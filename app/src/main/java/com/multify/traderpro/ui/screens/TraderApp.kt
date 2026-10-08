@@ -647,6 +647,10 @@ private fun RollingLearningSummary(learning: com.multify.traderpro.data.network.
                 if (learning.rollingCalls > 0) String.format(Locale.US, "%.2f%%", learning.longAveragePct) else "Learning"
             )
             KeyValueRow("Wave 1 sample count", learning.rollingCalls.toString())
+            KeyValueRow(
+                "Current trail-arm level",
+                if (learning.rollingCalls > 0) String.format(Locale.US, "%.2f%% profit", learning.longAveragePct) else "Learning"
+            )
             KeyValueRow("Mean", if (learning.rollingCalls > 0) String.format(Locale.US, "%.2f%%", learning.longAveragePct) else "Learning")
             KeyValueRow("Median", String.format(Locale.US, "%.2f%%", learning.longMedianPct))
             KeyValueRow("Trimmed mean", String.format(Locale.US, "%.2f%%", learning.longTrimmedMeanPct))
@@ -703,7 +707,7 @@ private fun WaveAveragesTable(
             }
             HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = .20f))
             Text(
-                "LONG avg = average upside move. Wave 1 LONG = rolling last 30 Multify recommendation trading days (entry→target/history + live). SHORT avg = average downside move observed for that wave, not realised broker P&L. Waves with no evidence remain visible as Learning. N = observations.",
+                "LONG avg / SHORT avg are trail-arm levels. Each new trading day refreshes the rolling window, so an unarmed threshold may rise or fall. Once price reaches it, profit trailing is armed and the stop only tightens. Wave 1 LONG uses the latest 30 Multify recommendation trading days. SHORT avg is downside movement, not realised broker P&L. N = observations.",
                 modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant

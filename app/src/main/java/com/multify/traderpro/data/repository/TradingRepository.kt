@@ -71,6 +71,7 @@ import com.multify.traderpro.engine.ExecutionHealthInput
 import com.multify.traderpro.engine.ExecutionHealthPolicy
 import com.multify.traderpro.engine.MarketTrajectoryMath
 import com.multify.traderpro.engine.MultifyReverseEngineering
+import com.multify.traderpro.engine.LearnedTrailingPolicy
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
@@ -995,7 +996,9 @@ class TradingRepository @Inject constructor(
         - ₹5,000 is a milestone, not a profit ceiling
         - -₹1,500 soft defensive band; no mechanical panic close
         - -₹2,500 hard daily cap with earlier live risk reduction for slippage
-        - Targets are checkpoints; strong trends may continue with trailing protection
+        - Rolling averages are dynamic trail-arm thresholds: each new trading day can move them up or down as the 30-day window rolls
+        - Reaching the learned average arms profit trailing; it does not force an immediate exit
+        - Once armed, a trailing stop can only tighten in the favourable direction and is never loosened by a later average change
         - Same-symbol external MIS conflict detection
         - Broker-side OCO protection on app MIS fills
         - Hard intraday force-flat for app MIS exposure
@@ -2174,17 +2177,52 @@ class TradingRepository @Inject constructor(
             val learned = learningStats()
             val learnedTarget = updated.entryPrice * (1.0 + learned.longAveragePct / 100.0)
             if (kotlin.math.abs(updated.targetPrice - learnedTarget) > .01) {
-                updated = updated.copy(targetPrice = learnedTarget)
+                updated = updated.copy(
+                    targetPrice = learnedTarget,
+                    strategy = "Multify follow · rolling ${fmt(learned.longAveragePct)}% trail arm"
+                )
                 shadowDao.updatePosition(updated)
             }
-            if (ltp >= learnedTarget && ltp > updated.entryPrice) {
-                val closed = closeShadow(updated, ltp, "ROLLING_30D_LONG_TARGET")
-                recordAdaptiveExit(updated.symbol, closed.exitPrice)
-                openShadowPostLongShort(closed, ltp, updated.sourceEventId, token, settings, "ADAPTIVE_LONG_TARGET")
-                return
+
+            val atr = max(ltp * .004, .05)
+            var trailArmed = LearnedTrailingPolicy.isArmed("LONG", updated.stopPrice, updated.entryPrice)
+            if (!trailArmed && LearnedTrailingPolicy.shouldArm("LONG", updated.entryPrice, ltp, learned.longAveragePct)) {
+                val candidateStop = LearnedTrailingPolicy.ratchetStop(
+                    side = "LONG", entryPrice = updated.entryPrice, ltp = ltp, atr = atr, currentStop = updated.stopPrice
+                )
+                updated = updated.copy(stopPrice = candidateStop)
+                shadowDao.updatePosition(updated)
+                trailArmed = true
+                auditLogger.log("TRAILING_STOP", "ROLLING_AVERAGE_ARMED", mapOf(
+                    "symbol" to updated.symbol, "side" to "LONG", "wave" to 1,
+                    "rolling_average_pct" to learned.longAveragePct, "threshold_price" to learnedTarget,
+                    "ltp" to ltp, "new_stop" to candidateStop, "window_trading_days" to learned.rollingTradingDays,
+                    "window_calls" to learned.rollingCalls
+                ))
             }
-            // Multify-following longs are allowed to remain virtual holdings overnight when red.
-            // The portfolio hard loss cap still overrides this rule.
+
+            if (trailArmed) {
+                if (ltp <= updated.stopPrice) {
+                    val closed = closeShadow(updated, ltp, "ROLLING_30D_TRAILING_PROFIT_STOP")
+                    recordAdaptiveExit(updated.symbol, closed.exitPrice)
+                    openShadowPostLongShort(closed, ltp, updated.sourceEventId, token, settings, "ADAPTIVE_TRAILING_EXIT")
+                    return
+                }
+                val candidateStop = LearnedTrailingPolicy.ratchetStop(
+                    side = "LONG", entryPrice = updated.entryPrice, ltp = ltp, atr = atr, currentStop = updated.stopPrice
+                )
+                if (candidateStop > updated.stopPrice + .01) {
+                    updated = updated.copy(stopPrice = candidateStop)
+                    shadowDao.updatePosition(updated)
+                    auditLogger.log("TRAILING_STOP", "ROLLING_AVERAGE_RATCHET", mapOf(
+                        "symbol" to updated.symbol, "side" to "LONG", "wave" to 1,
+                        "rolling_average_pct" to learned.longAveragePct, "ltp" to ltp, "new_stop" to candidateStop
+                    ))
+                }
+            }
+
+            // Before the learned average is reached, Multify-following longs may remain virtual holdings overnight when red.
+            // After the trail is armed, the stop is one-way only; later average changes never loosen it.
             if (now.toLocalTime() >= LocalTime.of(15, 22)) return
             if (System.currentTimeMillis() - updated.openedAtMs >= 75_000L) {
                 val synthetic = ParsedSignal(SignalType.TRADE_RELEASE, symbol = updated.symbol, rawText = "shadow-follow-monitor", confidence = 1.0)
@@ -2260,20 +2298,54 @@ class TradingRepository @Inject constructor(
         var updated = updateManagedMark(position, ltp)
         if (position.product == "CNC") {
             if (updated.engine == ENGINE_FAST_TRACK && updated.side == "LONG") {
-                if (updated.regime != REGIME_RECOVERY_HOLD) {
-                }
                 val learned = learningStats()
                 val target = updated.entryPrice * (1.0 + learned.longAveragePct / 100.0)
                 if (updated.targetPrice == null || kotlin.math.abs((updated.targetPrice ?: target) - target) > .01) {
-                    updated = updated.copy(targetPrice = target)
+                    updated = updated.copy(
+                        targetPrice = target,
+                        strategy = "Multify notification follow · rolling ${fmt(learned.longAveragePct)}% trail arm"
+                    )
                     managedDao.updatePosition(updated)
                 }
-                if (ltp >= target && ltp > updated.entryPrice) {
-                    val recoveryOnly = updated.regime == REGIME_RECOVERY_HOLD
-                    val closed = closeManaged(token, updated, ltp, if (recoveryOnly) "RECOVERY_HOLD_GREEN_EXIT" else "ROLLING_30D_LONG_TARGET")
-                    recordAdaptiveExit(updated.symbol, closed.exitPrice)
-                    if (!recoveryOnly) {
-                        openFastTrackShortFromLong(token, closed, closed.exitPrice, updated.sourceEventId, settings, "ADAPTIVE_LONG_TARGET")
+
+                val recoveryOnly = updated.regime == REGIME_RECOVERY_HOLD
+                val atr = max(ltp * .004, .05)
+                var trailArmed = LearnedTrailingPolicy.isArmed("LONG", updated.stopPrice, updated.entryPrice)
+                if (!trailArmed && LearnedTrailingPolicy.shouldArm("LONG", updated.entryPrice, ltp, learned.longAveragePct)) {
+                    val candidateStop = LearnedTrailingPolicy.ratchetStop(
+                        side = "LONG", entryPrice = updated.entryPrice, ltp = ltp, atr = atr, currentStop = updated.stopPrice
+                    )
+                    updated = updated.copy(stopPrice = candidateStop)
+                    managedDao.updatePosition(updated)
+                    trailArmed = true
+                    auditLogger.log("TRAILING_STOP", "ROLLING_AVERAGE_ARMED", mapOf(
+                        "symbol" to updated.symbol, "side" to "LONG", "wave" to 1,
+                        "rolling_average_pct" to learned.longAveragePct, "threshold_price" to target,
+                        "ltp" to ltp, "new_stop" to candidateStop, "window_trading_days" to learned.rollingTradingDays,
+                        "window_calls" to learned.rollingCalls
+                    ))
+                }
+
+                if (trailArmed) {
+                    val stop = updated.stopPrice
+                    if (stop != null && ltp <= stop) {
+                        val closed = closeManaged(token, updated, ltp, if (recoveryOnly) "RECOVERY_TRAILING_PROFIT_STOP" else "ROLLING_30D_TRAILING_PROFIT_STOP")
+                        recordAdaptiveExit(updated.symbol, closed.exitPrice)
+                        if (!recoveryOnly) {
+                            openFastTrackShortFromLong(token, closed, closed.exitPrice, updated.sourceEventId, settings, "ADAPTIVE_TRAILING_EXIT")
+                        }
+                        return
+                    }
+                    val candidateStop = LearnedTrailingPolicy.ratchetStop(
+                        side = "LONG", entryPrice = updated.entryPrice, ltp = ltp, atr = atr, currentStop = updated.stopPrice
+                    )
+                    if (updated.stopPrice == null || candidateStop > (updated.stopPrice ?: updated.entryPrice) + .01) {
+                        updated = updated.copy(stopPrice = candidateStop)
+                        managedDao.updatePosition(updated)
+                        auditLogger.log("TRAILING_STOP", "ROLLING_AVERAGE_RATCHET", mapOf(
+                            "symbol" to updated.symbol, "side" to "LONG", "wave" to 1,
+                            "rolling_average_pct" to learned.longAveragePct, "ltp" to ltp, "new_stop" to candidateStop
+                        ))
                     }
                 }
             }
@@ -2305,21 +2377,35 @@ class TradingRepository @Inject constructor(
         val same = analyze(updated.symbol, token, longSide = updated.side == "LONG", signal = synthetic)
         val opposite = analyze(updated.symbol, token, longSide = updated.side == "SHORT", signal = synthetic)
         val atr = same.features.atr14 ?: max(ltp * .004, .05)
-        // First-wave protection is always active in AUTO/LONG/SHORT modes. Trail only in the favourable direction.
+        // Learned wave average is the arming threshold. Once armed, the stop only ratchets favourably.
+        val waveNumber = (updated.addCount + 1).coerceIn(1, 10)
+        val waveStat = waveStats().firstOrNull { it.wave == waveNumber }
+        val learnedWavePct = if (updated.side == "LONG") waveStat?.averageUpPct else waveStat?.averageDownPct
         val favourableAtr = if (updated.side == "LONG") (ltp - updated.entryPrice) / atr else (updated.entryPrice - ltp) / atr
-        if (favourableAtr >= 0.60) {
-            val currentStop = updated.stopPrice ?: updated.entryPrice
-            val candidateStop = if (updated.side == "LONG") {
-                max(updated.entryPrice, ltp - atr * if (favourableAtr >= 1.50) 0.70 else 0.95)
-            } else {
-                min(updated.entryPrice, ltp + atr * if (favourableAtr >= 1.50) 0.70 else 0.95)
-            }
-            val improves = if (updated.side == "LONG") candidateStop > currentStop + 0.01 else candidateStop < currentStop - 0.01
-            if (improves) {
+        val alreadyArmed = LearnedTrailingPolicy.isArmed(updated.side, updated.stopPrice, updated.entryPrice)
+        val thresholdPct = LearnedTrailingPolicy.thresholdPct(
+            learnedPct = learnedWavePct,
+            entryPrice = updated.entryPrice,
+            atr = atr
+        )
+        if (alreadyArmed || LearnedTrailingPolicy.shouldArm(updated.side, updated.entryPrice, ltp, thresholdPct)) {
+            val currentStop = updated.stopPrice
+            val candidateStop = LearnedTrailingPolicy.ratchetStop(
+                side = updated.side, entryPrice = updated.entryPrice, ltp = ltp, atr = atr, currentStop = currentStop
+            )
+            val improves = if (updated.side == "LONG") candidateStop > (currentStop ?: updated.entryPrice) + 0.01
+                else candidateStop < (currentStop ?: updated.entryPrice) - 0.01
+            if (improves || !alreadyArmed) {
                 updated = updated.copy(stopPrice = candidateStop, lastEvaluatedAtMs = System.currentTimeMillis())
                 managedDao.updatePosition(updated)
                 modifyOcoIfPossible(token, updated)
-                auditLogger.log("TRAILING_STOP", "RATCHET", mapOf("symbol" to updated.symbol, "side" to updated.side, "ltp" to ltp, "atr" to atr, "new_stop" to candidateStop, "favourable_atr" to favourableAtr))
+                auditLogger.log("TRAILING_STOP", if (alreadyArmed) "WAVE_AVERAGE_RATCHET" else "WAVE_AVERAGE_ARMED", mapOf(
+                    "symbol" to updated.symbol, "side" to updated.side, "wave" to waveNumber,
+                    "ltp" to ltp, "atr" to atr, "new_stop" to candidateStop,
+                    "favourable_atr" to favourableAtr, "learned_average_pct" to learnedWavePct,
+                    "effective_arm_pct" to thresholdPct,
+                    "source" to if (learnedWavePct != null) "LEARNED_WAVE_AVERAGE" else "ATR_FALLBACK"
+                ))
             }
         }
         val targetHit = updated.targetPrice?.let { target -> if (updated.side == "LONG") ltp >= target else ltp <= target } ?: false
