@@ -1,0 +1,100 @@
+name: Build Multify Trader Pro 4.7 Fresh
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ v4.7-fresh-app ]
+    paths:
+      - '.fresh_v470/**'
+      - '.github/workflows/v470-fresh-build.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reconstruct fresh application source
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 --decode .fresh_v470/source.b64 > /tmp/v470.zip
+          rm -rf /tmp/v470src
+          mkdir -p /tmp/v470src
+          unzip -q /tmp/v470.zip -d /tmp/v470src
+          test -f /tmp/v470src/v470_new/settings.gradle.kts
+          grep -q 'applicationId = "com.multify.traderpro.v470"' /tmp/v470src/v470_new/app/build.gradle.kts
+          grep -q 'versionCode = 470' /tmp/v470src/v470_new/app/build.gradle.kts
+          grep -q 'liveExecutionEffective: Boolean get() = false' /tmp/v470src/v470_new/app/src/main/java/com/multify/traderpro/data/preferences/AppPreferences.kt
+          grep -q 'Broker order submission is disabled in the v4.7 fresh shadow build' /tmp/v470src/v470_new/app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
+          if grep -R 'AVERAGE_DOWN_ADD\|add up to ₹5,000\|₹5,000 add every\|reserved for ₹5,000' /tmp/v470src/v470_new/app/src/main/java /tmp/v470src/v470_new/app/src/main/res; then
+            echo 'Old averaging logic/text detected'
+            exit 1
+          fi
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android SDK 35 packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Generate brand-new 4.7 signing certificate
+        shell: bash
+        working-directory: /tmp/v470src/v470_new
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/v470-signing
+          PASS="$(openssl rand -hex 24)"
+          printf '%s' "$PASS" > /tmp/v470-signing/MULTIFY_V47_PASSWORD.txt
+          keytool -genkeypair -v             -keystore app/multify-v47.jks             -storepass "$PASS"             -keypass "$PASS"             -alias multifyv47             -keyalg RSA -keysize 3072 -validity 10000             -dname "CN=Multify Trader Pro 4.7, OU=Multify, O=Multify, C=IN"             -storetype JKS >/dev/null 2>&1
+          cp app/multify-v47.jks /tmp/v470-signing/Multify-v4.7-signing.jks
+          keytool -list -v -keystore app/multify-v47.jks -storepass "$PASS" -alias multifyv47             | grep -E 'SHA256:|Alias name:|Valid from:' > /tmp/v470-signing/CERTIFICATE_INFO.txt
+          echo "MULTIFY_V47_PASSWORD=$PASS" >> "$GITHUB_ENV"
+
+      - name: Unit tests
+        working-directory: /tmp/v470src/v470_new
+        run: gradle --no-daemon testDebugUnitTest
+
+      - name: Build signed release APK
+        working-directory: /tmp/v470src/v470_new
+        run: gradle --no-daemon assembleRelease
+        env:
+          MULTIFY_V47_PASSWORD: ${{ env.MULTIFY_V47_PASSWORD }}
+
+      - name: Verify APK signature and alignment
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=/tmp/v470src/v470_new/app/build/outputs/apk/release/app-release.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$APK"
+          "$ANDROID_HOME/build-tools/35.0.0/zipalign" -c -P 16 -v 4 "$APK"
+
+      - name: Package deliverables
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp /tmp/v470src/v470_new/app/build/outputs/apk/release/app-release.apk dist/Multify-TraderPro-v4.7.0-FRESH-SIGNED.apk
+          cp /tmp/v470-signing/Multify-v4.7-signing.jks dist/
+          cp /tmp/v470-signing/MULTIFY_V47_PASSWORD.txt dist/
+          cp /tmp/v470-signing/CERTIFICATE_INFO.txt dist/
+          (cd dist && sha256sum Multify-TraderPro-v4.7.0-FRESH-SIGNED.apk > SHA256SUMS.txt)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Multify-TraderPro-v4.7.0-FRESH
+          path: dist/
+          if-no-files-found: error
