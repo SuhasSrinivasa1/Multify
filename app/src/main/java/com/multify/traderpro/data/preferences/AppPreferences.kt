@@ -46,10 +46,10 @@ data class AppSettings(
     val minLiveConfidence: Double get() = minLiveConfidenceBps / 10_000.0
     val shadowPeakPnl: Double get() = if (shadowPeakPnlDate == LocalDate.now().toString()) shadowPeakPnlPaise / 100.0 else 0.0
     val livePeakPnl: Double get() = if (livePeakPnlDate == LocalDate.now().toString()) livePeakPnlPaise / 100.0 else 0.0
-    val liveExecutionEffective: Boolean
-        get() = liveExecutionEnabled && liveEnabledDate == LocalDate.now().toString() && !safetyHalt
-    val fastTrackEffective: Boolean
-        get() = fastTrackEnabled && fastTrackEnabledDate == LocalDate.now().toString() && !safetyHalt
+    // v4.6 distributable APK is intentionally shadow/decision-only.
+    // Broker credentials may be used for read-only quotes/account context, but no live order path is armed.
+    val liveExecutionEffective: Boolean get() = false
+    val fastTrackEffective: Boolean get() = false
 }
 
 @Singleton
@@ -144,15 +144,15 @@ class AppPreferences @Inject constructor(
 
     suspend fun setLiveExecution(value: Boolean) {
         context.dataStore.edit {
-            it[Keys.liveExecutionEnabled] = value
-            it[Keys.liveEnabledDate] = if (value) LocalDate.now().toString() else ""
+            it[Keys.liveExecutionEnabled] = false
+            it[Keys.liveEnabledDate] = ""
         }
     }
 
     suspend fun setFastTrack(value: Boolean) {
         context.dataStore.edit {
-            it[Keys.fastTrackEnabled] = value
-            it[Keys.fastTrackEnabledDate] = if (value) LocalDate.now().toString() else ""
+            it[Keys.fastTrackEnabled] = false
+            it[Keys.fastTrackEnabledDate] = ""
         }
     }
 
