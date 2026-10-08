@@ -1369,7 +1369,7 @@ class TradingRepository @Inject constructor(
                 val f = longEval.features
                 val trajectory = MarketTrajectoryMath.classify(f, longEval.directionalScore, shortEval.directionalScore)
                 val prior = previous.lastOrNull()?.selectedDirection ?: "HOLD"
-                val decision = AdaptiveDirectionEngine.decide(
+                val rawDecision = AdaptiveDirectionEngine.decide(
                     AdaptiveDirectionInput(
                         currentSide = currentSide,
                         waveCapitalRupees = eligibility.availableCapitalRupees,
@@ -1388,6 +1388,13 @@ class TradingRepository @Inject constructor(
                         priorDecision = prior
                     )
                 )
+                val decision = when {
+                    settings.executionMode == "LONG_ONLY" && rawDecision.action == "SHORT" ->
+                        rawDecision.copy(action = "HOLD", reason = "LONG ONLY mode rejected Adaptive SHORT; no trade")
+                    settings.executionMode == "SHORT_ONLY" && rawDecision.action == "LONG" ->
+                        rawDecision.copy(action = "HOLD", reason = "SHORT ONLY mode rejected Adaptive LONG; no trade")
+                    else -> rawDecision
+                }
                 executeAndRecordAdaptiveWave(
                     token = token, settings = settings, campaign = campaign, waveNumber = waveNumber,
                     ltp = ltp, currentSide = currentSide, campaignUsed = campaignUsed,
