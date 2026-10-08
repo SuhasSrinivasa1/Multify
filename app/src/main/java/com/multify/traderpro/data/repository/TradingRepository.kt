@@ -1449,18 +1449,6 @@ class TradingRepository @Inject constructor(
     ) {
         if (learningDao.waveDecisionForCampaign(campaign.id, waveNumber) != null) return
         val triggerPct = (ltp / campaign.startPrice - 1.0) * 100.0
-        val capitalAfter = when {
-            decision.action == "HOLD" -> campaignUsed
-            settings.liveExecutionEffective && !orderSubmitted -> campaignUsed
-            else -> min(settings.maxCampaignCapitalRupees.toDouble(), campaignUsed + capital)
-        }
-        if (decision.action != "HOLD" && settings.liveExecutionEffective && !liveOrderAllowed) {
-            auditLogger.log("ADAPTIVE_WAVE", "LIVE_ORDER_HEALTH_VETO", mapOf(
-                "symbol" to campaign.symbol, "wave" to waveNumber, "selected" to decision.action,
-                "reason" to healthReason
-            ))
-        }
-
         val id = learningDao.insertWaveDecision(
             WaveDecisionEntity(
                 campaignId = campaign.id, eventId = campaign.eventId, symbol = campaign.symbol, callDate = LocalDate.now(INDIA).toString(),
@@ -1470,7 +1458,7 @@ class TradingRepository @Inject constructor(
                 evLongPct = 0.0, evShortPct = 0.0, confidence = .5, regime = "RISK_VETO",
                 topPositiveFeatures = "", topNegativeFeatures = reason, rejectionReason = reason,
                 snapshotJson = "{\"reason\":${gsonQuote(reason)},\"price\":$ltp}", modelVersion = AdaptiveDirectionEngine.MODEL_VERSION,
-                dataAgeMs = snapshotAt - quoteStarted, brokerHealthy = brokerHealthy, listenerHealthy = listenerHealthy,
+                dataAgeMs = snapshotAt - quoteStarted, brokerHealthy = true, listenerHealthy = true,
                 waveCapitalRupees = 0.0, campaignCapitalBefore = campaignUsed, campaignCapitalAfter = campaignUsed,
                 actualOrderSubmitted = false, createdAtMs = snapshotAt
             )
@@ -1548,6 +1536,18 @@ class TradingRepository @Inject constructor(
             }
         }
 
+        val capitalAfter = when {
+            decision.action == "HOLD" -> campaignUsed
+            settings.liveExecutionEffective && !orderSubmitted -> campaignUsed
+            else -> min(settings.maxCampaignCapitalRupees.toDouble(), campaignUsed + capital)
+        }
+        if (decision.action != "HOLD" && settings.liveExecutionEffective && !liveOrderAllowed) {
+            auditLogger.log("ADAPTIVE_WAVE", "LIVE_ORDER_HEALTH_VETO", mapOf(
+                "symbol" to campaign.symbol, "wave" to waveNumber, "selected" to decision.action,
+                "reason" to healthReason
+            ))
+        }
+
         val id = learningDao.insertWaveDecision(
             WaveDecisionEntity(
                 campaignId = campaign.id, eventId = campaign.eventId, symbol = campaign.symbol, callDate = LocalDate.now(INDIA).toString(),
@@ -1565,7 +1565,7 @@ class TradingRepository @Inject constructor(
                     else -> "Alternative rejected by lower after-cost EV"
                 },
                 snapshotJson = GsonBuilder().create().toJson(snapshot), modelVersion = AdaptiveDirectionEngine.MODEL_VERSION,
-                dataAgeMs = snapshotAt - quoteStarted, brokerHealthy = true, listenerHealthy = true,
+                dataAgeMs = snapshotAt - quoteStarted, brokerHealthy = brokerHealthy, listenerHealthy = listenerHealthy,
                 waveCapitalRupees = if (decision.action == "HOLD") 0.0 else capital,
                 campaignCapitalBefore = campaignUsed, campaignCapitalAfter = capitalAfter,
                 actualOrderSubmitted = orderSubmitted, orderReference = orderRef, createdAtMs = snapshotAt
