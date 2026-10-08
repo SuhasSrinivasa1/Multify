@@ -12,9 +12,8 @@ class AdaptiveLearningMathTest {
         assertEquals(1.0, AdaptiveLearningMath.shortRetracementFraction(listOf(1.2, 1.0)), 0.0001)
     }
 
-    @Test fun averagingLevelsAreEveryTwoPercentFromAnchor() {
-        assertEquals(98.0, AdaptiveLearningMath.nextAverageTrigger(100.0, 0), 0.0001)
-        assertEquals(96.0, AdaptiveLearningMath.nextAverageTrigger(100.0, 1), 0.0001)
-        assertEquals(90.0, AdaptiveLearningMath.nextAverageTrigger(100.0, 4), 0.0001)
+    @Test fun rollingMeanUsesObservedValuesWithoutAveragingDownSemantics() {
+        assertEquals(2.0, AdaptiveLearningMath.rollingMean(listOf(1.0, 2.0, 3.0), 0.0), 0.0001)
+        assertEquals(4.0, AdaptiveLearningMath.rollingMean(emptyList(), 4.0), 0.0001)
     }
 }
