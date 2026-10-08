@@ -1,4 +1,4 @@
-name: Multify Trader Pro v4.8.5 Rolling Average Trail Arm + Multify DNA Build
+name: Multify Trader Pro v4.9.0 UI Information Architecture Redesign Build
 
 on:
   workflow_dispatch:
@@ -118,10 +118,10 @@ jobs:
             echo "=== $(basename "$apk") ===" >> dist/package-verification.txt
             "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$apk" | grep -E "^(package:|application-label:)" >> dist/package-verification.txt
           done
-          git archive --format=zip --output=dist/Multify-TraderPro-v4.8.5-source.zip HEAD
+          git archive --format=zip --output=dist/Multify-TraderPro-v4.9.0-source.zip HEAD
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Multify-TraderPro-v4.8.5-verified
+          name: Multify-TraderPro-v4.9.0-verified
           path: dist/
           if-no-files-found: error
