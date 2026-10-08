@@ -354,8 +354,21 @@ class TradingRepository @Inject constructor(
         ensureHistoricalSeed()
         val token = ensureToken()
         runCatching { if (nseSymbols.isStale()) nseSymbols.refresh() }
-        val result = if (token != null) "HOT · Groww session ready · NSE master checked" else "HOT · signal listener ready · Groww authentication pending"
-        auditLogger.log("RUNTIME", "PRE_ALERT_HOT_MODE", mapOf("result" to result))
+        val marginReady = token?.let { t ->
+            runCatching { apiFactory.groww.margins(bearer(t)).requirePayload("HOT margins") }.isSuccess
+        } ?: false
+        preferences.recordServiceHeartbeat()
+        val result = when {
+            token == null -> "HOT · listener ready · Groww authentication pending"
+            marginReady -> "HOT · Groww session + balances ready · NSE master checked · quote client warm"
+            else -> "HOT · Groww session ready · margin refresh partial · NSE master checked"
+        }
+        auditLogger.log("RUNTIME", "PRE_ALERT_HOT_MODE", mapOf(
+            "result" to result,
+            "token_ready" to (token != null),
+            "margin_ready" to marginReady,
+            "symbol_master_stale" to nseSymbols.isStale()
+        ))
         return result
     }
 
