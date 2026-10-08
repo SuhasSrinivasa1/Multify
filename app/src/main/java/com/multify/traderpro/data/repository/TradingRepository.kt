@@ -70,6 +70,7 @@ import com.multify.traderpro.engine.WaveCapitalPolicy
 import com.multify.traderpro.engine.ExecutionHealthInput
 import com.multify.traderpro.engine.ExecutionHealthPolicy
 import com.multify.traderpro.engine.MarketTrajectoryMath
+import com.multify.traderpro.engine.MultifyReverseEngineering
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
@@ -944,6 +945,8 @@ class TradingRepository @Inject constructor(
             add("learning/strategy_snapshots.json", gson.toJson(strategySnapshots))
             add("forecast/all_forecasts.json", gson.toJson(forecasts))
             add("research/after_market_reports.json", gson.toJson(researchReports))
+            add("research/multify_positive_close_fundamentals.csv", MultifyReverseEngineering.csv())
+            add("research/multify_reverse_engineering.txt", MultifyReverseEngineering.report())
             add("waves/campaigns.json", gson.toJson(waveCampaigns))
             add("waves/confirmed_pivots.json", gson.toJson(waveObservations))
             add("waves/current_20_wave_averages.json", gson.toJson(currentWaveStats))
@@ -979,6 +982,8 @@ class TradingRepository @Inject constructor(
         - RSI trend, exhaustion and chase filters
         - Candlestick confirmation: engulfing, pin bars, marubozu
         - Dynamic regime switch: TREND / COMPRESSION / MEAN_REVERSION / MIXED
+        - Multify DNA research: 20 positive-result + positive-session-close cases with public fundamentals
+        - DNA findings are hypothesis generation only; no fundamental weight reaches live execution without positive+negative walk-forward validation
 
         Risk/execution policy
         =====================

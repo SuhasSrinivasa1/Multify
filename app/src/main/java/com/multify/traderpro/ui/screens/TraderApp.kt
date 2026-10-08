@@ -96,6 +96,7 @@ import com.multify.traderpro.data.network.AdaptiveWaveDto
 import com.multify.traderpro.data.network.PositionDto
 import com.multify.traderpro.data.network.WaveSignalDto
 import com.multify.traderpro.data.network.WaveStatDto
+import com.multify.traderpro.engine.MultifyReverseEngineering
 import com.multify.traderpro.ui.components.KeyValueRow
 import com.multify.traderpro.ui.components.MetricCard
 import com.multify.traderpro.ui.components.SectionTitle
@@ -924,6 +925,7 @@ private fun ForecastScreen(state: TraderUiState, onGenerate: () -> Unit, onResea
                 }
             }
         }
+        item { MultifyDnaResearch() }
         if (rows.isEmpty()) {
             item { EmptyState("No forecast yet", "Authenticate Groww and tap Generate 5. During market hours the listener also creates the day's five candidates automatically.") }
         } else {
@@ -948,6 +950,63 @@ private fun ForecastScreen(state: TraderUiState, onGenerate: () -> Unit, onResea
                     Text(report.title, fontWeight = FontWeight.Medium)
                     Text(report.summary.ifBlank { "The first report is generated after market close or when you tap Run replay." }, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MultifyDnaResearch() {
+    val study = MultifyReverseEngineering
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        SectionTitle(
+            "Multify DNA · positive-close research",
+            "20 profitable Multify BUY examples whose NSE sessions also closed positive. Fundamentals are research priors only; no hindsight enters live execution."
+        )
+        Card(
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha=.22f)),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha=.22f)),
+            shape = RoundedCornerShape(18.dp)
+        ) {
+            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("What the winners suggest", fontWeight = FontWeight.SemiBold)
+                study.hypotheses.forEach { h ->
+                    Text("• $h", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+        Card(
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha=.22f)),
+            shape = RoundedCornerShape(18.dp)
+        ) {
+            Column(Modifier.fillMaxWidth().padding(12.dp)) {
+                Row(Modifier.fillMaxWidth().padding(bottom = 7.dp)) {
+                    Text("Stock / day", Modifier.weight(1.0f), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                    Text("Close", Modifier.weight(.62f), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                    Text("Fundamental snapshot", Modifier.weight(2.15f), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha=.20f))
+                study.positiveCases.forEachIndexed { index, x ->
+                    Row(Modifier.fillMaxWidth().padding(vertical = 7.dp), verticalAlignment = Alignment.Top) {
+                        Column(Modifier.weight(1.0f)) {
+                            Text(x.symbol, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
+                            Text(x.callDate.substring(5), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Text(String.format(Locale.US, "%+.2f%%", x.sessionCloseChangePct), Modifier.weight(.62f), style = MaterialTheme.typography.bodySmall, color = pnlColor(x.sessionCloseChangePct))
+                        Column(Modifier.weight(2.15f)) {
+                            Text(x.snapshot, style = MaterialTheme.typography.bodySmall)
+                            Text(x.fundamentalFact, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
+                    if (index != study.positiveCases.lastIndex) HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha=.08f))
+                }
+                Text(
+                    "Filter: positive Multify result + positive full-session close. Public fundamental snapshots are current/recent and are used only to form hypotheses; future live weights require both winners and losers plus walk-forward validation.",
+                    modifier = Modifier.padding(top = 9.dp),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
     }
