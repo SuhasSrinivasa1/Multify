@@ -92,6 +92,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.multify.traderpro.BuildConfig
 import com.multify.traderpro.data.local.SignalEventEntity
 import com.multify.traderpro.data.network.DashboardDto
+import com.multify.traderpro.data.network.AdaptiveWaveDto
 import com.multify.traderpro.data.network.PositionDto
 import com.multify.traderpro.data.network.WaveSignalDto
 import com.multify.traderpro.data.network.WaveStatDto
@@ -190,6 +191,7 @@ fun TraderApp(viewModel: TraderViewModel = hiltViewModel()) {
                     onBudgetChanged = viewModel::setIntradayBudget,
                     onExecutionMode = viewModel::setExecutionMode,
                     onWaveCount = viewModel::setWaveCount,
+                    onWaveRiskChanged = viewModel::setWaveRiskSettings,
                     onSubmitManualSignal = viewModel::submitManualSignal
                 )
                 Destination.Settings -> SystemScreen(
@@ -402,9 +404,28 @@ private fun DashboardScreen(
 
             item { SectionTitle("Active positions", "These are app-owned positions only. If the broker net quantity diverges because of manual trading in the same MIS symbol, the engine halts rather than touching your external position.") }
             if (dashboard.positions.isEmpty()) {
-                item { EmptyState("No open intraday positions", "No Multify campaign is open. A paid Equity BUY starts Shadow immediately; real broker submission remains disabled in this build.") }
+                item { EmptyState("No open intraday positions", "No app-owned position is open. Baseline Shadow still records every paid Multify BUY; LIVE orders require explicit daily arming.") }
             } else {
                 items(dashboard.positions, key = { it.symbol }) { PositionCard(it) }
+            }
+
+            item { SectionTitle("AUTO adaptive direction", "At each eligible 2% Wave 2+ checkpoint, LONG, SHORT and HOLD compete on after-cost expected value. Only one real direction can be active.") }
+            if (dashboard.adaptiveWaves.isEmpty()) {
+                item { EmptyState("Waiting for Wave 2+", "A 2% displacement makes ₹${state.settings.waveCapitalRupees} eligible; it does not automatically create an order.") }
+            } else {
+                items(dashboard.adaptiveWaves.take(12), key = { "${it.symbol}-${it.waveNumber}" }) { AdaptiveWaveCard(it) }
+            }
+            item {
+                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha=.45f)), shape = RoundedCornerShape(18.dp)) {
+                    Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                        Text("Execution health", fontWeight = FontWeight.SemiBold)
+                        KeyValueRow("Listener", dashboard.health.listener)
+                        KeyValueRow("Broker", dashboard.health.broker)
+                        KeyValueRow("Market data", dashboard.health.marketData)
+                        KeyValueRow("Symbol master", dashboard.health.symbolMaster)
+                        KeyValueRow("Execution service", dashboard.health.foregroundService)
+                    }
+                }
             }
 
             item { SectionTitle("20-wave statistical memory", "Wave 1 Up is seeded by rolling Multify history/live outcomes. All Down legs and Waves 2–20 come only from confirmed live price pivots.") }
@@ -573,6 +594,40 @@ private fun PositionCard(p: PositionDto) {
             p.targetPrice?.let { KeyValueRow("Target", money(it), MaterialTheme.colorScheme.primary) }
             p.stopPrice?.let { KeyValueRow("Stop", money(it), MaterialTheme.colorScheme.error) }
             p.strategy?.let { KeyValueRow("Strategy", it) }
+        }
+    }
+}
+
+@Composable
+private fun AdaptiveWaveCard(w: AdaptiveWaveDto) {
+    val tone = when (w.decision) {
+        "LONG", "SHORT" -> StatusTone.Positive
+        else -> StatusTone.Warning
+    }
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = .28f)),
+        shape = RoundedCornerShape(18.dp)
+    ) {
+        Column(Modifier.padding(15.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Column {
+                    Text("WAVE ${w.waveNumber} · ${w.symbol}", fontWeight = FontWeight.SemiBold)
+                    Text("Stock move ${String.format(Locale.US, "%.2f%%", w.triggerPct)} · ${w.regime.replace('_',' ')}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                StatusPill(w.decision, tone)
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                MetricCard("LONG", String.format(Locale.US, "%.0f%%", w.longProbability * 100.0), "EV ${money(w.evLongRupees)}", Modifier.weight(1f))
+                MetricCard("SHORT", String.format(Locale.US, "%.0f%%", w.shortProbability * 100.0), "EV ${money(w.evShortRupees)}", Modifier.weight(1f))
+            }
+            KeyValueRow("Confidence", String.format(Locale.US, "%.0f%%", w.confidence * 100.0))
+            KeyValueRow("Wave capital", money(w.waveCapitalRupees))
+            KeyValueRow("Campaign used", money(w.campaignCapitalUsed))
+            KeyValueRow("Campaign remaining", money(w.campaignCapitalRemaining))
+            KeyValueRow("Real order", if (w.actualOrderSubmitted) "SUBMITTED" else "NO")
+            Text(w.reasons.ifBlank { "No positive feature summary available" }, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 4, overflow = TextOverflow.Ellipsis)
+            Text("Alternative: ${w.alternativeRejected}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
         }
     }
 }
@@ -894,9 +949,15 @@ private fun ConfigurationScreen(
     onBudgetChanged: (Long) -> Unit,
     onExecutionMode: (String) -> Unit,
     onWaveCount: (Int) -> Unit,
+    onWaveRiskChanged: (Double, Long, Int, Long, Long, Long) -> Unit,
     onSubmitManualSignal: (String, String, String) -> Unit
 ) {
     var budget by remember(state.settings.dailyBudgetRupees) { mutableStateOf(state.settings.dailyBudgetRupees.toFloat()) }
+    var waveSpacing by remember(state.settings.waveSpacingBps) { mutableStateOf(state.settings.waveSpacingPercent.toFloat()) }
+    var waveCapital by remember(state.settings.waveCapitalRupees) { mutableStateOf(state.settings.waveCapitalRupees.toFloat()) }
+    var campaignCap by remember(state.settings.maxCampaignCapitalRupees) { mutableStateOf(state.settings.maxCampaignCapitalRupees.toFloat()) }
+    var dailyLoss by remember(state.settings.maxDailyLossRupees) { mutableStateOf(state.settings.maxDailyLossRupees.toFloat()) }
+    var stockLoss by remember(state.settings.maxSingleStockLossRupees) { mutableStateOf(state.settings.maxSingleStockLossRupees.toFloat()) }
     var symbol by remember { mutableStateOf("") }
     var observedPrice by remember { mutableStateOf("") }
     LazyColumn(
@@ -917,12 +978,26 @@ private fun ConfigurationScreen(
                     }
                     Text("Waves: ${state.settings.waveCount} / 20", fontWeight = FontWeight.SemiBold)
                     Slider(value = state.settings.waveCount.toFloat(), onValueChange = { onWaveCount(it.toInt().coerceIn(1, 20)) }, valueRange = 1f..20f, steps = 18)
-                    Text("Each wave keeps independent Up-n / Down-n memory. Untrained legs use the reference APK's deterministic 0.40% arm until live samples exist.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("A wave is an eligibility checkpoint, not an automatic order. AUTO chooses LONG, SHORT or HOLD from net expected value and current trajectory.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = .18f))
-                    Text("Fixed capital", fontWeight = FontWeight.SemiBold)
-                    Text(money(budget.toDouble()), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-                    Slider(value = budget, onValueChange = { budget = (it / 10_000f).toInt().coerceIn(1, 20) * 10_000f }, onValueChangeFinished = { onBudgetChanged(budget.toLong()) }, valueRange = 10_000f..200_000f, steps = 18)
-                    Text("No averaging down, no ₹5,000 tranches, no capital top-ups. Later waves may only reuse or reduce the original campaign notional.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Wave spacing · ${String.format(Locale.US, "%.1f%%", waveSpacing)}")
+                    Slider(value = waveSpacing, onValueChange = { waveSpacing = (it * 2f).toInt() / 2f }, valueRange = .5f..5f, steps = 8)
+                    Text("Eligible wave capital · ${money(waveCapital.toDouble())}")
+                    Slider(value = waveCapital, onValueChange = { waveCapital = (it / 1_000f).toInt().coerceIn(1, 20) * 1_000f }, valueRange = 1_000f..20_000f, steps = 18)
+                    Text("Maximum campaign capital · ${money(campaignCap.toDouble())}")
+                    Slider(value = campaignCap, onValueChange = { campaignCap = (it / 10_000f).toInt().coerceIn(1, 50) * 10_000f }, valueRange = 10_000f..500_000f, steps = 48)
+                    Text("Maximum daily loss · ${money(dailyLoss.toDouble())}")
+                    Slider(value = dailyLoss, onValueChange = { dailyLoss = (it / 500f).toInt().coerceIn(1, 20) * 500f }, valueRange = 500f..10_000f, steps = 18)
+                    Text("Maximum single-stock loss · ${money(stockLoss.toDouble())}")
+                    Slider(value = stockLoss, onValueChange = { stockLoss = (it / 250f).toInt().coerceIn(1, 20) * 250f }, valueRange = 250f..5_000f, steps = 18)
+                    Button(
+                        onClick = {
+                            onBudgetChanged(budget.toLong())
+                            onWaveRiskChanged(waveSpacing.toDouble(), waveCapital.toLong(), state.settings.waveCount, campaignCap.toLong(), dailyLoss.toLong(), stockLoss.toLong())
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Save adaptive risk settings") }
+                    Text("Default Wave 2+ capital is ₹5,000. The cap is enforced before every order, so repeated waves cannot silently expand the campaign beyond the configured maximum.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }
@@ -1026,7 +1101,7 @@ private fun ManualScreen(
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
                     Text("Exact lifecycle", fontWeight = FontWeight.SemiBold)
                     Text("1. Paid Multify Equity call → immediate CNC delivery campaign; the rolling 30-trading-day long target is used instead of blindly waiting forever.", style = MaterialTheme.typography.bodyMedium)
-                    Text("2. At each additional 2% checkpoint, reevaluate LONG vs SHORT vs HOLD. Same-side means keep the existing position without adding capital. Opposite-side means close first, then reopen only within the existing fixed notional. A red Multify sell does not mechanically panic-sell; the -₹2,500 app hard cap still overrides.", style = MaterialTheme.typography.bodyMedium)
+                    Text("2. At each eligible 2% checkpoint, reevaluate LONG vs SHORT vs HOLD. An approved same-side wave may add only the configured ₹5,000 tranche within the hard campaign cap. An opposite side must flatten/reconcile first; ambiguous evidence creates NO TRADE.", style = MaterialTheme.typography.bodyMedium)
                     Text("3. A green Multify Book Profit or learned long target closes only this app-owned CNC quantity. Personal holdings are never included.", style = MaterialTheme.typography.bodyMedium)
                     Text("4. If enabled and the long was profitable, open an MIS short. Cover distance starts at 100% of the preceding long move and adapts downward from rolling 30-day live observations.", style = MaterialTheme.typography.bodyMedium)
                     Text("5. Any broker/app MIS quantity mismatch is treated as an external-position conflict and blocks further automated orders.", style = MaterialTheme.typography.bodyMedium)

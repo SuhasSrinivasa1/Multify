@@ -160,6 +160,21 @@ class TraderViewModel @Inject constructor(
         }
     }
 
+    fun setWaveRiskSettings(
+        spacingPercent: Double, waveCapital: Long, maximumWaves: Int,
+        maxCampaignCapital: Long, maxDailyLoss: Long, maxSingleStockLoss: Long
+    ) {
+        viewModelScope.launch {
+            runCatching {
+                repository.setWaveRiskSettings(spacingPercent, waveCapital, maximumWaves, maxCampaignCapital, maxDailyLoss, maxSingleStockLoss)
+            }.onSuccess {
+                remote.value = remote.value.copy(message = "Adaptive Wave risk settings saved", error = null)
+            }.onFailure {
+                remote.value = remote.value.copy(error = it.userMessage())
+            }
+        }
+    }
+
     fun setFirstWaveMode(value: String) = setExecutionMode(value)
     fun setActiveWaveCount(value: Long) = setWaveCount(value.toInt())
 

@@ -427,13 +427,28 @@ class TradingRepository @Inject constructor(
         val best = strategyRows.firstOrNull()
         val forecasts = learningDao.forecastsForDate(today)
         val matched = forecasts.count { it.multifyMatched }
+        val waveDecisions = learningDao.allWaveDecisions().filter { it.callDate == today }
+        val outcomes = learningDao.allWaveOutcomes().associateBy { it.decisionId }
+        val evaluated = waveDecisions.mapNotNull { d -> outcomes[d.id]?.let { d to it } }
+        val selectorNet = evaluated.sumOf { it.second.selectedNetRupees }
+        val autoAverageNet = evaluated.sumOf { it.second.oldAveragingNetRupees }
+        val correct = evaluated.count { (d, o) ->
+            val best = max(0.0, max(o.longNetRupees, o.shortNetRupees))
+            when (d.selectedDirection) {
+                "LONG" -> o.longNetRupees >= best - 0.01
+                "SHORT" -> o.shortNetRupees >= best - 0.01
+                else -> best <= 0.0
+            }
+        }
+        val selectorAccuracy = if (evaluated.isEmpty()) 0.0 else correct.toDouble() / evaluated.size * 100.0
         val report = buildString {
             append("Rolling 30-trading-day long reference: ${fmt(stats.longAveragePct)}% (median ${fmt(stats.longMedianPct)}%). ")
             append("Short retracement target: ${fmt(stats.shortRetracementPct)}% of preceding long move; ${stats.shortObservedCalls} learned observations. ")
             append("Forecast match today: $matched/${forecasts.size}. ")
             if (best != null) append("Best shadow strategy today: ${best.first} with net ₹${fmt(best.second)}. ")
             if (shadowTrades.isEmpty()) append("No closed shadow trades yet; next session remains a data-collection priority. ")
-            append("Research keeps a rolling memory and does not promote a strategy from a single day.")
+            append("Adaptive Wave selector: ${evaluated.size} evaluated checkpoints, net ₹${fmt(selectorNet)} vs old automatic-LONG counterfactual ₹${fmt(autoAverageNet)}, selector accuracy ${fmt(selectorAccuracy)}%. ")
+            append("Champion remains unchanged intraday; challengers require repeated out-of-sample improvement before promotion.")
         }
         val entity = ResearchReportEntity(reportDate=today, generatedAtMs=System.currentTimeMillis(), title="After-market strategy review", summary=report)
         learningDao.insertResearchReport(entity)
@@ -488,6 +503,18 @@ class TradingRepository @Inject constructor(
     }
     suspend fun setFirstWaveMode(value: String) = setExecutionMode(value)
     suspend fun setActiveWaveCount(value: Long) = setWaveCount(value.toInt())
+
+    suspend fun setWaveRiskSettings(
+        spacingPercent: Double, waveCapital: Long, maximumWaves: Int,
+        maxCampaignCapital: Long, maxDailyLoss: Long, maxSingleStockLoss: Long
+    ) {
+        preferences.setWaveRiskSettings(spacingPercent, waveCapital, maximumWaves, maxCampaignCapital, maxDailyLoss, maxSingleStockLoss)
+        auditLogger.log("SETTINGS", "ADAPTIVE_WAVE_RISK", mapOf(
+            "spacing_percent" to spacingPercent, "wave_capital" to waveCapital, "maximum_waves" to maximumWaves,
+            "max_campaign_capital" to maxCampaignCapital, "max_daily_loss" to maxDailyLoss,
+            "max_single_stock_loss" to maxSingleStockLoss
+        ))
+    }
 
     fun hasBrokerCredentials(): Boolean = secretStore.hasApiKey() && secretStore.hasTotpSecret()
     fun hasAccessToken(): Boolean = secretStore.hasAccessToken()
