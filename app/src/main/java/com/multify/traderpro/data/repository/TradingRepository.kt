@@ -1472,7 +1472,14 @@ class TradingRepository @Inject constructor(
             "spread_bps" to longEval.features.spreadBps,
             "order_book_imbalance" to longEval.features.orderBookImbalance, "day_change_pct" to longEval.features.dayChangePct,
             "market_context" to "UNAVAILABLE_NEUTRAL", "sector_context" to "UNAVAILABLE_NEUTRAL",
-            "news_context" to "UNAVAILABLE_NEUTRAL_NO_LOOKAHEAD", "trajectory_regime" to trajectoryRegime
+            "news_context" to "UNAVAILABLE_NEUTRAL_NO_LOOKAHEAD", "trajectory_regime" to trajectoryRegime,
+            "expected_long_gain_pct" to decision.expectedLongGainPct,
+            "expected_long_loss_pct" to decision.expectedLongLossPct,
+            "expected_short_gain_pct" to decision.expectedShortGainPct,
+            "expected_short_loss_pct" to decision.expectedShortLossPct,
+            "estimated_costs_rupees" to decision.estimatedCostsRupees,
+            "ev_gap_rupees" to decision.expectedValueGapRupees,
+            "decision_reason" to decision.reason
         )
         var orderSubmitted = false
         var orderRef: String? = null
