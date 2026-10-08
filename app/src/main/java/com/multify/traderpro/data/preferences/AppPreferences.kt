@@ -4,7 +4,7 @@ import android.content.Context
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
-import androidx.datastore.preferences.core.integerPreferencesKey
+import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -72,7 +72,7 @@ class AppPreferences @Inject constructor(
         val fastTrackEnabled = booleanPreferencesKey("fast_track_enabled")
         val postSellShortEnabled = booleanPreferencesKey("post_sell_short_enabled")
         val executionMode = stringPreferencesKey("execution_mode")
-        val waveCount = integerPreferencesKey("wave_count")
+        val waveCount = intPreferencesKey("wave_count")
         val firstWaveMode = stringPreferencesKey("first_wave_mode")
         val activeWaveCount = longPreferencesKey("active_wave_count")
         val onboardingComplete = booleanPreferencesKey("onboarding_complete")
