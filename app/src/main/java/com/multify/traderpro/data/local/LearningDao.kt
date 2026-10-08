@@ -67,4 +67,28 @@ interface LearningDao {
 
     @Query("SELECT * FROM research_reports ORDER BY reportDate DESC")
     suspend fun allResearchReports(): List<ResearchReportEntity>
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertWaveCampaign(item: WaveCampaignEntity): Long
+
+    @Update
+    suspend fun updateWaveCampaign(item: WaveCampaignEntity)
+
+    @Query("SELECT * FROM wave_campaigns WHERE eventId=:eventId LIMIT 1")
+    suspend fun waveCampaignForEvent(eventId: Long): WaveCampaignEntity?
+
+    @Query("SELECT * FROM wave_campaigns WHERE active=1 ORDER BY startAtMs ASC")
+    suspend fun activeWaveCampaigns(): List<WaveCampaignEntity>
+
+    @Query("SELECT * FROM wave_campaigns ORDER BY startAtMs ASC")
+    suspend fun allWaveCampaigns(): List<WaveCampaignEntity>
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertWaveObservation(item: WaveObservationEntity): Long
+
+    @Query("SELECT * FROM wave_observations WHERE campaignId=:campaignId ORDER BY wave ASC, confirmedAtMs ASC")
+    suspend fun waveObservationsForCampaign(campaignId: Long): List<WaveObservationEntity>
+
+    @Query("SELECT * FROM wave_observations ORDER BY confirmedAtMs ASC")
+    suspend fun allWaveObservations(): List<WaveObservationEntity>
 }

@@ -16,9 +16,11 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         PriceObservationEntity::class,
         StrategySnapshotEntity::class,
         ForecastEntity::class,
-        ResearchReportEntity::class
+        ResearchReportEntity::class,
+        WaveCampaignEntity::class,
+        WaveObservationEntity::class
     ],
-    version = 4,
+    version = 5,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -235,5 +237,55 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_research_reports_reportDate ON research_reports(reportDate)")
             }
         }
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("""CREATE TABLE IF NOT EXISTS wave_campaigns (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    eventId INTEGER NOT NULL,
+                    symbol TEXT NOT NULL,
+                    callDate TEXT NOT NULL,
+                    startPrice REAL NOT NULL,
+                    startAtMs INTEGER NOT NULL,
+                    startSource TEXT NOT NULL,
+                    wave INTEGER NOT NULL,
+                    leg TEXT NOT NULL,
+                    legStartPrice REAL NOT NULL,
+                    legStartAtMs INTEGER NOT NULL,
+                    extremePrice REAL NOT NULL,
+                    extremeAtMs INTEGER NOT NULL,
+                    legArmed INTEGER NOT NULL,
+                    initialAdversePrice REAL NOT NULL,
+                    lastPrice REAL NOT NULL,
+                    active INTEGER NOT NULL,
+                    completedAtMs INTEGER,
+                    updatedAtMs INTEGER NOT NULL
+                )""")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_wave_campaigns_eventId ON wave_campaigns(eventId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_wave_campaigns_symbol_active ON wave_campaigns(symbol, active)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_wave_campaigns_callDate ON wave_campaigns(callDate)")
+                db.execSQL("""CREATE TABLE IF NOT EXISTS wave_observations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    campaignId INTEGER NOT NULL,
+                    eventId INTEGER NOT NULL,
+                    symbol TEXT NOT NULL,
+                    callDate TEXT NOT NULL,
+                    wave INTEGER NOT NULL,
+                    direction TEXT NOT NULL,
+                    startPrice REAL NOT NULL,
+                    extremePrice REAL NOT NULL,
+                    confirmationPrice REAL NOT NULL,
+                    startAtMs INTEGER NOT NULL,
+                    extremeAtMs INTEGER NOT NULL,
+                    confirmedAtMs INTEGER NOT NULL,
+                    movePct REAL NOT NULL,
+                    reversalPct REAL NOT NULL,
+                    source TEXT NOT NULL
+                )""")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_wave_observations_campaignId_wave_direction ON wave_observations(campaignId, wave, direction)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_wave_observations_callDate_wave_direction ON wave_observations(callDate, wave, direction)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_wave_observations_symbol_confirmedAtMs ON wave_observations(symbol, confirmedAtMs)")
+            }
+        }
+
     }
 }
