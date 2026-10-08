@@ -1,0 +1,114 @@
+name: Multify Trader Pro v4.5.0 Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - 'app/**'
+      - 'backend/**'
+      - 'build.gradle.kts'
+      - 'settings.gradle.kts'
+      - 'gradle.properties'
+      - '.github/workflows/multify-v450-build.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reject committed secrets and signing material
+        shell: bash
+        run: |
+          set -euo pipefail
+          if find . -type f \( -name '*.jks' -o -name '*.keystore' -o -name '*.p12' -o -name '*.pem' -o -name '*.key' -o -name '.env' \) | grep -q .; then
+            echo 'Private signing material or .env file is committed. Refusing to build.'
+            exit 1
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Backend tests
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+          PYTHONPATH="$GITHUB_WORKSPACE" \
+          PHONE_HMAC_SECRET=test-secret-test-secret-test-secret \
+          GROWW_API_KEY=test-api-key \
+          GROWW_TOTP_SECRET=JBSWY3DPEHPK3PXP \
+          python -m pytest -q backend/tests
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android SDK 35 packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Restore stable release signing key when configured
+        shell: bash
+        env:
+          MULTIFY_KEYSTORE_BASE64: ${{ secrets.MULTIFY_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          if [ -n "$MULTIFY_KEYSTORE_BASE64" ]; then
+            printf '%s' "$MULTIFY_KEYSTORE_BASE64" | base64 --decode > app/multify-v4-stable.jks
+            chmod 600 app/multify-v4-stable.jks
+            echo "Stable signing key restored from GitHub Actions secret."
+          else
+            echo "No release signing secret configured; release output will not be treated as distributable."
+          fi
+
+      - name: Android unit tests
+        run: gradle --no-daemon testDebugUnitTest
+
+      - name: Build debug APK
+        run: gradle --no-daemon assembleDebug
+        env:
+          MULTIFY_KEYSTORE_PASSWORD: ${{ secrets.MULTIFY_KEYSTORE_PASSWORD }}
+
+      - name: Build signed release APK when stable signing is configured
+        shell: bash
+        env:
+          MULTIFY_KEYSTORE_BASE64: ${{ secrets.MULTIFY_KEYSTORE_BASE64 }}
+          MULTIFY_KEYSTORE_PASSWORD: ${{ secrets.MULTIFY_KEYSTORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -n "$MULTIFY_KEYSTORE_BASE64" ] && [ -n "$MULTIFY_KEYSTORE_PASSWORD" ]; then
+            gradle --no-daemon assembleRelease
+            "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs app/build/outputs/apk/release/app-release.apk
+          else
+            echo "Skipping signed release: MULTIFY_KEYSTORE_BASE64 and MULTIFY_KEYSTORE_PASSWORD are not both configured."
+          fi
+
+      - name: Checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          find app/build/outputs/apk -type f -name '*.apk' -print0 | while IFS= read -r -d '' apk; do
+            cp "$apk" "dist/$(basename "$apk")"
+          done
+          (cd dist && sha256sum *.apk > SHA256SUMS.txt)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Multify-TraderPro-v4.5.0-APKs
+          path: dist/
+          if-no-files-found: error
