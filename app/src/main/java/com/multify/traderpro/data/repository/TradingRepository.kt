@@ -1340,9 +1340,13 @@ class TradingRepository @Inject constructor(
                 val previousCommitted = previous.maxOfOrNull { it.campaignCapitalAfter } ?: 0.0
                 val campaignUsed = max(managed?.capitalDeployed ?: 0.0, previousCommitted)
                 val day = if (settings.liveExecutionEffective) managedSnapshot(token, setOf(ENGINE_INTRADAY)).summary else paperSnapshot().summary
-                val singleStockPnl = managed?.let { p ->
+                val openStockPnl = managed?.let { p ->
                     if (p.side == "LONG") (ltp - p.entryPrice) * p.quantity else (p.entryPrice - ltp) * p.quantity
                 } ?: 0.0
+                val realisedStockPnl = managedDao.tradesSince(startOfIndiaDayMs())
+                    .filter { it.symbol.equals(campaign.symbol, true) }
+                    .sumOf { it.netPnl }
+                val singleStockPnl = realisedStockPnl + openStockPnl
                 val eligibility = WaveCapitalPolicy.eligibility(
                     requestedWave = waveNumber,
                     lastProcessedWave = lastWave,
@@ -1437,9 +1441,15 @@ class TradingRepository @Inject constructor(
         val triggerPct = (ltp / campaign.startPrice - 1.0) * 100.0
         val snapshot = linkedMapOf<String, Any?>(
             "timestamp_ms" to snapshotAt, "price" to ltp, "wave" to waveNumber, "trigger_pct" to triggerPct,
-            "vwap" to longEval.features.vwap, "ema9" to longEval.features.ema9, "ema20" to longEval.features.ema20,
-            "atr14" to longEval.features.atr14, "rsi14" to longEval.features.rsi14, "rvol" to longEval.features.rvol,
-            "macd_histogram" to longEval.features.macdHistogram, "spread_bps" to longEval.features.spreadBps,
+            "vwap" to longEval.features.vwap, "vwap_slope" to longEval.features.vwapSlope,
+            "ema9" to longEval.features.ema9, "ema20" to longEval.features.ema20, "ema50" to longEval.features.ema50,
+            "ema9_slope" to longEval.features.ema9Slope, "ema20_slope" to longEval.features.ema20Slope,
+            "atr14" to longEval.features.atr14, "rsi14" to longEval.features.rsi14, "rsi_slope" to longEval.features.rsiSlope,
+            "rvol" to longEval.features.rvol, "volume_acceleration" to longEval.features.volumeAcceleration,
+            "green_volume_share" to longEval.features.greenVolumeShare, "structure_score" to longEval.features.structureScore,
+            "session_high_distance_pct" to longEval.features.sessionHighDistancePct, "session_low_distance_pct" to longEval.features.sessionLowDistancePct,
+            "macd_histogram" to longEval.features.macdHistogram, "macd_histogram_slope" to longEval.features.macdHistogramSlope,
+            "spread_bps" to longEval.features.spreadBps,
             "order_book_imbalance" to longEval.features.orderBookImbalance, "day_change_pct" to longEval.features.dayChangePct,
             "market_context" to "UNAVAILABLE_NEUTRAL", "sector_context" to "UNAVAILABLE_NEUTRAL",
             "news_context" to "UNAVAILABLE_NEUTRAL_NO_LOOKAHEAD", "trajectory_regime" to trajectoryRegime
