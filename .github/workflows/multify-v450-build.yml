@@ -83,18 +83,18 @@ jobs:
         env:
           MULTIFY_KEYSTORE_PASSWORD: ${{ secrets.MULTIFY_KEYSTORE_PASSWORD }}
 
-      - name: Build signed release APK when stable signing is configured
+      - name: Build release APK and sign when stable signing is configured
         shell: bash
         env:
           MULTIFY_KEYSTORE_BASE64: ${{ secrets.MULTIFY_KEYSTORE_BASE64 }}
           MULTIFY_KEYSTORE_PASSWORD: ${{ secrets.MULTIFY_KEYSTORE_PASSWORD }}
         run: |
           set -euo pipefail
+          gradle --no-daemon assembleRelease
           if [ -n "$MULTIFY_KEYSTORE_BASE64" ] && [ -n "$MULTIFY_KEYSTORE_PASSWORD" ]; then
-            gradle --no-daemon assembleRelease
             "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs app/build/outputs/apk/release/app-release.apk
           else
-            echo "Skipping signed release: MULTIFY_KEYSTORE_BASE64 and MULTIFY_KEYSTORE_PASSWORD are not both configured."
+            echo "Release compiled successfully but is unsigned because stable signing secrets are not configured."
           fi
 
       - name: Checksums and APK verification
@@ -110,7 +110,11 @@ jobs:
           : > dist/package-verification.txt
           for apk in dist/*.apk; do
             echo "=== $(basename "$apk") ===" >> dist/signature.txt
-            "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$apk" >> dist/signature.txt 2>&1
+            if "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$apk" >> dist/signature.txt 2>&1; then
+              echo "SIGNATURE_STATUS=VERIFIED" >> dist/signature.txt
+            else
+              echo "SIGNATURE_STATUS=UNSIGNED_OR_INVALID" >> dist/signature.txt
+            fi
             echo "=== $(basename "$apk") ===" >> dist/package-verification.txt
             "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$apk" | grep -E "^(package:|application-label:)" >> dist/package-verification.txt
           done
