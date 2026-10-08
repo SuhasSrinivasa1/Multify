@@ -101,6 +101,12 @@ interface LearningDao {
     @Query("SELECT * FROM wave_decisions ORDER BY triggerAtMs DESC LIMIT :limit")
     suspend fun recentWaveDecisions(limit: Int = 50): List<WaveDecisionEntity>
 
+    @Query("SELECT * FROM wave_decisions WHERE campaignId=:campaignId ORDER BY waveNumber ASC")
+    suspend fun waveDecisionsForCampaign(campaignId: Long): List<WaveDecisionEntity>
+
+    @Query("SELECT * FROM wave_decisions WHERE id=:id LIMIT 1")
+    suspend fun waveDecisionById(id: Long): WaveDecisionEntity?
+
     @Query("SELECT * FROM wave_decisions ORDER BY triggerAtMs ASC")
     suspend fun allWaveDecisions(): List<WaveDecisionEntity>
 

@@ -27,6 +27,8 @@ import com.multify.traderpro.data.local.SignalEventDao
 import com.multify.traderpro.data.local.SignalEventEntity
 import com.multify.traderpro.data.local.WaveCampaignEntity
 import com.multify.traderpro.data.local.WaveObservationEntity
+import com.multify.traderpro.data.local.WaveDecisionEntity
+import com.multify.traderpro.data.local.WaveOutcomeEntity
 import com.multify.traderpro.data.network.BrokerStatusDto
 import com.multify.traderpro.data.network.DashboardDto
 import com.multify.traderpro.data.network.DaySummaryDto
@@ -46,6 +48,8 @@ import com.multify.traderpro.data.network.ForecastDto
 import com.multify.traderpro.data.network.ResearchDto
 import com.multify.traderpro.data.network.StrategyInsightDto
 import com.multify.traderpro.data.network.WaveStatDto
+import com.multify.traderpro.data.network.AdaptiveWaveDto
+import com.multify.traderpro.data.network.EngineHealthDto
 import com.multify.traderpro.data.network.TokenRequest
 import com.multify.traderpro.data.preferences.AppPreferences
 import com.multify.traderpro.data.preferences.AppSettings
@@ -60,6 +64,10 @@ import com.multify.traderpro.engine.AdaptiveLearningMath
 import com.multify.traderpro.engine.LocalStrategyEngine
 import com.multify.traderpro.engine.StrategyEvaluation
 import com.multify.traderpro.engine.WavePivotMath
+import com.multify.traderpro.engine.AdaptiveDirectionEngine
+import com.multify.traderpro.engine.AdaptiveDirectionInput
+import com.multify.traderpro.engine.WaveCapitalPolicy
+import com.multify.traderpro.engine.MarketTrajectoryMath
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
@@ -570,6 +578,7 @@ class TradingRepository @Inject constructor(
                 )
             }
             val waveStats = waveStats()
+            val adaptiveWaves = recentAdaptiveWaves(settings)
             val main = if (settings.liveExecutionEffective) live else shadow
             if (settings.liveExecutionEffective) {
                 preferences.updateLivePeakPnl(main.totalPnl)
@@ -610,6 +619,15 @@ class TradingRepository @Inject constructor(
                 research = latestResearch,
                 strategyInsights = strategyInsights,
                 waveStats = waveStats,
+                adaptiveWaves = adaptiveWaves,
+                health = EngineHealthDto(
+                    listener = "CONNECTED_OR_SYSTEM_MANAGED",
+                    broker = "CONNECTED",
+                    marketData = if (adaptiveWaves.any { it.dataAgeMs > MAX_MARKET_DATA_AGE_MS }) "STALE" else "FRESH",
+                    symbolMaster = if (nseSymbols.isStale()) "STALE" else "FRESH",
+                    foregroundService = "NOTIFICATION_LISTENER_ACTIVE_WHEN_BOUND",
+                    marketDataAgeMs = adaptiveWaves.maxOfOrNull { it.dataAgeMs } ?: 0L
+                ),
                 positions = main.positions,
                 recentDecisions = recent
             )
@@ -770,6 +788,8 @@ class TradingRepository @Inject constructor(
         val researchReports = learningDao.allResearchReports()
         val waveCampaigns = learningDao.allWaveCampaigns()
         val waveObservations = learningDao.allWaveObservations()
+        val waveDecisions = learningDao.allWaveDecisions()
+        val waveOutcomes = learningDao.allWaveOutcomes()
         val currentWaveStats = waveStats()
         val nseStatus = nseSymbols.status()
         val gson = GsonBuilder().setPrettyPrinting().create()
@@ -827,7 +847,9 @@ class TradingRepository @Inject constructor(
                 "forecasts" to forecasts.size,
                 "research_reports" to researchReports.size,
                 "wave_campaigns" to waveCampaigns.size,
-                "wave_observations" to waveObservations.size
+                "wave_observations" to waveObservations.size,
+                "wave_decisions" to waveDecisions.size,
+                "wave_outcomes" to waveOutcomes.size
             )
         )
 
@@ -856,6 +878,8 @@ class TradingRepository @Inject constructor(
             add("waves/campaigns.json", gson.toJson(waveCampaigns))
             add("waves/confirmed_pivots.json", gson.toJson(waveObservations))
             add("waves/current_20_wave_averages.json", gson.toJson(currentWaveStats))
+            add("waves/adaptive_decisions_immutable.json", gson.toJson(waveDecisions))
+            add("waves/counterfactual_outcomes.json", gson.toJson(waveOutcomes))
             add("learning/current_30day_stats.json", gson.toJson(learningStats()))
             add("analysis/strategy_catalog.txt", strategyCatalogText())
             add("analysis/strategy_performance.csv", strategyPerformanceCsv(shadowTrades, managedTrades))
@@ -1209,6 +1233,283 @@ class TradingRepository @Inject constructor(
         learningDao.updateWaveCampaign(updated)
         return updated
     }
+
+    private suspend fun recentAdaptiveWaves(settings: AppSettings): List<AdaptiveWaveDto> =
+        learningDao.recentWaveDecisions(20).map { d ->
+            AdaptiveWaveDto(
+                symbol = d.symbol,
+                waveNumber = d.waveNumber,
+                triggerPct = d.triggerPct,
+                currentSide = d.currentSide,
+                decision = d.selectedDirection,
+                longProbability = d.longProbability,
+                shortProbability = d.shortProbability,
+                evLongRupees = d.evLongRupees,
+                evShortRupees = d.evShortRupees,
+                confidence = d.confidence,
+                regime = d.regime,
+                reasons = d.topPositiveFeatures,
+                alternativeRejected = d.rejectionReason,
+                waveCapitalRupees = d.waveCapitalRupees,
+                campaignCapitalUsed = d.campaignCapitalAfter,
+                campaignCapitalRemaining = max(0.0, settings.maxCampaignCapitalRupees - d.campaignCapitalAfter),
+                dataAgeMs = d.dataAgeMs,
+                actualOrderSubmitted = d.actualOrderSubmitted
+            )
+        }
+
+    suspend fun monitorAdaptiveWaves(): Int {
+        val campaigns = learningDao.activeWaveCampaigns()
+        if (campaigns.isEmpty()) return 0
+        val token = ensureToken() ?: return campaigns.size
+        val settings = preferences.settings.first()
+        for (campaign in campaigns) {
+            runCatching {
+                val quoteStarted = System.currentTimeMillis()
+                val quote = apiFactory.groww.quote(bearer(token), tradingSymbol = campaign.symbol)
+                    .requirePayload("Adaptive wave quote " + campaign.symbol)
+                val ltp = quote.lastPrice ?: return@runCatching
+                val snapshotAt = System.currentTimeMillis()
+                val requested = WaveCapitalPolicy.triggeredWave(campaign.startPrice, ltp, settings.waveSpacingPercent, settings.waveCount)
+                val previous = learningDao.waveDecisionsForCampaign(campaign.id)
+                val lastWave = previous.maxOfOrNull { it.waveNumber } ?: 1
+                if (requested <= lastWave || requested <= 1) return@runCatching
+
+                // Process only the next missing checkpoint so a fast gap does not fabricate several
+                // decisions from one market snapshot. The next service tick will take a fresh snapshot.
+                val waveNumber = lastWave + 1
+                val managed = managedDao.openPosition(ENGINE_INTRADAY, campaign.symbol)
+                val currentSide = managed?.side
+                    ?: previous.lastOrNull { it.selectedDirection in setOf("LONG", "SHORT") }?.selectedDirection
+                    ?: "LONG"
+                val campaignUsed = managed?.capitalDeployed
+                    ?: previous.filter { it.selectedDirection != "HOLD" }.sumOf { it.waveCapitalRupees }
+                val day = if (settings.liveExecutionEffective) managedSnapshot(token, setOf(ENGINE_INTRADAY)).summary else paperSnapshot().summary
+                val singleStockPnl = managed?.let { p ->
+                    if (p.side == "LONG") (ltp - p.entryPrice) * p.quantity else (p.entryPrice - ltp) * p.quantity
+                } ?: 0.0
+                val eligibility = WaveCapitalPolicy.eligibility(
+                    requestedWave = waveNumber,
+                    lastProcessedWave = lastWave,
+                    waveCapitalRupees = settings.waveCapitalRupees.toDouble(),
+                    campaignCapitalUsed = campaignUsed,
+                    maxCampaignCapital = settings.maxCampaignCapitalRupees.toDouble(),
+                    dailyLossRupees = max(0.0, -day.totalPnl),
+                    maxDailyLossRupees = settings.maxDailyLossRupees.toDouble(),
+                    singleStockLossRupees = max(0.0, -singleStockPnl),
+                    maxSingleStockLossRupees = settings.maxSingleStockLossRupees.toDouble()
+                )
+                if (!eligibility.eligible) {
+                    recordAdaptiveHold(campaign, waveNumber, ltp, currentSide, eligibility.reason, campaignUsed, snapshotAt, quoteStarted)
+                    return@runCatching
+                }
+
+                val synthetic = ParsedSignal(SignalType.TRADE_RELEASE, symbol = campaign.symbol, rawText = "adaptive-wave-$waveNumber", confidence = 1.0)
+                val longEval = analyze(campaign.symbol, token, longSide = true, signal = synthetic, eventId = campaign.eventId, includeEventPrior = false)
+                val shortEval = analyze(campaign.symbol, token, longSide = false, signal = synthetic, eventId = campaign.eventId, includeEventPrior = false)
+                val f = longEval.features
+                val trajectory = MarketTrajectoryMath.classify(f, longEval.directionalScore, shortEval.directionalScore)
+                val prior = previous.lastOrNull()?.selectedDirection ?: "HOLD"
+                val decision = AdaptiveDirectionEngine.decide(
+                    AdaptiveDirectionInput(
+                        currentSide = currentSide,
+                        waveCapitalRupees = eligibility.availableCapitalRupees,
+                        price = ltp,
+                        atr = f.atr14 ?: max(ltp * .004, .05),
+                        spreadBps = f.spreadBps,
+                        longDirectionalScore = longEval.directionalScore,
+                        longConfidence = longEval.confidence,
+                        shortDirectionalScore = shortEval.directionalScore,
+                        shortConfidence = shortEval.confidence,
+                        trajectoryComposite = trajectory.composite,
+                        marketBias = 0.0,
+                        sectorBias = 0.0,
+                        dataFresh = snapshotAt - quoteStarted <= MAX_MARKET_DATA_AGE_MS,
+                        decisionComplete = f.candles.size >= 3,
+                        priorDecision = prior
+                    )
+                )
+                executeAndRecordAdaptiveWave(
+                    token = token, settings = settings, campaign = campaign, waveNumber = waveNumber,
+                    ltp = ltp, currentSide = currentSide, campaignUsed = campaignUsed,
+                    capital = eligibility.availableCapitalRupees, decision = decision,
+                    longEval = longEval, shortEval = shortEval, trajectoryRegime = trajectory.regime,
+                    snapshotAt = snapshotAt, quoteStarted = quoteStarted
+                )
+            }.onFailure {
+                auditLogger.log("ADAPTIVE_WAVE", "CHECKPOINT_ERROR", mapOf("symbol" to campaign.symbol, "message" to (it.message ?: "")))
+            }
+        }
+        return learningDao.activeWaveCampaigns().size
+    }
+
+    private suspend fun recordAdaptiveHold(
+        campaign: WaveCampaignEntity, waveNumber: Int, ltp: Double, currentSide: String,
+        reason: String, campaignUsed: Double, snapshotAt: Long, quoteStarted: Long
+    ) {
+        if (learningDao.waveDecisionForCampaign(campaign.id, waveNumber) != null) return
+        val triggerPct = (ltp / campaign.startPrice - 1.0) * 100.0
+        val id = learningDao.insertWaveDecision(
+            WaveDecisionEntity(
+                campaignId = campaign.id, eventId = campaign.eventId, symbol = campaign.symbol, callDate = LocalDate.now(INDIA).toString(),
+                waveNumber = waveNumber, triggerAtMs = snapshotAt, snapshotAtMs = snapshotAt, triggerPrice = ltp, triggerPct = triggerPct,
+                currentSide = currentSide, selectedDirection = "HOLD", longScore = 0.0, shortScore = 0.0,
+                longProbability = .5, shortProbability = .5, evLongRupees = 0.0, evShortRupees = 0.0,
+                evLongPct = 0.0, evShortPct = 0.0, confidence = .5, regime = "RISK_VETO",
+                topPositiveFeatures = "", topNegativeFeatures = reason, rejectionReason = reason,
+                snapshotJson = "{\"reason\":${gsonQuote(reason)},\"price\":$ltp}", modelVersion = AdaptiveDirectionEngine.MODEL_VERSION,
+                dataAgeMs = snapshotAt - quoteStarted, brokerHealthy = true, listenerHealthy = true,
+                waveCapitalRupees = 0.0, campaignCapitalBefore = campaignUsed, campaignCapitalAfter = campaignUsed,
+                actualOrderSubmitted = false, createdAtMs = snapshotAt
+            )
+        )
+        if (id > 0L) learningDao.insertWaveOutcome(WaveOutcomeEntity(decisionId = id, symbol = campaign.symbol, entryPrice = ltp, lastPrice = ltp, lastObservedAtMs = snapshotAt))
+        auditLogger.log("ADAPTIVE_WAVE", "HOLD_RISK_VETO", mapOf("symbol" to campaign.symbol, "wave" to waveNumber, "reason" to reason))
+    }
+
+    private suspend fun executeAndRecordAdaptiveWave(
+        token: String, settings: AppSettings, campaign: WaveCampaignEntity, waveNumber: Int, ltp: Double,
+        currentSide: String, campaignUsed: Double, capital: Double,
+        decision: com.multify.traderpro.engine.AdaptiveDirectionDecision,
+        longEval: StrategyEvaluation, shortEval: StrategyEvaluation, trajectoryRegime: String,
+        snapshotAt: Long, quoteStarted: Long
+    ) {
+        if (learningDao.waveDecisionForCampaign(campaign.id, waveNumber) != null) return
+        val positives = (if (decision.action == "SHORT") shortEval.votes else longEval.votes)
+            .sortedByDescending { it.score }.take(6).joinToString(" · ") { "${it.name}: ${it.note}" }
+        val negatives = (if (decision.action == "SHORT") longEval.votes else shortEval.votes)
+            .sortedByDescending { it.score }.take(4).joinToString(" · ") { "${it.name}: ${it.note}" }
+        val triggerPct = (ltp / campaign.startPrice - 1.0) * 100.0
+        val snapshot = linkedMapOf<String, Any?>(
+            "timestamp_ms" to snapshotAt, "price" to ltp, "wave" to waveNumber, "trigger_pct" to triggerPct,
+            "vwap" to longEval.features.vwap, "ema9" to longEval.features.ema9, "ema20" to longEval.features.ema20,
+            "atr14" to longEval.features.atr14, "rsi14" to longEval.features.rsi14, "rvol" to longEval.features.rvol,
+            "macd_histogram" to longEval.features.macdHistogram, "spread_bps" to longEval.features.spreadBps,
+            "order_book_imbalance" to longEval.features.orderBookImbalance, "day_change_pct" to longEval.features.dayChangePct,
+            "market_context" to "UNAVAILABLE_NEUTRAL", "sector_context" to "UNAVAILABLE_NEUTRAL",
+            "news_context" to "UNAVAILABLE_NEUTRAL_NO_LOOKAHEAD", "trajectory_regime" to trajectoryRegime
+        )
+        var orderSubmitted = false
+        var orderRef: String? = null
+        var capitalAfter = campaignUsed
+        val managed = managedDao.openPosition(ENGINE_INTRADAY, campaign.symbol)
+        if (decision.action != "HOLD" && settings.liveExecutionEffective && managed != null && managed.product == "MIS") {
+            preLiveGuard(settings)
+            if (decision.action == managed.side) {
+                val add = addManagedWave(token, managed, decision.action, capital, ltp, longEval.features.atr14 ?: max(ltp * .004, .05), waveNumber)
+                orderSubmitted = add.first
+                orderRef = add.second
+                if (orderSubmitted) capitalAfter = min(settings.maxCampaignCapitalRupees.toDouble(), campaignUsed + capital)
+            } else {
+                // One real direction only: flatten/reconcile before the opposite wave. CNC/recovery paths never enter here.
+                val closed = closeManaged(token, managed, ltp, "ADAPTIVE_WAVE_${waveNumber}_FLIP_TO_${decision.action}")
+                val refreshed = preferences.settings.first()
+                val afterRisk = liveRiskState(token, refreshed)
+                if (afterRisk.allowNewRisk && refreshed.liveExecutionEffective) {
+                    assertNoExternalMisConflict(token, campaign.symbol)
+                    val chosen = if (decision.action == "LONG") longEval else shortEval
+                    val atr = chosen.features.atr14 ?: max(ltp * .004, .05)
+                    val stop = if (decision.action == "LONG") ltp - atr else ltp + atr
+                    val target = if (decision.action == "LONG") ltp + atr * 1.5 else max(.05, ltp - atr * 1.5)
+                    val qty = floor(capital / ltp).toInt()
+                    if (qty > 0) {
+                        openManagedReversal(token, managed, decision.action, qty, ltp, stop, target, chosen, waveAnchor = campaign.startPrice, waveIndex = waveNumber - 1, campaignBudget = settings.maxCampaignCapitalRupees.toDouble())
+                        orderSubmitted = managedDao.openPosition(ENGINE_INTRADAY, campaign.symbol) != null
+                        orderRef = if (orderSubmitted) "FLIP_AFTER_${closed.closeOrderId}" else null
+                        if (orderSubmitted) capitalAfter = min(settings.maxCampaignCapitalRupees.toDouble(), campaignUsed + capital)
+                    }
+                }
+            }
+        }
+
+        val id = learningDao.insertWaveDecision(
+            WaveDecisionEntity(
+                campaignId = campaign.id, eventId = campaign.eventId, symbol = campaign.symbol, callDate = LocalDate.now(INDIA).toString(),
+                waveNumber = waveNumber, triggerAtMs = snapshotAt, snapshotAtMs = snapshotAt, triggerPrice = ltp, triggerPct = triggerPct,
+                currentSide = currentSide, selectedDirection = decision.action,
+                longScore = longEval.directionalScore, shortScore = shortEval.directionalScore,
+                longProbability = decision.longProbability, shortProbability = decision.shortProbability,
+                evLongRupees = decision.longExpectedValueRupees, evShortRupees = decision.shortExpectedValueRupees,
+                evLongPct = decision.longExpectedValuePct, evShortPct = decision.shortExpectedValuePct,
+                confidence = decision.confidence, regime = trajectoryRegime,
+                topPositiveFeatures = positives, topNegativeFeatures = negatives,
+                rejectionReason = if (decision.action == "HOLD") decision.reason else "Alternative rejected by lower after-cost EV",
+                snapshotJson = GsonBuilder().create().toJson(snapshot), modelVersion = AdaptiveDirectionEngine.MODEL_VERSION,
+                dataAgeMs = snapshotAt - quoteStarted, brokerHealthy = true, listenerHealthy = true,
+                waveCapitalRupees = if (decision.action == "HOLD") 0.0 else capital,
+                campaignCapitalBefore = campaignUsed, campaignCapitalAfter = capitalAfter,
+                actualOrderSubmitted = orderSubmitted, orderReference = orderRef, createdAtMs = snapshotAt
+            )
+        )
+        if (id > 0L) learningDao.insertWaveOutcome(WaveOutcomeEntity(decisionId = id, symbol = campaign.symbol, entryPrice = ltp, lastPrice = ltp, lastObservedAtMs = snapshotAt))
+        auditLogger.log("ADAPTIVE_WAVE", decision.action, mapOf(
+            "symbol" to campaign.symbol, "wave" to waveNumber, "trigger_pct" to triggerPct,
+            "p_up" to decision.longProbability, "p_down" to decision.shortProbability,
+            "ev_long" to decision.longExpectedValueRupees, "ev_short" to decision.shortExpectedValueRupees,
+            "capital" to capital, "capital_before" to campaignUsed, "capital_after" to capitalAfter,
+            "real_order" to orderSubmitted, "reason" to decision.reason
+        ))
+    }
+
+    private suspend fun addManagedWave(
+        token: String, position: ManagedPositionEntity, side: String, capital: Double, ltp: Double, atr: Double, waveNumber: Int
+    ): Pair<Boolean, String?> {
+        val qty = floor(capital / ltp).toInt()
+        if (qty <= 0) return false to null
+        position.smartOrderId?.let { runCatching { apiFactory.groww.cancelSmartOrder(bearer(token), smartOrderId = it) } }
+        val tx = if (side == "LONG") "BUY" else "SELL"
+        val ref = stableRef("MWA", "${position.id}-$waveNumber-${System.currentTimeMillis()}")
+        val order = placeMarket(token, position.symbol, tx, qty, "MIS", ref)
+        val filled = order.filledQuantity?.takeIf { it > 0 } ?: qty
+        val fill = order.averageFillPrice?.takeIf { it > 0 } ?: ltp
+        val newQty = position.quantity + filled
+        val newAverage = ((position.entryPrice * position.quantity) + (fill * filled)) / newQty
+        val stop = if (side == "LONG") max(position.stopPrice ?: newAverage - atr, newAverage - atr) else min(position.stopPrice ?: newAverage + atr, newAverage + atr)
+        val target = if (side == "LONG") max(position.targetPrice ?: newAverage + atr * 1.5, newAverage + atr * 1.5) else min(position.targetPrice ?: newAverage - atr * 1.5, max(.05, newAverage - atr * 1.5))
+        val updated = position.copy(
+            quantity = newQty, entryPrice = newAverage, stopPrice = stop, targetPrice = target,
+            capitalDeployed = position.capitalDeployed + fill * filled, addCount = waveNumber - 1,
+            lastPrice = fill, lastEvaluatedAtMs = System.currentTimeMillis(), smartOrderId = null
+        )
+        managedDao.updatePosition(updated)
+        val smart = protectManagedPosition(token, updated)
+        managedDao.updatePosition(updated.copy(smartOrderId = smart))
+        return true to (order.growwOrderId.ifBlank { ref })
+    }
+
+    suspend fun monitorWaveOutcomes(): Int {
+        val active = learningDao.activeWaveOutcomes()
+        if (active.isEmpty()) return 0
+        val token = ensureToken() ?: return active.size
+        val now = System.currentTimeMillis()
+        for (outcome in active) {
+            val decision = learningDao.waveDecisionById(outcome.decisionId) ?: continue
+            runCatching {
+                val price = apiFactory.groww.quote(bearer(token), tradingSymbol = outcome.symbol)
+                    .requirePayload("Counterfactual quote " + outcome.symbol).lastPrice ?: return@runCatching
+                val qty = floor(max(1.0, decision.waveCapitalRupees) / outcome.entryPrice).toInt().coerceAtLeast(1)
+                val longPnl = calculatePnl("LONG", qty, outcome.entryPrice, price).net
+                val shortPnl = calculatePnl("SHORT", qty, outcome.entryPrice, price).net
+                val selected = when (decision.selectedDirection) { "LONG" -> longPnl; "SHORT" -> shortPnl; else -> 0.0 }
+                val longMfe = max(outcome.longMfeRupees, max(0.0, longPnl))
+                val longMae = min(outcome.longMaeRupees, min(0.0, longPnl))
+                val shortMfe = max(outcome.shortMfeRupees, max(0.0, shortPnl))
+                val shortMae = min(outcome.shortMaeRupees, min(0.0, shortPnl))
+                val finalized = if (now - decision.triggerAtMs >= COUNTERFACTUAL_WINDOW_MS || ZonedDateTime.now(INDIA).toLocalTime() >= LocalTime.of(15, 20)) now else null
+                learningDao.updateWaveOutcome(outcome.copy(
+                    longMfeRupees = longMfe, longMaeRupees = longMae, shortMfeRupees = shortMfe, shortMaeRupees = shortMae,
+                    longNetRupees = longPnl, shortNetRupees = shortPnl, selectedNetRupees = selected,
+                    oldAveragingNetRupees = longPnl,
+                    noTradeAvoidanceRupees = max(0.0, -max(longPnl, shortPnl)),
+                    bestRealisticNetRupees = max(0.0, max(longPnl, shortPnl)),
+                    lastPrice = price, lastObservedAtMs = now, finalizedAtMs = finalized
+                ))
+            }
+        }
+        return learningDao.activeWaveOutcomes().size
+    }
+
+    private fun gsonQuote(value: String): String = GsonBuilder().create().toJson(value)
 
     suspend fun monitorWaveCampaigns(): Int {
         val active = learningDao.activeWaveCampaigns()
@@ -1896,19 +2197,8 @@ class TradingRepository @Inject constructor(
             closeManaged(token, updated, ltp, "PROFIT_HIGH_WATER_PROTECT")
             return
         }
-        if (updated.engine == ENGINE_INTRADAY && tradingDecisionsEnabled && opposite.confidence >= PAPER_REVERSAL_CONFIDENCE && opposite.directionalScore >= .12 && same.confidence < .60) {
-            closeManaged(token, updated, ltp, "STRATEGY_REVERSAL")
-            val refreshed = preferences.settings.first()
-            val after = liveRiskState(token, refreshed)
-            if (!after.allowNewRisk || !refreshed.liveExecutionEffective) return
-            assertNoExternalMisConflict(token, updated.symbol)
-            val side = if (updated.side == "LONG") "SHORT" else "LONG"
-            val stopPx = if (side == "LONG") ltp - atr * .95 else ltp + atr * .95
-            val targetPx = if (side == "LONG") ltp + atr * 1.55 else max(.05, ltp - atr * 1.55)
-            val fixedCapitalCap = FixedCapitalPolicy.cap(updated.campaignBudget, updated.capitalDeployed, updated.entryPrice * updated.quantity)
-            val allocation = BudgetAllocator.allocate(fixedCapitalCap, opposite.confidence, ltp, abs(ltp - stopPx), abs(targetPx - ltp), 0)
-            if (allocation.allowed) openManagedReversal(token, updated, side, allocation.quantity, ltp, stopPx, targetPx, opposite, campaignBudget = fixedCapitalCap)
-        }
+        // Direction switching is checkpoint-gated by monitorAdaptiveWaves(); no intra-wave flip-flop orders.
+
     }
 
     private suspend fun openManagedReversal(
@@ -2346,6 +2636,8 @@ class TradingRepository @Inject constructor(
         private const val DEFAULT_UNTRAINED_WAVE_ARM_PCT = 0.40
         private const val WAVE_PIVOT_FRACTION = 0.004
         private const val MANUAL_SOURCE = "com.multify.traderpro.manual"
+        private const val MAX_MARKET_DATA_AGE_MS = 5_000L
+        private const val COUNTERFACTUAL_WINDOW_MS = 30L * 60L * 1000L
         // Supplied workbook (2026-06-30 through 2026-09-30 BUY calls): entry-to-target mean = 3.68097%.
         private const val UPLOADED_THREE_MONTH_TARGET_PCT = 3.680970873786408
         // Rolling newest 30 recommendation trading dates after the appended Oct 1/Oct 5 records.
