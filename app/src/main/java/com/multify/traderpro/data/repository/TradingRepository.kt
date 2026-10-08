@@ -25,6 +25,8 @@ import com.multify.traderpro.data.local.ShadowPositionEntity
 import com.multify.traderpro.data.local.ShadowTradeEntity
 import com.multify.traderpro.data.local.SignalEventDao
 import com.multify.traderpro.data.local.SignalEventEntity
+import com.multify.traderpro.data.local.WaveCampaignEntity
+import com.multify.traderpro.data.local.WaveObservationEntity
 import com.multify.traderpro.data.network.BrokerStatusDto
 import com.multify.traderpro.data.network.DashboardDto
 import com.multify.traderpro.data.network.DaySummaryDto
@@ -44,6 +46,7 @@ import com.multify.traderpro.data.network.ForecastDto
 import com.multify.traderpro.data.network.ResearchDto
 import com.multify.traderpro.data.network.StrategyInsightDto
 import com.multify.traderpro.data.network.WaveSignalDto
+import com.multify.traderpro.data.network.WaveStatDto
 import com.multify.traderpro.data.network.TokenRequest
 import com.multify.traderpro.data.preferences.AppPreferences
 import com.multify.traderpro.data.preferences.AppSettings
@@ -60,6 +63,7 @@ import com.multify.traderpro.engine.MarketTrajectoryMath
 import com.multify.traderpro.engine.StrategyEvaluation
 import com.multify.traderpro.engine.WaveDirectionDecision
 import com.multify.traderpro.engine.WaveDirectionMath
+import com.multify.traderpro.engine.WavePivotMath
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
@@ -469,14 +473,17 @@ class TradingRepository @Inject constructor(
         preferences.setPostSellShortEnabled(value)
         auditLogger.log("FAST_TRACK", "POST_SELL_SHORT_CHANGED", mapOf("enabled" to value))
     }
-    suspend fun setFirstWaveMode(value: String) {
-        preferences.setFirstWaveMode(value)
-        auditLogger.log("SETTINGS", "FIRST_WAVE_MODE", mapOf("mode" to value.uppercase()))
+    suspend fun setExecutionMode(value: String) {
+        preferences.setExecutionMode(value)
+        val normalized = preferences.settings.first().executionMode
+        auditLogger.log("SETTINGS", "EXECUTION_MODE", mapOf("mode" to normalized))
     }
-    suspend fun setActiveWaveCount(value: Long) {
-        preferences.setActiveWaveCount(value)
-        auditLogger.log("SETTINGS", "ACTIVE_WAVE_COUNT", mapOf("waves" to value.coerceIn(1L, 10L)))
+    suspend fun setWaveCount(value: Int) {
+        preferences.setWaveCount(value)
+        auditLogger.log("SETTINGS", "WAVE_COUNT", mapOf("waves" to value.coerceIn(1, 20)))
     }
+    suspend fun setFirstWaveMode(value: String) = setExecutionMode(value)
+    suspend fun setActiveWaveCount(value: Long) = setWaveCount(value.toInt())
 
     fun hasBrokerCredentials(): Boolean = secretStore.hasApiKey() && secretStore.hasTotpSecret()
     fun hasAccessToken(): Boolean = secretStore.hasAccessToken()
@@ -566,6 +573,7 @@ class TradingRepository @Inject constructor(
                     orderBookImbalance = x.orderBookImbalance, votes = x.votes
                 )
             }
+            val waveStats = waveStats()
             val waveSignals = buildLiveWaveSignals(token, settings, learning)
             val main = if (settings.liveExecutionEffective) live else shadow
             if (settings.liveExecutionEffective) {
@@ -606,6 +614,7 @@ class TradingRepository @Inject constructor(
                 forecasts = forecasts,
                 research = latestResearch,
                 strategyInsights = strategyInsights,
+                waveStats = waveStats,
                 waveSignals = waveSignals,
                 positions = main.positions,
                 recentDecisions = recent
@@ -765,6 +774,9 @@ class TradingRepository @Inject constructor(
         val strategySnapshots = learningDao.allStrategySnapshots()
         val forecasts = learningDao.allForecasts()
         val researchReports = learningDao.allResearchReports()
+        val waveCampaigns = learningDao.allWaveCampaigns()
+        val waveObservations = learningDao.allWaveObservations()
+        val currentWaveStats = waveStats()
         val nseStatus = nseSymbols.status()
         val gson = GsonBuilder().setPrettyPrinting().create()
         val now = System.currentTimeMillis()
@@ -777,6 +789,8 @@ class TradingRepository @Inject constructor(
             "live_execution_effective" to settings.liveExecutionEffective,
             "fast_track_effective" to settings.fastTrackEffective,
             "post_sell_short_enabled" to settings.postSellShortEnabled,
+            "execution_mode" to settings.executionMode,
+            "wave_count" to settings.waveCount,
             "package_filter" to settings.packageFilter,
             "credentials_configured" to hasBrokerCredentials(),
             "broker_authenticated" to settings.brokerAuthenticated,
@@ -817,7 +831,9 @@ class TradingRepository @Inject constructor(
                 "price_observations" to priceObservations.size,
                 "strategy_snapshots" to strategySnapshots.size,
                 "forecasts" to forecasts.size,
-                "research_reports" to researchReports.size
+                "research_reports" to researchReports.size,
+                "wave_campaigns" to waveCampaigns.size,
+                "wave_observations" to waveObservations.size
             )
         )
 
@@ -843,6 +859,10 @@ class TradingRepository @Inject constructor(
             add("learning/strategy_snapshots.json", gson.toJson(strategySnapshots))
             add("forecast/all_forecasts.json", gson.toJson(forecasts))
             add("research/after_market_reports.json", gson.toJson(researchReports))
+            add("waves/campaigns.json", gson.toJson(waveCampaigns))
+            add("waves/confirmed_pivots.json", gson.toJson(waveObservations))
+            add("waves/current_20_wave_averages.json", gson.toJson(currentWaveStats))
+            add("learning/current_30day_stats.json", gson.toJson(learningStats()))
             add("analysis/strategy_catalog.txt", strategyCatalogText())
             add("analysis/strategy_performance.csv", strategyPerformanceCsv(shadowTrades, managedTrades))
             add("analysis/daily_pnl.csv", dailyPnlCsv(shadowTrades, managedTrades, zone))
@@ -877,6 +897,9 @@ class TradingRepository @Inject constructor(
         =====================
         - Multify-only fill ledger; unrelated Groww trades excluded
         - Shadow budget fixed at ₹2,00,000
+        - 20-wave pivot memory: Wave 1 Up from rolling Multify history/live outcomes; all Down legs and Waves 2–20 from confirmed live pivots
+        - No averaging-down, tranche adds, capital top-ups or automatic budget increases after entry
+        - Later wave actions may only reuse or reduce the existing fixed campaign notional
         - ₹5,000 is a milestone, not a profit ceiling
         - -₹1,500 soft defensive band; no mechanical panic close
         - -₹2,500 hard daily cap with earlier live risk reduction for slippage
@@ -1065,6 +1088,192 @@ class TradingRepository @Inject constructor(
         }
     }
 
+    suspend fun waveStats(): List<WaveStatDto> {
+        ensureHistoricalSeed()
+        val cutoff = LocalDate.now(INDIA).minusDays(29)
+        val pivots = learningDao.allWaveObservations().filter { row ->
+            runCatching { !LocalDate.parse(row.callDate).isBefore(cutoff) }.getOrDefault(false)
+        }
+        val learned = learningStats()
+        return (1..20).map { wave ->
+            val upRows = pivots.filter { it.wave == wave && it.direction.equals("UP", true) }
+            val downRows = pivots.filter { it.wave == wave && it.direction.equals("DOWN", true) }
+            val averageUp = if (wave == 1) learned.longAveragePct else upRows.map { it.movePct }.takeIf { it.isNotEmpty() }?.average()
+            WaveStatDto(
+                wave = wave,
+                averageUpPct = averageUp,
+                averageDownPct = downRows.map { it.movePct }.takeIf { it.isNotEmpty() }?.average(),
+                upSamples = if (wave == 1) learned.rollingCalls else upRows.size,
+                downSamples = downRows.size,
+                upSource = if (wave == 1) "30D_EXCEL_LIVE" else "LIVE_PIVOT",
+                downSource = "LIVE_PIVOT"
+            )
+        }
+    }
+
+    private suspend fun waveLongArmPct(wave: Int): Double =
+        waveStats().firstOrNull { it.wave == wave }?.averageUpPct?.takeIf { it > 0.0 }
+            ?: DEFAULT_UNTRAINED_WAVE_ARM_PCT
+
+    private suspend fun waveShortArmPct(wave: Int): Double =
+        waveStats().firstOrNull { it.wave == wave }?.averageDownPct?.takeIf { it > 0.0 }
+            ?: DEFAULT_UNTRAINED_WAVE_ARM_PCT
+
+    private suspend fun startOrReanchorWaveCampaign(eventId: Long, symbol: String, price: Double, source: String) {
+        if (price <= 0.0) return
+        val now = System.currentTimeMillis()
+        val existing = learningDao.waveCampaignForEvent(eventId)
+        if (existing == null) {
+            learningDao.activeWaveCampaigns().filter { it.symbol.equals(symbol, true) }.forEach { old ->
+                learningDao.updateWaveCampaign(old.copy(active = false, completedAtMs = now, updatedAtMs = now))
+            }
+            learningDao.insertWaveCampaign(
+                WaveCampaignEntity(
+                    eventId = eventId,
+                    symbol = symbol.uppercase(Locale.US),
+                    callDate = LocalDate.now(INDIA).toString(),
+                    startPrice = price,
+                    startAtMs = now,
+                    startSource = source,
+                    wave = 1,
+                    leg = "UP",
+                    legStartPrice = price,
+                    legStartAtMs = now,
+                    extremePrice = price,
+                    extremeAtMs = now,
+                    legArmed = false,
+                    initialAdversePrice = price,
+                    lastPrice = price,
+                    active = true,
+                    updatedAtMs = now
+                )
+            )
+            auditLogger.log("WAVES", "CAMPAIGN_STARTED", mapOf(
+                "event_id" to eventId, "symbol" to symbol, "price" to price,
+                "source" to source, "pivot_pct" to (WAVE_PIVOT_FRACTION * 100.0)
+            ))
+            return
+        }
+        if (source == "LIVE_FILL" && existing.startSource != "LIVE_FILL") {
+            learningDao.updateWaveCampaign(existing.copy(
+                startPrice = price, startAtMs = now, startSource = source,
+                wave = 1, leg = "UP", legStartPrice = price, legStartAtMs = now,
+                extremePrice = price, extremeAtMs = now, legArmed = false,
+                initialAdversePrice = price, lastPrice = price, active = true,
+                completedAtMs = null, updatedAtMs = now
+            ))
+            auditLogger.log("WAVES", "CAMPAIGN_REANCHORED_TO_LIVE_FILL", mapOf(
+                "event_id" to eventId, "symbol" to symbol, "price" to price
+            ))
+        }
+    }
+
+    private suspend fun updateWaveCampaignTick(campaign: WaveCampaignEntity, price: Double, maxWaves: Int): WaveCampaignEntity {
+        if (!campaign.active || price <= 0.0) return campaign
+        val now = System.currentTimeMillis()
+        val direction = if (campaign.leg.equals("DOWN", true)) "DOWN" else "UP"
+        val nextExtreme = if (direction == "UP") max(campaign.extremePrice, price) else min(campaign.extremePrice, price)
+        val extremeAt = if (nextExtreme != campaign.extremePrice) now else campaign.extremeAtMs
+        val armPct = if (direction == "UP") waveLongArmPct(campaign.wave) else waveShortArmPct(campaign.wave)
+        val armFraction = (armPct / 100.0).coerceAtLeast(WAVE_PIVOT_FRACTION)
+        val armed = campaign.legArmed || WavePivotMath.shouldArm(direction, campaign.legStartPrice, nextExtreme, armFraction)
+        val initialAdverse = if (direction == "UP") min(campaign.initialAdversePrice, price) else max(campaign.initialAdversePrice, price)
+
+        if (armed && WavePivotMath.shouldConfirm(direction, nextExtreme, price, WAVE_PIVOT_FRACTION)) {
+            val movePct = WavePivotMath.movePct(campaign.legStartPrice, nextExtreme)
+            val reversalPct = WavePivotMath.reversalFraction(direction, nextExtreme, price) * 100.0
+            learningDao.insertWaveObservation(
+                WaveObservationEntity(
+                    campaignId = campaign.id, eventId = campaign.eventId, symbol = campaign.symbol,
+                    callDate = campaign.callDate, wave = campaign.wave, direction = direction,
+                    startPrice = campaign.legStartPrice, extremePrice = nextExtreme, confirmationPrice = price,
+                    startAtMs = campaign.legStartAtMs, extremeAtMs = extremeAt, confirmedAtMs = now,
+                    movePct = movePct, reversalPct = reversalPct, source = "LIVE_PIVOT"
+                )
+            )
+            val completed = direction == "DOWN" && campaign.wave >= maxWaves.coerceIn(1, 20)
+            val nextWave = if (direction == "DOWN") (campaign.wave + 1).coerceAtMost(20) else campaign.wave
+            val nextLeg = if (direction == "UP") "DOWN" else "UP"
+            val updated = campaign.copy(
+                wave = nextWave, leg = nextLeg, legStartPrice = price, legStartAtMs = now,
+                extremePrice = price, extremeAtMs = now, legArmed = false,
+                initialAdversePrice = price, lastPrice = price, active = !completed,
+                completedAtMs = if (completed) now else null, updatedAtMs = now
+            )
+            learningDao.updateWaveCampaign(updated)
+            auditLogger.log("WAVES", if (direction == "UP") "UP_CONFIRMED" else "DOWN_CONFIRMED", mapOf(
+                "symbol" to campaign.symbol, "wave" to campaign.wave, "move_pct" to movePct,
+                "confirm" to price, "next_leg" to nextLeg, "active" to !completed
+            ))
+            return updated
+        }
+
+        val updated = campaign.copy(
+            extremePrice = nextExtreme, extremeAtMs = extremeAt, legArmed = armed,
+            initialAdversePrice = initialAdverse, lastPrice = price, updatedAtMs = now
+        )
+        learningDao.updateWaveCampaign(updated)
+        return updated
+    }
+
+    suspend fun monitorWaveCampaigns(): Int {
+        val active = learningDao.activeWaveCampaigns()
+        if (active.isEmpty()) return 0
+        val token = ensureToken() ?: return active.size
+        val settings = preferences.settings.first()
+        active.forEach { campaign ->
+            runCatching {
+                val price = apiFactory.groww.quote(bearer(token), tradingSymbol = campaign.symbol)
+                    .requirePayload("Wave pivot quote " + campaign.symbol).lastPrice ?: campaign.lastPrice
+                updateWaveCampaignTick(campaign, price, settings.waveCount)
+            }.onFailure {
+                auditLogger.log("WAVES", "TICK_ERROR", mapOf("symbol" to campaign.symbol, "message" to (it.message ?: "")))
+            }
+        }
+        return learningDao.activeWaveCampaigns().size
+    }
+
+    suspend fun submitManualSignal(symbol: String, action: String, observedPrice: Double? = null): Long {
+        val normalizedSymbol = symbol.trim().uppercase(Locale.US)
+        require(normalizedSymbol.isNotBlank()) { "Enter an NSE symbol" }
+        val normalizedAction = action.trim().uppercase(Locale.US).replace(' ', '_')
+        require(normalizedAction in setOf("BUY", "BOOK_PROFIT")) { "Choose BUY or BOOK PROFIT" }
+        if (!nseSymbols.isKnown(normalizedSymbol) && !nseSymbols.isStale()) error("$normalizedSymbol is not in the current NSE equity master")
+        val now = System.currentTimeMillis()
+        val signalType = if (normalizedAction == "BUY") SignalType.TRADE_RELEASE else SignalType.BOOK_PROFIT
+        val id = dao.insert(
+            SignalEventEntity(
+                fingerprint = sha256("$MANUAL_SOURCE|$normalizedSymbol|$normalizedAction|$now"),
+                receivedAtMs = now, postedAtMs = now, sourcePackage = MANUAL_SOURCE, appLabel = "Manual signal",
+                title = normalizedAction.replace('_', ' '), text = normalizedSymbol,
+                bigText = observedPrice?.let { "$normalizedSymbol @ ₹${fmt(it)}" } ?: normalizedSymbol,
+                signalType = signalType.name, symbol = normalizedSymbol,
+                summary = "Manual $normalizedAction · $normalizedSymbol",
+                confidence = 1.0
+            )
+        )
+        require(id > 0L) { "Manual signal was not stored" }
+        val token = ensureToken()
+        if (token == null) {
+            dao.updateForwarding(id, "CAPTURED", "AUTH_REQUIRED", "Manual signal stored. Authenticate Groww to process market data.", null)
+            return id
+        }
+        val settings = preferences.settings.first()
+        val parsed = ParsedSignal(
+            type = signalType, symbol = normalizedSymbol,
+            exitPrice = if (signalType == SignalType.BOOK_PROFIT) observedPrice else null,
+            rawText = "manual:$normalizedAction:$normalizedSymbol", confidence = 1.0
+        )
+        if (signalType == SignalType.TRADE_RELEASE) {
+            prioritizeNewRecommendation(normalizedSymbol, token, settings)
+            handleBuyRelease(id, parsed, token, settings)
+        } else {
+            handleBookProfit(id, parsed, token, settings)
+        }
+        auditLogger.log("SIGNAL", "MANUAL_SIGNAL", mapOf("event_id" to id, "symbol" to normalizedSymbol, "action" to normalizedAction, "observed_price" to observedPrice))
+        return id
+    }
+
     private suspend fun buildLiveWaveSignals(token: String, settings: AppSettings, learning: LearningStatsDto): List<WaveSignalDto> {
         val candidates = managedDao.openPositions()
             .filter { it.engine == ENGINE_INTRADAY }
@@ -1106,6 +1315,7 @@ class TradingRepository @Inject constructor(
         val quote = apiFactory.groww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Quote $symbol")
         val ltp = quote.lastPrice ?: error("Groww quote does not contain LTP")
         recordLiveBuy(eventId, signal, ltp)
+        startOrReanchorWaveCampaign(eventId, symbol, ltp, "MULTIFY_NOTIFICATION")
         val learned = learningStats()
 
         // SHADOW is a faithful Multify-following simulator first: every paid BUY creates a virtual long immediately.
@@ -1186,6 +1396,7 @@ class TradingRepository @Inject constructor(
         val order = placeMarket(token, symbol, "BUY", allocation.quantity, "MIS", reference)
         val qty = order.filledQuantity?.takeIf { it > 0 } ?: allocation.quantity
         val entry = order.averageFillPrice?.takeIf { it > 0 } ?: f.ltp
+        startOrReanchorWaveCampaign(eventId, symbol, entry, "LIVE_FILL")
         managedDao.insertPosition(
             ManagedPositionEntity(
                 engine = ENGINE_INTRADAY, symbol = symbol, product = "MIS", side = "LONG", quantity = qty,
@@ -2313,6 +2524,9 @@ class TradingRepository @Inject constructor(
         private const val DEFENSIVE_HOLD_CONFIDENCE = 0.80
         private const val MULTIFY_SELL_SHORT_GATE = 0.66
         private const val MAX_PAPER_TRADES_PER_SYMBOL = 10
+        private const val DEFAULT_UNTRAINED_WAVE_ARM_PCT = 0.40
+        private const val WAVE_PIVOT_FRACTION = 0.004
+        private const val MANUAL_SOURCE = "com.multify.traderpro.manual"
         // Supplied workbook (2026-06-30 through 2026-09-30 BUY calls): entry-to-target mean = 3.68097%.
         private const val UPLOADED_THREE_MONTH_TARGET_PCT = 3.680970873786408
         // Rolling newest 30 recommendation trading dates after the appended Oct 1/Oct 5 records.
