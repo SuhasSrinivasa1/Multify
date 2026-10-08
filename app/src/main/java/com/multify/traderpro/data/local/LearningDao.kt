@@ -91,4 +91,31 @@ interface LearningDao {
 
     @Query("SELECT * FROM wave_observations ORDER BY confirmedAtMs ASC")
     suspend fun allWaveObservations(): List<WaveObservationEntity>
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertWaveDecision(item: WaveDecisionEntity): Long
+
+    @Query("SELECT * FROM wave_decisions WHERE campaignId=:campaignId AND waveNumber=:waveNumber LIMIT 1")
+    suspend fun waveDecisionForCampaign(campaignId: Long, waveNumber: Int): WaveDecisionEntity?
+
+    @Query("SELECT * FROM wave_decisions ORDER BY triggerAtMs DESC LIMIT :limit")
+    suspend fun recentWaveDecisions(limit: Int = 50): List<WaveDecisionEntity>
+
+    @Query("SELECT * FROM wave_decisions ORDER BY triggerAtMs ASC")
+    suspend fun allWaveDecisions(): List<WaveDecisionEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertWaveOutcome(item: WaveOutcomeEntity): Long
+
+    @Update
+    suspend fun updateWaveOutcome(item: WaveOutcomeEntity)
+
+    @Query("SELECT * FROM wave_outcomes WHERE decisionId=:decisionId LIMIT 1")
+    suspend fun waveOutcomeForDecision(decisionId: Long): WaveOutcomeEntity?
+
+    @Query("SELECT * FROM wave_outcomes WHERE finalizedAtMs IS NULL ORDER BY lastObservedAtMs ASC")
+    suspend fun activeWaveOutcomes(): List<WaveOutcomeEntity>
+
+    @Query("SELECT * FROM wave_outcomes ORDER BY lastObservedAtMs ASC")
+    suspend fun allWaveOutcomes(): List<WaveOutcomeEntity>
 }

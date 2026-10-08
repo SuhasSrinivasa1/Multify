@@ -69,6 +69,8 @@ data class DashboardDto(
     val strategyInsights: List<StrategyInsightDto> = emptyList(),
     val waveStats: List<WaveStatDto> = emptyList(),
     val waveSignals: List<WaveSignalDto> = emptyList(),
+    val adaptiveWaves: List<AdaptiveWaveDto> = emptyList(),
+    val health: EngineHealthDto = EngineHealthDto(),
     val positions: List<PositionDto> = emptyList(),
     val recentDecisions: List<RecentDecisionDto> = emptyList()
 )
@@ -144,4 +146,39 @@ data class StrategyInsightDto(
     val rvol: Double? = null,
     val orderBookImbalance: Double? = null,
     val votes: String = ""
+)
+
+
+data class AdaptiveWaveDto(
+    val symbol: String = "",
+    val waveNumber: Int = 0,
+    val triggerPct: Double = 0.0,
+    val currentSide: String = "NEUTRAL",
+    val decision: String = "HOLD",
+    val longProbability: Double = 0.5,
+    val shortProbability: Double = 0.5,
+    val evLongRupees: Double = 0.0,
+    val evShortRupees: Double = 0.0,
+    val confidence: Double = 0.0,
+    val regime: String = "UNKNOWN",
+    val reasons: String = "",
+    val alternativeRejected: String = "",
+    val waveCapitalRupees: Double = 0.0,
+    val campaignCapitalUsed: Double = 0.0,
+    val campaignCapitalRemaining: Double = 0.0,
+    val dataAgeMs: Long = Long.MAX_VALUE,
+    val actualOrderSubmitted: Boolean = false
+)
+
+data class EngineHealthDto(
+    val listener: String = "UNKNOWN",
+    val broker: String = "UNKNOWN",
+    val marketData: String = "UNKNOWN",
+    val symbolMaster: String = "UNKNOWN",
+    val foregroundService: String = "UNKNOWN",
+    val lastNotificationAtMs: Long = 0L,
+    val reconnectCount: Long = 0L,
+    val lastReconnectAtMs: Long = 0L,
+    val lastEventProcessingLatencyMs: Long = 0L,
+    val marketDataAgeMs: Long = Long.MAX_VALUE
 )

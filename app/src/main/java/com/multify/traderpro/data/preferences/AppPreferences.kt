@@ -42,15 +42,21 @@ data class AppSettings(
     val shadowPeakPnlPaise: Long = 0L,
     val shadowPeakPnlDate: String = "",
     val livePeakPnlPaise: Long = 0L,
-    val livePeakPnlDate: String = ""
+    val livePeakPnlDate: String = "",
+    val waveSpacingBps: Long = 200L,
+    val waveCapitalRupees: Long = 5_000L,
+    val maxCampaignCapitalRupees: Long = 200_000L,
+    val maxDailyLossRupees: Long = 2_500L,
+    val maxSingleStockLossRupees: Long = 1_500L
 ) {
     val minLiveConfidence: Double get() = minLiveConfidenceBps / 10_000.0
     val shadowPeakPnl: Double get() = if (shadowPeakPnlDate == LocalDate.now().toString()) shadowPeakPnlPaise / 100.0 else 0.0
     val livePeakPnl: Double get() = if (livePeakPnlDate == LocalDate.now().toString()) livePeakPnlPaise / 100.0 else 0.0
-    // v4.6 distributable APK is intentionally shadow/decision-only.
-    // Broker credentials may be used for read-only quotes/account context, but no live order path is armed.
-    val liveExecutionEffective: Boolean get() = false
-    val fastTrackEffective: Boolean get() = false
+    val liveExecutionEffective: Boolean get() =
+        liveExecutionEnabled && liveEnabledDate == LocalDate.now().toString() && !safetyHalt
+    val fastTrackEffective: Boolean get() =
+        fastTrackEnabled && fastTrackEnabledDate == LocalDate.now().toString() && !safetyHalt
+    val waveSpacingPercent: Double get() = waveSpacingBps / 100.0
     val firstWaveMode: String get() = when (executionMode) {
         "LONG_ONLY" -> "LONG"
         "SHORT_ONLY" -> "SHORT"
@@ -91,6 +97,11 @@ class AppPreferences @Inject constructor(
         val shadowPeakPnlDate = stringPreferencesKey("shadow_peak_pnl_date")
         val livePeakPnlPaise = longPreferencesKey("live_peak_pnl_paise")
         val livePeakPnlDate = stringPreferencesKey("live_peak_pnl_date")
+        val waveSpacingBps = longPreferencesKey("wave_spacing_bps")
+        val waveCapitalRupees = longPreferencesKey("wave_capital_rupees")
+        val maxCampaignCapitalRupees = longPreferencesKey("max_campaign_capital_rupees")
+        val maxDailyLossRupees = longPreferencesKey("max_daily_loss_rupees")
+        val maxSingleStockLossRupees = longPreferencesKey("max_single_stock_loss_rupees")
     }
 
     val settings: Flow<AppSettings> = context.dataStore.data.map { p -> p.toSettings() }
@@ -162,15 +173,33 @@ class AppPreferences @Inject constructor(
 
     suspend fun setLiveExecution(value: Boolean) {
         context.dataStore.edit {
-            it[Keys.liveExecutionEnabled] = false
-            it[Keys.liveEnabledDate] = ""
+            it[Keys.liveExecutionEnabled] = value
+            it[Keys.liveEnabledDate] = if (value) LocalDate.now().toString() else ""
         }
     }
 
     suspend fun setFastTrack(value: Boolean) {
         context.dataStore.edit {
-            it[Keys.fastTrackEnabled] = false
-            it[Keys.fastTrackEnabledDate] = ""
+            it[Keys.fastTrackEnabled] = value
+            it[Keys.fastTrackEnabledDate] = if (value) LocalDate.now().toString() else ""
+        }
+    }
+
+    suspend fun setWaveRiskSettings(
+        waveSpacingPercent: Double,
+        waveCapitalRupees: Long,
+        maximumWaves: Int,
+        maxCampaignCapitalRupees: Long,
+        maxDailyLossRupees: Long,
+        maxSingleStockLossRupees: Long
+    ) {
+        context.dataStore.edit {
+            it[Keys.waveSpacingBps] = (waveSpacingPercent.coerceIn(0.5, 10.0) * 100.0).toLong()
+            it[Keys.waveCapitalRupees] = waveCapitalRupees.coerceIn(1_000L, 50_000L)
+            it[Keys.waveCount] = maximumWaves.coerceIn(1, 20)
+            it[Keys.maxCampaignCapitalRupees] = maxCampaignCapitalRupees.coerceIn(10_000L, 500_000L)
+            it[Keys.maxDailyLossRupees] = maxDailyLossRupees.coerceIn(500L, 100_000L)
+            it[Keys.maxSingleStockLossRupees] = maxSingleStockLossRupees.coerceIn(250L, 50_000L)
         }
     }
 
@@ -243,6 +272,11 @@ class AppPreferences @Inject constructor(
         shadowPeakPnlPaise = this[Keys.shadowPeakPnlPaise] ?: 0L,
         shadowPeakPnlDate = this[Keys.shadowPeakPnlDate].orEmpty(),
         livePeakPnlPaise = this[Keys.livePeakPnlPaise] ?: 0L,
-        livePeakPnlDate = this[Keys.livePeakPnlDate].orEmpty()
+        livePeakPnlDate = this[Keys.livePeakPnlDate].orEmpty(),
+        waveSpacingBps = (this[Keys.waveSpacingBps] ?: 200L).coerceIn(50L, 1000L),
+        waveCapitalRupees = (this[Keys.waveCapitalRupees] ?: 5_000L).coerceIn(1_000L, 50_000L),
+        maxCampaignCapitalRupees = (this[Keys.maxCampaignCapitalRupees] ?: 200_000L).coerceIn(10_000L, 500_000L),
+        maxDailyLossRupees = (this[Keys.maxDailyLossRupees] ?: 2_500L).coerceIn(500L, 100_000L),
+        maxSingleStockLossRupees = (this[Keys.maxSingleStockLossRupees] ?: 1_500L).coerceIn(250L, 50_000L)
     )
 }

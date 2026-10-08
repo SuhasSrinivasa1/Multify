@@ -18,9 +18,11 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         ForecastEntity::class,
         ResearchReportEntity::class,
         WaveCampaignEntity::class,
-        WaveObservationEntity::class
+        WaveObservationEntity::class,
+        WaveDecisionEntity::class,
+        WaveOutcomeEntity::class
     ],
-    version = 5,
+    version = 6,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -284,6 +286,73 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_wave_observations_campaignId_wave_direction ON wave_observations(campaignId, wave, direction)")
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_wave_observations_callDate_wave_direction ON wave_observations(callDate, wave, direction)")
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_wave_observations_symbol_confirmedAtMs ON wave_observations(symbol, confirmedAtMs)")
+            }
+        }
+
+        val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("""CREATE TABLE IF NOT EXISTS wave_decisions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    campaignId INTEGER NOT NULL,
+                    eventId INTEGER,
+                    symbol TEXT NOT NULL,
+                    callDate TEXT NOT NULL,
+                    waveNumber INTEGER NOT NULL,
+                    triggerAtMs INTEGER NOT NULL,
+                    snapshotAtMs INTEGER NOT NULL,
+                    triggerPrice REAL NOT NULL,
+                    triggerPct REAL NOT NULL,
+                    currentSide TEXT NOT NULL,
+                    selectedDirection TEXT NOT NULL,
+                    longScore REAL NOT NULL,
+                    shortScore REAL NOT NULL,
+                    longProbability REAL NOT NULL,
+                    shortProbability REAL NOT NULL,
+                    evLongRupees REAL NOT NULL,
+                    evShortRupees REAL NOT NULL,
+                    evLongPct REAL NOT NULL,
+                    evShortPct REAL NOT NULL,
+                    confidence REAL NOT NULL,
+                    regime TEXT NOT NULL,
+                    topPositiveFeatures TEXT NOT NULL,
+                    topNegativeFeatures TEXT NOT NULL,
+                    rejectionReason TEXT NOT NULL,
+                    snapshotJson TEXT NOT NULL,
+                    modelVersion TEXT NOT NULL,
+                    dataAgeMs INTEGER NOT NULL,
+                    brokerHealthy INTEGER NOT NULL,
+                    listenerHealthy INTEGER NOT NULL,
+                    waveCapitalRupees REAL NOT NULL,
+                    campaignCapitalBefore REAL NOT NULL,
+                    campaignCapitalAfter REAL NOT NULL,
+                    actualOrderSubmitted INTEGER NOT NULL,
+                    orderReference TEXT,
+                    createdAtMs INTEGER NOT NULL
+                )""")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_wave_decisions_campaignId_waveNumber ON wave_decisions(campaignId, waveNumber)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_wave_decisions_symbol_triggerAtMs ON wave_decisions(symbol, triggerAtMs)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_wave_decisions_callDate ON wave_decisions(callDate)")
+                db.execSQL("""CREATE TABLE IF NOT EXISTS wave_outcomes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    decisionId INTEGER NOT NULL,
+                    symbol TEXT NOT NULL,
+                    entryPrice REAL NOT NULL,
+                    longMfeRupees REAL NOT NULL,
+                    longMaeRupees REAL NOT NULL,
+                    shortMfeRupees REAL NOT NULL,
+                    shortMaeRupees REAL NOT NULL,
+                    longNetRupees REAL NOT NULL,
+                    shortNetRupees REAL NOT NULL,
+                    selectedNetRupees REAL NOT NULL,
+                    oldAveragingNetRupees REAL NOT NULL,
+                    noTradeAvoidanceRupees REAL NOT NULL,
+                    bestRealisticNetRupees REAL NOT NULL,
+                    lastPrice REAL NOT NULL,
+                    lastObservedAtMs INTEGER NOT NULL,
+                    finalizedAtMs INTEGER
+                )""")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_wave_outcomes_decisionId ON wave_outcomes(decisionId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_wave_outcomes_symbol_lastObservedAtMs ON wave_outcomes(symbol, lastObservedAtMs)")
             }
         }
 
