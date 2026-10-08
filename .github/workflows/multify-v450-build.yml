@@ -1,4 +1,4 @@
-name: Multify Trader Pro v4.5.0 Build
+name: Multify Trader Pro v4.6.1 Fixed Capital Build
 
 on:
   workflow_dispatch:
@@ -109,6 +109,6 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Multify-TraderPro-v4.5.0-APKs
+          name: Multify-TraderPro-v4.6.1-APKs
           path: dist/
           if-no-files-found: error

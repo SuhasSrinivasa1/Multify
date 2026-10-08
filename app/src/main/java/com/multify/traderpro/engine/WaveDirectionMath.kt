@@ -5,7 +5,7 @@ import kotlin.math.floor
 import kotlin.math.max
 
 /**
- * Chooses exactly one incremental AUTO action at each 2% wave after the initial Multify entry.
+ * Chooses exactly one AUTO direction decision at each 2% checkpoint after the initial Multify entry.
  * LONG/SHORT inputs are event-neutral strategy evaluations from the same market snapshot.
  * HOLD is deliberate: forcing a side when both expected values are weak creates churn.
  */
@@ -23,7 +23,6 @@ data class WaveDirectionDecision(
 
 object WaveDirectionMath {
     const val WAVE_FRACTION = 0.02
-    const val DEFAULT_TRANCHE_RUPEES = 5_000.0
     const val MAX_WAVES = 10
 
     fun waveIndex(anchorPrice: Double, currentPrice: Double): Int {
@@ -33,7 +32,7 @@ object WaveDirectionMath {
 
     fun decide(
         currentSide: String,
-        trancheRupees: Double,
+        exposureRupees: Double,
         price: Double,
         atr: Double,
         spreadBps: Double?,
@@ -42,11 +41,11 @@ object WaveDirectionMath {
         shortDirectionalScore: Double,
         shortConfidence: Double
     ): WaveDirectionDecision {
-        if (price <= 0.0 || trancheRupees <= 0.0) return hold("Invalid wave price/budget")
-        if ((spreadBps ?: 0.0) > 35.0) return hold("Spread is too wide for a wave add/flip")
+        if (price <= 0.0 || exposureRupees <= 0.0) return hold("Invalid checkpoint price/exposure")
+        if ((spreadBps ?: 0.0) > 35.0) return hold("Spread is too wide for a direction change")
 
-        val qty = floor(trancheRupees / price).toInt()
-        if (qty <= 0) return hold("₹${trancheRupees.toInt()} tranche cannot buy/short one share at the current price")
+        val qty = floor(exposureRupees / price).toInt()
+        if (qty <= 0) return hold("₹${exposureRupees.toInt()} fixed exposure cannot buy/short one share at the current price")
 
         val safeAtr = max(atr, max(price * 0.0035, 0.05))
         val longP = calibratedProbability(longDirectionalScore, longConfidence)
@@ -63,8 +62,8 @@ object WaveDirectionMath {
 
         val minProbability = if (flip) 0.64 else 0.58
         val minScore = if (flip) 0.16 else 0.08
-        val minEv = if (flip) max(20.0, trancheRupees * 0.004) else max(10.0, trancheRupees * 0.002)
-        val minGap = if (flip) max(15.0, trancheRupees * 0.003) else max(7.5, trancheRupees * 0.0015)
+        val minEv = if (flip) max(20.0, exposureRupees * 0.004) else max(10.0, exposureRupees * 0.002)
+        val minGap = if (flip) max(15.0, exposureRupees * 0.003) else max(7.5, exposureRupees * 0.0015)
 
         if (winnerP < minProbability || winnerScore < minScore || winnerEv < minEv || gap < minGap) {
             return WaveDirectionDecision(
@@ -81,7 +80,7 @@ object WaveDirectionMath {
             longExpectedValueRupees = longEv, shortExpectedValueRupees = shortEv,
             winnerExpectedValueRupees = winnerEv, expectedValueGapRupees = gap,
             confidence = winnerP,
-            reason = "One-sided wave edge: $winner p=${fmt(winnerP)} EV=₹${money(winnerEv)} vs ₹${money(if (winner == "LONG") shortEv else longEv)}"
+            reason = "One-sided checkpoint edge: $winner p=${fmt(winnerP)} EV=₹${money(winnerEv)} vs ₹${money(if (winner == "LONG") shortEv else longEv)}"
         )
     }
 

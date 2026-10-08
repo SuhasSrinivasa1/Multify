@@ -14,7 +14,7 @@ class WaveDirectionMathTest {
 
     @Test fun bearishEvidenceSelectsOnlyShort() {
         val d = WaveDirectionMath.decide(
-            currentSide="LONG", trancheRupees=5000.0, price=100.0, atr=1.2, spreadBps=8.0,
+            currentSide="LONG", exposureRupees=5000.0, price=100.0, atr=1.2, spreadBps=8.0,
             longDirectionalScore=-0.45, longConfidence=0.31,
             shortDirectionalScore=0.72, shortConfidence=0.80
         )
@@ -24,7 +24,7 @@ class WaveDirectionMathTest {
 
     @Test fun weakMixedEvidenceHoldsInsteadOfForcingBothOrChurning() {
         val d = WaveDirectionMath.decide(
-            currentSide="LONG", trancheRupees=5000.0, price=100.0, atr=.8, spreadBps=10.0,
+            currentSide="LONG", exposureRupees=5000.0, price=100.0, atr=.8, spreadBps=10.0,
             longDirectionalScore=.06, longConfidence=.54,
             shortDirectionalScore=.05, shortConfidence=.53
         )

@@ -53,6 +53,7 @@ import com.multify.traderpro.domain.NotificationParser
 import com.multify.traderpro.domain.ParsedSignal
 import com.multify.traderpro.domain.SignalType
 import com.multify.traderpro.engine.BudgetAllocator
+import com.multify.traderpro.engine.FixedCapitalPolicy
 import com.multify.traderpro.engine.AdaptiveLearningMath
 import com.multify.traderpro.engine.LocalStrategyEngine
 import com.multify.traderpro.engine.MarketTrajectoryMath
@@ -998,7 +999,7 @@ class TradingRepository @Inject constructor(
      *
      * Existing first-wave positions in another symbol are handled deterministically:
      * - net green after estimated costs -> exit and release focus/capital for the new call;
-     * - net red -> keep the broker protection/monitoring alive, but stop averaging, flipping and
+     * - net red -> keep the broker protection/monitoring alive, but stop adding exposure, flipping and
      *   strategy churn for that symbol for the rest of the call cycle;
      * - wave 2+ positions may continue as one secondary symbol. Any additional wave 2+ symbol is
      *   converted to prediction-only so the engine concentrates on at most two actively-managed names.
@@ -1071,7 +1072,7 @@ class TradingRepository @Inject constructor(
             .take(2)
         return candidates.mapNotNull { p ->
             runCatching {
-                val (decision, longEval, _) = assessAutoWave(p.symbol, token, p.side)
+                val (decision, longEval, _) = assessAutoWave(p.symbol, token, p.side, FixedCapitalPolicy.cap(p.campaignBudget, p.capitalDeployed, p.entryPrice * p.quantity))
                 val nextWave = (p.addCount + 2).coerceIn(2, WaveDirectionMath.MAX_WAVES)
                 val executeEligible = nextWave <= settings.activeWaveCount.toInt() &&
                     p.regime != REGIME_RECOVERY_HOLD && p.regime != REGIME_SECONDARY_PREVIEW
@@ -1114,7 +1115,7 @@ class TradingRepository @Inject constructor(
             if (!risk.hardStop) {
                 shadowDao.openPosition(symbol)?.takeIf { it.side == "SHORT" }?.let { closeShadow(it, ltp, "MULTIFY_LONG_REVERSAL") }
                 if (shadowDao.openPosition(symbol) == null) {
-                    val initialCapital = initialCampaignAllocation(SHADOW_BUDGET)
+                    val initialCapital = SHADOW_BUDGET
                     val qty = floor(initialCapital / ltp).toInt().coerceAtLeast(1)
                     val target = ltp * (1.0 + learned.longAveragePct / 100.0)
                     val stop = max(.05, ltp * .88)
@@ -1125,7 +1126,7 @@ class TradingRepository @Inject constructor(
                     )
                     dao.updateForwarding(
                         eventId, "ANALYZED", "PAPER_BUY_OPEN",
-                        "Immediate ₹2L shadow campaign · virtual $qty shares @ ₹${fmt(ltp)} · rolling 30-day long target ${fmt(learned.longAveragePct)}% · ₹5,000 add every further 2% decline while budget remains.", null
+                        "Immediate fixed-capital ₹2L shadow campaign · virtual $qty shares @ ₹${fmt(ltp)} · rolling 30-day long target ${fmt(learned.longAveragePct)}% · no averaging or capital top-ups.", null
                     )
                 }
             } else {
@@ -1170,7 +1171,7 @@ class TradingRepository @Inject constructor(
         }
         assertNoExternalMisConflict(token, symbol)
         val campaignBudget = settings.dailyBudgetRupees.toDouble()
-        val initialBudget = initialCampaignAllocation(campaignBudget)
+        val initialBudget = campaignBudget
         val allocation = BudgetAllocator.allocate(
             budgetRupees = initialBudget, confidence = analysis.confidence, price = f.ltp,
             stopDistance = f.ltp - stop, targetDistance = target - f.ltp, existingNetQuantity = 0
@@ -1192,7 +1193,7 @@ class TradingRepository @Inject constructor(
                 regime = analysis.regime, confidence = analysis.confidence, sourceEventId = eventId,
                 openOrderId = order.growwOrderId, openReferenceId = reference, openedAtMs = System.currentTimeMillis(),
                 lastPrice = entry, maxFavourablePrice = entry, maxAdversePrice = entry, lastEvaluatedAtMs = System.currentTimeMillis(),
-                anchorPrice = entry, capitalDeployed = entry * qty, campaignBudget = campaignBudget
+                anchorPrice = entry, capitalDeployed = entry * qty, campaignBudget = entry * qty
             )
         )
         val managed = managedDao.openPosition(ENGINE_INTRADAY, symbol) ?: error("App ledger failed to record live position")
@@ -1222,7 +1223,7 @@ class TradingRepository @Inject constructor(
                     closeShadow(openLong, quoteNow, "MULTIFY_BOOK_PROFIT_GREEN")
                     longTrade = shadowDao.latestTrade(symbol, "LONG", startOfIndiaDayMs())
                 } else {
-                    dao.updateForwarding(eventId, "ANALYZED", "PAPER_HOLD_RED", "Multify sell arrived while shadow long is red. Hold/average campaign continues; no same-day short is opened.", null)
+                    dao.updateForwarding(eventId, "ANALYZED", "PAPER_HOLD_RED", "Multify sell arrived while shadow long is red. Recovery monitoring continues without averaging or added capital; no same-day short is opened.", null)
                     runCatching { analyze(symbol, token, longSide = false, signal = signal, eventId = eventId) }
                     return
                 }
@@ -1233,11 +1234,16 @@ class TradingRepository @Inject constructor(
                 val longMove = prior.exitPrice - prior.entryPrice
                 val target = AdaptiveLearningMath.shortTarget(quoteNow, prior.entryPrice, prior.exitPrice, learned.shortRetracementFraction)
                 val stop = quoteNow * (1.0 + FAST_SHORT_STOP_PCT)
-                val qty = floor(SHADOW_BUDGET / quoteNow).toInt().coerceAtLeast(1)
+                val fixedCapitalCap = prior.entryPrice * prior.quantity
+                val qty = floor(fixedCapitalCap / quoteNow).toInt()
+                if (qty <= 0) {
+                    dao.updateForwarding(eventId, "ANALYZED", "PAPER_NO_SHORT_FIXED_CAP", "The fixed campaign capital cannot open one share at the current price; no capital increase is allowed.", null)
+                    return
+                }
                 openShadowDirect(
                     symbol, "SHORT", qty, quoteNow, stop, target,
                     "Post-Multify sell · ${fmt(learned.shortRetracementPct)}% of preceding long move", "POST_SELL",
-                    1.0, eventId, SHADOW_BUDGET, qty * quoteNow
+                    1.0, eventId, fixedCapitalCap, qty * quoteNow
                 )
                 dao.updateForwarding(eventId, "ANALYZED", "PAPER_SHORT_OPEN", "Immediate shadow short @ ₹${fmt(quoteNow)} · preceding long move ₹${fmt(longMove)} · learned retracement ${fmt(learned.shortRetracementPct)}% · target ₹${fmt(target)}.", null)
             } else {
@@ -1247,7 +1253,11 @@ class TradingRepository @Inject constructor(
             return
         }
 
-        managedDao.openPosition(ENGINE_INTRADAY, symbol)?.takeIf { it.side == "LONG" }?.let {
+        val liveLong = managedDao.openPosition(ENGINE_INTRADAY, symbol)?.takeIf { it.side == "LONG" }
+        val fixedPostSellCap = liveLong?.let {
+            FixedCapitalPolicy.cap(it.campaignBudget, it.capitalDeployed, it.entryPrice * it.quantity)
+        } ?: settings.dailyBudgetRupees.toDouble()
+        liveLong?.let {
             assertManagedMisStillOwned(token, it)
             closeManaged(token, it, quoteNow, "MULTIFY_BOOK_PROFIT")
         }
@@ -1268,7 +1278,7 @@ class TradingRepository @Inject constructor(
             return
         }
         assertNoExternalMisConflict(token, symbol)
-        val allocation = BudgetAllocator.allocate(settings.dailyBudgetRupees.toDouble(), max(analysis.confidence, .76), f.ltp, stop - f.ltp, f.ltp - target, 0)
+        val allocation = BudgetAllocator.allocate(fixedPostSellCap, max(analysis.confidence, .76), f.ltp, stop - f.ltp, f.ltp - target, 0)
         val reason = "${analysis.strategy} · ${analysis.regime} · short confidence ${pct(analysis.confidence)} · Multify sell prior · ${allocation.reason}"
         if (!allocation.allowed || analysis.confidence < shortGate) {
             dao.updateForwarding(eventId, "ANALYZED", "LIVE_WAIT_SHORT", reason, null)
@@ -1286,7 +1296,7 @@ class TradingRepository @Inject constructor(
                 regime = analysis.regime, confidence = max(analysis.confidence, .76), sourceEventId = eventId,
                 openOrderId = order.growwOrderId, openReferenceId = reference, openedAtMs = System.currentTimeMillis(),
                 lastPrice = entry, maxFavourablePrice = entry, maxAdversePrice = entry, lastEvaluatedAtMs = System.currentTimeMillis(),
-                anchorPrice = entry, capitalDeployed = entry * qty, campaignBudget = settings.dailyBudgetRupees.toDouble()
+                anchorPrice = entry, capitalDeployed = entry * qty, campaignBudget = min(fixedPostSellCap, entry * qty)
             )
         )
         val managed = managedDao.openPosition(ENGINE_INTRADAY, symbol) ?: error("App ledger failed to record short")
@@ -1304,7 +1314,7 @@ class TradingRepository @Inject constructor(
         val ltp = quote.lastPrice ?: return
         val learned = learningStats()
         val totalBudget = settings.fastTrackBudgetRupees.toDouble()
-        val initialCapital = initialCampaignAllocation(totalBudget)
+        val initialCapital = totalBudget
         val qty = floor(initialCapital / ltp).toInt()
         if (qty <= 0) return
         val margin = apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin")
@@ -1322,12 +1332,12 @@ class TradingRepository @Inject constructor(
                 regime = "DELIVERY", confidence = 1.0, sourceEventId = eventId, openOrderId = order.growwOrderId,
                 openReferenceId = ref, openedAtMs = System.currentTimeMillis(), lastPrice = entry,
                 maxFavourablePrice = entry, maxAdversePrice = entry, lastEvaluatedAtMs = System.currentTimeMillis(),
-                anchorPrice = entry, capitalDeployed = entry * filled, campaignBudget = totalBudget, addCount = 0
+                anchorPrice = entry, capitalDeployed = entry * filled, campaignBudget = entry * filled, addCount = 0
             )
         )
         auditLogger.log("FAST_TRACK", "CNC_BUY_FILLED", mapOf(
-            "symbol" to symbol, "entry" to entry, "quantity" to filled, "campaign_budget" to totalBudget,
-            "initial_capital" to (entry * filled), "reserved_for_averaging" to max(0.0, totalBudget - entry * filled),
+            "symbol" to symbol, "entry" to entry, "quantity" to filled, "configured_cap" to totalBudget,
+            "fixed_capital" to (entry * filled), "capital_top_up_allowed" to false,
             "rolling_long_target_pct" to learned.longAveragePct
         ))
     }
@@ -1364,11 +1374,13 @@ class TradingRepository @Inject constructor(
         val learned = learningStats()
         val target = AdaptiveLearningMath.shortTarget(entryPrice, closed.entryPrice, closed.exitPrice, learned.shortRetracementFraction)
         val stop = entryPrice * (1.0 + FAST_SHORT_STOP_PCT)
-        val qty = floor(SHADOW_BUDGET / entryPrice).toInt().coerceAtLeast(1)
+        val fixedCapitalCap = closed.entryPrice * closed.quantity
+        val qty = floor(fixedCapitalCap / entryPrice).toInt()
+        if (qty <= 0) return
         openShadowDirect(
             symbol = closed.symbol, side = "SHORT", quantity = qty, entry = entryPrice, stop = stop, target = target,
             strategy = "Adaptive post-long short · ${fmt(learned.shortRetracementPct)}% retracement", regime = "POST_SELL",
-            confidence = 1.0, sourceEventId = sourceEventId, campaignBudget = SHADOW_BUDGET, capitalDeployed = qty * entryPrice
+            confidence = 1.0, sourceEventId = sourceEventId, campaignBudget = fixedCapitalCap, capitalDeployed = qty * entryPrice
         )
         auditLogger.log("SHADOW", "ADAPTIVE_SHORT_OPEN", mapOf(
             "symbol" to closed.symbol, "trigger" to trigger, "entry" to entryPrice, "long_entry" to closed.entryPrice,
@@ -1389,7 +1401,8 @@ class TradingRepository @Inject constructor(
         val learned = learningStats()
         val target = AdaptiveLearningMath.shortTarget(entryPrice, closed.entryPrice, closed.exitPrice, learned.shortRetracementFraction)
         val stop = entryPrice * (1.0 + FAST_SHORT_STOP_PCT)
-        val allocation = BudgetAllocator.allocate(settings.fastTrackBudgetRupees.toDouble(), .90, entryPrice, stop - entryPrice, entryPrice - target, 0)
+        val fixedCapitalCap = closed.entryPrice * closed.quantity
+        val allocation = BudgetAllocator.allocate(fixedCapitalCap, .90, entryPrice, stop - entryPrice, entryPrice - target, 0)
         if (!allocation.allowed) return
         auditLogger.log("FAST_TRACK", "POST_LONG_SHORT_PLAN", mapOf(
             "symbol" to closed.symbol, "trigger" to trigger, "long_entry" to closed.entryPrice, "long_exit" to closed.exitPrice,
@@ -1409,7 +1422,7 @@ class TradingRepository @Inject constructor(
                 sourceEventId = sourceEventId, openOrderId = order.growwOrderId, openReferenceId = ref,
                 openedAtMs = System.currentTimeMillis(), lastPrice = actualEntry, maxFavourablePrice = actualEntry,
                 maxAdversePrice = actualEntry, lastEvaluatedAtMs = System.currentTimeMillis(), anchorPrice = actualEntry,
-                capitalDeployed = actualEntry * qty, campaignBudget = settings.fastTrackBudgetRupees.toDouble()
+                capitalDeployed = actualEntry * qty, campaignBudget = min(fixedCapitalCap, actualEntry * qty)
             )
         )
         val short = managedDao.openPosition(ENGINE_FAST_SHORT, closed.symbol) ?: return
@@ -1417,7 +1430,7 @@ class TradingRepository @Inject constructor(
         managedDao.updatePosition(short.copy(smartOrderId = smart))
     }
 
-    private suspend fun assessAutoWave(symbol: String, token: String, currentSide: String): Triple<WaveDirectionDecision, StrategyEvaluation, StrategyEvaluation> {
+    private suspend fun assessAutoWave(symbol: String, token: String, currentSide: String, exposureRupees: Double): Triple<WaveDirectionDecision, StrategyEvaluation, StrategyEvaluation> {
         val auth = bearer(token)
         val quote = apiFactory.groww.quote(auth, tradingSymbol = symbol).requirePayload("Wave quote $symbol")
         val now = ZonedDateTime.now(INDIA)
@@ -1443,7 +1456,7 @@ class TradingRepository @Inject constructor(
             features = features, longScore = longEval.directionalScore, shortScore = shortEval.directionalScore
         )
         val rawDecision = WaveDirectionMath.decide(
-            currentSide = currentSide, trancheRupees = AVERAGE_ADD_RUPEES, price = features.ltp,
+            currentSide = currentSide, exposureRupees = max(exposureRupees, features.ltp), price = features.ltp,
             atr = features.atr14 ?: max(features.ltp * .004, .05), spreadBps = features.spreadBps,
             longDirectionalScore = longEval.directionalScore, longConfidence = longEval.confidence,
             shortDirectionalScore = shortEval.directionalScore, shortConfidence = shortEval.confidence
@@ -1470,12 +1483,13 @@ class TradingRepository @Inject constructor(
     }
 
     private suspend fun applyAutoWaveDecision(
-        token: String, position: ManagedPositionEntity, ltp: Double, waveIndex: Int, settings: AppSettings, risk: RiskState
+        token: String, position: ManagedPositionEntity, ltp: Double, waveIndex: Int, risk: RiskState
     ): ManagedPositionEntity? {
         val waveNumber = waveIndex + 1 // wave 1 is the initial Multify entry; ±2% is wave 2.
-        val (decision, longEval, shortEval) = assessAutoWave(position.symbol, token, position.side)
+        val (decision, longEval, shortEval) = assessAutoWave(position.symbol, token, position.side, FixedCapitalPolicy.cap(position.campaignBudget, position.capitalDeployed, position.entryPrice * position.quantity))
         val chosen = if (decision.action == "SHORT") shortEval else longEval
         val processed = position.copy(addCount = waveIndex, lastEvaluatedAtMs = System.currentTimeMillis())
+        val fixedCapitalCap = FixedCapitalPolicy.cap(position.campaignBudget, position.capitalDeployed, position.entryPrice * position.quantity)
 
         if (decision.action == "HOLD") {
             managedDao.updatePosition(processed)
@@ -1489,95 +1503,50 @@ class TradingRepository @Inject constructor(
         }
 
         if (decision.action.equals(position.side, true)) {
-            val budget = position.campaignBudget.takeIf { it > 0.0 } ?: settings.dailyBudgetRupees.toDouble()
-            val deployed = position.capitalDeployed.takeIf { it > 0.0 } ?: position.entryPrice * position.quantity
-            val available = budget - deployed
-            if (available < AVERAGE_ADD_RUPEES * .8) {
-                managedDao.updatePosition(processed)
-                auditLogger.log("AUTO_WAVE", "NO_RESERVED_BUDGET", mapOf("symbol" to position.symbol, "wave" to waveNumber, "available" to available))
-                return processed
-            }
-            val addCash = min(AVERAGE_ADD_RUPEES, available)
-            val addQty = floor(addCash / ltp).toInt()
-            if (addQty <= 0) {
-                managedDao.updatePosition(processed)
-                return processed
-            }
-            assertManagedMisStillOwned(token, position)
-            // Resize protection safely: remove the old OCO before changing broker net quantity. If the add fails, restore protection.
-            position.smartOrderId?.let { id ->
-                apiFactory.groww.cancelSmartOrder(bearer(token), smartOrderId = id).requirePayload("Cancel OCO before wave add")
-                delay(150)
-                val status = runCatching { apiFactory.groww.smartOrderStatus(bearer(token), smartOrderId = id).requirePayload("OCO cancel check") }.getOrNull()
-                require(status == null || !status.status.equals("ACTIVE", true)) { "Old OCO is still ACTIVE; wave resize blocked" }
-            }
-            val tx = if (position.side == "LONG") "BUY" else "SELL"
-            val ref = stableRef("MFW", "${position.id}-$waveIndex-${System.currentTimeMillis()}-${position.side}")
-            val order = try {
-                placeMarket(token, position.symbol, tx, addQty, "MIS", ref)
-            } catch (t: Throwable) {
-                // Broker quantity did not change, so recreate the previous protection before surfacing the failure.
-                val restored = protectManagedPosition(token, position.copy(smartOrderId = null))
-                managedDao.updatePosition(position.copy(smartOrderId = restored, addCount = waveIndex))
-                throw t
-            }
-            val filled = order.filledQuantity?.takeIf { it > 0 } ?: addQty
-            val fillPrice = order.averageFillPrice?.takeIf { it > 0 } ?: ltp
-            val newQty = position.quantity + filled
-            val actualAdd = filled * fillPrice
-            val newAvg = (position.entryPrice * position.quantity + fillPrice * filled) / newQty
-            val atr = chosen.features.atr14 ?: max(fillPrice * .004, .05)
-            val newStop = if (position.side == "LONG") {
-                max(position.stopPrice ?: .05, max(.05, fillPrice - atr * .95))
-            } else {
-                min(position.stopPrice ?: Double.MAX_VALUE, fillPrice + atr * .95)
-            }
-            val newTarget = if (position.side == "LONG") {
-                max(position.targetPrice ?: fillPrice, fillPrice + atr * 1.55)
-            } else {
-                min(position.targetPrice ?: fillPrice, max(.05, fillPrice - atr * 1.55))
-            }
-            var updated = position.copy(
-                quantity = newQty, entryPrice = newAvg, stopPrice = newStop, targetPrice = newTarget,
-                strategy = "AUTO wave $waveNumber ${chosen.strategy}", regime = chosen.regime, confidence = decision.confidence,
-                smartOrderId = null, capitalDeployed = deployed + actualAdd, campaignBudget = budget, addCount = waveIndex,
-                lastPrice = fillPrice, lastEvaluatedAtMs = System.currentTimeMillis()
+            val updated = processed.copy(
+                strategy = "AUTO wave $waveNumber continuation · ${chosen.strategy}",
+                regime = chosen.regime,
+                confidence = decision.confidence
             )
             managedDao.updatePosition(updated)
-            val smart = protectManagedPosition(token, updated)
-            updated = updated.copy(smartOrderId = smart)
-            managedDao.updatePosition(updated)
-            auditLogger.log("AUTO_WAVE", "SAME_SIDE_ADD", mapOf(
-                "symbol" to position.symbol, "wave" to waveNumber, "side" to position.side, "add_rupees" to actualAdd,
-                "fill" to fillPrice, "new_avg" to newAvg, "quantity" to newQty, "decision" to decision.reason
+            auditLogger.log("AUTO_WAVE", "SAME_SIDE_HOLD_FIXED_CAPITAL", mapOf(
+                "symbol" to position.symbol, "wave" to waveNumber, "side" to position.side,
+                "fixed_capital_cap" to fixedCapitalCap, "capital_added" to 0.0, "decision" to decision.reason
             ))
             return updated
         }
 
-        // Opposite side won decisively. Never maintain both directions: flatten/reconcile first, then use a ₹5k probe.
+        // Opposite side won decisively. Flatten first, then reopen only within the existing fixed capital cap.
         val anchor = position.anchorPrice.takeIf { it > 0.0 } ?: position.entryPrice
-        val campaignBudget = position.campaignBudget.takeIf { it > 0.0 } ?: settings.dailyBudgetRupees.toDouble()
-        closeManaged(token, position, ltp, "AUTO_WAVE_${waveNumber}_FLIP_TO_${decision.action}")
-        val refreshed = preferences.settings.first()
-        val after = liveRiskState(token, refreshed)
-        if (!after.allowNewRisk || !refreshed.liveExecutionEffective) return null
-        assertNoExternalMisConflict(token, position.symbol)
         val entryPx = chosen.features.ltp
         val atr = chosen.features.atr14 ?: max(entryPx * .004, .05)
         val stopPx = if (decision.action == "LONG") max(.05, entryPx - atr * .95) else entryPx + atr * .95
         val targetPx = if (decision.action == "LONG") entryPx + atr * 1.55 else max(.05, entryPx - atr * 1.55)
         val allocation = BudgetAllocator.allocate(
-            AVERAGE_ADD_RUPEES, decision.confidence, entryPx, abs(entryPx - stopPx), abs(targetPx - entryPx), 0
+            fixedCapitalCap, decision.confidence, entryPx, abs(entryPx - stopPx), abs(targetPx - entryPx), 0
         )
-        if (!allocation.allowed) return null
+        if (!allocation.allowed) {
+            managedDao.updatePosition(processed)
+            auditLogger.log("AUTO_WAVE", "FLIP_REJECTED_FIXED_CAPITAL", mapOf(
+                "symbol" to position.symbol, "wave" to waveNumber, "wanted" to decision.action,
+                "fixed_capital_cap" to fixedCapitalCap, "reason" to allocation.reason
+            ))
+            return processed
+        }
+
+        closeManaged(token, position, ltp, "AUTO_WAVE_${waveNumber}_FLIP_TO_${decision.action}")
+        val refreshed = preferences.settings.first()
+        val after = liveRiskState(token, refreshed)
+        if (!after.allowNewRisk || !refreshed.liveExecutionEffective) return null
+        assertNoExternalMisConflict(token, position.symbol)
         openManagedReversal(
             token, position, decision.action, allocation.quantity, entryPx, stopPx, targetPx, chosen,
-            waveAnchor = anchor, waveIndex = waveIndex, campaignBudget = campaignBudget
+            waveAnchor = anchor, waveIndex = waveIndex, campaignBudget = fixedCapitalCap
         )
         val reopened = managedDao.openPosition(ENGINE_INTRADAY, position.symbol)
-        auditLogger.log("AUTO_WAVE", "ONE_SIDE_FLIP", mapOf(
+        auditLogger.log("AUTO_WAVE", "ONE_SIDE_FLIP_FIXED_CAPITAL", mapOf(
             "symbol" to position.symbol, "wave" to waveNumber, "from" to position.side, "to" to decision.action,
-            "probe_budget" to AVERAGE_ADD_RUPEES, "decision" to decision.reason
+            "fixed_capital_cap" to fixedCapitalCap, "capital_added" to 0.0, "decision" to decision.reason
         ))
         return reopened
     }
@@ -1706,7 +1675,6 @@ class TradingRepository @Inject constructor(
         val followShort = updated.side == "SHORT" && updated.regime == "POST_SELL"
 
         if (followLong) {
-            updated = maybeAverageShadowLong(updated, ltp)
             val learned = learningStats()
             val learnedTarget = updated.entryPrice * (1.0 + learned.longAveragePct / 100.0)
             if (kotlin.math.abs(updated.targetPrice - learnedTarget) > .01) {
@@ -1784,8 +1752,9 @@ class TradingRepository @Inject constructor(
             val side = if (updated.side == "LONG") "SHORT" else "LONG"
             val stop = if (side == "LONG") ltp - atr * .95 else ltp + atr * .95
             val target = if (side == "LONG") ltp + atr * 1.55 else max(.05, ltp - atr * 1.55)
-            val allocation = BudgetAllocator.allocate(SHADOW_BUDGET, opposite.confidence, ltp, abs(ltp - stop), abs(target - ltp), 0)
-            if (allocation.allowed) openShadow(updated.symbol, side, allocation.quantity, ltp, stop, target, opposite, updated.sourceEventId)
+            val fixedCapitalCap = FixedCapitalPolicy.cap(updated.campaignBudget, updated.capitalDeployed, updated.entryPrice * updated.quantity)
+            val allocation = BudgetAllocator.allocate(fixedCapitalCap, opposite.confidence, ltp, abs(ltp - stop), abs(target - ltp), 0)
+            if (allocation.allowed) openShadow(updated.symbol, side, allocation.quantity, ltp, stop, target, opposite, updated.sourceEventId, fixedCapitalCap)
         }
     }
 
@@ -1796,7 +1765,6 @@ class TradingRepository @Inject constructor(
         if (position.product == "CNC") {
             if (updated.engine == ENGINE_FAST_TRACK && updated.side == "LONG") {
                 if (updated.regime != REGIME_RECOVERY_HOLD) {
-                    updated = maybeAverageManagedLong(token, updated, ltp)
                 }
                 val learned = learningStats()
                 val target = updated.entryPrice * (1.0 + learned.longAveragePct / 100.0)
@@ -1840,7 +1808,7 @@ class TradingRepository @Inject constructor(
             if (waveIndex >= 1 && waveIndex > updated.addCount) {
                 val waveNumber = waveIndex + 1
                 if (waveNumber > settings.activeWaveCount.toInt()) {
-                    val (preview, _, _) = assessAutoWave(updated.symbol, token, updated.side)
+                    val (preview, _, _) = assessAutoWave(updated.symbol, token, updated.side, FixedCapitalPolicy.cap(updated.campaignBudget, updated.capitalDeployed, updated.entryPrice * updated.quantity))
                     auditLogger.log("AUTO_WAVE", "PREVIEW_ONLY", mapOf(
                         "symbol" to updated.symbol, "wave" to waveNumber, "configured_waves" to settings.activeWaveCount,
                         "green_side" to preview.action, "long_probability" to preview.longProbability,
@@ -1849,7 +1817,7 @@ class TradingRepository @Inject constructor(
                     updated = updated.copy(addCount = waveIndex, lastEvaluatedAtMs = System.currentTimeMillis())
                     managedDao.updatePosition(updated)
                 } else {
-                    val afterWave = applyAutoWaveDecision(token, updated, ltp, waveIndex, settings, risk) ?: return
+                    val afterWave = applyAutoWaveDecision(token, updated, ltp, waveIndex, risk) ?: return
                     updated = afterWave
                 }
             }
@@ -1907,8 +1875,9 @@ class TradingRepository @Inject constructor(
             val side = if (updated.side == "LONG") "SHORT" else "LONG"
             val stopPx = if (side == "LONG") ltp - atr * .95 else ltp + atr * .95
             val targetPx = if (side == "LONG") ltp + atr * 1.55 else max(.05, ltp - atr * 1.55)
-            val allocation = BudgetAllocator.allocate(refreshed.dailyBudgetRupees.toDouble(), opposite.confidence, ltp, abs(ltp - stopPx), abs(targetPx - ltp), 0)
-            if (allocation.allowed) openManagedReversal(token, updated, side, allocation.quantity, ltp, stopPx, targetPx, opposite)
+            val fixedCapitalCap = FixedCapitalPolicy.cap(updated.campaignBudget, updated.capitalDeployed, updated.entryPrice * updated.quantity)
+            val allocation = BudgetAllocator.allocate(fixedCapitalCap, opposite.confidence, ltp, abs(ltp - stopPx), abs(targetPx - ltp), 0)
+            if (allocation.allowed) openManagedReversal(token, updated, side, allocation.quantity, ltp, stopPx, targetPx, opposite, campaignBudget = fixedCapitalCap)
         }
     }
 
@@ -1950,75 +1919,12 @@ class TradingRepository @Inject constructor(
                 stopPrice = stop, targetPrice = target, strategy = strategy, regime = regime,
                 confidence = confidence, sourceEventId = sourceEventId, openedAtMs = now,
                 lastPrice = entry, maxFavourablePrice = entry, maxAdversePrice = entry, lastEvaluatedAtMs = now,
-                anchorPrice = entry, capitalDeployed = capitalDeployed, campaignBudget = campaignBudget, addCount = 0
+                anchorPrice = entry, capitalDeployed = capitalDeployed, campaignBudget = min(campaignBudget, capitalDeployed), addCount = 0
             )
         )
     }
 
-    private fun initialCampaignAllocation(totalBudget: Double): Double {
-        val reserveRaw = min(50_000.0, totalBudget * .25)
-        val reserve = floor(reserveRaw / AVERAGE_ADD_RUPEES) * AVERAGE_ADD_RUPEES
-        return max(AVERAGE_ADD_RUPEES, totalBudget - max(AVERAGE_ADD_RUPEES, reserve))
-    }
-
-    private suspend fun maybeAverageShadowLong(position: ShadowPositionEntity, ltp: Double): ShadowPositionEntity {
-        val anchor = position.anchorPrice.takeIf { it > 0.0 } ?: position.entryPrice
-        val budget = position.campaignBudget.takeIf { it > 0.0 } ?: SHADOW_BUDGET
-        val deployed = position.capitalDeployed.takeIf { it > 0.0 } ?: position.entryPrice * position.quantity
-        val nextDrop = AdaptiveLearningMath.AVERAGE_STEP_FRACTION * (position.addCount + 1)
-        if (ltp > AdaptiveLearningMath.nextAverageTrigger(anchor, position.addCount)) return position
-        val available = budget - deployed
-        if (available < AVERAGE_ADD_RUPEES * .8) return position
-        val cash = min(AVERAGE_ADD_RUPEES, available)
-        val addQty = floor(cash / ltp).toInt()
-        if (addQty <= 0) return position
-        val newQty = position.quantity + addQty
-        val actualAdd = addQty * ltp
-        val newAvg = (position.entryPrice * position.quantity + ltp * addQty) / newQty
-        val learned = learningStats()
-        val updated = position.copy(
-            quantity = newQty, entryPrice = newAvg, targetPrice = newAvg * (1.0 + learned.longAveragePct / 100.0),
-            capitalDeployed = deployed + actualAdd, campaignBudget = budget, addCount = position.addCount + 1,
-            lastPrice = ltp, lastEvaluatedAtMs = System.currentTimeMillis()
-        )
-        shadowDao.updatePosition(updated)
-        auditLogger.log("SHADOW", "AVERAGE_DOWN_ADD", mapOf("symbol" to position.symbol, "drop_level_pct" to nextDrop * 100.0, "add_rupees" to actualAdd, "new_avg" to newAvg, "add_count" to updated.addCount))
-        return updated
-    }
-
-    private suspend fun maybeAverageManagedLong(token: String, position: ManagedPositionEntity, ltp: Double): ManagedPositionEntity {
-        val anchor = position.anchorPrice.takeIf { it > 0.0 } ?: position.entryPrice
-        val budget = position.campaignBudget.takeIf { it > 0.0 } ?: preferences.settings.first().fastTrackBudgetRupees.toDouble()
-        val deployed = position.capitalDeployed.takeIf { it > 0.0 } ?: position.entryPrice * position.quantity
-        val nextDrop = AdaptiveLearningMath.AVERAGE_STEP_FRACTION * (position.addCount + 1)
-        if (ltp > AdaptiveLearningMath.nextAverageTrigger(anchor, position.addCount)) return position
-        val available = budget - deployed
-        if (available < AVERAGE_ADD_RUPEES * .8) return position
-        val addCash = min(AVERAGE_ADD_RUPEES, available)
-        val addQty = floor(addCash / ltp).toInt()
-        if (addQty <= 0) return position
-        val margin = apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin")
-        val cash = margin.equity?.cncBalanceAvailable ?: margin.clearCash
-        if (cash < addQty * ltp) return position
-        val ref = stableRef("MFA", "${position.id}-${position.addCount + 1}-${System.currentTimeMillis()}")
-        val order = placeMarket(token, position.symbol, "BUY", addQty, "CNC", ref)
-        val filled = order.filledQuantity?.takeIf { it > 0 } ?: addQty
-        val fillPrice = order.averageFillPrice?.takeIf { it > 0 } ?: ltp
-        val newQty = position.quantity + filled
-        val actualAdd = filled * fillPrice
-        val newAvg = (position.entryPrice * position.quantity + fillPrice * filled) / newQty
-        val learned = learningStats()
-        val updated = position.copy(
-            quantity = newQty, entryPrice = newAvg, targetPrice = newAvg * (1.0 + learned.longAveragePct / 100.0),
-            capitalDeployed = deployed + actualAdd, campaignBudget = budget, addCount = position.addCount + 1,
-            lastPrice = fillPrice, lastEvaluatedAtMs = System.currentTimeMillis()
-        )
-        managedDao.updatePosition(updated)
-        auditLogger.log("FAST_TRACK", "AVERAGE_DOWN_ADD", mapOf("symbol" to position.symbol, "drop_level_pct" to nextDrop * 100.0, "add_rupees" to actualAdd, "new_avg" to newAvg, "add_count" to updated.addCount, "order_id" to order.growwOrderId))
-        return updated
-    }
-
-    private suspend fun openShadow(symbol: String, side: String, quantity: Int, entry: Double, stop: Double, target: Double, analysis: StrategyEvaluation, sourceEventId: Long?) {
+    private suspend fun openShadow(symbol: String, side: String, quantity: Int, entry: Double, stop: Double, target: Double, analysis: StrategyEvaluation, sourceEventId: Long?, capitalCap: Double) {
         if (quantity <= 0 || shadowDao.openPosition(symbol) != null) return
         val now = System.currentTimeMillis()
         shadowDao.insertPosition(
@@ -2028,7 +1934,7 @@ class TradingRepository @Inject constructor(
                 regime = analysis.regime, confidence = analysis.confidence, sourceEventId = sourceEventId,
                 openedAtMs = now, lastPrice = entry, maxFavourablePrice = entry,
                 maxAdversePrice = entry, lastEvaluatedAtMs = now, anchorPrice = entry,
-                capitalDeployed = entry * quantity, campaignBudget = SHADOW_BUDGET
+                capitalDeployed = entry * quantity, campaignBudget = min(capitalCap, entry * quantity)
             )
         )
     }
@@ -2414,7 +2320,6 @@ class TradingRepository @Inject constructor(
         private const val HISTORICAL_SHORT_BACKFILL_INTERVAL_MS = 30L * 60L * 1000L
         private const val HISTORICAL_SHORT_BACKFILL_REQUEST_DELAY_MS = 350L
         private const val MAX_HISTORICAL_SHORT_BACKFILLS_PER_PASS = 8
-        private const val AVERAGE_ADD_RUPEES = 5_000.0
         private const val FAST_SHORT_STOP_PCT = 0.0035
         const val ENGINE_INTRADAY = "INTRADAY"
         const val ENGINE_FAST_TRACK = "FAST_TRACK"

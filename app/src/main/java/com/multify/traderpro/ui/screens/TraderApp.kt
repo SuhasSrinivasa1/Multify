@@ -415,7 +415,7 @@ private fun DashboardScreen(
                 items(dashboard.positions, key = { it.symbol }) { PositionCard(it) }
             }
 
-            item { SectionTitle("Live wave table", "Wave 1 stays driven by rolling daily averages. Even when Active waves = 1, the next wave is calculated live. Green means the currently preferred side; PREVIEW ONLY never sends an order.") }
+            item { SectionTitle("Live wave table", "Wave 1 uses the learned rolling target. Wave 2+ checkpoints are direction-only: same-side means HOLD with no added capital; an opposite-side decision must close first and may reopen only within the existing fixed capital cap. PREVIEW ONLY never sends an order.") }
             if (dashboard.waveSignals.isEmpty()) {
                 item {
                     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .35f)), shape = RoundedCornerShape(18.dp)) {
@@ -716,7 +716,7 @@ private fun StrategiesScreen(state: TraderUiState) {
         "Shadow capital fixed at ₹2,00,000; live capital selectable ₹10k–₹2L",
         "Rolling 30-trading-day learned long target; uploaded history seeds the model",
         "Post-sell short retracement starts at 100%, never exceeds 100%, and learns downward from reconstructed + live outcomes",
-        "Long averaging: add up to ₹5,000 at each additional 2% decline, inside the campaign budget",
+        "No averaging-down or capital top-ups: Wave 2+ may HOLD or reverse direction within the existing fixed exposure only",
         "₹5,000 is a milestone, never a profit ceiling",
         "-₹1,500 soft loss band; -₹2,500 hard cap with pre-emptive live reduction",
         "Broker-side OCO protection on every app MIS fill; external-position conflicts halt automation"
@@ -915,7 +915,7 @@ private fun ManualScreen(
                         valueRange = 10_000f..200_000f,
                         steps = 18
                     )
-                    Text("₹10,000 to ₹2,00,000 campaign cap. Part of the cap is reserved for ₹5,000 averaging adds at each additional 2% decline.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("₹10,000 to ₹2,00,000 fixed campaign cap. The selected cap is used for the initial position only; there are no averaging adds, top-ups or later capital increases.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = .18f))
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
@@ -952,7 +952,7 @@ private fun ManualScreen(
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
                     Text("Exact lifecycle", fontWeight = FontWeight.SemiBold)
                     Text("1. Paid Multify Equity call → immediate CNC delivery campaign; the rolling 30-trading-day long target is used instead of blindly waiting forever.", style = MaterialTheme.typography.bodyMedium)
-                    Text("2. If price falls, add up to ₹5,000 at -2%, -4%, -6%… while staying inside the selected campaign cap. A red Multify sell does not mechanically panic-sell; the -₹2,500 app hard cap still overrides.", style = MaterialTheme.typography.bodyMedium)
+                    Text("2. At each additional 2% checkpoint, reevaluate LONG vs SHORT vs HOLD. Same-side means keep the existing position without adding capital. Opposite-side means close first, then reopen only within the existing fixed notional. A red Multify sell does not mechanically panic-sell; the -₹2,500 app hard cap still overrides.", style = MaterialTheme.typography.bodyMedium)
                     Text("3. A green Multify Book Profit or learned long target closes only this app-owned CNC quantity. Personal holdings are never included.", style = MaterialTheme.typography.bodyMedium)
                     Text("4. If enabled and the long was profitable, open an MIS short. Cover distance starts at 100% of the preceding long move and adapts downward from rolling 30-day live observations.", style = MaterialTheme.typography.bodyMedium)
                     Text("5. Any broker/app MIS quantity mismatch is treated as an external-position conflict and blocks further automated orders.", style = MaterialTheme.typography.bodyMedium)
@@ -1075,8 +1075,8 @@ private fun SystemScreen(
                 shape = RoundedCornerShape(20.dp)
             ) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text("First-wave mode & wave depth", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                    Text("Wave 1 remains average-driven. AUTO runs long then eligible post-sell short; LONG runs only the long leg; SHORT monitors the long call but executes only the short leg.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("First-wave mode & direction checkpoints", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    Text("Wave 1 uses learned rolling target statistics. AUTO runs the eligible long/short sequence; LONG runs only the long leg; SHORT monitors the long call but executes only the short leg. No mode averages down or adds capital after entry.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         listOf("AUTO", "LONG", "SHORT").forEach { mode ->
                             val selectedMode = state.settings.firstWaveMode == mode
@@ -1094,10 +1094,10 @@ private fun SystemScreen(
                         valueRange = 1f..10f,
                         steps = 8
                     )
-                    Text("Waves beyond this number are prediction-only: the preferred LONG or SHORT side is calculated and logged, but no order is placed. This keeps the next-wave green signal visible without increasing risk.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Checkpoints beyond this number are prediction-only: LONG, SHORT or HOLD is still calculated and logged, but no order is placed. Enabled checkpoints may only HOLD or reverse within the fixed existing exposure; they never add capital.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     KeyValueRow("Wave spacing", "2% from the original anchor")
-                    KeyValueRow("Wave add/probe", "₹5,000")
-                    KeyValueRow("Maximum proper waves", "10")
+                    KeyValueRow("Wave capital action", "No add · HOLD or fixed-cap reversal")
+                    KeyValueRow("Maximum checkpoints", "10")
                     KeyValueRow("First-wave trailing stop", "Always on · AUTO / LONG / SHORT")
                 }
             }
@@ -1109,8 +1109,8 @@ private fun SystemScreen(
                 shape = RoundedCornerShape(20.dp)
             ) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text("Daily capital & live execution", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                    Text("Intraday live budget", style = MaterialTheme.typography.labelLarge)
+                    Text("Fixed capital & live execution", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    Text("Fixed intraday capital cap", style = MaterialTheme.typography.labelLarge)
                     Text(money(budgetValue.toDouble()), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
                     Slider(
                         value = budgetValue,
@@ -1118,7 +1118,7 @@ private fun SystemScreen(
                         valueRange = 10_000f..200_000f,
                         steps = 18
                     )
-                    Text("₹10,000 ← selected live capital → ₹2,00,000. Shadow mode always uses ₹2,00,000 regardless of this slider.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("₹10,000 ← fixed initial cap → ₹2,00,000. This cap is never increased automatically. Shadow mode uses a fixed ₹2,00,000 initial cap and never averages down.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     KeyValueRow("Profit milestone", "₹5,000 · no profit ceiling")
                     KeyValueRow("Soft loss band", "-₹1,500 · defensive mode")
                     KeyValueRow("Hard loss cap", "-₹2,500 · live pre-flatten starts earlier for slippage")
