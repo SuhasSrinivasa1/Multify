@@ -67,11 +67,22 @@ data class DashboardDto(
     val forecasts: List<ForecastDto> = emptyList(),
     val research: ResearchDto = ResearchDto(),
     val strategyInsights: List<StrategyInsightDto> = emptyList(),
+    val waveStats: List<WaveStatDto> = emptyList(),
     val waveSignals: List<WaveSignalDto> = emptyList(),
     val positions: List<PositionDto> = emptyList(),
     val recentDecisions: List<RecentDecisionDto> = emptyList()
 )
 
+
+data class WaveStatDto(
+    val wave: Int = 1,
+    val averageUpPct: Double? = null,
+    val averageDownPct: Double? = null,
+    val upSamples: Int = 0,
+    val downSamples: Int = 0,
+    val upSource: String = "LIVE_PIVOT",
+    val downSource: String = "LIVE_PIVOT"
+)
 
 data class WaveSignalDto(
     val symbol: String = "",
@@ -90,6 +101,7 @@ data class WaveSignalDto(
 )
 
 data class LearningStatsDto(
+    val rollingCalendarDays: Int = 30,
     val rollingTradingDays: Int = 0,
     val rollingCalls: Int = 0,
     val longAveragePct: Double = 0.0,

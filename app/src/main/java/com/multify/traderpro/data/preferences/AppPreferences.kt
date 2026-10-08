@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.integerPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -24,8 +25,8 @@ data class AppSettings(
     val liveExecutionEnabled: Boolean = false,
     val fastTrackEnabled: Boolean = false,
     val postSellShortEnabled: Boolean = true,
-    val firstWaveMode: String = "AUTO",
-    val activeWaveCount: Long = 1L,
+    val executionMode: String = "AUTO",
+    val waveCount: Int = 1,
     val onboardingComplete: Boolean = false,
     val brokerAuthenticated: Boolean = false,
     val authenticatedAtMs: Long = 0L,
@@ -50,6 +51,12 @@ data class AppSettings(
     // Broker credentials may be used for read-only quotes/account context, but no live order path is armed.
     val liveExecutionEffective: Boolean get() = false
     val fastTrackEffective: Boolean get() = false
+    val firstWaveMode: String get() = when (executionMode) {
+        "LONG_ONLY" -> "LONG"
+        "SHORT_ONLY" -> "SHORT"
+        else -> "AUTO"
+    }
+    val activeWaveCount: Long get() = waveCount.toLong()
 }
 
 @Singleton
@@ -64,6 +71,8 @@ class AppPreferences @Inject constructor(
         val liveExecutionEnabled = booleanPreferencesKey("live_execution_enabled")
         val fastTrackEnabled = booleanPreferencesKey("fast_track_enabled")
         val postSellShortEnabled = booleanPreferencesKey("post_sell_short_enabled")
+        val executionMode = stringPreferencesKey("execution_mode")
+        val waveCount = integerPreferencesKey("wave_count")
         val firstWaveMode = stringPreferencesKey("first_wave_mode")
         val activeWaveCount = longPreferencesKey("active_wave_count")
         val onboardingComplete = booleanPreferencesKey("onboarding_complete")
@@ -107,14 +116,23 @@ class AppPreferences @Inject constructor(
         context.dataStore.edit { it[Keys.postSellShortEnabled] = value }
     }
 
-    suspend fun setFirstWaveMode(value: String) {
-        val normalized = value.uppercase().let { if (it in setOf("AUTO", "LONG", "SHORT")) it else "AUTO" }
-        context.dataStore.edit { it[Keys.firstWaveMode] = normalized }
+    suspend fun setExecutionMode(value: String) {
+        val normalized = value.uppercase().replace(' ', '_').let {
+            when (it) {
+                "LONG", "LONG_ONLY" -> "LONG_ONLY"
+                "SHORT", "SHORT_ONLY" -> "SHORT_ONLY"
+                else -> "AUTO"
+            }
+        }
+        context.dataStore.edit { it[Keys.executionMode] = normalized }
     }
 
-    suspend fun setActiveWaveCount(value: Long) {
-        context.dataStore.edit { it[Keys.activeWaveCount] = value.coerceIn(1L, 10L) }
+    suspend fun setWaveCount(value: Int) {
+        context.dataStore.edit { it[Keys.waveCount] = value.coerceIn(1, 20) }
     }
+
+    suspend fun setFirstWaveMode(value: String) = setExecutionMode(value)
+    suspend fun setActiveWaveCount(value: Long) = setWaveCount(value.toInt())
 
     suspend fun updateAuthState(
         authenticated: Boolean,
@@ -202,8 +220,14 @@ class AppPreferences @Inject constructor(
         liveExecutionEnabled = this[Keys.liveExecutionEnabled] ?: false,
         fastTrackEnabled = this[Keys.fastTrackEnabled] ?: false,
         postSellShortEnabled = this[Keys.postSellShortEnabled] ?: true,
-        firstWaveMode = this[Keys.firstWaveMode].orEmpty().ifBlank { "AUTO" }.uppercase().let { if (it in setOf("AUTO", "LONG", "SHORT")) it else "AUTO" },
-        activeWaveCount = (this[Keys.activeWaveCount] ?: 1L).coerceIn(1L, 10L),
+        executionMode = this[Keys.executionMode].orEmpty().ifBlank {
+            when (this[Keys.firstWaveMode].orEmpty().uppercase()) {
+                "LONG" -> "LONG_ONLY"
+                "SHORT" -> "SHORT_ONLY"
+                else -> "AUTO"
+            }
+        }.uppercase().replace(' ', '_').let { if (it in setOf("AUTO", "LONG_ONLY", "SHORT_ONLY")) it else "AUTO" },
+        waveCount = (this[Keys.waveCount] ?: (this[Keys.activeWaveCount] ?: 1L).toInt()).coerceIn(1, 20),
         onboardingComplete = this[Keys.onboardingComplete] ?: false,
         brokerAuthenticated = this[Keys.brokerAuthenticated] ?: false,
         authenticatedAtMs = this[Keys.authenticatedAtMs] ?: 0L,

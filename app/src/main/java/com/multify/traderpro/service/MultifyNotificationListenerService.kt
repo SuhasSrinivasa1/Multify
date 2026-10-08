@@ -68,6 +68,7 @@ class MultifyNotificationListenerService : NotificationListenerService() {
                     val shadowCount = runCatching { repository.monitorShadowPositions() }.getOrDefault(0)
                     val managedCount = runCatching { repository.monitorManagedPositions() }.getOrDefault(0)
                     val learningCount = runCatching { repository.monitorLearningObservations() }.getOrDefault(0)
+                    val pivotCount = runCatching { repository.monitorWaveCampaigns() }.getOrDefault(0)
                     val now = java.time.ZonedDateTime.now(java.time.ZoneId.of("Asia/Kolkata"))
                     if (now.dayOfWeek.value < 6 && now.toLocalTime() >= java.time.LocalTime.of(9, 16) && now.toLocalTime() <= java.time.LocalTime.of(10, 0)) {
                         runCatching { repository.generateDailyForecasts(false) }
@@ -75,7 +76,7 @@ class MultifyNotificationListenerService : NotificationListenerService() {
                     if (now.dayOfWeek.value < 6 && now.toLocalTime() >= java.time.LocalTime.of(15, 35)) {
                         runCatching { repository.runAfterHoursResearch(false) }
                     }
-                    delay(if (shadowCount + managedCount + learningCount > 0) 2_000L else 10_000L)
+                    delay(if (shadowCount + managedCount + learningCount + pivotCount > 0) 2_000L else 10_000L)
                 }
             }
         }

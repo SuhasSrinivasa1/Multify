@@ -146,17 +146,33 @@ class TraderViewModel @Inject constructor(
         }
     }
 
-    fun setFirstWaveMode(value: String) {
+    fun setExecutionMode(value: String) {
         viewModelScope.launch {
-            runCatching { repository.setFirstWaveMode(value) }
+            runCatching { repository.setExecutionMode(value) }
                 .onFailure { remote.value = remote.value.copy(error = it.userMessage()) }
         }
     }
 
-    fun setActiveWaveCount(value: Long) {
+    fun setWaveCount(value: Int) {
         viewModelScope.launch {
-            runCatching { repository.setActiveWaveCount(value) }
+            runCatching { repository.setWaveCount(value) }
                 .onFailure { remote.value = remote.value.copy(error = it.userMessage()) }
+        }
+    }
+
+    fun setFirstWaveMode(value: String) = setExecutionMode(value)
+    fun setActiveWaveCount(value: Long) = setWaveCount(value.toInt())
+
+    fun submitManualSignal(symbol: String, action: String, observedPriceText: String) {
+        viewModelScope.launch {
+            remote.value = remote.value.copy(loading = true, error = null, message = null)
+            val price = observedPriceText.replace(",", "").replace("₹", "").trim().takeIf { it.isNotBlank() }?.toDoubleOrNull()
+            runCatching { repository.submitManualSignal(symbol, action, price) }
+                .onSuccess { id ->
+                    remote.value = remote.value.copy(loading = false, message = "Manual signal processed · event #$id", error = null)
+                    refresh(silent = true)
+                }
+                .onFailure { remote.value = remote.value.copy(loading = false, error = it.userMessage()) }
         }
     }
 

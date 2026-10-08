@@ -30,8 +30,8 @@ android {
         applicationId = "com.multify.traderpro.vivoy73final"
         minSdk = 26
         targetSdk = 35
-        versionCode = 461
-        versionName = "4.6.1-fixed-capital-no-averaging"
+        versionCode = 470
+        versionName = "4.7.0-reference-ui-wave-pivot-fixed-capital"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
     }
