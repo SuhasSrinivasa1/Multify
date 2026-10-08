@@ -1190,7 +1190,7 @@ class TradingRepository @Inject constructor(
         return (1..20).map { wave ->
             val upRows = pivots.filter { it.wave == wave && it.direction.equals("UP", true) }
             val downRows = pivots.filter { it.wave == wave && it.direction.equals("DOWN", true) }
-            val averageUp = if (wave == 1) learned.longAveragePct else upRows.map { it.movePct }.takeIf { it.isNotEmpty() }?.average()
+            val averageUp = if (wave == 1) learned.longAveragePct.takeIf { learned.rollingCalls > 0 } else upRows.map { it.movePct }.takeIf { it.isNotEmpty() }?.average()
             WaveStatDto(
                 wave = wave,
                 averageUpPct = averageUp,

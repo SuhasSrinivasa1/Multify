@@ -432,13 +432,9 @@ private fun DashboardScreen(
                 }
             }
 
-            item { SectionTitle("Wave averages", "Compact table of the learned Up/Down movement for every wave. “Learning” means there are not yet enough observations for that leg.") }
+            item { SectionTitle("10-wave LONG / SHORT averages", "Wave 1 LONG is the rolling last-30-trading-day Multify average. Waves 2–10 learn independently. “Learning” means the row exists but there is not enough evidence yet.") }
             item { RollingLearningSummary(dashboard.learning) }
-            if (dashboard.waveStats.isEmpty()) {
-                item { EmptyState("Wave averages are learning", "A paid Equity BUY starts a campaign. Each Up-n and Down-n is stored independently through Wave 20.") }
-            } else {
-                item { WaveAveragesTable(dashboard.waveStats) }
-            }
+            item { WaveAveragesTable(dashboard.waveStats, dashboard.learning) }
 
             item { SectionTitle("Recent engine decisions", "Every action is auditable. Wave pivots learn independently while fixed-capital execution never averages down or adds notional after entry.") }
             if (dashboard.recentDecisions.isEmpty()) {
@@ -645,8 +641,13 @@ private fun RollingLearningSummary(learning: com.multify.traderpro.data.network.
         shape = RoundedCornerShape(16.dp)
     ) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-            Text("Rolling 30-session statistics", fontWeight = FontWeight.SemiBold)
-            KeyValueRow("Mean", String.format(Locale.US, "%.2f%%", learning.longAveragePct))
+            Text("Rolling 30-session LONG baseline", fontWeight = FontWeight.SemiBold)
+            KeyValueRow(
+                "Wave 1 LONG average",
+                if (learning.rollingCalls > 0) String.format(Locale.US, "%.2f%%", learning.longAveragePct) else "Learning"
+            )
+            KeyValueRow("Wave 1 sample count", learning.rollingCalls.toString())
+            KeyValueRow("Mean", if (learning.rollingCalls > 0) String.format(Locale.US, "%.2f%%", learning.longAveragePct) else "Learning")
             KeyValueRow("Median", String.format(Locale.US, "%.2f%%", learning.longMedianPct))
             KeyValueRow("Trimmed mean", String.format(Locale.US, "%.2f%%", learning.longTrimmedMeanPct))
             KeyValueRow("EWMA", String.format(Locale.US, "%.2f%%", learning.longEwmaPct))
@@ -657,7 +658,12 @@ private fun RollingLearningSummary(learning: com.multify.traderpro.data.network.
 }
 
 @Composable
-private fun WaveAveragesTable(rows: List<WaveStatDto>) {
+private fun WaveAveragesTable(
+    rows: List<WaveStatDto>,
+    learning: com.multify.traderpro.data.network.LearningStatsDto
+) {
+    val byWave = rows.associateBy { it.wave }
+    val displayRows = (1..10).map { wave -> byWave[wave] ?: WaveStatDto(wave = wave) }
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = .24f)),
@@ -665,34 +671,39 @@ private fun WaveAveragesTable(rows: List<WaveStatDto>) {
     ) {
         Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
             Row(
-                Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 7.dp),
+                Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 7.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("Wave", modifier = Modifier.weight(.75f), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
-                Text("Up avg", modifier = Modifier.weight(1.05f), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
-                Text("Up N", modifier = Modifier.weight(.65f), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
-                Text("Down avg", modifier = Modifier.weight(1.15f), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
-                Text("Down N", modifier = Modifier.weight(.70f), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                Text("Wave", modifier = Modifier.weight(.62f), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                Text("LONG avg", modifier = Modifier.weight(1.08f), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                Text("N", modifier = Modifier.weight(.42f), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                Text("SHORT avg", modifier = Modifier.weight(1.13f), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                Text("N", modifier = Modifier.weight(.42f), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
             }
             HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = .20f))
-            rows.sortedBy { it.wave }.forEachIndexed { index, w ->
-                val up = w.averageUpPct?.let { String.format(Locale.US, "%.2f%%", it) } ?: "Learning"
-                val down = w.averageDownPct?.let { String.format(Locale.US, "%.2f%%", it) } ?: "Learning"
+            displayRows.forEachIndexed { index, w ->
+                val longAvg = when {
+                    w.wave == 1 && learning.rollingCalls <= 0 -> "Learning"
+                    w.averageUpPct != null -> String.format(Locale.US, "%.2f%%", w.averageUpPct)
+                    else -> "Learning"
+                }
+                val shortAvg = w.averageDownPct?.let { String.format(Locale.US, "%.2f%%", it) } ?: "Learning"
+                val longN = if (w.wave == 1) learning.rollingCalls else w.upSamples
                 Row(
-                    Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 7.dp),
+                    Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(w.wave.toString(), modifier = Modifier.weight(.75f), style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
-                    Text(up, modifier = Modifier.weight(1.05f), style = MaterialTheme.typography.bodySmall)
-                    Text(w.upSamples.toString(), modifier = Modifier.weight(.65f), style = MaterialTheme.typography.bodySmall)
-                    Text(down, modifier = Modifier.weight(1.15f), style = MaterialTheme.typography.bodySmall)
-                    Text(w.downSamples.toString(), modifier = Modifier.weight(.70f), style = MaterialTheme.typography.bodySmall)
+                    Text(w.wave.toString(), modifier = Modifier.weight(.62f), style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
+                    Text(longAvg, modifier = Modifier.weight(1.08f), style = MaterialTheme.typography.bodySmall)
+                    Text(if (longN > 0) longN.toString() else "—", modifier = Modifier.weight(.42f), style = MaterialTheme.typography.bodySmall)
+                    Text(shortAvg, modifier = Modifier.weight(1.13f), style = MaterialTheme.typography.bodySmall)
+                    Text(if (w.downSamples > 0) w.downSamples.toString() else "—", modifier = Modifier.weight(.42f), style = MaterialTheme.typography.bodySmall)
                 }
-                if (index != rows.lastIndex) HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = .10f))
+                if (index != displayRows.lastIndex) HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = .10f))
             }
             HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = .20f))
             Text(
-                "Wave 1 Up uses rolling Multify entry-to-target learning. Down legs and later-wave Up legs use confirmed live pivot observations. N = sample count.",
+                "LONG avg = average upside move. Wave 1 LONG = rolling last 30 Multify recommendation trading days (entry→target/history + live). SHORT avg = average downside move observed for that wave, not realised broker P&L. Waves with no evidence remain visible as Learning. N = observations.",
                 modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant

@@ -30,8 +30,8 @@ android {
         applicationId = "com.multify.traderpro.vivoy73final"
         minSdk = 26
         targetSdk = 35
-        versionCode = 483
-        versionName = "4.8.3-multify-dna-positive-research"
+        versionCode = 484
+        versionName = "4.8.4-explicit-10-wave-averages"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
     }
