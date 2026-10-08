@@ -11,5 +11,3 @@ local.properties
 .env
 backend/data/*.sqlite3
 backend/data/*.db
-__pycache__/
-.pytest_cache/
