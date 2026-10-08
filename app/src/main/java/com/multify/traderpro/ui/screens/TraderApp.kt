@@ -94,6 +94,7 @@ import com.multify.traderpro.data.local.SignalEventEntity
 import com.multify.traderpro.data.network.DashboardDto
 import com.multify.traderpro.data.network.PositionDto
 import com.multify.traderpro.data.network.WaveSignalDto
+import com.multify.traderpro.data.network.WaveStatDto
 import com.multify.traderpro.ui.components.KeyValueRow
 import com.multify.traderpro.ui.components.MetricCard
 import com.multify.traderpro.ui.components.SectionTitle
@@ -105,12 +106,10 @@ import java.util.Date
 import java.util.Locale
 
 private enum class Destination(val label: String, val icon: ImageVector) {
-    Dashboard("Dashboard", Icons.Default.Dashboard),
-    Signals("Signals", Icons.Default.NotificationsActive),
-    Strategies("Strategies", Icons.Default.Science),
+    Execution("Execution", Icons.Default.Dashboard),
     Forecast("Forecast", Icons.Default.Analytics),
-    Manual("Manual", Icons.Default.Bolt),
-    System("System", Icons.Default.Settings)
+    Configuration("Configuration", Icons.Default.Bolt),
+    Settings("Settings", Icons.Default.Settings)
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -146,7 +145,7 @@ fun TraderApp(viewModel: TraderViewModel = hiltViewModel()) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text("Multify Trader Pro", fontWeight = FontWeight.SemiBold)
                         Text(
-                            "NSE CASH · execution console",
+                            "Execution · Forecast · Settings",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -177,7 +176,7 @@ fun TraderApp(viewModel: TraderViewModel = hiltViewModel()) {
     ) { padding ->
         Box(Modifier.fillMaxSize().padding(padding)) {
             when (Destination.entries[selected]) {
-                Destination.Dashboard -> DashboardScreen(
+                Destination.Execution -> DashboardScreen(
                     state = state,
                     onRefresh = { viewModel.refresh() },
                     onLiveRequested = {
@@ -185,22 +184,15 @@ fun TraderApp(viewModel: TraderViewModel = hiltViewModel()) {
                     },
                     onResetHalt = { showResetConfirm = true }
                 )
-                Destination.Signals -> SignalsScreen(state.events)
-                Destination.Strategies -> StrategiesScreen(state)
-                Destination.Forecast -> ForecastScreen(
+                Destination.Forecast -> ForecastScreen(state = state, onGenerate = viewModel::generateForecasts, onResearch = viewModel::runAfterHoursResearch)
+                Destination.Configuration -> ConfigurationScreen(
                     state = state,
-                    onGenerate = viewModel::generateForecasts,
-                    onResearch = viewModel::runAfterHoursResearch
+                    onBudgetChanged = viewModel::setIntradayBudget,
+                    onExecutionMode = viewModel::setExecutionMode,
+                    onWaveCount = viewModel::setWaveCount,
+                    onSubmitManualSignal = viewModel::submitManualSignal
                 )
-                Destination.Manual -> ManualScreen(
-                    state = state,
-                    onBudgetChanged = viewModel::setFastTrackBudget,
-                    onFastTrackRequested = {
-                        if (state.settings.fastTrackEffective) viewModel.setFastTrackExecution(false) else showFastTrackConfirm = true
-                    },
-                    onPostSellShortChanged = viewModel::setPostSellShortEnabled
-                )
-                Destination.System -> SystemScreen(
+                Destination.Settings -> SystemScreen(
                     state = state,
                     onSave = viewModel::saveBrokerSettings,
                     onAuthenticate = viewModel::authenticate,
@@ -336,7 +328,7 @@ private fun DashboardScreen(
             }
         }
         if (dashboard != null) {
-            item { SectionTitle("Today's Multify performance", "Only Multify Trader Pro's own shadow/live orders are counted. Your unrelated Groww trades never enter these P&L figures.") }
+            item { SectionTitle("Today's execution audit", "Shadow always mirrors the selected fixed capital and wave depth. App P&L contains only Multify Trader Pro-owned positions.") }
             item {
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
                     MetricCard(
@@ -410,26 +402,19 @@ private fun DashboardScreen(
 
             item { SectionTitle("Active positions", "These are app-owned positions only. If the broker net quantity diverges because of manual trading in the same MIS symbol, the engine halts rather than touching your external position.") }
             if (dashboard.positions.isEmpty()) {
-                item { EmptyState("No open intraday positions", "The shadow engine is flat. A paid Multify equity release can open a virtual position; target is a checkpoint, not an automatic exit, and strong trends can continue with a trailing protection update.") }
+                item { EmptyState("No open intraday positions", "No Multify campaign is open. A paid Equity BUY starts Shadow immediately; real broker submission remains disabled in this build.") }
             } else {
                 items(dashboard.positions, key = { it.symbol }) { PositionCard(it) }
             }
 
-            item { SectionTitle("Live wave table", "Wave 1 uses the learned rolling target. Wave 2+ checkpoints are direction-only: same-side means HOLD with no added capital; an opposite-side decision must close first and may reopen only within the existing fixed capital cap. PREVIEW ONLY never sends an order.") }
-            if (dashboard.waveSignals.isEmpty()) {
-                item {
-                    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .35f)), shape = RoundedCornerShape(18.dp)) {
-                        Column(Modifier.padding(15.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                            Text("Waiting for an active Multify stock", fontWeight = FontWeight.SemiBold)
-                            Text("Wave 1 long average ${String.format(Locale.US, "%.2f%%", dashboard.learning.longAveragePct)} · short retracement ${String.format(Locale.US, "%.0f%%", dashboard.learning.shortRetracementPct)} of the preceding long move.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                    }
-                }
+            item { SectionTitle("20-wave statistical memory", "Wave 1 Up is seeded by rolling Multify history/live outcomes. All Down legs and Waves 2–20 come only from confirmed live price pivots.") }
+            if (dashboard.waveStats.isEmpty()) {
+                item { EmptyState("Wave memory is learning", "A paid Equity BUY starts a pivot campaign. Each Up-n and Down-n is stored independently through Wave 20.") }
             } else {
-                items(dashboard.waveSignals, key = { "${it.symbol}-${it.nextWave}" }) { WaveSignalCard(it) }
+                items(dashboard.waveStats, key = { it.wave }) { WaveAverageCard(it) }
             }
 
-            item { SectionTitle("Recent engine decisions", "Paper trades include virtual quantity, target/stop monitoring, estimated costs and reversal exits. Real orders still require LIVE to be explicitly enabled.") }
+            item { SectionTitle("Recent engine decisions", "Every action is auditable. Wave pivots learn independently while fixed-capital execution never averages down or adds notional after entry.") }
             if (dashboard.recentDecisions.isEmpty()) {
                 item { EmptyState("No decisions yet", "Captured Multify signals will appear here after local analysis.") }
             } else {
@@ -588,6 +573,40 @@ private fun PositionCard(p: PositionDto) {
             p.targetPrice?.let { KeyValueRow("Target", money(it), MaterialTheme.colorScheme.primary) }
             p.stopPrice?.let { KeyValueRow("Stop", money(it), MaterialTheme.colorScheme.error) }
             p.strategy?.let { KeyValueRow("Strategy", it) }
+        }
+    }
+}
+
+@Composable
+private fun WaveAverageCard(w: WaveStatDto) {
+    val up = w.averageUpPct?.let { String.format(Locale.US, "%.2f%%", it) } ?: "Learning"
+    val down = w.averageDownPct?.let { String.format(Locale.US, "%.2f%%", it) } ?: "Learning"
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = .24f)),
+        shape = RoundedCornerShape(16.dp)
+    ) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("Wave ${w.wave}", fontWeight = FontWeight.SemiBold)
+                Text("Up ${w.upSamples} · Down ${w.downSamples}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Card(modifier = Modifier.weight(1f), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = .35f))) {
+                    Column(Modifier.padding(10.dp)) {
+                        Text("UP", style = MaterialTheme.typography.labelSmall)
+                        Text(up, fontWeight = FontWeight.Bold)
+                        Text(w.upSource.replace('_', ' '), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+                Card(modifier = Modifier.weight(1f), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .55f))) {
+                    Column(Modifier.padding(10.dp)) {
+                        Text("DOWN", style = MaterialTheme.typography.labelSmall)
+                        Text(down, fontWeight = FontWeight.Bold)
+                        Text(w.downSource.replace('_', ' '), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
         }
     }
 }
@@ -870,6 +889,61 @@ private fun StrategyGroup(title: String, entries: List<String>, icon: ImageVecto
 }
 
 @Composable
+private fun ConfigurationScreen(
+    state: TraderUiState,
+    onBudgetChanged: (Long) -> Unit,
+    onExecutionMode: (String) -> Unit,
+    onWaveCount: (Int) -> Unit,
+    onSubmitManualSignal: (String, String, String) -> Unit
+) {
+    var budget by remember(state.settings.dailyBudgetRupees) { mutableStateOf(state.settings.dailyBudgetRupees.toFloat()) }
+    var symbol by remember { mutableStateOf("") }
+    var observedPrice by remember { mutableStateOf("") }
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp, 14.dp, 16.dp, 32.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        item { SectionTitle("Execution control", "Fast deterministic Multify follower. Forecasting and research never sit on the execution fast lane.") }
+        item {
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = .28f)), shape = RoundedCornerShape(20.dp)) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text("Execution mode", fontWeight = FontWeight.SemiBold)
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf("AUTO" to "AUTO", "LONG ONLY" to "LONG_ONLY", "SHORT ONLY" to "SHORT_ONLY").forEach { (label, mode) ->
+                            if (state.settings.executionMode == mode) Button(onClick = { onExecutionMode(mode) }, modifier = Modifier.weight(1f)) { Text(label) }
+                            else OutlinedButton(onClick = { onExecutionMode(mode) }, modifier = Modifier.weight(1f)) { Text(label) }
+                        }
+                    }
+                    Text("Waves: ${state.settings.waveCount} / 20", fontWeight = FontWeight.SemiBold)
+                    Slider(value = state.settings.waveCount.toFloat(), onValueChange = { onWaveCount(it.toInt().coerceIn(1, 20)) }, valueRange = 1f..20f, steps = 18)
+                    Text("Each wave keeps independent Up-n / Down-n memory. Untrained legs use the reference APK's deterministic 0.40% arm until live samples exist.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = .18f))
+                    Text("Fixed capital", fontWeight = FontWeight.SemiBold)
+                    Text(money(budget.toDouble()), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                    Slider(value = budget, onValueChange = { budget = (it / 10_000f).toInt().coerceIn(1, 20) * 10_000f }, onValueChangeFinished = { onBudgetChanged(budget.toLong()) }, valueRange = 10_000f..200_000f, steps = 18)
+                    Text("No averaging down, no ₹5,000 tranches, no capital top-ups. Later waves may only reuse or reduce the original campaign notional.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+        item { SectionTitle("Manual signal", "Fallback only when the paid Equity notification is missed. It enters the same Shadow/decision pipeline.") }
+        item {
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = .28f)), shape = RoundedCornerShape(20.dp)) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedTextField(value = symbol, onValueChange = { symbol = it.uppercase(Locale.US).filter { ch -> ch.isLetterOrDigit() || ch in "&._-" } }, modifier = Modifier.fillMaxWidth(), label = { Text("NSE symbol") }, placeholder = { Text("e.g. TIMEX") }, singleLine = true)
+                    OutlinedTextField(value = observedPrice, onValueChange = { observedPrice = it }, modifier = Modifier.fillMaxWidth(), label = { Text("Observed price (optional)") }, supportingText = { Text("Audit reference only; Groww quote drives analysis.") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), singleLine = true)
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Button(onClick = { onSubmitManualSignal(symbol, "BUY", observedPrice) }, enabled = symbol.isNotBlank(), modifier = Modifier.weight(1f)) { Text("BUY") }
+                        OutlinedButton(onClick = { onSubmitManualSignal(symbol, "BOOK_PROFIT", observedPrice) }, enabled = symbol.isNotBlank(), modifier = Modifier.weight(1f)) { Text("BOOK PROFIT") }
+                    }
+                    Text("Process through normal pipeline", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun ManualScreen(
     state: TraderUiState,
     onBudgetChanged: (Long) -> Unit,
@@ -1075,11 +1149,11 @@ private fun SystemScreen(
                 shape = RoundedCornerShape(20.dp)
             ) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text("First-wave mode & direction checkpoints", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                    Text("Wave 1 uses learned rolling target statistics. AUTO runs the eligible long/short sequence; LONG runs only the long leg; SHORT monitors the long call but executes only the short leg. No mode averages down or adds capital after entry.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Execution mode & wave depth", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    Text("Reference v4.4 control model: AUTO, LONG ONLY or SHORT ONLY with independent Up/Down pivot memory through Wave 20. No mode averages down or adds capital.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        listOf("AUTO", "LONG", "SHORT").forEach { mode ->
-                            val selectedMode = state.settings.firstWaveMode == mode
+                        listOf("AUTO", "LONG_ONLY", "SHORT_ONLY").forEach { mode ->
+                            val selectedMode = state.settings.executionMode == mode
                             if (selectedMode) {
                                 Button(onClick = { onFirstWaveMode(mode) }, modifier = Modifier.weight(1f)) { Text(mode) }
                             } else {
@@ -1087,17 +1161,17 @@ private fun SystemScreen(
                             }
                         }
                     }
-                    Text("Active waves: ${state.settings.activeWaveCount} / 10", fontWeight = FontWeight.SemiBold)
+                    Text("Active waves: ${state.settings.waveCount} / 20", fontWeight = FontWeight.SemiBold)
                     Slider(
-                        value = state.settings.activeWaveCount.toFloat(),
-                        onValueChange = { onActiveWaveCount(it.toLong().coerceIn(1L, 10L)) },
-                        valueRange = 1f..10f,
-                        steps = 8
+                        value = state.settings.waveCount.toFloat(),
+                        onValueChange = { onActiveWaveCount(it.toLong().coerceIn(1L, 20L)) },
+                        valueRange = 1f..20f,
+                        steps = 18
                     )
                     Text("Checkpoints beyond this number are prediction-only: LONG, SHORT or HOLD is still calculated and logged, but no order is placed. Enabled checkpoints may only HOLD or reverse within the fixed existing exposure; they never add capital.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    KeyValueRow("Wave spacing", "2% from the original anchor")
+                    KeyValueRow("Pivot confirmation", "0.40% reversal from extreme")
                     KeyValueRow("Wave capital action", "No add · HOLD or fixed-cap reversal")
-                    KeyValueRow("Maximum checkpoints", "10")
+                    KeyValueRow("Maximum waves", "20")
                     KeyValueRow("First-wave trailing stop", "Always on · AUTO / LONG / SHORT")
                 }
             }
