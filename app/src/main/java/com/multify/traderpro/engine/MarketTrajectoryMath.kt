@@ -48,9 +48,11 @@ object MarketTrajectoryMath {
             0.13 * volume +
             0.11 * micro +
             0.10 * day +
-            0.09 * scoreGap +
-            0.06 * context +
-            0.03 * symbol
+            0.08 * scoreGap +
+            0.05 * context +
+            0.03 * symbol +
+            0.03 * (features.vwapSlope ?: 0.0).coerceIn(-1.0, 1.0) +
+            0.03 * (features.structureScore ?: 0.0).coerceIn(-1.0, 1.0)
         ).coerceIn(-1.0, 1.0)
 
         // High disagreement between short-term trend, VWAP, EMA and ensemble implies an oscillating/wave regime.
@@ -58,7 +60,16 @@ object MarketTrajectoryMath {
         val agreement = abs(trend + vwap + ema + scoreGap) / 4.0
         val waveiness = (meanAbs - agreement + (if ((features.rsi14 ?: 50.0) in 42.0..58.0) 0.15 else 0.0)).coerceIn(0.0, 1.0)
 
+        val atrPct = (features.atr14 ?: 0.0) / features.ltp.coerceAtLeast(1e-9)
+        val breakout = features.donchianHigh?.let { features.ltp > it } == true && (features.rvol ?: 1.0) > 1.15
+        val breakdown = features.donchianLow?.let { features.ltp < it } == true && (features.rvol ?: 1.0) > 1.15
+        val reversal = (features.structureScore ?: 0.0) * composite < -0.08 && abs(features.structureScore ?: 0.0) > .45
         val regime = when {
+            breakout -> "BREAKOUT"
+            breakdown -> "BREAKDOWN"
+            reversal -> "REVERSAL"
+            atrPct > .025 -> "HIGH_VOLATILITY"
+            atrPct < .004 && (features.rvol ?: 1.0) < .90 -> "LOW_VOLATILITY"
             waveiness >= 0.40 && abs(composite) < 0.42 -> "OSCILLATING"
             composite >= 0.24 -> "UP_TREND"
             composite <= -0.24 -> "DOWN_TREND"
