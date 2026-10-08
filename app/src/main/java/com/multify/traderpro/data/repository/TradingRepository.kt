@@ -67,6 +67,8 @@ import com.multify.traderpro.engine.WavePivotMath
 import com.multify.traderpro.engine.AdaptiveDirectionEngine
 import com.multify.traderpro.engine.AdaptiveDirectionInput
 import com.multify.traderpro.engine.WaveCapitalPolicy
+import com.multify.traderpro.engine.ExecutionHealthInput
+import com.multify.traderpro.engine.ExecutionHealthPolicy
 import com.multify.traderpro.engine.MarketTrajectoryMath
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -1382,6 +1384,23 @@ class TradingRepository @Inject constructor(
                 val f = longEval.features
                 val trajectory = MarketTrajectoryMath.classify(f, longEval.directionalScore, shortEval.directionalScore)
                 val prior = previous.lastOrNull()?.selectedDirection ?: "HOLD"
+                val heartbeatAge = if (settings.serviceHeartbeatAtMs > 0L) {
+                    (snapshotAt - settings.serviceHeartbeatAtMs).coerceAtLeast(0L)
+                } else Long.MAX_VALUE
+                val health = ExecutionHealthPolicy.evaluate(
+                    ExecutionHealthInput(
+                        brokerAuthenticated = settings.brokerAuthenticated && secretStore.hasAccessToken(),
+                        staticIpMatched = settings.staticIpMatched,
+                        marketOpen = marketSession() == "OPEN",
+                        quoteAgeMs = (snapshotAt - quoteStarted).coerceAtLeast(0L),
+                        maxQuoteAgeMs = MAX_MARKET_DATA_AGE_MS,
+                        listenerHeartbeatAgeMs = heartbeatAge,
+                        maxListenerHeartbeatAgeMs = MAX_LISTENER_HEARTBEAT_AGE_MS,
+                        symbolMasterFresh = !nseSymbols.isStale(),
+                        decisionComplete = f.candles.size >= 3,
+                        safetyHalt = settings.safetyHalt
+                    )
+                )
                 val rawDecision = AdaptiveDirectionEngine.decide(
                     AdaptiveDirectionInput(
                         currentSide = currentSide,
@@ -1396,8 +1415,8 @@ class TradingRepository @Inject constructor(
                         trajectoryComposite = trajectory.composite,
                         marketBias = 0.0,
                         sectorBias = 0.0,
-                        dataFresh = snapshotAt - quoteStarted <= MAX_MARKET_DATA_AGE_MS,
-                        decisionComplete = f.candles.size >= 3,
+                        dataFresh = health.marketDataFresh,
+                        decisionComplete = health.decisionComplete,
                         priorDecision = prior
                     )
                 )
@@ -1413,7 +1432,9 @@ class TradingRepository @Inject constructor(
                     ltp = ltp, currentSide = currentSide, campaignUsed = campaignUsed,
                     capital = eligibility.availableCapitalRupees, decision = decision,
                     longEval = longEval, shortEval = shortEval, trajectoryRegime = trajectory.regime,
-                    snapshotAt = snapshotAt, quoteStarted = quoteStarted
+                    snapshotAt = snapshotAt, quoteStarted = quoteStarted,
+                    brokerHealthy = health.brokerHealthy, listenerHealthy = health.listenerHealthy,
+                    liveOrderAllowed = health.liveOrderAllowed, healthReason = health.reason
                 )
             }.onFailure {
                 auditLogger.log("ADAPTIVE_WAVE", "CHECKPOINT_ERROR", mapOf("symbol" to campaign.symbol, "message" to (it.message ?: "")))
@@ -1428,6 +1449,18 @@ class TradingRepository @Inject constructor(
     ) {
         if (learningDao.waveDecisionForCampaign(campaign.id, waveNumber) != null) return
         val triggerPct = (ltp / campaign.startPrice - 1.0) * 100.0
+        val capitalAfter = when {
+            decision.action == "HOLD" -> campaignUsed
+            settings.liveExecutionEffective && !orderSubmitted -> campaignUsed
+            else -> min(settings.maxCampaignCapitalRupees.toDouble(), campaignUsed + capital)
+        }
+        if (decision.action != "HOLD" && settings.liveExecutionEffective && !liveOrderAllowed) {
+            auditLogger.log("ADAPTIVE_WAVE", "LIVE_ORDER_HEALTH_VETO", mapOf(
+                "symbol" to campaign.symbol, "wave" to waveNumber, "selected" to decision.action,
+                "reason" to healthReason
+            ))
+        }
+
         val id = learningDao.insertWaveDecision(
             WaveDecisionEntity(
                 campaignId = campaign.id, eventId = campaign.eventId, symbol = campaign.symbol, callDate = LocalDate.now(INDIA).toString(),
@@ -1437,7 +1470,7 @@ class TradingRepository @Inject constructor(
                 evLongPct = 0.0, evShortPct = 0.0, confidence = .5, regime = "RISK_VETO",
                 topPositiveFeatures = "", topNegativeFeatures = reason, rejectionReason = reason,
                 snapshotJson = "{\"reason\":${gsonQuote(reason)},\"price\":$ltp}", modelVersion = AdaptiveDirectionEngine.MODEL_VERSION,
-                dataAgeMs = snapshotAt - quoteStarted, brokerHealthy = true, listenerHealthy = true,
+                dataAgeMs = snapshotAt - quoteStarted, brokerHealthy = brokerHealthy, listenerHealthy = listenerHealthy,
                 waveCapitalRupees = 0.0, campaignCapitalBefore = campaignUsed, campaignCapitalAfter = campaignUsed,
                 actualOrderSubmitted = false, createdAtMs = snapshotAt
             )
@@ -1451,7 +1484,9 @@ class TradingRepository @Inject constructor(
         currentSide: String, campaignUsed: Double, capital: Double,
         decision: com.multify.traderpro.engine.AdaptiveDirectionDecision,
         longEval: StrategyEvaluation, shortEval: StrategyEvaluation, trajectoryRegime: String,
-        snapshotAt: Long, quoteStarted: Long
+        snapshotAt: Long, quoteStarted: Long,
+        brokerHealthy: Boolean, listenerHealthy: Boolean,
+        liveOrderAllowed: Boolean, healthReason: String
     ) {
         if (learningDao.waveDecisionForCampaign(campaign.id, waveNumber) != null) return
         val positives = (if (decision.action == "SHORT") shortEval.votes else longEval.votes)
@@ -1479,14 +1514,14 @@ class TradingRepository @Inject constructor(
             "expected_short_loss_pct" to decision.expectedShortLossPct,
             "estimated_costs_rupees" to decision.estimatedCostsRupees,
             "ev_gap_rupees" to decision.expectedValueGapRupees,
+            "broker_healthy" to brokerHealthy, "listener_healthy" to listenerHealthy,
+            "live_order_allowed" to liveOrderAllowed, "execution_health_reason" to healthReason,
             "decision_reason" to decision.reason
         )
         var orderSubmitted = false
         var orderRef: String? = null
-        var capitalAfter = if (decision.action == "HOLD") campaignUsed
-            else min(settings.maxCampaignCapitalRupees.toDouble(), campaignUsed + capital)
         val managed = managedDao.openPosition(ENGINE_INTRADAY, campaign.symbol)
-        if (decision.action != "HOLD" && settings.liveExecutionEffective && managed != null && managed.product == "MIS") {
+        if (decision.action != "HOLD" && settings.liveExecutionEffective && liveOrderAllowed && managed != null && managed.product == "MIS") {
             preLiveGuard(settings)
             if (decision.action == managed.side) {
                 val add = addManagedWave(token, managed, decision.action, capital, ltp, longEval.features.atr14 ?: max(ltp * .004, .05), waveNumber)
@@ -1524,7 +1559,11 @@ class TradingRepository @Inject constructor(
                 evLongPct = decision.longExpectedValuePct, evShortPct = decision.shortExpectedValuePct,
                 confidence = decision.confidence, regime = trajectoryRegime,
                 topPositiveFeatures = positives, topNegativeFeatures = negatives,
-                rejectionReason = if (decision.action == "HOLD") decision.reason else "Alternative rejected by lower after-cost EV",
+                rejectionReason = when {
+                    decision.action == "HOLD" -> decision.reason
+                    settings.liveExecutionEffective && !liveOrderAllowed -> "Selected ${decision.action}; real order blocked: $healthReason"
+                    else -> "Alternative rejected by lower after-cost EV"
+                },
                 snapshotJson = GsonBuilder().create().toJson(snapshot), modelVersion = AdaptiveDirectionEngine.MODEL_VERSION,
                 dataAgeMs = snapshotAt - quoteStarted, brokerHealthy = true, listenerHealthy = true,
                 waveCapitalRupees = if (decision.action == "HOLD") 0.0 else capital,
@@ -1538,7 +1577,8 @@ class TradingRepository @Inject constructor(
             "p_up" to decision.longProbability, "p_down" to decision.shortProbability,
             "ev_long" to decision.longExpectedValueRupees, "ev_short" to decision.shortExpectedValueRupees,
             "capital" to capital, "capital_before" to campaignUsed, "capital_after" to capitalAfter,
-            "real_order" to orderSubmitted, "reason" to decision.reason
+            "real_order" to orderSubmitted, "health_allowed" to liveOrderAllowed,
+            "health_reason" to healthReason, "reason" to decision.reason
         ))
     }
 
@@ -2742,6 +2782,7 @@ class TradingRepository @Inject constructor(
         private const val WAVE_PIVOT_FRACTION = 0.004
         private const val MANUAL_SOURCE = "com.multify.traderpro.manual"
         private const val MAX_MARKET_DATA_AGE_MS = 5_000L
+        private const val MAX_LISTENER_HEARTBEAT_AGE_MS = 30_000L
         private const val COUNTERFACTUAL_WINDOW_MS = 30L * 60L * 1000L
         private val WAVE_OUTCOME_OFFSETS_SECONDS = listOf(15, 30, 60, 120, 300, 600, 900, 1800)
         // Supplied workbook (2026-06-30 through 2026-09-30 BUY calls): entry-to-target mean = 3.68097%.

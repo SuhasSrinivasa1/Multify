@@ -30,8 +30,8 @@ android {
         applicationId = "com.multify.traderpro.vivoy73final"
         minSdk = 26
         targetSdk = 35
-        versionCode = 480
-        versionName = "4.8.0-adaptive-direction-engine"
+        versionCode = 481
+        versionName = "4.8.1-adaptive-direction-health-gated"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
     }
