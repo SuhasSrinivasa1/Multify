@@ -1,0 +1,72 @@
+name: Build Multify v4.6 Shadow APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ v4.6-wave1-shadow-apk ]
+    paths:
+      - '.shadow_bootstrap/**'
+      - '.github/workflows/v460-shadow-apk.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reconstruct safe shadow source
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 --decode .shadow_bootstrap/source.b64 > /tmp/v460-shadow.zip
+          rm -rf /tmp/v460-shadow
+          mkdir -p /tmp/v460-shadow
+          unzip -q /tmp/v460-shadow.zip -d /tmp/v460-shadow
+          test -f /tmp/v460-shadow/v460_safe/settings.gradle.kts
+          grep -q 'liveExecutionEffective: Boolean get() = false' /tmp/v460-shadow/v460_safe/app/src/main/java/com/multify/traderpro/data/preferences/AppPreferences.kt
+          grep -q 'Broker order submission is disabled in the v4.6 shadow build' /tmp/v460-shadow/v460_safe/app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
+          if grep -R 'AVERAGE_DOWN_ADD\|₹5,000 add every' /tmp/v460-shadow/v460_safe/app/src/main/java/com/multify/traderpro; then
+            echo 'Downward averaging logic detected'
+            exit 1
+          fi
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android SDK 35 packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Unit tests
+        working-directory: /tmp/v460-shadow/v460_safe
+        run: gradle --no-daemon testDebugUnitTest
+
+      - name: Build APK
+        working-directory: /tmp/v460-shadow/v460_safe
+        run: gradle --no-daemon assembleDebug
+
+      - name: Package artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp /tmp/v460-shadow/v460_safe/app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v4.6.0-wave1-average-trailing-shadow.apk
+          (cd dist && sha256sum *.apk > SHA256SUMS.txt)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Multify-TraderPro-v4.6.0-wave1-average-trailing-shadow
+          path: dist/
+          if-no-files-found: error
