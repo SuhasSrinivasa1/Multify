@@ -107,11 +107,11 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-private enum class Destination(val label: String, val icon: ImageVector) {
-    Execution("Execution", Icons.Default.Dashboard),
-    Forecast("Forecast", Icons.Default.Analytics),
-    Configuration("Configuration", Icons.Default.Bolt),
-    Settings("Settings", Icons.Default.Settings)
+private enum class Destination(val label: String, val subtitle: String, val icon: ImageVector) {
+    Execution("Execution", "Live state, positions, decisions and health", Icons.Default.Dashboard),
+    Averages("Averages", "Rolling LONG / SHORT learning and trail-arm levels", Icons.Default.Analytics),
+    Forecast("Forecast", "Five candidates, Multify DNA and after-market research", Icons.Default.Science),
+    Settings("Settings", "Broker, execution, risk and device controls", Icons.Default.Settings)
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -145,9 +145,9 @@ fun TraderApp(viewModel: TraderViewModel = hiltViewModel()) {
             CenterAlignedTopAppBar(
                 title = {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("Multify Trader Pro", fontWeight = FontWeight.SemiBold)
+                        Text(Destination.entries[selected].label, fontWeight = FontWeight.SemiBold)
                         Text(
-                            "Execution · Forecast · Settings",
+                            Destination.entries[selected].subtitle,
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -186,15 +186,8 @@ fun TraderApp(viewModel: TraderViewModel = hiltViewModel()) {
                     },
                     onResetHalt = { showResetConfirm = true }
                 )
+                Destination.Averages -> AveragesScreen(state)
                 Destination.Forecast -> ForecastScreen(state = state, onGenerate = viewModel::generateForecasts, onResearch = viewModel::runAfterHoursResearch)
-                Destination.Configuration -> ConfigurationScreen(
-                    state = state,
-                    onBudgetChanged = viewModel::setIntradayBudget,
-                    onExecutionMode = viewModel::setExecutionMode,
-                    onWaveCount = viewModel::setWaveCount,
-                    onWaveRiskChanged = viewModel::setWaveRiskSettings,
-                    onSubmitManualSignal = viewModel::submitManualSignal
-                )
                 Destination.Settings -> SystemScreen(
                     state = state,
                     onSave = viewModel::saveBrokerSettings,
@@ -432,10 +425,6 @@ private fun DashboardScreen(
                 }
             }
 
-            item { SectionTitle("10-wave LONG / SHORT averages", "Wave 1 LONG is the rolling last-30-trading-day Multify average. Waves 2–10 learn independently. “Learning” means the row exists but there is not enough evidence yet.") }
-            item { RollingLearningSummary(dashboard.learning) }
-            item { WaveAveragesTable(dashboard.waveStats, dashboard.learning) }
-
             item { SectionTitle("Recent engine decisions", "Every action is auditable. Wave pivots learn independently while fixed-capital execution never averages down or adds notional after entry.") }
             if (dashboard.recentDecisions.isEmpty()) {
                 item { EmptyState("No decisions yet", "Captured Multify signals will appear here after local analysis.") }
@@ -459,6 +448,96 @@ private fun DashboardScreen(
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AveragesScreen(state: TraderUiState) {
+    val dashboard = state.dashboard
+    val learning = dashboard?.learning ?: com.multify.traderpro.data.network.LearningStatsDto()
+    val rows = dashboard?.waveStats.orEmpty()
+    val wave1 = rows.firstOrNull { it.wave == 1 }
+    val wave1Long = wave1?.averageUpPct?.takeIf { learning.rollingCalls > 0 }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp, 14.dp, 16.dp, 32.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        item {
+            SectionTitle(
+                "Averages · learned movement map",
+                "The single source of truth for rolling LONG/SHORT averages and the profit-trailing arm levels used by the engine."
+            )
+        }
+        item {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = .35f)),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = .18f)),
+                shape = RoundedCornerShape(22.dp)
+            ) {
+                Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                    Text("Wave 1 LONG · current trail arm", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        wave1Long?.let { String.format(Locale.US, "%.2f%%", it) } ?: "Learning",
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Text(
+                        if (learning.rollingCalls > 0)
+                            "Latest ${learning.rollingTradingDays} recommendation trading days · ${learning.rollingCalls} calls"
+                        else "Waiting for qualifying Multify history/live observations",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = .18f))
+                    KeyValueRow("Median", if (learning.rollingCalls > 0) String.format(Locale.US, "%.2f%%", learning.longMedianPct) else "Learning")
+                    KeyValueRow("Trimmed mean", if (learning.rollingCalls > 0) String.format(Locale.US, "%.2f%%", learning.longTrimmedMeanPct) else "Learning")
+                    KeyValueRow("EWMA", if (learning.rollingCalls > 0) String.format(Locale.US, "%.2f%%", learning.longEwmaPct) else "Learning")
+                    KeyValueRow("P25 / P75", if (learning.rollingCalls > 0) String.format(Locale.US, "%.2f%% / %.2f%%", learning.longP25Pct, learning.longP75Pct) else "Learning")
+                }
+            }
+        }
+        item {
+            SectionTitle(
+                "10-wave averages table",
+                "Every row is always visible. LONG avg is upside movement; SHORT avg is downside movement. N is the number of observations."
+            )
+        }
+        item { WaveAveragesTable(rows, learning) }
+        item {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = .24f)),
+                shape = RoundedCornerShape(20.dp)
+            ) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                    Text("How the table drives exits", fontWeight = FontWeight.SemiBold)
+                    Text("1. Before trailing is armed, the latest learned wave average is the threshold.", style = MaterialTheme.typography.bodyMedium)
+                    Text("2. The rolling window can move an unarmed threshold up or down as trading days enter and leave.", style = MaterialTheme.typography.bodyMedium)
+                    Text("3. Reaching the threshold arms profit trailing; it does not force an immediate exit.", style = MaterialTheme.typography.bodyMedium)
+                    Text("4. After arming, the stop is one-way only and can never be loosened by a later average change.", style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+        }
+        item {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = .28f)),
+                shape = RoundedCornerShape(20.dp)
+            ) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("Short retracement learner", fontWeight = FontWeight.SemiBold)
+                    KeyValueRow("Post-sell move capture", String.format(Locale.US, "%.0f%% of prior long move", learning.shortRetracementPct))
+                    KeyValueRow("Observations", learning.shortObservedCalls.toString())
+                    Text(
+                        "This is separate from the wave SHORT-average column. The wave table measures downside movement by wave; this statistic estimates how much of the preceding long move is typically retraced after Multify sells.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
         }
@@ -900,7 +979,6 @@ private fun StrategiesScreen(state: TraderUiState) {
 private fun ForecastScreen(state: TraderUiState, onGenerate: () -> Unit, onResearch: () -> Unit) {
     val dashboard = state.dashboard
     val rows = dashboard?.forecasts.orEmpty()
-    val learning = dashboard?.learning ?: com.multify.traderpro.data.network.LearningStatsDto()
     val report = dashboard?.research ?: com.multify.traderpro.data.network.ResearchDto()
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -909,35 +987,9 @@ private fun ForecastScreen(state: TraderUiState, onGenerate: () -> Unit, onResea
     ) {
         item { SectionTitle("Forecast · five daily candidates", "Five timestamped candidates are frozen from the rolling Multify-like universe. Matching Multify later is evaluation data, not an input to rewrite the forecast.") }
         item {
-            val learned = state.dashboard?.learning ?: com.multify.traderpro.data.network.LearningStatsDto()
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha=.28f)), shape = RoundedCornerShape(18.dp)) {
-                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                    Text("Current learned targets", fontWeight = FontWeight.SemiBold)
-                    KeyValueRow("Long mean", String.format(Locale.US, "%.2f%%", learned.longAveragePct))
-                    KeyValueRow("Long median", String.format(Locale.US, "%.2f%%", learned.longMedianPct))
-                    KeyValueRow("Long trimmed mean", String.format(Locale.US, "%.2f%%", learned.longTrimmedMeanPct))
-                    KeyValueRow("Long EWMA", String.format(Locale.US, "%.2f%%", learned.longEwmaPct))
-                    KeyValueRow("Long P25 / P75", String.format(Locale.US, "%.2f%% / %.2f%%", learned.longP25Pct, learned.longP75Pct))
-                    KeyValueRow("Short move capture", String.format(Locale.US, "%.0f%% of prior long move", learned.shortRetracementPct))
-                    Text("Long target rolls over the latest 30 recommendation trading days using Multify entry-to-target %. Short learning uses reconstructed history when Groww data is available plus live post-sell observations; 100% is the hard maximum.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            }
-        }
-        item {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
                 Button(onClick = onGenerate, modifier = Modifier.weight(1f)) { Text("Generate 5") }
                 OutlinedButton(onClick = onResearch, modifier = Modifier.weight(1f)) { Text("Run replay") }
-            }
-        }
-        item {
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha=.45f)), shape = RoundedCornerShape(20.dp)) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("Learning window", fontWeight = FontWeight.SemiBold)
-                    KeyValueRow("Trading days", learning.rollingTradingDays.toString())
-                    KeyValueRow("Calls", learning.rollingCalls.toString())
-                    KeyValueRow("Long target", String.format(Locale.US, "%.2f%%", learning.longAveragePct))
-                    KeyValueRow("Short retracement", String.format(Locale.US, "%.0f%%", learning.shortRetracementPct))
-                }
             }
         }
         item { MultifyDnaResearch() }
