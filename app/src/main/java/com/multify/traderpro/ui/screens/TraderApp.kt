@@ -431,11 +431,12 @@ private fun DashboardScreen(
                 }
             }
 
-            item { SectionTitle("20-wave statistical memory", "Wave 1 Up is seeded by rolling Multify history/live outcomes. All Down legs and Waves 2–20 come only from confirmed live price pivots.") }
+            item { SectionTitle("Wave averages", "Compact table of the learned Up/Down movement for every wave. “Learning” means there are not yet enough observations for that leg.") }
+            item { RollingLearningSummary(dashboard.learning) }
             if (dashboard.waveStats.isEmpty()) {
-                item { EmptyState("Wave memory is learning", "A paid Equity BUY starts a pivot campaign. Each Up-n and Down-n is stored independently through Wave 20.") }
+                item { EmptyState("Wave averages are learning", "A paid Equity BUY starts a campaign. Each Up-n and Down-n is stored independently through Wave 20.") }
             } else {
-                items(dashboard.waveStats, key = { it.wave }) { WaveAverageCard(it) }
+                item { WaveAveragesTable(dashboard.waveStats) }
             }
 
             item { SectionTitle("Recent engine decisions", "Every action is auditable. Wave pivots learn independently while fixed-capital execution never averages down or adds notional after entry.") }
@@ -636,35 +637,65 @@ private fun AdaptiveWaveCard(w: AdaptiveWaveDto) {
 }
 
 @Composable
-private fun WaveAverageCard(w: WaveStatDto) {
-    val up = w.averageUpPct?.let { String.format(Locale.US, "%.2f%%", it) } ?: "Learning"
-    val down = w.averageDownPct?.let { String.format(Locale.US, "%.2f%%", it) } ?: "Learning"
+private fun RollingLearningSummary(learning: com.multify.traderpro.data.network.LearningStatsDto) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = .26f)),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = .20f)),
+        shape = RoundedCornerShape(16.dp)
+    ) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+            Text("Rolling 30-session statistics", fontWeight = FontWeight.SemiBold)
+            KeyValueRow("Mean", String.format(Locale.US, "%.2f%%", learning.longAveragePct))
+            KeyValueRow("Median", String.format(Locale.US, "%.2f%%", learning.longMedianPct))
+            KeyValueRow("Trimmed mean", String.format(Locale.US, "%.2f%%", learning.longTrimmedMeanPct))
+            KeyValueRow("EWMA", String.format(Locale.US, "%.2f%%", learning.longEwmaPct))
+            KeyValueRow("P25 / P75", String.format(Locale.US, "%.2f%% / %.2f%%", learning.longP25Pct, learning.longP75Pct))
+            KeyValueRow("Calls / trading days", "${learning.rollingCalls} / ${learning.rollingTradingDays}")
+        }
+    }
+}
+
+@Composable
+private fun WaveAveragesTable(rows: List<WaveStatDto>) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = .24f)),
         shape = RoundedCornerShape(16.dp)
     ) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("Wave ${w.wave}", fontWeight = FontWeight.SemiBold)
-                Text("Up ${w.upSamples} · Down ${w.downSamples}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 7.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Wave", modifier = Modifier.weight(.75f), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                Text("Up avg", modifier = Modifier.weight(1.05f), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                Text("Up N", modifier = Modifier.weight(.65f), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                Text("Down avg", modifier = Modifier.weight(1.15f), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                Text("Down N", modifier = Modifier.weight(.70f), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
             }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Card(modifier = Modifier.weight(1f), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = .35f))) {
-                    Column(Modifier.padding(10.dp)) {
-                        Text("UP", style = MaterialTheme.typography.labelSmall)
-                        Text(up, fontWeight = FontWeight.Bold)
-                        Text(w.upSource.replace('_', ' '), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = .20f))
+            rows.sortedBy { it.wave }.forEachIndexed { index, w ->
+                val up = w.averageUpPct?.let { String.format(Locale.US, "%.2f%%", it) } ?: "Learning"
+                val down = w.averageDownPct?.let { String.format(Locale.US, "%.2f%%", it) } ?: "Learning"
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 7.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(w.wave.toString(), modifier = Modifier.weight(.75f), style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
+                    Text(up, modifier = Modifier.weight(1.05f), style = MaterialTheme.typography.bodySmall)
+                    Text(w.upSamples.toString(), modifier = Modifier.weight(.65f), style = MaterialTheme.typography.bodySmall)
+                    Text(down, modifier = Modifier.weight(1.15f), style = MaterialTheme.typography.bodySmall)
+                    Text(w.downSamples.toString(), modifier = Modifier.weight(.70f), style = MaterialTheme.typography.bodySmall)
                 }
-                Card(modifier = Modifier.weight(1f), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .55f))) {
-                    Column(Modifier.padding(10.dp)) {
-                        Text("DOWN", style = MaterialTheme.typography.labelSmall)
-                        Text(down, fontWeight = FontWeight.Bold)
-                        Text(w.downSource.replace('_', ' '), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                }
+                if (index != rows.lastIndex) HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = .10f))
             }
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = .20f))
+            Text(
+                "Wave 1 Up uses rolling Multify entry-to-target learning. Down legs and later-wave Up legs use confirmed live pivot observations. N = sample count.",
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }
@@ -1071,7 +1102,7 @@ private fun ManualScreen(
                         valueRange = 10_000f..200_000f,
                         steps = 18
                     )
-                    Text("₹10,000 to ₹2,00,000 fixed campaign cap. The selected cap is used for the initial position only; there are no averaging adds, top-ups or later capital increases.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("₹10,000 to ₹2,00,000 initial budget. Wave 2+ can deploy only the separately configured tranche after LONG/SHORT/HOLD approval, and cumulative capital can never exceed the hard campaign cap.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = .18f))
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {

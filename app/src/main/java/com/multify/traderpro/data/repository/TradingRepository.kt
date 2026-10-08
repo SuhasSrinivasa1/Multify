@@ -985,8 +985,8 @@ class TradingRepository @Inject constructor(
         - Multify-only fill ledger; unrelated Groww trades excluded
         - Shadow budget fixed at ₹2,00,000
         - 20-wave pivot memory: Wave 1 Up from rolling Multify history/live outcomes; all Down legs and Waves 2–20 from confirmed live pivots
-        - No averaging-down, tranche adds, capital top-ups or automatic budget increases after entry
-        - Later wave actions may only reuse or reduce the existing fixed campaign notional
+        - No uncontrolled averaging. A 2% Wave 2+ displacement only makes the configured tranche eligible.
+        - LONG/SHORT/HOLD approval is required before any additional tranche; cumulative capital is bounded by the hard campaign cap.
         - ₹5,000 is a milestone, not a profit ceiling
         - -₹1,500 soft defensive band; no mechanical panic close
         - -₹2,500 hard daily cap with earlier live risk reduction for slippage
