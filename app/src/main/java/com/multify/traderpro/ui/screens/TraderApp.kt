@@ -793,7 +793,7 @@ private fun StrategiesScreen(state: TraderUiState) {
         "Shadow capital fixed at ₹2,00,000; live capital selectable ₹10k–₹2L",
         "Rolling 30-trading-day learned long target; uploaded history seeds the model",
         "Post-sell short retracement starts at 100%, never exceeds 100%, and learns downward from reconstructed + live outcomes",
-        "No averaging-down or capital top-ups: Wave 2+ may HOLD or reverse direction within the existing fixed exposure only",
+        "No uncontrolled averaging: a 2% Wave 2+ checkpoint may deploy only the configured tranche after LONG/SHORT/HOLD approval and only inside the campaign/loss caps",
         "₹5,000 is a milestone, never a profit ceiling",
         "-₹1,500 soft loss band; -₹2,500 hard cap with pre-emptive live reduction",
         "Broker-side OCO protection on every app MIS fill; external-position conflicts halt automation"
@@ -1232,7 +1232,7 @@ private fun SystemScreen(
             ) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text("Execution mode & wave depth", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                    Text("Reference v4.4 control model: AUTO, LONG ONLY or SHORT ONLY with independent Up/Down pivot memory through Wave 20. No mode averages down or adds capital.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("AUTO, LONG ONLY and SHORT ONLY share the same auditable Wave 2+ gates. In AUTO, a checkpoint may add the configured tranche only after after-cost direction approval; HOLD sends no order.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         listOf("AUTO", "LONG_ONLY", "SHORT_ONLY").forEach { mode ->
                             val selectedMode = state.settings.executionMode == mode
@@ -1250,9 +1250,9 @@ private fun SystemScreen(
                         valueRange = 1f..20f,
                         steps = 18
                     )
-                    Text("Checkpoints beyond this number are prediction-only: LONG, SHORT or HOLD is still calculated and logged, but no order is placed. Enabled checkpoints may only HOLD or reverse within the fixed existing exposure; they never add capital.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Checkpoints beyond this number are prediction-only. Enabled Wave 2+ checkpoints may deploy only the configured tranche after LONG/SHORT/HOLD approval and remain bounded by campaign, daily-loss and single-stock-loss caps.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     KeyValueRow("Pivot confirmation", "0.40% reversal from extreme")
-                    KeyValueRow("Wave capital action", "No add · HOLD or fixed-cap reversal")
+                    KeyValueRow("Wave capital action", "Configured tranche · only after AUTO approval")
                     KeyValueRow("Maximum waves", "20")
                     KeyValueRow("First-wave trailing stop", "Always on · AUTO / LONG / SHORT")
                 }
@@ -1274,7 +1274,7 @@ private fun SystemScreen(
                         valueRange = 10_000f..200_000f,
                         steps = 18
                     )
-                    Text("₹10,000 ← fixed initial cap → ₹2,00,000. This cap is never increased automatically. Shadow mode uses a fixed ₹2,00,000 initial cap and never averages down.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("The initial live budget remains explicit. Wave 2+ uses its separately configured tranche and hard campaign cap; no checkpoint can silently expand capital beyond that cap.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     KeyValueRow("Profit milestone", "₹5,000 · no profit ceiling")
                     KeyValueRow("Soft loss band", "-₹1,500 · defensive mode")
                     KeyValueRow("Hard loss cap", "-₹2,500 · live pre-flatten starts earlier for slippage")
