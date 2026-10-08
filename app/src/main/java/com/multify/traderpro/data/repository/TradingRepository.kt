@@ -1337,8 +1337,8 @@ class TradingRepository @Inject constructor(
                 val currentSide = managed?.side
                     ?: previous.lastOrNull { it.selectedDirection in setOf("LONG", "SHORT") }?.selectedDirection
                     ?: "LONG"
-                val campaignUsed = managed?.capitalDeployed
-                    ?: previous.filter { it.selectedDirection != "HOLD" }.sumOf { it.waveCapitalRupees }
+                val previousCommitted = previous.maxOfOrNull { it.campaignCapitalAfter } ?: 0.0
+                val campaignUsed = max(managed?.capitalDeployed ?: 0.0, previousCommitted)
                 val day = if (settings.liveExecutionEffective) managedSnapshot(token, setOf(ENGINE_INTRADAY)).summary else paperSnapshot().summary
                 val singleStockPnl = managed?.let { p ->
                     if (p.side == "LONG") (ltp - p.entryPrice) * p.quantity else (p.entryPrice - ltp) * p.quantity
@@ -1446,7 +1446,8 @@ class TradingRepository @Inject constructor(
         )
         var orderSubmitted = false
         var orderRef: String? = null
-        var capitalAfter = campaignUsed
+        var capitalAfter = if (decision.action == "HOLD") campaignUsed
+            else min(settings.maxCampaignCapitalRupees.toDouble(), campaignUsed + capital)
         val managed = managedDao.openPosition(ENGINE_INTRADAY, campaign.symbol)
         if (decision.action != "HOLD" && settings.liveExecutionEffective && managed != null && managed.product == "MIS") {
             preLiveGuard(settings)
@@ -1454,7 +1455,6 @@ class TradingRepository @Inject constructor(
                 val add = addManagedWave(token, managed, decision.action, capital, ltp, longEval.features.atr14 ?: max(ltp * .004, .05), waveNumber)
                 orderSubmitted = add.first
                 orderRef = add.second
-                if (orderSubmitted) capitalAfter = min(settings.maxCampaignCapitalRupees.toDouble(), campaignUsed + capital)
             } else {
                 // One real direction only: flatten/reconcile before the opposite wave. CNC/recovery paths never enter here.
                 val closed = closeManaged(token, managed, ltp, "ADAPTIVE_WAVE_${waveNumber}_FLIP_TO_${decision.action}")
@@ -1471,7 +1471,6 @@ class TradingRepository @Inject constructor(
                         openManagedReversal(token, managed, decision.action, qty, ltp, stop, target, chosen, waveAnchor = campaign.startPrice, waveIndex = waveNumber - 1, campaignBudget = settings.maxCampaignCapitalRupees.toDouble())
                         orderSubmitted = managedDao.openPosition(ENGINE_INTRADAY, campaign.symbol) != null
                         orderRef = if (orderSubmitted) "FLIP_AFTER_${closed.closeOrderId}" else null
-                        if (orderSubmitted) capitalAfter = min(settings.maxCampaignCapitalRupees.toDouble(), campaignUsed + capital)
                     }
                 }
             }
@@ -2475,11 +2474,12 @@ class TradingRepository @Inject constructor(
         val total = s.totalPnl
         preferences.updateShadowPeakPnl(total)
         val peak = preferences.settings.first().shadowPeakPnl
-        val hard = total <= -HARD_LOSS_CAP
-        val defensive = total <= -SOFT_LOSS_LEVEL
+        val hard = total <= -settings.maxDailyLossRupees.toDouble()
+        val defensiveLevel = min(SOFT_LOSS_LEVEL, settings.maxDailyLossRupees * .60)
+        val defensive = total <= -defensiveLevel
         val profitProtect = peak >= PROFIT_MILESTONE && total <= max(PROFIT_MILESTONE * .70, peak * .70)
         return RiskState(total, defensive, hard, profitProtect, !hard && !defensive && !profitProtect,
-            when { hard -> "Shadow hard loss cap reached"; defensive -> "Shadow P&L is below -₹1,500; new risk paused while strong existing positions may be held"; profitProtect -> "Shadow high-water profit protection is active"; else -> "Normal" })
+            when { hard -> "Shadow hard loss cap reached"; defensive -> "Shadow P&L entered the configured defensive loss band; new risk paused"; profitProtect -> "Shadow high-water profit protection is active"; else -> "Normal" })
     }
 
     private suspend fun liveRiskState(token: String, settings: AppSettings): RiskState {
@@ -2487,11 +2487,13 @@ class TradingRepository @Inject constructor(
         val total = live.totalPnl
         preferences.updateLivePeakPnl(total)
         val peak = preferences.settings.first().livePeakPnl
-        val hard = total <= -LIVE_EMERGENCY_TRIGGER
-        val defensive = total <= -SOFT_LOSS_LEVEL
+        val emergency = max(250.0, settings.maxDailyLossRupees * .90)
+        val hard = total <= -emergency
+        val defensiveLevel = min(SOFT_LOSS_LEVEL, settings.maxDailyLossRupees * .60)
+        val defensive = total <= -defensiveLevel
         val profitProtect = peak >= PROFIT_MILESTONE && total <= max(PROFIT_MILESTONE * .70, peak * .70)
         return RiskState(total, defensive, hard, profitProtect, !hard && !defensive && !profitProtect,
-            when { hard -> "App-only P&L is near the -₹2,500 hard cap; emergency risk reduction active"; defensive -> "App-only P&L is below -₹1,500; no new risk"; profitProtect -> "Profit high-water protection is active"; else -> "Normal" })
+            when { hard -> "App-only P&L is near the configured daily loss cap; emergency risk reduction active"; defensive -> "App-only P&L entered the configured defensive loss band; no new risk"; profitProtect -> "Profit high-water protection is active"; else -> "Normal" })
     }
 
     private suspend fun paperRiskAllowsNewTrade(token: String, settings: AppSettings, symbol: String): Boolean {
@@ -2636,14 +2638,14 @@ class TradingRepository @Inject constructor(
     )
 
     private fun riskStatus(s: AppSettings, currentPnl: Double, peakPnl: Double) = RiskStatusDto(
-        maxDailyLoss = HARD_LOSS_CAP,
-        softDailyLoss = SOFT_LOSS_LEVEL,
+        maxDailyLoss = s.maxDailyLossRupees.toDouble(),
+        softDailyLoss = min(SOFT_LOSS_LEVEL, s.maxDailyLossRupees * .60),
         profitMilestone = PROFIT_MILESTONE,
         riskPerTrade = max(150.0, s.dailyBudgetRupees * .005),
         maxExposure = s.dailyBudgetRupees.toDouble(),
         riskMode = when {
-            currentPnl <= -LIVE_EMERGENCY_TRIGGER -> "HARD STOP"
-            currentPnl <= -SOFT_LOSS_LEVEL -> "DEFENSIVE"
+            currentPnl <= -max(250.0, s.maxDailyLossRupees * .90) -> "HARD STOP"
+            currentPnl <= -min(SOFT_LOSS_LEVEL, s.maxDailyLossRupees * .60) -> "DEFENSIVE"
             peakPnl >= PROFIT_MILESTONE && currentPnl <= peakPnl * .70 -> "PROFIT PROTECT"
             currentPnl >= PROFIT_MILESTONE -> "MILESTONE+"
             else -> "NORMAL"
