@@ -29,6 +29,17 @@ data class FeatureSnapshot(
     val vwap: Double?,
     val ema9: Double?,
     val ema20: Double?,
+    val ema50: Double?,
+    val ema9Slope: Double?,
+    val ema20Slope: Double?,
+    val vwapSlope: Double?,
+    val macdHistogramSlope: Double?,
+    val rsiSlope: Double?,
+    val volumeAcceleration: Double?,
+    val greenVolumeShare: Double?,
+    val structureScore: Double?,
+    val sessionHighDistancePct: Double?,
+    val sessionLowDistancePct: Double?,
     val atr14: Double?,
     val rsi14: Double?,
     val bollWidth: Double?,
@@ -95,6 +106,35 @@ object LocalStrategyEngine {
         val (o15h, o15l) = openingRange(candles, 15, intervalMinutes)
         val bid = quote.bidPrice
         val ask = quote.offerPrice
+        val atrNow = atr(candles, 14)
+        val ema9Now = ema(closes, 9)
+        val ema20Now = ema(closes, 20)
+        val ema50Now = ema(closes, 50)
+        val ema9Prev = ema(closes.dropLast(1), 9)
+        val ema20Prev = ema(closes.dropLast(1), 20)
+        val vwapNow = vwap(candles)
+        val vwapPrev = vwap(candles.dropLast(1))
+        val macdNow = macdHistogram(closes)
+        val macdPrev = macdHistogram(closes.dropLast(1))
+        val rsiNow = rsi(closes, 14)
+        val rsiPrev = rsi(closes.dropLast(1), 14)
+        val recentVols = vols.dropLast(1).takeLast(3)
+        val volAccel = recentVols.takeIf { it.isNotEmpty() && it.average() > 0.0 }?.let { (vols.last() / it.average()) - 1.0 }
+        val recentStructure = candles.takeLast(4)
+        val structure = if (recentStructure.size >= 3) {
+            var up = 0; var down = 0
+            for (i in 1 until recentStructure.size) {
+                if (recentStructure[i].high > recentStructure[i-1].high) up++ else if (recentStructure[i].high < recentStructure[i-1].high) down++
+                if (recentStructure[i].low > recentStructure[i-1].low) up++ else if (recentStructure[i].low < recentStructure[i-1].low) down++
+            }
+            (up - down).toDouble() / (2.0 * (recentStructure.size - 1))
+        } else null
+        val recentTen = candles.takeLast(10)
+        val greenVol = recentTen.filter { it.close >= it.open }.sumOf { it.volume }
+        val redVol = recentTen.filter { it.close < it.open }.sumOf { it.volume }
+        val greenShare = if (greenVol + redVol > 0.0) greenVol / (greenVol + redVol) else null
+        val sessionHigh = candles.maxOfOrNull { it.high }
+        val sessionLow = candles.minOfOrNull { it.low }
         return FeatureSnapshot(
             ltp = ltp,
             bid = bid,
@@ -111,14 +151,25 @@ object LocalStrategyEngine {
                 val lo = quote.week52Low; val hi = quote.week52High
                 if (lo != null && hi != null && hi > lo) ((ltp - lo) / (hi - lo)).coerceIn(0.0, 1.0) else null
             },
-            vwap = vwap(candles),
-            ema9 = ema(closes, 9),
-            ema20 = ema(closes, 20),
-            atr14 = atr(candles, 14),
-            rsi14 = rsi(closes, 14),
+            vwap = vwapNow,
+            ema9 = ema9Now,
+            ema20 = ema20Now,
+            ema50 = ema50Now,
+            ema9Slope = if (ema9Now != null && ema9Prev != null && atrNow != null && atrNow > 0.0) (ema9Now - ema9Prev) / atrNow else null,
+            ema20Slope = if (ema20Now != null && ema20Prev != null && atrNow != null && atrNow > 0.0) (ema20Now - ema20Prev) / atrNow else null,
+            vwapSlope = if (vwapNow != null && vwapPrev != null && atrNow != null && atrNow > 0.0) (vwapNow - vwapPrev) / atrNow else null,
+            macdHistogramSlope = if (macdNow != null && macdPrev != null && atrNow != null && atrNow > 0.0) (macdNow - macdPrev) / atrNow else null,
+            rsiSlope = if (rsiNow != null && rsiPrev != null) rsiNow - rsiPrev else null,
+            volumeAcceleration = volAccel,
+            greenVolumeShare = greenShare,
+            structureScore = structure,
+            sessionHighDistancePct = sessionHigh?.takeIf { it > 0.0 }?.let { (it - ltp) / it * 100.0 },
+            sessionLowDistancePct = sessionLow?.takeIf { it > 0.0 }?.let { (ltp - it) / it * 100.0 },
+            atr14 = atrNow,
+            rsi14 = rsiNow,
             bollWidth = bollingerWidth(closes, 20),
-            macdHistogram = macdHistogram(closes),
-            trendSlopeAtr = trendSlopeAtr(closes, atr(candles, 14)),
+            macdHistogram = macdNow,
+            trendSlopeAtr = trendSlopeAtr(closes, atrNow),
             rvol = rv,
             donchianHigh = prevWindow.maxOfOrNull { it.high },
             donchianLow = prevWindow.minOfOrNull { it.low },
@@ -147,6 +198,14 @@ object LocalStrategyEngine {
             val sep = (f.ema9 - f.ema20) / atr
             votes += StrategyVote("EMA 9/20 trend", (sep * .9).coerceIn(-.8, .8), "EMA separation ${fmt(sep)} ATR")
         }
+        f.ema9Slope?.let { votes += StrategyVote("EMA9 slope", (it * 1.1).coerceIn(-.40,.40), "${fmt(it)} ATR/bar") }
+        f.ema20Slope?.let { votes += StrategyVote("EMA20 slope", (it * .9).coerceIn(-.35,.35), "${fmt(it)} ATR/bar") }
+        f.vwapSlope?.let { votes += StrategyVote("VWAP slope", (it * 1.0).coerceIn(-.35,.35), "${fmt(it)} ATR/bar") }
+        f.macdHistogramSlope?.let { votes += StrategyVote("MACD histogram acceleration", (it * .8).coerceIn(-.30,.30), "${fmt(it)} ATR/bar") }
+        f.rsiSlope?.let { votes += StrategyVote("RSI slope", (it / 20.0).coerceIn(-.25,.25), "delta RSI ${fmt(it)}") }
+        f.structureScore?.let { votes += StrategyVote("Higher-high / higher-low structure", (it * .45).coerceIn(-.45,.45), "structure ${fmt(it)}") }
+        f.volumeAcceleration?.let { votes += StrategyVote("Volume acceleration", (it * .20).coerceIn(-.25,.30), "volume change ${fmt(it)}") }
+        f.greenVolumeShare?.let { votes += StrategyVote("Green/red volume balance", ((it - .5) * .70).coerceIn(-.35,.35), "green share ${fmt(it * 100)}%") }
         if (f.orb5High != null && px > f.orb5High && rv > 1.15) votes += StrategyVote("5-min opening range breakout", .55, "ORB5 + RVOL")
         if (f.orb15High != null && px > f.orb15High && rv > 1.10) votes += StrategyVote("15-min opening range breakout", .45, "ORB15 + RVOL")
         if (f.donchianHigh != null && px > f.donchianHigh && rv > 1.10) votes += StrategyVote("Donchian breakout", .50, "short-window high")
@@ -206,6 +265,14 @@ object LocalStrategyEngine {
             val sep = (f.ema20 - f.ema9) / atr
             votes += StrategyVote("EMA 9/20 bear trend", (sep * .9).coerceIn(-.8, .8), "bear separation ${fmt(sep)} ATR")
         }
+        f.ema9Slope?.let { votes += StrategyVote("EMA9 bear slope", (-it * 1.1).coerceIn(-.40,.40), "${fmt(it)} ATR/bar") }
+        f.ema20Slope?.let { votes += StrategyVote("EMA20 bear slope", (-it * .9).coerceIn(-.35,.35), "${fmt(it)} ATR/bar") }
+        f.vwapSlope?.let { votes += StrategyVote("VWAP bear slope", (-it * 1.0).coerceIn(-.35,.35), "${fmt(it)} ATR/bar") }
+        f.macdHistogramSlope?.let { votes += StrategyVote("MACD histogram downside acceleration", (-it * .8).coerceIn(-.30,.30), "${fmt(it)} ATR/bar") }
+        f.rsiSlope?.let { votes += StrategyVote("RSI bear slope", (-it / 20.0).coerceIn(-.25,.25), "delta RSI ${fmt(it)}") }
+        f.structureScore?.let { votes += StrategyVote("Lower-high / lower-low structure", (-it * .45).coerceIn(-.45,.45), "structure ${fmt(it)}") }
+        f.volumeAcceleration?.let { votes += StrategyVote("Volume acceleration", (it * .20).coerceIn(-.25,.30), "volume change ${fmt(it)}") }
+        f.greenVolumeShare?.let { votes += StrategyVote("Red/green volume balance", ((.5 - it) * .70).coerceIn(-.35,.35), "green share ${fmt(it * 100)}%") }
         if (f.orb5Low != null && px < f.orb5Low && rv > 1.15) votes += StrategyVote("5-min opening range breakdown", .55, "ORB5 + RVOL")
         if (f.orb15Low != null && px < f.orb15Low && rv > 1.10) votes += StrategyVote("15-min opening range breakdown", .45, "ORB15 + RVOL")
         if (f.donchianLow != null && px < f.donchianLow && rv > 1.10) votes += StrategyVote("Donchian breakdown", .50, "short-window low")
