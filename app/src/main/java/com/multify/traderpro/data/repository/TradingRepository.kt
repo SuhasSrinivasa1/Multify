@@ -45,7 +45,6 @@ import com.multify.traderpro.data.network.LearningStatsDto
 import com.multify.traderpro.data.network.ForecastDto
 import com.multify.traderpro.data.network.ResearchDto
 import com.multify.traderpro.data.network.StrategyInsightDto
-import com.multify.traderpro.data.network.WaveSignalDto
 import com.multify.traderpro.data.network.WaveStatDto
 import com.multify.traderpro.data.network.TokenRequest
 import com.multify.traderpro.data.preferences.AppPreferences
@@ -59,10 +58,7 @@ import com.multify.traderpro.engine.BudgetAllocator
 import com.multify.traderpro.engine.FixedCapitalPolicy
 import com.multify.traderpro.engine.AdaptiveLearningMath
 import com.multify.traderpro.engine.LocalStrategyEngine
-import com.multify.traderpro.engine.MarketTrajectoryMath
 import com.multify.traderpro.engine.StrategyEvaluation
-import com.multify.traderpro.engine.WaveDirectionDecision
-import com.multify.traderpro.engine.WaveDirectionMath
 import com.multify.traderpro.engine.WavePivotMath
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -574,7 +570,6 @@ class TradingRepository @Inject constructor(
                 )
             }
             val waveStats = waveStats()
-            val waveSignals = buildLiveWaveSignals(token, settings, learning)
             val main = if (settings.liveExecutionEffective) live else shadow
             if (settings.liveExecutionEffective) {
                 preferences.updateLivePeakPnl(main.totalPnl)
@@ -615,7 +610,6 @@ class TradingRepository @Inject constructor(
                 research = latestResearch,
                 strategyInsights = strategyInsights,
                 waveStats = waveStats,
-                waveSignals = waveSignals,
                 positions = main.positions,
                 recentDecisions = recent
             )
@@ -1024,7 +1018,7 @@ class TradingRepository @Inject constructor(
      * - net green after estimated costs -> exit and release focus/capital for the new call;
      * - net red -> keep the broker protection/monitoring alive, but stop adding exposure, flipping and
      *   strategy churn for that symbol for the rest of the call cycle;
-     * - wave 2+ positions may continue as one secondary symbol. Any additional wave 2+ symbol is
+     * - later-wave positions may continue as one secondary symbol. Any additional later-wave symbol is
      *   converted to prediction-only so the engine concentrates on at most two actively-managed names.
      *
      * "Do not monitor" therefore means no new trading decisions. Safety/OCO/trailing reconciliation
@@ -1070,9 +1064,9 @@ class TradingRepository @Inject constructor(
             if (!keptSecondary) {
                 keptSecondary = true
                 if (p.regime == REGIME_SECONDARY_PREVIEW) {
-                    managedDao.updatePosition(p.copy(regime = "WAVE_ACTIVE", lastEvaluatedAtMs = System.currentTimeMillis()))
+                    managedDao.updatePosition(p.copy(regime = "PIVOT_ACTIVE", lastEvaluatedAtMs = System.currentTimeMillis()))
                 }
-                auditLogger.log("PRIORITY", "SECONDARY_WAVE_CONTINUES", mapOf(
+                auditLogger.log("PRIORITY", "SECONDARY_PIVOT_CONTINUES", mapOf(
                     "symbol" to p.symbol, "new_symbol" to newSymbol, "wave" to (p.addCount + 1)
                 ))
             } else {
@@ -1272,42 +1266,6 @@ class TradingRepository @Inject constructor(
         }
         auditLogger.log("SIGNAL", "MANUAL_SIGNAL", mapOf("event_id" to id, "symbol" to normalizedSymbol, "action" to normalizedAction, "observed_price" to observedPrice))
         return id
-    }
-
-    private suspend fun buildLiveWaveSignals(token: String, settings: AppSettings, learning: LearningStatsDto): List<WaveSignalDto> {
-        val candidates = managedDao.openPositions()
-            .filter { it.engine == ENGINE_INTRADAY }
-            .sortedByDescending { it.openedAtMs }
-            .take(2)
-        return candidates.mapNotNull { p ->
-            runCatching {
-                val (decision, longEval, _) = assessAutoWave(p.symbol, token, p.side, FixedCapitalPolicy.cap(p.campaignBudget, p.capitalDeployed, p.entryPrice * p.quantity))
-                val nextWave = (p.addCount + 2).coerceIn(2, WaveDirectionMath.MAX_WAVES)
-                val executeEligible = nextWave <= settings.activeWaveCount.toInt() &&
-                    p.regime != REGIME_RECOVERY_HOLD && p.regime != REGIME_SECONDARY_PREVIEW
-                WaveSignalDto(
-                    symbol = p.symbol,
-                    currentSide = p.side,
-                    nextWave = nextWave,
-                    triggerDistancePct = (nextWave - 1) * WaveDirectionMath.WAVE_FRACTION * 100.0,
-                    greenSide = decision.action,
-                    longProbability = decision.longProbability,
-                    shortProbability = decision.shortProbability,
-                    executionMode = if (executeEligible) "AUTO_ELIGIBLE" else "PREVIEW_ONLY",
-                    focusState = when (p.regime) {
-                        REGIME_RECOVERY_HOLD -> "RECOVERY_HOLD"
-                        REGIME_SECONDARY_PREVIEW -> "SECONDARY_PREVIEW"
-                        else -> if (p.addCount == 0) "FIRST_WAVE_PRIORITY" else "SECONDARY_ACTIVE"
-                    },
-                    firstWaveMode = settings.firstWaveMode,
-                    learnedLongAveragePct = learning.longAveragePct,
-                    learnedShortRetracementPct = learning.shortRetracementPct,
-                    reason = decision.reason + " · LTP ₹${fmt(longEval.features.ltp)}"
-                )
-            }.onFailure {
-                auditLogger.log("AUTO_WAVE", "LIVE_TABLE_PREVIEW_ERROR", mapOf("symbol" to p.symbol, "message" to (it.message ?: "")))
-            }.getOrNull()
-        }
     }
 
     private suspend fun handleBuyRelease(eventId: Long, signal: ParsedSignal, token: String, settings: AppSettings) {
@@ -1641,127 +1599,6 @@ class TradingRepository @Inject constructor(
         managedDao.updatePosition(short.copy(smartOrderId = smart))
     }
 
-    private suspend fun assessAutoWave(symbol: String, token: String, currentSide: String, exposureRupees: Double): Triple<WaveDirectionDecision, StrategyEvaluation, StrategyEvaluation> {
-        val auth = bearer(token)
-        val quote = apiFactory.groww.quote(auth, tradingSymbol = symbol).requirePayload("Wave quote $symbol")
-        val now = ZonedDateTime.now(INDIA)
-        val start = now.toLocalDate().atTime(9, 15).format(HIST_FORMAT)
-        val end = now.toLocalDateTime().format(HIST_FORMAT)
-        var intervalMinutes = 5
-        var historical = apiFactory.groww.historicalCandles(
-            authorization = auth, growwSymbol = "NSE-$symbol", startTime = start, endTime = end, candleInterval = "5minute"
-        ).requirePayload("Wave candles $symbol")
-        if (now.toLocalTime().isBefore(LocalTime.of(9, 40)) || historical.candles.size < 5) {
-            intervalMinutes = 1
-            historical = apiFactory.groww.historicalCandles(
-                authorization = auth, growwSymbol = "NSE-$symbol", startTime = start, endTime = end, candleInterval = "1minute"
-            ).requirePayload("Wave 1-minute candles $symbol")
-        }
-        require(historical.candles.size >= 3) { "Not enough candles for wave direction" }
-        val features = LocalStrategyEngine.buildFeatures(quote, historical, intervalMinutes)
-        val synthetic = ParsedSignal(SignalType.TRADE_RELEASE, symbol = symbol, rawText = "auto-wave-neutral", confidence = 1.0)
-        // Deliberately remove Multify BUY/SELL event priors here. From wave 2 onward the market path decides the side.
-        val longEval = LocalStrategyEngine.evaluateLong(synthetic, features, includeEventPrior = false)
-        val shortEval = LocalStrategyEngine.evaluateShort(features, includeEventPrior = false)
-        val trajectory = MarketTrajectoryMath.classify(
-            features = features, longScore = longEval.directionalScore, shortScore = shortEval.directionalScore
-        )
-        val rawDecision = WaveDirectionMath.decide(
-            currentSide = currentSide, exposureRupees = max(exposureRupees, features.ltp), price = features.ltp,
-            atr = features.atr14 ?: max(features.ltp * .004, .05), spreadBps = features.spreadBps,
-            longDirectionalScore = longEval.directionalScore, longConfidence = longEval.confidence,
-            shortDirectionalScore = shortEval.directionalScore, shortConfidence = shortEval.confidence
-        )
-        // In a clean trend, do not let a marginal counter-trend wave vote override the broader trajectory.
-        // In OSCILLATING mode both sides remain eligible at different waves; the current snapshot still chooses only one side.
-        val decision = if (trajectory.regime != "OSCILLATING" && rawDecision.action != "HOLD" && rawDecision.action != trajectory.preferredSide && trajectory.confidence >= .66) {
-            rawDecision.copy(action = "HOLD", reason = "Trajectory veto: ${trajectory.reason}; raw=${rawDecision.reason}")
-        } else rawDecision.copy(reason = "${rawDecision.reason}; ${trajectory.reason}")
-        auditLogger.log("AUTO_WAVE", "DIRECTION_DECISION", mapOf(
-            "symbol" to symbol, "current_side" to currentSide, "action" to decision.action,
-            "long_probability" to decision.longProbability, "short_probability" to decision.shortProbability,
-            "long_ev_rupees" to decision.longExpectedValueRupees, "short_ev_rupees" to decision.shortExpectedValueRupees,
-            "ev_gap_rupees" to decision.expectedValueGapRupees, "reason" to decision.reason,
-            "ltp" to features.ltp, "vwap" to features.vwap, "ema9" to features.ema9, "ema20" to features.ema20,
-            "atr14" to features.atr14, "rsi14" to features.rsi14, "rvol" to features.rvol,
-            "macd_histogram" to features.macdHistogram, "trend_slope_atr" to features.trendSlopeAtr,
-            "order_book_imbalance" to features.orderBookImbalance, "day_change_pct" to features.dayChangePct,
-            "market_cap" to features.marketCap, "range_52_position" to features.range52Position,
-            "trajectory_regime" to trajectory.regime, "trajectory_score" to trajectory.composite,
-            "trajectory_waveiness" to trajectory.waveiness, "trajectory_preferred" to trajectory.preferredSide
-        ))
-        return Triple(decision, longEval, shortEval)
-    }
-
-    private suspend fun applyAutoWaveDecision(
-        token: String, position: ManagedPositionEntity, ltp: Double, waveIndex: Int, risk: RiskState
-    ): ManagedPositionEntity? {
-        val waveNumber = waveIndex + 1 // wave 1 is the initial Multify entry; ±2% is wave 2.
-        val (decision, longEval, shortEval) = assessAutoWave(position.symbol, token, position.side, FixedCapitalPolicy.cap(position.campaignBudget, position.capitalDeployed, position.entryPrice * position.quantity))
-        val chosen = if (decision.action == "SHORT") shortEval else longEval
-        val processed = position.copy(addCount = waveIndex, lastEvaluatedAtMs = System.currentTimeMillis())
-        val fixedCapitalCap = FixedCapitalPolicy.cap(position.campaignBudget, position.capitalDeployed, position.entryPrice * position.quantity)
-
-        if (decision.action == "HOLD") {
-            managedDao.updatePosition(processed)
-            auditLogger.log("AUTO_WAVE", "HOLD", mapOf("symbol" to position.symbol, "wave" to waveNumber, "ltp" to ltp, "reason" to decision.reason))
-            return processed
-        }
-        if (!risk.allowNewRisk) {
-            managedDao.updatePosition(processed)
-            auditLogger.log("AUTO_WAVE", "RISK_VETO", mapOf("symbol" to position.symbol, "wave" to waveNumber, "wanted" to decision.action, "reason" to risk.reason))
-            return processed
-        }
-
-        if (decision.action.equals(position.side, true)) {
-            val updated = processed.copy(
-                strategy = "AUTO wave $waveNumber continuation · ${chosen.strategy}",
-                regime = chosen.regime,
-                confidence = decision.confidence
-            )
-            managedDao.updatePosition(updated)
-            auditLogger.log("AUTO_WAVE", "SAME_SIDE_HOLD_FIXED_CAPITAL", mapOf(
-                "symbol" to position.symbol, "wave" to waveNumber, "side" to position.side,
-                "fixed_capital_cap" to fixedCapitalCap, "capital_added" to 0.0, "decision" to decision.reason
-            ))
-            return updated
-        }
-
-        // Opposite side won decisively. Flatten first, then reopen only within the existing fixed capital cap.
-        val anchor = position.anchorPrice.takeIf { it > 0.0 } ?: position.entryPrice
-        val entryPx = chosen.features.ltp
-        val atr = chosen.features.atr14 ?: max(entryPx * .004, .05)
-        val stopPx = if (decision.action == "LONG") max(.05, entryPx - atr * .95) else entryPx + atr * .95
-        val targetPx = if (decision.action == "LONG") entryPx + atr * 1.55 else max(.05, entryPx - atr * 1.55)
-        val allocation = BudgetAllocator.allocate(
-            fixedCapitalCap, decision.confidence, entryPx, abs(entryPx - stopPx), abs(targetPx - entryPx), 0
-        )
-        if (!allocation.allowed) {
-            managedDao.updatePosition(processed)
-            auditLogger.log("AUTO_WAVE", "FLIP_REJECTED_FIXED_CAPITAL", mapOf(
-                "symbol" to position.symbol, "wave" to waveNumber, "wanted" to decision.action,
-                "fixed_capital_cap" to fixedCapitalCap, "reason" to allocation.reason
-            ))
-            return processed
-        }
-
-        closeManaged(token, position, ltp, "AUTO_WAVE_${waveNumber}_FLIP_TO_${decision.action}")
-        val refreshed = preferences.settings.first()
-        val after = liveRiskState(token, refreshed)
-        if (!after.allowNewRisk || !refreshed.liveExecutionEffective) return null
-        assertNoExternalMisConflict(token, position.symbol)
-        openManagedReversal(
-            token, position, decision.action, allocation.quantity, entryPx, stopPx, targetPx, chosen,
-            waveAnchor = anchor, waveIndex = waveIndex, campaignBudget = fixedCapitalCap
-        )
-        val reopened = managedDao.openPosition(ENGINE_INTRADAY, position.symbol)
-        auditLogger.log("AUTO_WAVE", "ONE_SIDE_FLIP_FIXED_CAPITAL", mapOf(
-            "symbol" to position.symbol, "wave" to waveNumber, "from" to position.side, "to" to decision.action,
-            "fixed_capital_cap" to fixedCapitalCap, "capital_added" to 0.0, "decision" to decision.reason
-        ))
-        return reopened
-    }
-
     private suspend fun analyze(
         symbol: String, token: String, longSide: Boolean, signal: ParsedSignal, eventId: Long? = null, includeEventPrior: Boolean = true
     ): StrategyEvaluation {
@@ -1871,7 +1708,7 @@ class TradingRepository @Inject constructor(
             when {
                 it.addCount <= 0 && it.regime != REGIME_RECOVERY_HOLD -> 0 // active first wave: highest priority
                 it.regime == REGIME_RECOVERY_HOLD -> 2               // safety-only recovery hold
-                else -> 1                                             // wave 2+ secondary
+                else -> 1                                             // later-wave secondary
             }
         }.thenBy { it.openedAtMs })
         for (position in ordered) runCatching { monitorOneManaged(position, token, settings, now, misRisk) }
@@ -2013,26 +1850,8 @@ class TradingRepository @Inject constructor(
             return
         }
         val tradingDecisionsEnabled = updated.regime != REGIME_RECOVERY_HOLD && updated.regime != REGIME_SECONDARY_PREVIEW
-        if (updated.engine == ENGINE_INTRADAY && tradingDecisionsEnabled) {
-            val anchor = updated.anchorPrice.takeIf { it > 0.0 } ?: updated.entryPrice
-            val waveIndex = WaveDirectionMath.waveIndex(anchor, ltp)
-            if (waveIndex >= 1 && waveIndex > updated.addCount) {
-                val waveNumber = waveIndex + 1
-                if (waveNumber > settings.activeWaveCount.toInt()) {
-                    val (preview, _, _) = assessAutoWave(updated.symbol, token, updated.side, FixedCapitalPolicy.cap(updated.campaignBudget, updated.capitalDeployed, updated.entryPrice * updated.quantity))
-                    auditLogger.log("AUTO_WAVE", "PREVIEW_ONLY", mapOf(
-                        "symbol" to updated.symbol, "wave" to waveNumber, "configured_waves" to settings.activeWaveCount,
-                        "green_side" to preview.action, "long_probability" to preview.longProbability,
-                        "short_probability" to preview.shortProbability, "reason" to preview.reason
-                    ))
-                    updated = updated.copy(addCount = waveIndex, lastEvaluatedAtMs = System.currentTimeMillis())
-                    managedDao.updatePosition(updated)
-                } else {
-                    val afterWave = applyAutoWaveDecision(token, updated, ltp, waveIndex, risk) ?: return
-                    updated = afterWave
-                }
-            }
-        }
+        // Wave progression is owned exclusively by the persistent v4.4 pivot campaign engine.
+        // Position size is never increased at a wave boundary.
         if (System.currentTimeMillis() - updated.openedAtMs < 75_000L) return
         val synthetic = ParsedSignal(SignalType.TRADE_RELEASE, symbol = updated.symbol, rawText = "live-monitor", confidence = 1.0)
         val same = analyze(updated.symbol, token, longSide = updated.side == "LONG", signal = synthetic)
