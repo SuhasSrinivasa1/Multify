@@ -185,13 +185,13 @@ class TradingRepository @Inject constructor(
             if (c.entryPrice > 0.0) (target - c.entryPrice) / c.entryPrice * 100.0 else null
         }
         val longValues = rolling.mapNotNull(::targetPct).filter { it > 0.0 && it < 25.0 }
-        val sorted = longValues.sorted()
-        val longAvg = if (longValues.isEmpty()) DEFAULT_LONG_TARGET_PCT else longValues.average()
-        val longMedian = when {
-            sorted.isEmpty() -> DEFAULT_LONG_TARGET_PCT
-            sorted.size % 2 == 1 -> sorted[sorted.size / 2]
-            else -> (sorted[sorted.size/2 - 1] + sorted[sorted.size/2]) / 2.0
-        }
+        val longAvg = AdaptiveLearningMath.rollingMean(longValues, DEFAULT_LONG_TARGET_PCT)
+        val longMedian = AdaptiveLearningMath.median(longValues, DEFAULT_LONG_TARGET_PCT)
+        val longTrimmed = AdaptiveLearningMath.trimmedMean(longValues, DEFAULT_LONG_TARGET_PCT)
+        val datedLong = rolling.sortedBy { it.callDate }.mapNotNull(::targetPct).filter { it > 0.0 && it < 25.0 }
+        val longEwma = AdaptiveLearningMath.ewma(datedLong, DEFAULT_LONG_TARGET_PCT)
+        val longP25 = AdaptiveLearningMath.quantile(longValues, .25, DEFAULT_LONG_TARGET_PCT)
+        val longP75 = AdaptiveLearningMath.quantile(longValues, .75, DEFAULT_LONG_TARGET_PCT)
         val seed3m = calls.filter { it.source == "SEED" }.mapNotNull(::targetPct).filter { it > 0.0 }.let {
             if (it.isEmpty()) UPLOADED_THREE_MONTH_TARGET_PCT else it.average()
         }
@@ -207,6 +207,10 @@ class TradingRepository @Inject constructor(
             rollingCalls = rolling.size,
             longAveragePct = longAvg,
             longMedianPct = longMedian,
+            longTrimmedMeanPct = longTrimmed,
+            longEwmaPct = longEwma,
+            longP25Pct = longP25,
+            longP75Pct = longP75,
             seededThreeMonthAveragePct = seed3m,
             liveCompletedCalls = calls.count { it.source == "LIVE" && it.longRealizedPct != null },
             shortObservedCalls = shortRows.size,
@@ -441,6 +445,13 @@ class TradingRepository @Inject constructor(
             }
         }
         val selectorAccuracy = if (evaluated.isEmpty()) 0.0 else correct.toDouble() / evaluated.size * 100.0
+        val regimeSummary = evaluated.groupBy { it.first.regime }.entries
+            .sortedByDescending { it.value.size }
+            .take(5)
+            .joinToString("; ") { (regime, rows) ->
+                val net = rows.sumOf { it.second.selectedNetRupees }
+                "$regime n=${rows.size} net ₹${fmt(net)}"
+            }
         val report = buildString {
             append("Rolling 30-trading-day long reference: ${fmt(stats.longAveragePct)}% (median ${fmt(stats.longMedianPct)}%). ")
             append("Short retracement target: ${fmt(stats.shortRetracementPct)}% of preceding long move; ${stats.shortObservedCalls} learned observations. ")
@@ -448,6 +459,7 @@ class TradingRepository @Inject constructor(
             if (best != null) append("Best shadow strategy today: ${best.first} with net ₹${fmt(best.second)}. ")
             if (shadowTrades.isEmpty()) append("No closed shadow trades yet; next session remains a data-collection priority. ")
             append("Adaptive Wave selector: ${evaluated.size} evaluated checkpoints, net ₹${fmt(selectorNet)} vs old automatic-LONG counterfactual ₹${fmt(autoAverageNet)}, selector accuracy ${fmt(selectorAccuracy)}%. ")
+            if (regimeSummary.isNotBlank()) append("Regime results: $regimeSummary. ")
             append("Champion remains unchanged intraday; challengers require repeated out-of-sample improvement before promotion.")
         }
         val entity = ResearchReportEntity(reportDate=today, generatedAtMs=System.currentTimeMillis(), title="After-market strategy review", summary=report)
@@ -515,6 +527,12 @@ class TradingRepository @Inject constructor(
             "max_single_stock_loss" to maxSingleStockLoss
         ))
     }
+
+    suspend fun recordListenerConnected() = preferences.recordListenerConnected()
+    suspend fun recordListenerReconnect() = preferences.recordListenerReconnect()
+    suspend fun recordNotificationReceived() = preferences.recordNotification()
+    suspend fun recordEventProcessingLatency(latencyMs: Long) = preferences.recordEventLatency(latencyMs)
+    suspend fun recordServiceHeartbeat() = preferences.recordServiceHeartbeat()
 
     fun hasBrokerCredentials(): Boolean = secretStore.hasApiKey() && secretStore.hasTotpSecret()
     fun hasAccessToken(): Boolean = secretStore.hasAccessToken()
@@ -647,14 +665,23 @@ class TradingRepository @Inject constructor(
                 strategyInsights = strategyInsights,
                 waveStats = waveStats,
                 adaptiveWaves = adaptiveWaves,
-                health = EngineHealthDto(
-                    listener = "CONNECTED_OR_SYSTEM_MANAGED",
-                    broker = "CONNECTED",
-                    marketData = if (adaptiveWaves.any { it.dataAgeMs > MAX_MARKET_DATA_AGE_MS }) "STALE" else "FRESH",
-                    symbolMaster = if (nseSymbols.isStale()) "STALE" else "FRESH",
-                    foregroundService = "NOTIFICATION_LISTENER_ACTIVE_WHEN_BOUND",
-                    marketDataAgeMs = adaptiveWaves.maxOfOrNull { it.dataAgeMs } ?: 0L
-                ),
+                health = run {
+                    val nowMs = System.currentTimeMillis()
+                    val heartbeatAge = if (settings.serviceHeartbeatAtMs > 0) nowMs - settings.serviceHeartbeatAtMs else Long.MAX_VALUE
+                    val dataAge = if (settings.lastMarketDataAtMs > 0) nowMs - settings.lastMarketDataAtMs else Long.MAX_VALUE
+                    EngineHealthDto(
+                        listener = if (heartbeatAge <= 30_000L) "HEALTHY" else "UNHEALTHY",
+                        broker = "CONNECTED",
+                        marketData = if (dataAge <= MAX_MARKET_DATA_AGE_MS * 3) "FRESH" else "STALE",
+                        symbolMaster = if (nseSymbols.isStale()) "STALE" else "FRESH",
+                        foregroundService = if (heartbeatAge <= 30_000L) "RUNNING" else "NOT_HEARTBEATING",
+                        lastNotificationAtMs = settings.lastNotificationAtMs,
+                        reconnectCount = settings.listenerReconnectCount,
+                        lastReconnectAtMs = settings.lastListenerReconnectAtMs,
+                        lastEventProcessingLatencyMs = settings.lastEventProcessingLatencyMs,
+                        marketDataAgeMs = dataAge
+                    )
+                },
                 positions = main.positions,
                 recentDecisions = recent
             )
@@ -1297,6 +1324,7 @@ class TradingRepository @Inject constructor(
                     .requirePayload("Adaptive wave quote " + campaign.symbol)
                 val ltp = quote.lastPrice ?: return@runCatching
                 val snapshotAt = System.currentTimeMillis()
+                preferences.recordMarketData(snapshotAt)
                 val requested = WaveCapitalPolicy.triggeredWave(campaign.startPrice, ltp, settings.waveSpacingPercent, settings.waveCount)
                 val previous = learningDao.waveDecisionsForCampaign(campaign.id)
                 val lastWave = previous.maxOfOrNull { it.waveNumber } ?: 1
@@ -1515,6 +1543,17 @@ class TradingRepository @Inject constructor(
                 val price = apiFactory.groww.quote(bearer(token), tradingSymbol = outcome.symbol)
                     .requirePayload("Counterfactual quote " + outcome.symbol).lastPrice ?: return@runCatching
                 val qty = floor(max(1.0, decision.waveCapitalRupees) / outcome.entryPrice).toInt().coerceAtLeast(1)
+                val elapsedSeconds = ((now - decision.triggerAtMs) / 1000L).coerceAtLeast(0L)
+                val phase = "WAVE_DECISION"
+                val sampledOffsets = learningDao.observationsForEventPhase(-decision.id, phase).map { it.offsetSeconds }.toSet()
+                WAVE_OUTCOME_OFFSETS_SECONDS.filter { elapsedSeconds >= it && it !in sampledOffsets }.forEach { offset ->
+                    learningDao.insertObservation(
+                        PriceObservationEntity(
+                            eventId = -decision.id, symbol = outcome.symbol, phase = phase, offsetSeconds = offset,
+                            observedAtMs = now, price = price
+                        )
+                    )
+                }
                 val longPnl = calculatePnl("LONG", qty, outcome.entryPrice, price).net
                 val shortPnl = calculatePnl("SHORT", qty, outcome.entryPrice, price).net
                 val selected = when (decision.selectedDirection) { "LONG" -> longPnl; "SHORT" -> shortPnl; else -> 0.0 }
@@ -2665,6 +2704,7 @@ class TradingRepository @Inject constructor(
         private const val MANUAL_SOURCE = "com.multify.traderpro.manual"
         private const val MAX_MARKET_DATA_AGE_MS = 5_000L
         private const val COUNTERFACTUAL_WINDOW_MS = 30L * 60L * 1000L
+        private val WAVE_OUTCOME_OFFSETS_SECONDS = listOf(15, 30, 60, 120, 300, 600, 900, 1800)
         // Supplied workbook (2026-06-30 through 2026-09-30 BUY calls): entry-to-target mean = 3.68097%.
         private const val UPLOADED_THREE_MONTH_TARGET_PCT = 3.680970873786408
         // Rolling newest 30 recommendation trading dates after the appended Oct 1/Oct 5 records.

@@ -424,6 +424,9 @@ private fun DashboardScreen(
                         KeyValueRow("Market data", dashboard.health.marketData)
                         KeyValueRow("Symbol master", dashboard.health.symbolMaster)
                         KeyValueRow("Execution service", dashboard.health.foregroundService)
+                        KeyValueRow("Reconnect count", dashboard.health.reconnectCount.toString())
+                        KeyValueRow("Last event latency", if (dashboard.health.lastEventProcessingLatencyMs > 0) "${dashboard.health.lastEventProcessingLatencyMs} ms" else "No event yet")
+                        KeyValueRow("Market-data age", if (dashboard.health.marketDataAgeMs < Long.MAX_VALUE / 2) "${dashboard.health.marketDataAgeMs} ms" else "No fresh quote")
                     }
                 }
             }
@@ -863,7 +866,11 @@ private fun ForecastScreen(state: TraderUiState, onGenerate: () -> Unit, onResea
             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha=.28f)), shape = RoundedCornerShape(18.dp)) {
                 Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
                     Text("Current learned targets", fontWeight = FontWeight.SemiBold)
-                    KeyValueRow("Long profit target", String.format(Locale.US, "%.2f%%", learned.longAveragePct))
+                    KeyValueRow("Long mean", String.format(Locale.US, "%.2f%%", learned.longAveragePct))
+                    KeyValueRow("Long median", String.format(Locale.US, "%.2f%%", learned.longMedianPct))
+                    KeyValueRow("Long trimmed mean", String.format(Locale.US, "%.2f%%", learned.longTrimmedMeanPct))
+                    KeyValueRow("Long EWMA", String.format(Locale.US, "%.2f%%", learned.longEwmaPct))
+                    KeyValueRow("Long P25 / P75", String.format(Locale.US, "%.2f%% / %.2f%%", learned.longP25Pct, learned.longP75Pct))
                     KeyValueRow("Short move capture", String.format(Locale.US, "%.0f%% of prior long move", learned.shortRetracementPct))
                     Text("Long target rolls over the latest 30 recommendation trading days using Multify entry-to-target %. Short learning uses reconstructed history when Groww data is available plus live post-sell observations; 100% is the hard maximum.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }

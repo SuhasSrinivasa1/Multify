@@ -60,11 +60,13 @@ class MultifyNotificationListenerService : NotificationListenerService() {
     override fun onListenerConnected() {
         super.onListenerConnected()
         auditLogger.log("RUNTIME", "NOTIFICATION_LISTENER_CONNECTED")
+        scope.launch { repository.recordListenerConnected() }
         notifyStatus("Signal capture active", "Listening for paid Multify equity notifications · shadow + app-owned live monitors ready")
         if (shadowMonitorJob?.isActive != true) {
             shadowMonitorJob = scope.launch {
                 runCatching { repository.ensureHistoricalSeed() }
                 while (isActive) {
+                    runCatching { repository.recordServiceHeartbeat() }
                     val shadowCount = runCatching { repository.monitorShadowPositions() }.getOrDefault(0)
                     val managedCount = runCatching { repository.monitorManagedPositions() }.getOrDefault(0)
                     val learningCount = runCatching { repository.monitorLearningObservations() }.getOrDefault(0)
@@ -87,6 +89,7 @@ class MultifyNotificationListenerService : NotificationListenerService() {
     override fun onListenerDisconnected() {
         super.onListenerDisconnected()
         auditLogger.log("RUNTIME", "NOTIFICATION_LISTENER_DISCONNECTED")
+        scope.launch { repository.recordListenerReconnect() }
         // Vivo/Funtouch OS can aggressively reclaim background components. Ask Android to
         // re-bind the notification listener instead of waiting for the app to be reopened.
         runCatching { requestRebind(android.content.ComponentName(this, MultifyNotificationListenerService::class.java)) }
@@ -128,6 +131,7 @@ class MultifyNotificationListenerService : NotificationListenerService() {
                 )
             )
             if (id <= 0L) return@launch
+            repository.recordNotificationReceived()
             auditLogger.log("SIGNAL", "CAPTURED", mapOf(
                 "event_id" to id, "signal_type" to parsed.type.name, "symbol" to parsed.symbol,
                 "source_package" to sbn.packageName, "parser_confidence" to parsed.confidence
@@ -145,7 +149,9 @@ class MultifyNotificationListenerService : NotificationListenerService() {
             val critical = parsed.type == SignalType.TRADE_RELEASE || parsed.type == SignalType.BOOK_PROFIT
             val executor = if (critical) priorityScope else scope
             executor.launch {
+                val processStarted = System.currentTimeMillis()
                 val processed = runCatching { repository.processEvent(id) }
+                runCatching { repository.recordEventProcessingLatency(System.currentTimeMillis() - processStarted) }
                 if (processed.isFailure) enqueueForward(id)
                 if (critical) {
                     scope.launch { runCatching { repository.sampleSignal(id) } }

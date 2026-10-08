@@ -47,7 +47,13 @@ data class AppSettings(
     val waveCapitalRupees: Long = 5_000L,
     val maxCampaignCapitalRupees: Long = 200_000L,
     val maxDailyLossRupees: Long = 2_500L,
-    val maxSingleStockLossRupees: Long = 1_500L
+    val maxSingleStockLossRupees: Long = 1_500L,
+    val lastNotificationAtMs: Long = 0L,
+    val listenerReconnectCount: Long = 0L,
+    val lastListenerReconnectAtMs: Long = 0L,
+    val lastEventProcessingLatencyMs: Long = 0L,
+    val serviceHeartbeatAtMs: Long = 0L,
+    val lastMarketDataAtMs: Long = 0L
 ) {
     val minLiveConfidence: Double get() = minLiveConfidenceBps / 10_000.0
     val shadowPeakPnl: Double get() = if (shadowPeakPnlDate == LocalDate.now().toString()) shadowPeakPnlPaise / 100.0 else 0.0
@@ -102,6 +108,12 @@ class AppPreferences @Inject constructor(
         val maxCampaignCapitalRupees = longPreferencesKey("max_campaign_capital_rupees")
         val maxDailyLossRupees = longPreferencesKey("max_daily_loss_rupees")
         val maxSingleStockLossRupees = longPreferencesKey("max_single_stock_loss_rupees")
+        val lastNotificationAtMs = longPreferencesKey("last_notification_at_ms")
+        val listenerReconnectCount = longPreferencesKey("listener_reconnect_count")
+        val lastListenerReconnectAtMs = longPreferencesKey("last_listener_reconnect_at_ms")
+        val lastEventProcessingLatencyMs = longPreferencesKey("last_event_processing_latency_ms")
+        val serviceHeartbeatAtMs = longPreferencesKey("service_heartbeat_at_ms")
+        val lastMarketDataAtMs = longPreferencesKey("last_market_data_at_ms")
     }
 
     val settings: Flow<AppSettings> = context.dataStore.data.map { p -> p.toSettings() }
@@ -203,6 +215,33 @@ class AppPreferences @Inject constructor(
         }
     }
 
+    suspend fun recordListenerConnected(nowMs: Long = System.currentTimeMillis()) {
+        context.dataStore.edit { it[Keys.serviceHeartbeatAtMs] = nowMs }
+    }
+
+    suspend fun recordListenerReconnect(nowMs: Long = System.currentTimeMillis()) {
+        context.dataStore.edit {
+            it[Keys.listenerReconnectCount] = (it[Keys.listenerReconnectCount] ?: 0L) + 1L
+            it[Keys.lastListenerReconnectAtMs] = nowMs
+        }
+    }
+
+    suspend fun recordNotification(nowMs: Long = System.currentTimeMillis()) {
+        context.dataStore.edit { it[Keys.lastNotificationAtMs] = nowMs }
+    }
+
+    suspend fun recordEventLatency(latencyMs: Long) {
+        context.dataStore.edit { it[Keys.lastEventProcessingLatencyMs] = latencyMs.coerceAtLeast(0L) }
+    }
+
+    suspend fun recordServiceHeartbeat(nowMs: Long = System.currentTimeMillis()) {
+        context.dataStore.edit { it[Keys.serviceHeartbeatAtMs] = nowMs }
+    }
+
+    suspend fun recordMarketData(nowMs: Long = System.currentTimeMillis()) {
+        context.dataStore.edit { it[Keys.lastMarketDataAtMs] = nowMs }
+    }
+
     suspend fun updateShadowPeakPnl(value: Double) {
         val today = LocalDate.now().toString()
         context.dataStore.edit {
@@ -277,6 +316,12 @@ class AppPreferences @Inject constructor(
         waveCapitalRupees = (this[Keys.waveCapitalRupees] ?: 5_000L).coerceIn(1_000L, 50_000L),
         maxCampaignCapitalRupees = (this[Keys.maxCampaignCapitalRupees] ?: 200_000L).coerceIn(10_000L, 500_000L),
         maxDailyLossRupees = (this[Keys.maxDailyLossRupees] ?: 2_500L).coerceIn(500L, 100_000L),
-        maxSingleStockLossRupees = (this[Keys.maxSingleStockLossRupees] ?: 1_500L).coerceIn(250L, 50_000L)
+        maxSingleStockLossRupees = (this[Keys.maxSingleStockLossRupees] ?: 1_500L).coerceIn(250L, 50_000L),
+        lastNotificationAtMs = this[Keys.lastNotificationAtMs] ?: 0L,
+        listenerReconnectCount = this[Keys.listenerReconnectCount] ?: 0L,
+        lastListenerReconnectAtMs = this[Keys.lastListenerReconnectAtMs] ?: 0L,
+        lastEventProcessingLatencyMs = this[Keys.lastEventProcessingLatencyMs] ?: 0L,
+        serviceHeartbeatAtMs = this[Keys.serviceHeartbeatAtMs] ?: 0L,
+        lastMarketDataAtMs = this[Keys.lastMarketDataAtMs] ?: 0L
     )
 }

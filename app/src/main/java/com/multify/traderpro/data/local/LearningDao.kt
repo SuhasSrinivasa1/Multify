@@ -35,6 +35,9 @@ interface LearningDao {
     @Query("SELECT * FROM price_observations ORDER BY observedAtMs ASC")
     suspend fun allObservations(): List<PriceObservationEntity>
 
+    @Query("SELECT * FROM price_observations WHERE eventId=:eventId AND phase=:phase ORDER BY offsetSeconds ASC")
+    suspend fun observationsForEventPhase(eventId: Long, phase: String): List<PriceObservationEntity>
+
     @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insertStrategySnapshot(item: StrategySnapshotEntity): Long
 
