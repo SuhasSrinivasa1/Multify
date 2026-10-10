@@ -52,4 +52,13 @@ interface ManagedTradeDao {
 
     @Query("SELECT * FROM managed_trades WHERE engine=:engine AND symbol=:symbol AND side=:side AND closedAtMs >= :sinceMs ORDER BY closedAtMs DESC LIMIT 1")
     suspend fun latestTrade(engine: String, symbol: String, side: String, sinceMs: Long): ManagedTradeEntity?
+
+    @Insert(onConflict = OnConflictStrategy.ABORT)
+    suspend fun insertExecutionSample(sample: ExecutionSampleEntity): Long
+
+    @Query("SELECT * FROM execution_samples WHERE transactionType=:transactionType ORDER BY filledAtMs DESC LIMIT :limit")
+    suspend fun recentExecutionSamples(transactionType: String, limit: Int): List<ExecutionSampleEntity>
+
+    @Query("SELECT * FROM execution_samples ORDER BY filledAtMs ASC")
+    suspend fun allExecutionSamples(): List<ExecutionSampleEntity>
 }
