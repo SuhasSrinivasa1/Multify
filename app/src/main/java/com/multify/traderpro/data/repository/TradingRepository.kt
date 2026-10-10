@@ -841,10 +841,16 @@ class TradingRepository @Inject constructor(
         auditLogger.log("SAFETY", "LEGACY_NON_LONG_CLOSED", mapOf("symbol" to position.symbol, "qty" to position.quantity))
     }
 
-    private suspend fun closeLongHolding(token: String, position: ManagedPositionEntity, mark: Double, reason: String): ManagedTradeEntity {
+    private suspend fun closeLongHolding(
+        token: String,
+        position: ManagedPositionEntity,
+        mark: Double,
+        reason: String,
+        notificationStartedNs: Long? = null
+    ): ManagedTradeEntity {
         require(position.side == "LONG") { "Only LONG holdings are supported" }
         val ref = stableRef("CLS", "${position.id}-${position.symbol}-$reason")
-        val order = placeOwnedCncSell(token, position, ref)
+        val order = placeOwnedCncSell(token, position, ref, notificationStartedNs)
         val exit = order.averageFillPrice?.takeIf { it > 0.0 } ?: mark
         val gross = (exit - position.entryPrice) * position.quantity
         val costs = estimatedCashCosts(position.entryPrice, exit, position.quantity)
