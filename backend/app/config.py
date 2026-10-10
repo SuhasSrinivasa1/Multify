@@ -31,7 +31,6 @@ class Settings(BaseSettings):
     daily_loss_halt_rupees: float = 2_500.0
     market_open_hhmm: str = "09:15"
     last_new_order_hhmm: str = "15:20"
-    force_flat_hhmm: str = "15:24"
 
     @property
     def db_path(self) -> Path:
