@@ -38,5 +38,7 @@ data class ManagedPositionEntity(
     val capitalDeployed: Double = 0.0,
     val campaignBudget: Double = 0.0,
     val addCount: Int = 0,
+    val trailingArmPct: Double = 0.0,
+    val trailingLastRatchetPrice: Double = 0.0,
     val status: String = "OPEN"
 )
