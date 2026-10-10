@@ -1,4 +1,4 @@
-name: Multify Trader Pro v6.0.0 Long Only CNC Holdings Build
+name: Multify Trader Pro v6.1.0 Strict Long Holdings Build
 
 on:
   workflow_dispatch:
@@ -118,10 +118,10 @@ jobs:
             echo "=== $(basename "$apk") ===" >> dist/package-verification.txt
             "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$apk" | grep -E "^(package:|application-label:)" >> dist/package-verification.txt
           done
-          git archive --format=zip --output=dist/Multify-TraderPro-v6.0.0-source.zip HEAD
+          git archive --format=zip --output=dist/Multify-TraderPro-v6.1.0-source.zip HEAD
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Multify-TraderPro-v6.0.0-verified
+          name: Multify-TraderPro-v6.1.0-verified
           path: dist/
           if-no-files-found: error
