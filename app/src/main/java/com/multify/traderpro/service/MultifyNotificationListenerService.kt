@@ -139,20 +139,6 @@ class MultifyNotificationListenerService : NotificationListenerService() {
             )
             if (id <= 0L) return@launch
 
-            repository.recordNotificationReceived()
-            auditLogger.log("SIGNAL", "CAPTURED", mapOf(
-                "event_id" to id,
-                "signal_type" to parsed.type.name,
-                "symbol" to parsed.symbol,
-                "source_package" to sbn.packageName,
-                "parser_confidence" to parsed.confidence
-            ))
-
-            if (parsed.type == SignalType.AUTO_PAUSED) {
-                repository.forceLocalDisarm()
-                notifyStatus("ARM disabled", "Multify reported a safety pause. Review broker state before resetting the halt.")
-            }
-
             val processStarted = System.currentTimeMillis()
             val processed = runCatching {
                 repository.processEvent(
@@ -161,11 +147,22 @@ class MultifyNotificationListenerService : NotificationListenerService() {
                     notificationStartedNs = if (critical) notificationStartedNs else null
                 )
             }
-            runCatching { repository.recordEventProcessingLatency(System.currentTimeMillis() - processStarted) }
             if (processed.isFailure) enqueueForward(id)
 
-            if (critical) {
-                scope.launch { runCatching { repository.sampleSignal(id) } }
+            scope.launch {
+                runCatching { repository.recordNotificationReceived() }
+                runCatching { repository.recordEventProcessingLatency(System.currentTimeMillis() - processStarted) }
+                auditLogger.log("SIGNAL", "CAPTURED", mapOf(
+                    "event_id" to id,
+                    "signal_type" to parsed.type.name,
+                    "symbol" to parsed.symbol,
+                    "source_package" to sbn.packageName,
+                    "parser_confidence" to parsed.confidence
+                ))
+                if (parsed.type == SignalType.AUTO_PAUSED) {
+                    notifyStatus("ARM disabled", "Multify reported a safety pause. Review broker state before resetting the halt.")
+                }
+                if (critical) runCatching { repository.sampleSignal(id) }
             }
         }
     }

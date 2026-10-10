@@ -18,6 +18,7 @@ class NseSymbolRepository @Inject constructor(
         .connectTimeout(Duration.ofSeconds(12))
         .readTimeout(Duration.ofSeconds(20))
         .build()
+    @Volatile private var cachedSymbols: Set<String>? = null
 
     data class Status(val count: Int, val updatedAtMs: Long)
 
@@ -26,15 +27,20 @@ class NseSymbolRepository @Inject constructor(
         updatedAtMs = prefs.getLong(KEY_UPDATED, 0L)
     )
 
-    fun symbols(): List<String> {
+    private fun symbolSet(): Set<String> {
+        cachedSymbols?.let { return it }
         val packed = prefs.getString(KEY_SYMBOLS, "").orEmpty()
-        return if (packed.isBlank()) emptyList() else packed.split('|').filter { it.isNotBlank() }
+        val loaded = if (packed.isBlank()) emptySet() else packed.split('|').asSequence().filter { it.isNotBlank() }.toSet()
+        cachedSymbols = loaded
+        return loaded
     }
 
+    fun symbols(): List<String> = symbolSet().toList()
+
     fun isKnown(symbol: String): Boolean {
-        val packed = prefs.getString(KEY_SYMBOLS, "").orEmpty()
-        if (packed.isBlank()) return true
-        return packed.split('|').binarySearch(symbol.trim().uppercase(Locale.US)) >= 0
+        val symbols = symbolSet()
+        if (symbols.isEmpty()) return true
+        return symbol.trim().uppercase(Locale.US) in symbols
     }
 
     fun isStale(maxAgeMs: Long = 25L * 24 * 60 * 60 * 1000): Boolean {
@@ -65,6 +71,7 @@ class NseSymbolRepository @Inject constructor(
             .putInt(KEY_COUNT, symbols.size)
             .putLong(KEY_UPDATED, now)
             .apply()
+        cachedSymbols = symbols.toSet()
         return Status(symbols.size, now)
     }
 

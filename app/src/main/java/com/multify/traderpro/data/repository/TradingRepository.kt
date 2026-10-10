@@ -466,7 +466,7 @@ class TradingRepository @Inject constructor(
         }
 
         preArmGuard(settings)
-        if (managedDao.openPositions().any { it.symbol.equals(symbol, true) && it.side == "LONG" }) {
+        if (managedDao.openPositionForSymbol(symbol) != null) {
             dao.updateForwarding(eventId, "ANALYZED", "HOLDING_ALREADY_OPEN", "$symbol is already app-owned; duplicate BUY blocked.", null)
             return
         }
