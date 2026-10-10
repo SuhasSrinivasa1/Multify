@@ -77,6 +77,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.multify.traderpro.BuildConfig
 import com.multify.traderpro.data.network.DashboardDto
+import com.multify.traderpro.data.network.ExecutionAverageDto
 import com.multify.traderpro.data.network.ForecastDto
 import com.multify.traderpro.data.network.PositionDto
 import com.multify.traderpro.engine.MultifyReverseEngineering
@@ -92,7 +93,7 @@ import java.util.Locale
 
 private enum class Destination(val label: String, val subtitle: String, val icon: ImageVector) {
     Execution("Execution", "ARM status and app-owned CNC holdings", Icons.Default.Dashboard),
-    Averages("LONG Averages", "Rolling realized returns and distribution", Icons.Default.Analytics),
+    Averages("Averages", "30-day LONG averages", Icons.Default.Analytics),
     Forecast("Forecast", "Up to five LONG holding candidates", Icons.Default.Science),
     Settings("Settings", "Broker, ARM, holding budget and device controls", Icons.Default.Settings)
 }
@@ -147,7 +148,7 @@ fun TraderApp(viewModel: TraderViewModel = hiltViewModel()) {
                         selected = selected == index,
                         onClick = { selected = index },
                         icon = { Icon(destination.icon, contentDescription = destination.label) },
-                        label = { Text(destination.label) },
+                        label = { Text(destination.label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                         colors = NavigationBarItemDefaults.colors(indicatorColor = MaterialTheme.colorScheme.primaryContainer)
                     )
                 }
@@ -310,6 +311,24 @@ private fun ExecutionScreen(
                 }
             }
 
+            item { SectionTitle("Execution speed", "Rolling average from the latest 30 successful LONG CNC fills.") }
+            item {
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                    MetricCard(
+                        label = "Avg LONG Buy",
+                        value = executionTime(dashboard.execution.buyLong.averageFillMs, dashboard.execution.buyLong.sampleCount),
+                        supporting = executionSupport(dashboard.execution.buyLong),
+                        modifier = Modifier.weight(1f)
+                    )
+                    MetricCard(
+                        label = "Avg LONG Sell",
+                        value = executionTime(dashboard.execution.sellLong.averageFillMs, dashboard.execution.sellLong.sampleCount),
+                        supporting = executionSupport(dashboard.execution.sellLong),
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+
             item { SectionTitle("Active holdings", "All positions shown here are app-owned LONG CNC holdings. There is no automatic end-of-day exit.") }
             if (dashboard.positions.isEmpty()) {
                 item { EmptyState("No app-owned holdings", "ARM will buy the next eligible Multify call. Forecast candidates can also be bought manually while ARM is enabled.") }
@@ -434,7 +453,15 @@ private fun HoldingCard(p: PositionDto) {
             KeyValueRow("Average", money(p.averagePrice))
             KeyValueRow("LTP", p.ltp?.let(::money) ?: "—")
             KeyValueRow("Unrealised", money(p.pnl), pnlColor(p.pnl))
-            KeyValueRow("Trail arm", p.targetPrice?.let(::money) ?: "Learning")
+            KeyValueRow(
+                "Trail arm",
+                p.targetPrice?.let { target ->
+                    if (p.averagePrice > 0.0) {
+                        val pct = (target / p.averagePrice - 1.0) * 100.0
+                        "+${String.format(Locale.US, "%.2f", pct)}% · ${money(target)}"
+                    } else money(target)
+                } ?: "Learning"
+            )
             KeyValueRow("Protective / trail stop", p.stopPrice?.let(::money) ?: "—")
             if (!p.strategy.isNullOrBlank()) {
                 Text(p.strategy, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -447,7 +474,6 @@ private fun HoldingCard(p: PositionDto) {
 private fun LongAveragesScreen(state: TraderUiState) {
     val learning = state.dashboard?.learning ?: com.multify.traderpro.data.network.LearningStatsDto()
     val forecastLearning = state.dashboard?.forecastLearning ?: com.multify.traderpro.data.network.ForecastLearningStatsDto()
-    val champions = state.dashboard?.forecastChampions.orEmpty()
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -464,28 +490,6 @@ private fun LongAveragesScreen(state: TraderUiState) {
                 accent = MaterialTheme.colorScheme.primary
             )
         }
-        item {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha=.22f)),
-                shape = RoundedCornerShape(20.dp)
-            ) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
-                    Text("LONG distribution", fontWeight = FontWeight.SemiBold)
-                    KeyValueRow("Mean", String.format(Locale.US, "%.2f%%", learning.longAveragePct))
-                    KeyValueRow("Median", String.format(Locale.US, "%.2f%%", learning.longMedianPct))
-                    KeyValueRow("Trimmed mean", String.format(Locale.US, "%.2f%%", learning.longTrimmedMeanPct))
-                    KeyValueRow("EWMA", String.format(Locale.US, "%.2f%%", learning.longEwmaPct))
-                    KeyValueRow("P25", String.format(Locale.US, "%.2f%%", learning.longP25Pct))
-                    KeyValueRow("P75", String.format(Locale.US, "%.2f%%", learning.longP75Pct))
-                    Text(
-                        "Mean, median, trimmed mean, EWMA, P25 and P75 all use realized entry-to-Multify-exit returns. The arithmetic mean is the trailing-arm level; losses remain included.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-        }
         item { SectionTitle("Forecasted stocks", "A separate rolling 30-trading-day LONG average from completed forecast outcomes.") }
         item {
             MetricCard(
@@ -499,31 +503,6 @@ private fun LongAveragesScreen(state: TraderUiState) {
                 modifier = Modifier.fillMaxWidth(),
                 accent = MaterialTheme.colorScheme.primary
             )
-        }
-        item { SectionTitle("Frozen LONG champions", "A forecast setup freezes only after at least five target hits spanning three trading days and three different stocks.") }
-        if (champions.none { it.frozen }) {
-            item { EmptyState("No frozen LONG champion yet", "The engine is still collecting target-hit evidence across stocks and days.") }
-        } else {
-            items(champions.filter { it.frozen }.take(10)) { c ->
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha=.20f)),
-                    shape = RoundedCornerShape(18.dp)
-                ) {
-                    Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text(c.marketRegime, fontWeight = FontWeight.SemiBold)
-                            StatusPill("FROZEN", StatusTone.Positive)
-                        }
-                        Text("${c.strategy} · ${c.regime}", style = MaterialTheme.typography.bodyMedium)
-                        Text(
-                            "${c.wins} hits · ${c.losses} misses · ${c.distinctDays} days · ${c.distinctSymbols} stocks",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-            }
         }
     }
 }
@@ -858,6 +837,20 @@ private fun pnlColor(value: Double): Color = when {
     value > 0.0 -> MaterialTheme.colorScheme.primary
     value < 0.0 -> MaterialTheme.colorScheme.error
     else -> MaterialTheme.colorScheme.onSurface
+}
+
+private fun executionTime(ms: Double, sampleCount: Int): String = when {
+    sampleCount <= 0 -> "Learning"
+    ms < 1000.0 -> String.format(Locale.US, "%.0f ms", ms)
+    else -> String.format(Locale.US, "%.2f s", ms / 1000.0)
+}
+
+private fun executionSupport(stats: ExecutionAverageDto): String {
+    if (stats.sampleCount <= 0) return "waiting for first successful fill"
+    val base = "submit → confirmed fill · ${stats.sampleCount} fills"
+    return if (stats.dispatchSampleCount > 0) {
+        "$base · app dispatch ${executionTime(stats.averageAppDispatchMs, stats.dispatchSampleCount)}"
+    } else base
 }
 
 private fun money(value: Double): String = NumberFormat.getCurrencyInstance(Locale("en", "IN")).format(value)
