@@ -4,6 +4,7 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.os.Bundle
+import android.os.SystemClock
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import androidx.core.app.NotificationCompat
@@ -67,6 +68,7 @@ class MultifyNotificationListenerService : NotificationListenerService() {
                 runCatching { repository.ensureHistoricalSeed() }
                 while (isActive) {
                     runCatching { repository.recordServiceHeartbeat() }
+                    runCatching { repository.maintainArmHotPath() }
                     val managedCount = runCatching { repository.monitorManagedPositions() }.getOrDefault(0)
                     val forecastOutcomeCount = runCatching { repository.monitorForecastOutcomes() }.getOrDefault(0)
                     val now = java.time.ZonedDateTime.now(java.time.ZoneId.of("Asia/Kolkata"))
@@ -103,29 +105,29 @@ class MultifyNotificationListenerService : NotificationListenerService() {
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
         if (sbn == null || sbn.packageName == packageName) return
         val notification = sbn.notification ?: return
+        val notificationStartedNs = SystemClock.elapsedRealtimeNanos()
+        val receivedAtMs = System.currentTimeMillis()
 
-        scope.launch {
+        val extras = notification.extras ?: Bundle.EMPTY
+        val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString().orEmpty()
+        val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString().orEmpty()
+        val bigText = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString().ifNullOrBlank(text)
+        val parsed = parser.parse(title, text, bigText)
+        if (parsed.type == SignalType.UNKNOWN) return
+
+        val critical = parsed.type == SignalType.TRADE_RELEASE || parsed.type == SignalType.BOOK_PROFIT
+        val executor = if (critical) priorityScope else scope
+        executor.launch {
             if (!repository.shouldCapturePackage(sbn.packageName)) return@launch
 
-            val extras = notification.extras ?: Bundle.EMPTY
-            val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString().orEmpty()
-            val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString().orEmpty()
-            val bigText = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString().ifNullOrBlank(text)
-            val parsed = parser.parse(title, text, bigText)
-            if (parsed.type == SignalType.UNKNOWN) return@launch
-
-            val appLabel = runCatching {
-                packageManager.getApplicationLabel(packageManager.getApplicationInfo(sbn.packageName, 0)).toString()
-            }.getOrDefault(sbn.packageName)
             val fingerprint = fingerprint(sbn.packageName, title, bigText, sbn.postTime)
-
             val id = dao.insert(
                 SignalEventEntity(
                     fingerprint = fingerprint,
-                    receivedAtMs = System.currentTimeMillis(),
+                    receivedAtMs = receivedAtMs,
                     postedAtMs = sbn.postTime,
                     sourcePackage = sbn.packageName,
-                    appLabel = appLabel,
+                    appLabel = sbn.packageName,
                     title = title,
                     text = text,
                     bigText = bigText,
@@ -136,29 +138,34 @@ class MultifyNotificationListenerService : NotificationListenerService() {
                 )
             )
             if (id <= 0L) return@launch
+
             repository.recordNotificationReceived()
             auditLogger.log("SIGNAL", "CAPTURED", mapOf(
-                "event_id" to id, "signal_type" to parsed.type.name, "symbol" to parsed.symbol,
-                "source_package" to sbn.packageName, "parser_confidence" to parsed.confidence
+                "event_id" to id,
+                "signal_type" to parsed.type.name,
+                "symbol" to parsed.symbol,
+                "source_package" to sbn.packageName,
+                "parser_confidence" to parsed.confidence
             ))
 
-            val isSafetyEvent = parsed.type == SignalType.AUTO_PAUSED
-            if (isSafetyEvent) {
+            if (parsed.type == SignalType.AUTO_PAUSED) {
                 repository.forceLocalDisarm()
                 notifyStatus("ARM disabled", "Multify reported a safety pause. Review broker state before resetting the halt.")
             }
 
-            // Multify holdings lifecycle events have top processing priority. WorkManager remains recovery only.
-            val critical = parsed.type == SignalType.TRADE_RELEASE || parsed.type == SignalType.BOOK_PROFIT
-            val executor = if (critical) priorityScope else scope
-            executor.launch {
-                val processStarted = System.currentTimeMillis()
-                val processed = runCatching { repository.processEvent(id) }
-                runCatching { repository.recordEventProcessingLatency(System.currentTimeMillis() - processStarted) }
-                if (processed.isFailure) enqueueForward(id)
-                if (critical) {
-                    scope.launch { runCatching { repository.sampleSignal(id) } }
-                }
+            val processStarted = System.currentTimeMillis()
+            val processed = runCatching {
+                repository.processEvent(
+                    eventId = id,
+                    parsedOverride = parsed,
+                    notificationStartedNs = if (critical) notificationStartedNs else null
+                )
+            }
+            runCatching { repository.recordEventProcessingLatency(System.currentTimeMillis() - processStarted) }
+            if (processed.isFailure) enqueueForward(id)
+
+            if (critical) {
+                scope.launch { runCatching { repository.sampleSignal(id) } }
             }
         }
     }
