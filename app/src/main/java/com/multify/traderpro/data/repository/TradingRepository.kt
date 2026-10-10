@@ -2,57 +2,34 @@ package com.multify.traderpro.data.repository
 
 import android.content.Context
 import android.net.Uri
-import android.os.Build
 import com.google.gson.GsonBuilder
-import com.multify.traderpro.BuildConfig
-import com.multify.traderpro.data.logging.AuditLogger
-import dagger.hilt.android.qualifiers.ApplicationContext
-import java.time.Instant
-import java.util.zip.ZipEntry
-import java.util.zip.ZipOutputStream
 import com.google.gson.JsonParser
+import com.multify.traderpro.BuildConfig
+import com.multify.traderpro.data.local.ForecastChampionEntity
+import com.multify.traderpro.data.local.IntradayForecastEntity
+import com.multify.traderpro.data.local.LearningCallEntity
+import com.multify.traderpro.data.local.LearningDao
 import com.multify.traderpro.data.local.ManagedPositionEntity
 import com.multify.traderpro.data.local.ManagedTradeDao
 import com.multify.traderpro.data.local.ManagedTradeEntity
-import com.multify.traderpro.data.local.LearningDao
-import com.multify.traderpro.data.local.LearningCallEntity
 import com.multify.traderpro.data.local.PriceObservationEntity
-import com.multify.traderpro.data.local.StrategySnapshotEntity
-import com.multify.traderpro.data.local.ForecastEntity
-import com.multify.traderpro.data.local.IntradayForecastEntity
-import com.multify.traderpro.data.local.ForecastChampionEntity
-import com.multify.traderpro.data.local.ResearchReportEntity
-import com.multify.traderpro.data.local.ShadowDao
-import com.multify.traderpro.data.local.ShadowPositionEntity
-import com.multify.traderpro.data.local.ShadowTradeEntity
 import com.multify.traderpro.data.local.SignalEventDao
 import com.multify.traderpro.data.local.SignalEventEntity
-import com.multify.traderpro.data.local.WaveCampaignEntity
-import com.multify.traderpro.data.local.WaveObservationEntity
-import com.multify.traderpro.data.local.WaveDecisionEntity
-import com.multify.traderpro.data.local.WaveOutcomeEntity
+import com.multify.traderpro.data.logging.AuditLogger
 import com.multify.traderpro.data.network.BrokerStatusDto
 import com.multify.traderpro.data.network.DashboardDto
 import com.multify.traderpro.data.network.DaySummaryDto
+import com.multify.traderpro.data.network.EngineHealthDto
+import com.multify.traderpro.data.network.ForecastChampionDto
+import com.multify.traderpro.data.network.ForecastDto
 import com.multify.traderpro.data.network.GrowwApiFactory
-import com.multify.traderpro.data.network.GrowwPosition
-import com.multify.traderpro.data.network.OcoCreateRequest
-import com.multify.traderpro.data.network.OcoLeg
-import com.multify.traderpro.data.network.OcoModifyLeg
-import com.multify.traderpro.data.network.OcoModifyRequest
+import com.multify.traderpro.data.network.LearningStatsDto
 import com.multify.traderpro.data.network.OrderCreateRequest
 import com.multify.traderpro.data.network.OrderPayload
 import com.multify.traderpro.data.network.PositionDto
 import com.multify.traderpro.data.network.RecentDecisionDto
-import com.multify.traderpro.data.network.RiskStatusDto
-import com.multify.traderpro.data.network.LearningStatsDto
-import com.multify.traderpro.data.network.ForecastDto
-import com.multify.traderpro.data.network.ForecastChampionDto
 import com.multify.traderpro.data.network.ResearchDto
-import com.multify.traderpro.data.network.StrategyInsightDto
-import com.multify.traderpro.data.network.WaveStatDto
-import com.multify.traderpro.data.network.AdaptiveWaveDto
-import com.multify.traderpro.data.network.EngineHealthDto
+import com.multify.traderpro.data.network.RiskStatusDto
 import com.multify.traderpro.data.network.TokenRequest
 import com.multify.traderpro.data.preferences.AppPreferences
 import com.multify.traderpro.data.preferences.AppSettings
@@ -61,39 +38,30 @@ import com.multify.traderpro.data.security.TotpGenerator
 import com.multify.traderpro.domain.NotificationParser
 import com.multify.traderpro.domain.ParsedSignal
 import com.multify.traderpro.domain.SignalType
-import com.multify.traderpro.engine.BudgetAllocator
-import com.multify.traderpro.engine.FixedCapitalPolicy
 import com.multify.traderpro.engine.AdaptiveLearningMath
-import com.multify.traderpro.engine.LocalStrategyEngine
-import com.multify.traderpro.engine.StrategyEvaluation
-import com.multify.traderpro.engine.WavePivotMath
-import com.multify.traderpro.engine.AdaptiveDirectionEngine
-import com.multify.traderpro.engine.AdaptiveDirectionInput
-import com.multify.traderpro.engine.WaveCapitalPolicy
-import com.multify.traderpro.engine.ExecutionHealthInput
-import com.multify.traderpro.engine.ExecutionHealthPolicy
-import com.multify.traderpro.engine.MarketTrajectoryMath
-import com.multify.traderpro.engine.MultifyReverseEngineering
 import com.multify.traderpro.engine.LearnedTrailingPolicy
+import com.multify.traderpro.engine.LocalStrategyEngine
+import com.multify.traderpro.engine.MultifyReverseEngineering
+import com.multify.traderpro.engine.StrategyEvaluation
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import retrofit2.HttpException
 import java.security.MessageDigest
 import java.time.LocalDate
-import java.time.Duration
 import java.time.LocalTime
 import java.time.ZoneId
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 import javax.inject.Inject
 import javax.inject.Singleton
-import kotlin.math.abs
 import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
-
 
 data class AuthenticationResult(
     val authenticated: Boolean,
@@ -102,7 +70,7 @@ data class AuthenticationResult(
     val publicIp: String,
     val staticIpMatched: Boolean,
     val accessTokenExpiry: String,
-    val misBalanceAvailable: Double,
+    val cncBalanceAvailable: Double,
     val ddpiEnabled: Boolean,
     val detail: String
 )
@@ -110,7 +78,6 @@ data class AuthenticationResult(
 @Singleton
 class TradingRepository @Inject constructor(
     private val dao: SignalEventDao,
-    private val shadowDao: ShadowDao,
     private val managedDao: ManagedTradeDao,
     private val learningDao: LearningDao,
     private val preferences: AppPreferences,
@@ -123,17 +90,15 @@ class TradingRepository @Inject constructor(
 ) {
     val settings: Flow<AppSettings> = preferences.settings
     val recentEvents: Flow<List<SignalEventEntity>> = dao.observeRecent(100)
-    private var lastHistoricalShortBackfillAttemptMs: Long = 0L
-    private var lastForecastScanAtMs: Long = 0L
-    private var lastForecastOutcomeMonitorAtMs: Long = 0L
-    @Volatile private var historicalSeedEnsured: Boolean = false
 
+    @Volatile private var historicalSeedEnsured = false
+    private var lastForecastScanAtMs = 0L
+    private var lastForecastOutcomeMonitorAtMs = 0L
 
     suspend fun ensureHistoricalSeed() {
         if (historicalSeedEnsured) return
         val now = System.currentTimeMillis()
         var inserted = 0
-        var refreshed = 0
         appContext.assets.open("multify_history_seed.csv").bufferedReader().useLines { lines ->
             lines.drop(1).forEach { line ->
                 val x = line.split(',')
@@ -146,7 +111,7 @@ class TradingRepository @Inject constructor(
                 val targetPct = x[5].toDoubleOrNull()
                 val targetPrice = x[6].toDoubleOrNull()
                 val exit = x[7].toDoubleOrNull()
-                val historicalRealized = x[8].toDoubleOrNull()
+                val realised = x[8].toDoubleOrNull()
                 val buyAtMs = x[9].toLongOrNull() ?: 0L
                 val sellAtMs = x[10].toLongOrNull()?.takeIf { it > 0L }
                 val existing = learningDao.historicalCallForKey(callDate, symbol, action)
@@ -155,7 +120,7 @@ class TradingRepository @Inject constructor(
                         LearningCallEntity(
                             callDate = callDate, symbol = symbol, source = source, action = action,
                             entryPrice = entry, targetPrice = targetPrice, targetPct = targetPct,
-                            multifyExitPrice = exit, longRealizedPct = historicalRealized,
+                            multifyExitPrice = exit, longRealizedPct = realised,
                             buyAtMs = buyAtMs, sellAtMs = sellAtMs, updatedAtMs = now
                         )
                     )
@@ -165,73 +130,43 @@ class TradingRepository @Inject constructor(
                         existing.copy(
                             source = source, entryPrice = entry, targetPrice = targetPrice, targetPct = targetPct,
                             multifyExitPrice = exit ?: existing.multifyExitPrice,
-                            longRealizedPct = historicalRealized ?: existing.longRealizedPct,
+                            longRealizedPct = realised ?: existing.longRealizedPct,
                             buyAtMs = buyAtMs.takeIf { it > 0L } ?: existing.buyAtMs,
-                            sellAtMs = sellAtMs ?: existing.sellAtMs,
-                            updatedAtMs = now
+                            sellAtMs = sellAtMs ?: existing.sellAtMs, updatedAtMs = now
                         )
                     )
-                    refreshed++
                 }
             }
         }
         historicalSeedEnsured = true
-        if (inserted > 0 || refreshed > 0) {
-            auditLogger.log(
-                "LEARNING", "HISTORY_SEEDED",
-                mapOf("inserted" to inserted, "refreshed" to refreshed, "rows" to learningDao.callCount(), "source" to "uploaded_3_month_history")
-            )
-        }
+        if (inserted > 0) auditLogger.log("LEARNING", "LONG_HISTORY_SEEDED", mapOf("inserted" to inserted, "rows" to learningDao.callCount()))
     }
 
     suspend fun learningStats(): LearningStatsDto {
         ensureHistoricalSeed()
         val calls = learningDao.allCalls().filter { it.action.equals("BUY", true) }
-        val dateOrder = calls.mapNotNull { runCatching { LocalDate.parse(it.callDate) }.getOrNull() }.distinct().sortedDescending()
-        val keepDates = dateOrder.take(30).map { it.toString() }.toSet()
+        val dates = calls.mapNotNull { runCatching { LocalDate.parse(it.callDate) }.getOrNull() }.distinct().sortedDescending()
+        val keepDates = dates.take(30).map { it.toString() }.toSet()
         val rolling = calls.filter { it.callDate in keepDates }
         fun targetPct(c: LearningCallEntity): Double? = c.targetPct ?: c.targetPrice?.let { target ->
             if (c.entryPrice > 0.0) (target - c.entryPrice) / c.entryPrice * 100.0 else null
         }
-        val longValues = rolling.mapNotNull(::targetPct).filter { it > 0.0 && it < 25.0 }
-        val longAvg = AdaptiveLearningMath.rollingMean(longValues, DEFAULT_LONG_TARGET_PCT)
-        val longMedian = AdaptiveLearningMath.median(longValues, DEFAULT_LONG_TARGET_PCT)
-        val longTrimmed = AdaptiveLearningMath.trimmedMean(longValues, DEFAULT_LONG_TARGET_PCT)
-        val datedLong = rolling.sortedBy { it.callDate }.mapNotNull(::targetPct).filter { it > 0.0 && it < 25.0 }
-        val longEwma = AdaptiveLearningMath.ewma(datedLong, DEFAULT_LONG_TARGET_PCT)
-        val longP25 = AdaptiveLearningMath.quantile(longValues, .25, DEFAULT_LONG_TARGET_PCT)
-        val longP75 = AdaptiveLearningMath.quantile(longValues, .75, DEFAULT_LONG_TARGET_PCT)
-        val seed3m = calls.filter { it.source == "SEED" }.mapNotNull(::targetPct).filter { it > 0.0 }.let {
+        val values = rolling.mapNotNull(::targetPct).filter { it > 0.0 && it < 25.0 }
+        val dated = rolling.sortedBy { it.callDate }.mapNotNull(::targetPct).filter { it > 0.0 && it < 25.0 }
+        val seed = calls.filter { it.source == "SEED" }.mapNotNull(::targetPct).filter { it > 0.0 }.let {
             if (it.isEmpty()) UPLOADED_THREE_MONTH_TARGET_PCT else it.average()
         }
-        val shortRows = rolling.filter { it.shortObservationFinalized }.mapNotNull { call ->
-            call.postSellRetracementFraction?.takeIf { it >= 0.0 && (call.multifyExitPrice ?: 0.0) > call.entryPrice }
-                ?.let { call.callDate to it.coerceIn(0.0, 1.0) }
-        }
-        // Each trading day gets one vote so a day with several Multify calls cannot dominate the learner.
-        val shortDaily = shortRows.groupBy({ it.first }, { it.second }).values.map { day -> day.average() }
-        val shortFraction = AdaptiveLearningMath.shortRetracementFraction(shortDaily)
-        val shortDownRows = rolling.filter { it.shortObservationFinalized }.mapNotNull { call ->
-            val sell = call.multifyExitPrice ?: return@mapNotNull null
-            val low = call.minPostSellPrice ?: return@mapNotNull null
-            if (sell > 0.0 && low <= sell) ((sell - low) / sell * 100.0).takeIf { it in 0.0..25.0 } else null
-        }
-        val shortAverageDownPct = AdaptiveLearningMath.rollingMean(shortDownRows, 0.75)
         return LearningStatsDto(
             rollingTradingDays = keepDates.size,
             rollingCalls = rolling.size,
-            longAveragePct = longAvg,
-            longMedianPct = longMedian,
-            longTrimmedMeanPct = longTrimmed,
-            longEwmaPct = longEwma,
-            longP25Pct = longP25,
-            longP75Pct = longP75,
-            seededThreeMonthAveragePct = seed3m,
-            liveCompletedCalls = calls.count { it.source == "LIVE" && it.longRealizedPct != null },
-            shortObservedCalls = shortRows.size,
-            shortRetracementFraction = shortFraction,
-            shortRetracementPct = shortFraction * 100.0,
-            shortAverageDownPct = shortAverageDownPct
+            longAveragePct = AdaptiveLearningMath.rollingMean(values, DEFAULT_LONG_TARGET_PCT),
+            longMedianPct = AdaptiveLearningMath.median(values, DEFAULT_LONG_TARGET_PCT),
+            longTrimmedMeanPct = AdaptiveLearningMath.trimmedMean(values, DEFAULT_LONG_TARGET_PCT),
+            longEwmaPct = AdaptiveLearningMath.ewma(dated, DEFAULT_LONG_TARGET_PCT),
+            longP25Pct = AdaptiveLearningMath.quantile(values, .25, DEFAULT_LONG_TARGET_PCT),
+            longP75Pct = AdaptiveLearningMath.quantile(values, .75, DEFAULT_LONG_TARGET_PCT),
+            seededThreeMonthAveragePct = seed,
+            liveCompletedCalls = calls.count { it.source == "LIVE" && it.longRealizedPct != null }
         )
     }
 
@@ -246,195 +181,341 @@ class TradingRepository @Inject constructor(
                 buyAtMs = System.currentTimeMillis(), updatedAtMs = System.currentTimeMillis()
             )
         )
-        learningDao.markForecastMatch(LocalDate.now(INDIA).toString(), symbol, "LONG")
         learningDao.markIntradayForecastMatch(LocalDate.now(INDIA).toString(), symbol)
     }
 
-    private suspend fun recordLiveSell(eventId: Long, symbol: String, price: Double) {
-        learningDao.markForecastMatch(LocalDate.now(INDIA).toString(), symbol, "SHORT")
-        learningDao.markIntradayForecastMatch(LocalDate.now(INDIA).toString(), symbol)
+    private suspend fun recordLiveExit(eventId: Long, symbol: String, price: Double) {
         val call = learningDao.latestLiveCall(symbol) ?: return
         if (call.sellAtMs != null) return
-        val pct = if (call.entryPrice > 0) (price - call.entryPrice) / call.entryPrice * 100.0 else null
+        val pct = if (call.entryPrice > 0.0) (price - call.entryPrice) / call.entryPrice * 100.0 else null
         learningDao.updateCall(
             call.copy(
                 multifyExitPrice = price, longRealizedPct = pct, sellEventId = eventId,
-                sellAtMs = System.currentTimeMillis(), minPostSellPrice = price,
-                postSellRetracementFraction = 0.0, updatedAtMs = System.currentTimeMillis()
+                sellAtMs = System.currentTimeMillis(), updatedAtMs = System.currentTimeMillis()
             )
         )
     }
 
-    private suspend fun recordAdaptiveExit(symbol: String, price: Double) {
-        val call = learningDao.latestLiveCall(symbol) ?: return
-        if (call.sellAtMs != null) return
-        val pct = if (call.entryPrice > 0) (price - call.entryPrice) / call.entryPrice * 100.0 else null
-        learningDao.updateCall(
-            call.copy(
-                multifyExitPrice = price, longRealizedPct = pct, sellAtMs = System.currentTimeMillis(),
-                minPostSellPrice = price, postSellRetracementFraction = 0.0, updatedAtMs = System.currentTimeMillis()
+    suspend fun saveBrokerSettings(
+        apiKeyOrToken: String,
+        totpSecret: String,
+        expectedStaticIp: String,
+        packageFilter: String,
+        holdingBudgetRupees: Long
+    ) {
+        require(holdingBudgetRupees in MIN_BUDGET..MAX_BUDGET) { "Holding budget must be between ₹10,000 and ₹2,00,000" }
+        require(expectedStaticIp.isBlank() || isValidIp(expectedStaticIp)) { "Enter a valid IPv4/IPv6 static IP" }
+        preferences.updateBrokerSettings(expectedStaticIp, packageFilter, holdingBudgetRupees)
+        if (apiKeyOrToken.isNotBlank()) secretStore.putApiKey(apiKeyOrToken)
+        if (totpSecret.isNotBlank()) secretStore.putTotpSecret(totpSecret)
+        if (apiKeyOrToken.isNotBlank() || totpSecret.isNotBlank()) {
+            secretStore.clearAccessToken()
+            preferences.updateAuthState(authenticated = false)
+        }
+    }
+
+    suspend fun setHoldingBudget(value: Long) {
+        preferences.setHoldingBudget(value)
+        auditLogger.log("SETTINGS", "HOLDING_BUDGET", mapOf("rupees" to value))
+    }
+
+    suspend fun setArm(enabled: Boolean) {
+        if (enabled) {
+            val s = preferences.settings.first()
+            require(s.brokerAuthenticated) { "Authenticate Groww first" }
+            require(s.staticIpMatched) { "Static IP verification failed" }
+            require(s.brokerDdpiEnabled) { "DDPI is required for CNC holdings so the app can sell its own holdings later" }
+            require(!s.safetyHalt) { "Safety halt is active" }
+        }
+        preferences.setArm(enabled)
+        auditLogger.log("SETTINGS", if (enabled) "ARM_ENABLED" else "ARM_DISABLED")
+    }
+
+    suspend fun resetHalt() {
+        preferences.setSafetyHalt(false)
+        preferences.setArm(false)
+        auditLogger.log("SAFETY", "HALT_RESET_ARM_OFF")
+    }
+
+    suspend fun forceLocalDisarm() {
+        preferences.setSafetyHalt(true)
+        auditLogger.log("SAFETY", "LOCAL_DISARM")
+    }
+
+    suspend fun recordListenerConnected() = preferences.recordListenerConnected()
+    suspend fun recordListenerReconnect() = preferences.recordListenerReconnect()
+    suspend fun recordNotificationReceived() = preferences.recordNotification()
+    suspend fun recordEventProcessingLatency(latencyMs: Long) = preferences.recordEventLatency(latencyMs)
+    suspend fun recordServiceHeartbeat() = preferences.recordServiceHeartbeat()
+
+    fun hasBrokerCredentials(): Boolean = secretStore.hasApiKey() && secretStore.hasTotpSecret()
+
+    suspend fun authenticate(): AuthenticationResult {
+        auditLogger.log("AUTH", "AUTHENTICATION_ATTEMPT", mapOf("method" to "TOTP"))
+        val settings = preferences.settings.first()
+        val apiKey = secretStore.getApiKey() ?: error("Groww TOTP token is not configured")
+        val totpSecret = secretStore.getTotpSecret() ?: error("Groww TOTP secret is not configured")
+        val publicIp = runCatching { apiFactory.publicIp.currentIp().ip.trim() }.getOrDefault("")
+        val staticMatched = settings.expectedStaticIp.isNotBlank() && publicIp.isNotBlank() &&
+            normalizeIp(publicIp) == normalizeIp(settings.expectedStaticIp)
+        val tokenResponse = try {
+            apiFactory.groww.createAccessToken(
+                authorization = "Bearer $apiKey",
+                request = TokenRequest(keyType = "totp", totp = TotpGenerator.generate(totpSecret))
             )
+        } catch (e: HttpException) {
+            error(growwAuthError(e))
+        }
+        val token = tokenResponse.token?.takeIf { it.isNotBlank() }
+            ?: error("Groww did not return an access token. Verify the TOTP token/secret and phone time.")
+        secretStore.putAccessToken(token)
+        val profile = apiFactory.groww.userProfile(bearer(token)).requirePayload("Groww profile")
+        val cashEnabled = profile.nseEnabled && profile.activeSegments.any { it.equals("CASH", true) }
+        require(cashEnabled) { "Groww profile is not enabled for NSE CASH trading" }
+        val margin = apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin")
+        val expiry = tokenResponse.expiry.orEmpty()
+        preferences.updateAuthState(
+            authenticated = true, authenticatedAtMs = System.currentTimeMillis(), accessTokenExpiry = expiry,
+            brokerUcc = profile.ucc.orEmpty(), brokerDdpiEnabled = profile.ddpiEnabled,
+            verifiedPublicIp = publicIp, staticIpMatched = staticMatched
         )
-        auditLogger.log("LEARNING", "ADAPTIVE_LONG_EXIT_ANCHOR", mapOf("symbol" to symbol, "exit" to price, "return_pct" to pct))
-    }
-
-    suspend fun monitorLearningObservations(): Int {
-        ensureHistoricalSeed()
-        maybeBackfillHistoricalShortLearning()
-        val active = learningDao.activePostSellObservations()
-        if (active.isEmpty()) return 0
-        val token = ensureToken() ?: return active.size
-        val now = ZonedDateTime.now(INDIA)
-        active.forEach { call ->
-            val sell = call.multifyExitPrice ?: return@forEach
-            val ltp = runCatching {
-                apiFactory.groww.quote(bearer(token), tradingSymbol = call.symbol).requirePayload("Quote ${call.symbol}").lastPrice
-            }.getOrNull() ?: return@forEach
-            val low = min(call.minPostSellPrice ?: sell, ltp)
-            val longMove = sell - call.entryPrice
-            val fraction = if (longMove > 0.0) ((sell - low) / longMove).coerceIn(0.0, 1.0) else null
-            val callDate = runCatching { LocalDate.parse(call.callDate) }.getOrNull()
-            val finalize = callDate != now.toLocalDate() || now.toLocalTime() >= LocalTime.of(15, 22)
-            learningDao.updateCall(call.copy(
-                minPostSellPrice = low,
-                postSellRetracementFraction = fraction,
-                shortObservationFinalized = finalize,
-                updatedAtMs = System.currentTimeMillis()
-            ))
-        }
-        return learningDao.activePostSellObservations().size
-    }
-
-    private suspend fun maybeBackfillHistoricalShortLearning() {
-        val nowMs = System.currentTimeMillis()
-        if (nowMs - lastHistoricalShortBackfillAttemptMs < HISTORICAL_SHORT_BACKFILL_INTERVAL_MS) return
-        lastHistoricalShortBackfillAttemptMs = nowMs
-        val token = ensureToken() ?: return
-        val calls = learningDao.allCalls().filter { it.action.equals("BUY", true) }
-        val keepDates = calls.mapNotNull { runCatching { LocalDate.parse(it.callDate) }.getOrNull() }
-            .distinct().sortedDescending().take(30).map { it.toString() }.toSet()
-        val pending = calls.asSequence()
-            .filter { it.source == "SEED" && it.callDate in keepDates && !it.shortObservationFinalized }
-            .filter { (it.sellAtMs ?: 0L) > 0L && (it.multifyExitPrice ?: 0.0) > it.entryPrice }
-            .take(MAX_HISTORICAL_SHORT_BACKFILLS_PER_PASS)
-            .toList()
-        var completed = 0
-        for (call in pending) {
-            val sellAt = call.sellAtMs ?: continue
-            val sell = call.multifyExitPrice ?: continue
-            val sessionDate = runCatching { LocalDate.parse(call.callDate) }.getOrNull() ?: continue
-            val start = Instant.ofEpochMilli(sellAt).atZone(INDIA).toLocalDateTime().format(HIST_FORMAT)
-            val end = sessionDate.atTime(15, 30).format(HIST_FORMAT)
-            val payload = runCatching {
-                apiFactory.groww.historicalCandles(
-                    authorization = bearer(token), growwSymbol = "NSE-${call.symbol}",
-                    startTime = start, endTime = end, candleInterval = "5minute"
-                ).requirePayload("Historical post-sell candles ${call.symbol}")
-            }.getOrNull() ?: continue
-            val lows = payload.candles.mapNotNull { candle ->
-                if (candle.size < 4) null else runCatching { candle[3].asDouble }.getOrNull()
-            }
-            if (lows.isEmpty()) continue
-            val low = min(sell, lows.minOrNull() ?: sell)
-            val longMove = sell - call.entryPrice
-            if (longMove <= 0.0) continue
-            val fraction = ((sell - low) / longMove).coerceIn(0.0, 1.0)
-            learningDao.updateCall(call.copy(
-                minPostSellPrice = low, postSellRetracementFraction = fraction,
-                shortObservationFinalized = true, updatedAtMs = System.currentTimeMillis()
-            ))
-            completed++
-            delay(HISTORICAL_SHORT_BACKFILL_REQUEST_DELAY_MS)
-        }
-        if (completed > 0) {
-            auditLogger.log("LEARNING", "HISTORICAL_SHORT_BACKFILL", mapOf("completed" to completed, "window_days" to keepDates.size))
-        }
-    }
-
-    suspend fun sampleSignal(eventId: Long) {
-        val event = dao.byId(eventId) ?: return
-        val symbol = event.symbol ?: return
-        val type = runCatching { SignalType.valueOf(event.signalType) }.getOrNull() ?: return
-        if (type != SignalType.TRADE_RELEASE && type != SignalType.BOOK_PROFIT) return
-        val token = ensureToken() ?: return
-        val phase = if (type == SignalType.TRADE_RELEASE) "POST_BUY" else "POST_SELL"
-        val offsets = listOf(1,2,5,10,15,30,60,120,300)
-        var elapsed = 0
-        for (offset in offsets) {
-            delay((offset - elapsed) * 1000L)
-            elapsed = offset
-            val price = runCatching { apiFactory.groww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Quote $symbol").lastPrice }.getOrNull() ?: continue
-            learningDao.insertObservation(PriceObservationEntity(eventId = eventId, symbol = symbol, phase = phase, offsetSeconds = offset, observedAtMs = System.currentTimeMillis(), price = price))
-        }
-    }
-
-    suspend fun prepareHotMode(): String {
-        ensureHistoricalSeed()
-        val token = ensureToken()
-        runCatching { if (nseSymbols.isStale()) nseSymbols.refresh() }
-        val marginReady = token?.let { t ->
-            runCatching { apiFactory.groww.margins(bearer(t)).requirePayload("HOT margins") }.isSuccess
-        } ?: false
-        preferences.recordServiceHeartbeat()
-        val result = when {
-            token == null -> "HOT · listener ready · Groww authentication pending"
-            marginReady -> "HOT · Groww session + balances ready · NSE master checked · quote client warm"
-            else -> "HOT · Groww session ready · margin refresh partial · NSE master checked"
-        }
-        auditLogger.log("RUNTIME", "PRE_ALERT_HOT_MODE", mapOf(
-            "result" to result,
-            "token_ready" to (token != null),
-            "margin_ready" to marginReady,
-            "symbol_master_stale" to nseSymbols.isStale()
+        val cnc = margin.equity?.cncBalanceAvailable ?: margin.clearCash
+        auditLogger.log("AUTH", "AUTHENTICATION_SUCCESS", mapOf(
+            "nse_cash_enabled" to cashEnabled, "ddpi_enabled" to profile.ddpiEnabled,
+            "static_ip_matched" to staticMatched, "cnc_balance_available" to cnc
         ))
-        return result
+        return AuthenticationResult(
+            authenticated = true, ucc = profile.ucc.orEmpty(), nseCashEnabled = cashEnabled,
+            publicIp = publicIp, staticIpMatched = staticMatched, accessTokenExpiry = expiry,
+            cncBalanceAvailable = cnc, ddpiEnabled = profile.ddpiEnabled,
+            detail = buildString {
+                append("Groww authenticated")
+                if (profile.ucc?.isNotBlank() == true) append(" · UCC ${profile.ucc}")
+                append(if (profile.ddpiEnabled) " · DDPI enabled" else " · DDPI required before ARM")
+                if (publicIp.isNotBlank()) append(" · egress $publicIp")
+                if (settings.expectedStaticIp.isNotBlank()) append(if (staticMatched) " · static IP matched" else " · STATIC IP MISMATCH")
+            }
+        )
+    }
+
+    suspend fun refreshDashboard(): DashboardDto {
+        val settings = preferences.settings.first()
+        val token = secretStore.getAccessToken()
+        if (!settings.brokerAuthenticated || token.isNullOrBlank()) return disconnectedDashboard(settings)
+        return try {
+            val margin = apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin")
+            ensureHistoricalSeed()
+            val learning = learningStats()
+            val snapshot = managedSnapshot(token)
+            val today = LocalDate.now(INDIA).toString()
+            val forecasts = learningDao.intradayForecastsForSide(today, "LONG").map { it.toForecastDto() }
+            val champions = learningDao.allForecastChampions()
+                .filter { it.side == "LONG" }
+                .map { ForecastChampionDto(it.marketRegime, it.regime, it.strategy, it.wins, it.losses, it.sampleCount, it.distinctDays, it.distinctSymbols, it.frozen) }
+            val research = learningDao.latestResearchReport()?.let { ResearchDto(it.reportDate, it.title, it.summary) } ?: ResearchDto()
+            val events = dao.recentNow(8).mapNotNull { e ->
+                e.backendAction?.let { RecentDecisionDto(formatEventTime(e.receivedAtMs), e.symbol, it, e.backendReason.orEmpty()) }
+            }
+            val symbolStatus = nseSymbols.status()
+            val nowMs = System.currentTimeMillis()
+            val heartbeatAge = if (settings.serviceHeartbeatAtMs > 0L) nowMs - settings.serviceHeartbeatAtMs else Long.MAX_VALUE
+            val dataAge = if (settings.lastMarketDataAtMs > 0L) nowMs - settings.lastMarketDataAtMs else Long.MAX_VALUE
+            DashboardDto(
+                armed = settings.armEffective, halted = settings.safetyHalt, marketSession = marketSession(),
+                asOf = ZonedDateTime.now(INDIA).format(DateTimeFormatter.ISO_OFFSET_DATE_TIME),
+                broker = BrokerStatusDto(
+                    configured = hasBrokerCredentials(), connected = true,
+                    detail = "CNC holdings only · DDPI ${if (settings.brokerDdpiEnabled) "enabled" else "required"} · available ₹${fmt(margin.equity?.cncBalanceAvailable ?: margin.clearCash)} · NSE master ${symbolStatus.count}"
+                ),
+                risk = RiskStatusDto(
+                    maxExposure = settings.holdingBudgetRupees.toDouble(),
+                    riskMode = when { settings.safetyHalt -> "HALTED"; settings.armEffective -> "ARMED"; else -> "DISARMED" }
+                ),
+                summary = snapshot.summary, learning = learning, forecasts = forecasts, forecastChampions = champions,
+                research = research,
+                health = EngineHealthDto(
+                    listener = if (heartbeatAge <= 30_000L) "HEALTHY" else "UNHEALTHY",
+                    broker = "CONNECTED",
+                    marketData = if (dataAge <= 15_000L) "FRESH" else "STALE",
+                    symbolMaster = if (nseSymbols.isStale()) "STALE" else "FRESH",
+                    foregroundService = if (heartbeatAge <= 30_000L) "RUNNING" else "NOT_HEARTBEATING",
+                    lastNotificationAtMs = settings.lastNotificationAtMs,
+                    reconnectCount = settings.listenerReconnectCount,
+                    lastReconnectAtMs = settings.lastListenerReconnectAtMs,
+                    lastEventProcessingLatencyMs = settings.lastEventProcessingLatencyMs,
+                    marketDataAgeMs = dataAge
+                ),
+                positions = snapshot.positions,
+                recentDecisions = (snapshot.recentDecisions + events).take(10)
+            )
+        } catch (t: Throwable) {
+            if (t.message?.contains("401") == true || t.message?.contains("author", true) == true) preferences.updateAuthState(authenticated = false)
+            disconnectedDashboard(preferences.settings.first()).copy(
+                broker = BrokerStatusDto(configured = hasBrokerCredentials(), connected = false, detail = t.message)
+            )
+        }
+    }
+
+    suspend fun processEvent(eventId: Long) {
+        ensureHistoricalSeed()
+        val event = dao.byId(eventId) ?: return
+        dao.updateForwarding(eventId, "ANALYZING", null, null, null)
+        val parsed = parser.parse(event.title, event.text, event.bigText)
+        when (parsed.type) {
+            SignalType.AUTO_PAUSED -> {
+                forceLocalDisarm()
+                dao.updateForwarding(eventId, "HALTED", "SAFETY_HALT", "Multify reported a safety pause. ARM has been disabled.", null)
+                return
+            }
+            SignalType.PRE_ALERT -> {
+                val ready = ensureToken() != null
+                dao.updateForwarding(eventId, "ANALYZED", "PRE_ALERT_READY", if (ready) "Broker session warmed for the next Multify call." else "Signal captured; authenticate Groww before ARM.", null)
+                return
+            }
+            SignalType.BUY_SUBMITTED -> {
+                dao.updateForwarding(eventId, "ANALYZED", "BROKER_ACK_CAPTURED", "Multify broker acknowledgement captured.", null)
+                return
+            }
+            SignalType.UNKNOWN -> {
+                dao.updateForwarding(eventId, "IGNORED", "IGNORED", "Unsupported notification ignored.", null)
+                return
+            }
+            else -> Unit
+        }
+        val symbol = parsed.symbol
+        if (!symbol.isNullOrBlank() && !nseSymbols.isKnown(symbol) && !nseSymbols.isStale()) {
+            dao.updateForwarding(eventId, "IGNORED", "SYMBOL_NOT_IN_NSE_MASTER", "$symbol is not in the current NSE equity master.", null)
+            return
+        }
+        val token = ensureToken()
+        if (token == null) {
+            dao.updateForwarding(eventId, "CAPTURED", "AUTH_REQUIRED", "Signal stored. Authenticate Groww to enable ARM.", null)
+            return
+        }
+        val settings = preferences.settings.first()
+        when (parsed.type) {
+            SignalType.TRADE_RELEASE -> handleMultifyBuy(eventId, parsed, token, settings)
+            SignalType.BOOK_PROFIT -> handleMultifyExit(eventId, parsed, token, settings)
+            else -> Unit
+        }
+    }
+
+    private suspend fun handleMultifyBuy(eventId: Long, signal: ParsedSignal, token: String, settings: AppSettings) {
+        val symbol = signal.symbol ?: error("Trade release has no symbol")
+        val quote = apiFactory.groww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Quote $symbol")
+        val ltp = quote.lastPrice ?: error("Groww quote does not contain LTP")
+        preferences.recordMarketData()
+        recordLiveBuy(eventId, signal, ltp)
+        if (!settings.armEffective) {
+            dao.updateForwarding(eventId, "ANALYZED", "LONG_CALL_CAPTURED", "Multify LONG call captured at ₹${fmt(ltp)}. ARM is off, so no order was placed.", null)
+            return
+        }
+        preArmGuard(settings)
+        if (managedDao.openPositions().any { it.symbol.equals(symbol, true) && it.side == "LONG" }) {
+            dao.updateForwarding(eventId, "ANALYZED", "HOLDING_ALREADY_OPEN", "$symbol is already app-owned; duplicate BUY blocked.", null)
+            return
+        }
+        val margin = apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin")
+        val available = (margin.equity?.cncBalanceAvailable ?: margin.clearCash).coerceAtLeast(0.0)
+        val capital = min(settings.holdingBudgetRupees.toDouble(), available)
+        val qty = floor(capital / ltp).toInt()
+        require(qty > 0) { "Available CNC balance cannot fund one share of $symbol" }
+        val ref = stableRef("MLH", "$eventId-$symbol")
+        val order = placeMarket(token, symbol, "BUY", qty, "CNC", ref)
+        val filled = order.filledQuantity?.takeIf { it > 0 } ?: qty
+        val entry = order.averageFillPrice?.takeIf { it > 0.0 } ?: ltp
+        val learned = learningStats()
+        val trailArmPct = learned.longAveragePct.coerceAtLeast(0.20)
+        managedDao.insertPosition(
+            ManagedPositionEntity(
+                engine = ENGINE_MULTIFY_HOLDING, symbol = symbol, product = "CNC", side = "LONG", quantity = filled,
+                entryPrice = entry, stopPrice = entry * (1.0 - HOLDING_FAILSAFE_STOP_PCT),
+                targetPrice = entry * (1.0 + trailArmPct / 100.0),
+                strategy = "Multify ARM holding · long trail arm ${fmt(trailArmPct)}%",
+                regime = "HOLDING_LONG", confidence = 1.0, sourceEventId = eventId,
+                openOrderId = order.growwOrderId, openReferenceId = ref, openedAtMs = System.currentTimeMillis(),
+                lastPrice = entry, maxFavourablePrice = entry, maxAdversePrice = entry, lastEvaluatedAtMs = System.currentTimeMillis(),
+                anchorPrice = entry, capitalDeployed = entry * filled, campaignBudget = capital
+            )
+        )
+        dao.updateForwarding(eventId, "DELIVERED", "CNC_LONG_BOUGHT", "ARM bought $filled $symbol into holdings @ ₹${fmt(entry)}. Long trailing arms at +${fmt(trailArmPct)}%.", null)
+        auditLogger.log("HOLDING", "MULTIFY_LONG_OPENED", mapOf("symbol" to symbol, "qty" to filled, "entry" to entry, "trail_arm_pct" to trailArmPct))
+    }
+
+    private suspend fun handleMultifyExit(eventId: Long, signal: ParsedSignal, token: String, settings: AppSettings) {
+        val symbol = signal.symbol ?: error("Book-profit signal has no symbol")
+        val quote = apiFactory.groww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Quote $symbol")
+        val ltp = quote.lastPrice ?: signal.exitPrice ?: error("No exit quote")
+        preferences.recordMarketData()
+        recordLiveExit(eventId, symbol, ltp)
+        val holding = managedDao.openPosition(ENGINE_MULTIFY_HOLDING, symbol)
+        if (holding == null) {
+            dao.updateForwarding(eventId, "ANALYZED", "MULTIFY_EXIT_CAPTURED", "Book Profit captured; no app-owned Multify holding was open.", null)
+            return
+        }
+        require(settings.brokerDdpiEnabled) { "DDPI is required to sell the app-owned CNC holding" }
+        closeLongHolding(token, holding, ltp, "MULTIFY_BOOK_PROFIT")
+        dao.updateForwarding(eventId, "DELIVERED", "CNC_LONG_SOLD", "Multify Book Profit sold the app-owned $symbol holding.", null)
+    }
+
+    suspend fun submitManualSignal(symbol: String, action: String, observedPrice: Double?): Long {
+        val normalizedSymbol = symbol.trim().uppercase(Locale.US)
+        require(normalizedSymbol.matches(Regex("[A-Z0-9&._-]{1,32}"))) { "Enter a valid NSE symbol" }
+        val normalizedAction = action.trim().uppercase(Locale.US).replace(' ', '_')
+        require(normalizedAction in setOf("BUY", "BOOK_PROFIT")) { "Manual action must be BUY or BOOK PROFIT" }
+        val signalType = if (normalizedAction == "BUY") SignalType.TRADE_RELEASE else SignalType.BOOK_PROFIT
+        val now = System.currentTimeMillis()
+        val id = dao.insert(
+            SignalEventEntity(
+                fingerprint = sha256("$MANUAL_SOURCE|$normalizedSymbol|$normalizedAction|$now"),
+                receivedAtMs = now, postedAtMs = now, sourcePackage = MANUAL_SOURCE, appLabel = "Manual Multify fallback",
+                title = normalizedAction.replace('_', ' '), text = normalizedSymbol,
+                bigText = observedPrice?.let { "$normalizedSymbol @ ₹${fmt(it)}" } ?: normalizedSymbol,
+                signalType = signalType.name, symbol = normalizedSymbol, summary = "Manual $normalizedAction · $normalizedSymbol", confidence = 1.0
+            )
+        )
+        require(id > 0L) { "Manual signal was not stored" }
+        processEvent(id)
+        return id
     }
 
     suspend fun generateDailyForecasts(force: Boolean = false): List<ForecastDto> {
         ensureHistoricalSeed()
         val now = ZonedDateTime.now(INDIA)
         val today = now.toLocalDate().toString()
-        val existingAll = learningDao.intradayForecastsForDate(today)
-        if (now.dayOfWeek.value >= 6 || now.toLocalTime() < LocalTime.of(9, 15) || now.toLocalTime() > LocalTime.of(15, 0)) {
-            return existingAll.map { it.toForecastDto() }
-        }
+        disableLegacyForecastRows(today)
+        val existing = learningDao.intradayForecastsForSide(today, "LONG")
+        if (now.dayOfWeek.value >= 6 || now.toLocalTime() < LocalTime.of(9, 15) || now.toLocalTime() > LocalTime.of(15, 0)) return existing.map { it.toForecastDto() }
         val nowMs = System.currentTimeMillis()
-        if (!force && nowMs - lastForecastScanAtMs < FORECAST_SCAN_INTERVAL_MS) return existingAll.map { it.toForecastDto() }
-        val token = ensureToken() ?: return existingAll.map { it.toForecastDto() }
+        if (!force && nowMs - lastForecastScanAtMs < FORECAST_SCAN_INTERVAL_MS) return existing.map { it.toForecastDto() }
+        val token = ensureToken() ?: return existing.map { it.toForecastDto() }
         lastForecastScanAtMs = nowMs
 
         val calls = learningDao.allCalls().filter { it.action.equals("BUY", true) }
         val recentDates = calls.map { it.callDate }.distinct().sortedDescending().take(30).toSet()
         val rolling = calls.filter { it.callDate in recentDates }
         val frequency = rolling.groupingBy { it.symbol }.eachCount()
-        val recentSymbols = frequency.entries.sortedByDescending { it.value }.take(10).map { it.key }
+        val recentSymbols = frequency.entries.sortedByDescending { it.value }.take(12).map { it.key }
         val dnaSymbols = MultifyReverseEngineering.positiveCases.map { it.symbol }
         val master = nseSymbols.symbols()
         val slot = (now.hour * 60 + now.minute) / 20
         val rotating = if (master.isEmpty()) emptyList() else {
             val seed = kotlin.math.abs(today.hashCode() + slot * 977)
-            (0 until min(18, master.size)).map { i -> master[Math.floorMod(seed + i * 131, master.size)] }
+            (0 until min(24, master.size)).map { i -> master[Math.floorMod(seed + i * 131, master.size)] }
         }
-        val universe = (dnaSymbols + recentSymbols + rotating).distinct().take(36)
-
-        data class PairEval(val symbol: String, val long: StrategyEvaluation, val short: StrategyEvaluation)
-        val evaluated = mutableListOf<PairEval>()
+        val universe = (dnaSymbols + recentSymbols + rotating).distinct().take(42)
+        val evaluated = mutableListOf<Pair<String, StrategyEvaluation>>()
         for (symbol in universe) {
-            val pair = runCatching { forecastEvaluation(symbol, token) }.getOrNull() ?: continue
-            val f = pair.first.features
+            val evaluation = runCatching { forecastEvaluation(symbol, token) }.getOrNull() ?: continue
+            val f = evaluation.features
             if (f.ltp < 10.0 || (f.spreadBps ?: 0.0) > 45.0) continue
-            evaluated += PairEval(symbol, pair.first, pair.second)
+            evaluated += symbol to evaluation
         }
-        val breadth = evaluated.mapNotNull { it.long.features.dayChangePct }.takeIf { it.isNotEmpty() }?.average() ?: 0.0
-        val marketRegime = when {
-            breadth >= 0.50 -> "BREADTH_BULL"
-            breadth <= -0.50 -> "BREADTH_BEAR"
-            else -> "BREADTH_NEUTRAL"
-        }
-        val champions = learningDao.allForecastChampions().associateBy { it.key }
+        val breadth = evaluated.mapNotNull { it.second.features.dayChangePct }.takeIf { it.isNotEmpty() }?.average() ?: 0.0
+        val marketRegime = when { breadth >= .50 -> "BREADTH_BULL"; breadth <= -.50 -> "BREADTH_WEAK"; else -> "BREADTH_NEUTRAL" }
+        val champions = learningDao.allForecastChampions().filter { it.side == "LONG" }.associateBy { it.key }
         val learned = learningStats()
-        val longTargetPct = learned.longAveragePct.coerceAtLeast(0.20)
-        val shortTargetPct = learned.shortAverageDownPct.coerceAtLeast(0.20)
+        val targetPct = learned.longAveragePct.coerceAtLeast(.20)
         val desired = when {
             now.toLocalTime() < LocalTime.of(10, 15) -> 1
             now.toLocalTime() < LocalTime.of(11, 15) -> 2
@@ -442,152 +523,110 @@ class TradingRepository @Inject constructor(
             now.toLocalTime() < LocalTime.of(13, 15) -> 4
             else -> 5
         }
+        val have = existing.map { it.symbol }.toSet()
+        val ranked = evaluated.map { row ->
+            val key = championKey(marketRegime, row.second.regime, row.second.strategy)
+            val championBonus = if (champions[key]?.frozen == true) .06 else 0.0
+            val frequencyBonus = min(.06, (frequency[row.first] ?: 0) * .006)
+            val dnaBonus = if (row.first in dnaSymbols) .04 else 0.0
+            Triple(row.first, row.second, (row.second.confidence + championBonus + frequencyBonus + dnaBonus).coerceAtMost(.99))
+        }.filter { it.first !in have }.sortedByDescending { it.third }
 
-        suspend fun addSide(side: String, targetPct: Double, selector: (PairEval) -> StrategyEvaluation) {
-            val existing = learningDao.intradayForecastsForSide(today, side)
-            if (existing.size >= desired) return
-            val have = existing.map { it.symbol }.toSet()
-            val ranked = evaluated.map { row ->
-                val eval = selector(row)
-                val key = championKey(side, marketRegime, eval.regime, eval.strategy)
-                val championBonus = if (champions[key]?.frozen == true) 0.06 else 0.0
-                val freqBonus = if (side == "LONG") min(0.06, (frequency[row.symbol] ?: 0) * 0.006) else 0.0
-                val dnaBonus = if (side == "LONG" && row.symbol in dnaSymbols) 0.04 else 0.0
-                Triple(row, eval, (eval.confidence + championBonus + freqBonus + dnaBonus).coerceAtMost(.99))
-            }.filter { it.first.symbol !in have }.sortedByDescending { it.third }
-
-            ranked.take(desired - existing.size).forEachIndexed { index, item ->
-                val eval = item.second
-                val price = eval.features.ltp
-                val target = if (side == "LONG") price * (1.0 + targetPct / 100.0)
-                    else max(.05, price * (1.0 - targetPct / 100.0))
-                val key = championKey(side, marketRegime, eval.regime, eval.strategy)
-                learningDao.upsertIntradayForecast(
-                    IntradayForecastEntity(
-                        forecastDate = today, side = side, rank = existing.size + index + 1, symbol = item.first.symbol,
-                        entryPrice = price, targetPct = targetPct, targetPrice = target,
-                        confidence = eval.confidence, score = item.third, strategy = eval.strategy, regime = eval.regime,
-                        marketRegime = marketRegime, championKey = key, reason = eval.reason,
-                        generatedAtMs = nowMs, lastPrice = price, lastObservedAtMs = nowMs
-                    )
+        ranked.take((desired - existing.size).coerceAtLeast(0)).forEachIndexed { index, item ->
+            val price = item.second.features.ltp
+            val key = championKey(marketRegime, item.second.regime, item.second.strategy)
+            learningDao.upsertIntradayForecast(
+                IntradayForecastEntity(
+                    forecastDate = today, side = "LONG", rank = existing.size + index + 1, symbol = item.first,
+                    entryPrice = price, targetPct = targetPct, targetPrice = price * (1.0 + targetPct / 100.0),
+                    confidence = item.second.confidence, score = item.third, strategy = item.second.strategy,
+                    regime = item.second.regime, marketRegime = marketRegime, championKey = key,
+                    reason = item.second.reason, generatedAtMs = nowMs, lastPrice = price, lastObservedAtMs = nowMs
                 )
-            }
+            )
         }
-
-        addSide("LONG", longTargetPct) { it.long }
-        addSide("SHORT", shortTargetPct) { it.short }
-        val all = learningDao.intradayForecastsForDate(today)
-        auditLogger.log("FORECAST", "INTRADAY_SCAN", mapOf(
-            "date" to today, "universe" to universe.size, "evaluated" to evaluated.size,
-            "long_count" to all.count { it.side == "LONG" }, "short_count" to all.count { it.side == "SHORT" },
-            "market_regime" to marketRegime, "long_target_pct" to longTargetPct, "short_target_pct" to shortTargetPct
-        ))
+        val all = learningDao.intradayForecastsForSide(today, "LONG")
+        auditLogger.log("FORECAST", "LONG_SCAN", mapOf("date" to today, "evaluated" to evaluated.size, "count" to all.size, "target_pct" to targetPct))
         return all.map { it.toForecastDto() }
     }
 
-    private suspend fun forecastEvaluation(symbol: String, token: String): Pair<StrategyEvaluation, StrategyEvaluation> {
+    private suspend fun forecastEvaluation(symbol: String, token: String): StrategyEvaluation {
         val now = ZonedDateTime.now(INDIA)
         val start = now.minusDays(4).toLocalDate().atTime(9,15).format(HIST_FORMAT)
         val end = now.toLocalDateTime().format(HIST_FORMAT)
         val quote = apiFactory.groww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Quote $symbol")
-        val historical = apiFactory.groww.historicalCandles(bearer(token), growwSymbol = "NSE-$symbol", startTime = start, endTime = end, candleInterval = "15minute").requirePayload("Forecast candles $symbol")
+        val historical = apiFactory.groww.historicalCandles(
+            bearer(token), growwSymbol = "NSE-$symbol", startTime = start, endTime = end, candleInterval = "15minute"
+        ).requirePayload("Forecast candles $symbol")
         require(historical.candles.size >= 5) { "Insufficient forecast candles" }
-        val f = LocalStrategyEngine.buildFeatures(quote, historical, 15)
-        val synthetic = ParsedSignal(SignalType.TRADE_RELEASE, symbol=symbol, rawText="forecast", confidence=1.0)
-        return LocalStrategyEngine.evaluateLong(synthetic, f, includeEventPrior = false) to LocalStrategyEngine.evaluateShort(f, includeEventPrior = false)
+        val features = LocalStrategyEngine.buildFeatures(quote, historical, 15)
+        val signal = ParsedSignal(SignalType.TRADE_RELEASE, symbol = symbol, rawText = "forecast", confidence = 1.0)
+        return LocalStrategyEngine.evaluateLong(signal, features, includeEventPrior = false)
     }
 
-    private fun championKey(side: String, marketRegime: String, regime: String, strategy: String): String =
-        listOf(side, marketRegime, regime, strategy).joinToString("|") { it.uppercase(Locale.US).replace("|", "/") }
-
-    private fun IntradayForecastEntity.toForecastDto() = ForecastDto(
-        rank = rank, symbol = symbol, bias = side, confidence = confidence, score = score, reason = reason,
-        multifyMatched = multifyMatched, multifyDirectionMatched = multifyMatched,
-        entryPrice = entryPrice, targetPrice = targetPrice, targetPct = targetPct, status = status,
-        strategy = strategy, regime = regime, marketRegime = marketRegime,
-        championTag = championKey, maxFavourablePct = maxFavourablePct, maxAdversePct = maxAdversePct,
-        generatedAtMs = generatedAtMs
-    )
+    suspend fun executeForecast(symbol: String): String {
+        val now = ZonedDateTime.now(INDIA)
+        require(now.dayOfWeek.value < 6 && marketSession() == "OPEN") { "Forecast BUY is available only during the NSE regular session" }
+        val settings = preferences.settings.first()
+        preArmGuard(settings)
+        val token = ensureToken() ?: error("Authenticate Groww first")
+        val row = learningDao.intradayForecastsForSide(now.toLocalDate().toString(), "LONG")
+            .firstOrNull { it.symbol.equals(symbol, true) } ?: error("No active LONG recommendation for $symbol")
+        require(row.status == "ACTIVE") { "$symbol forecast is no longer active" }
+        if (managedDao.openPositions().any { it.symbol.equals(row.symbol, true) && it.side == "LONG" }) return "${row.symbol} is already app-owned; duplicate BUY blocked"
+        val quote = apiFactory.groww.quote(bearer(token), tradingSymbol = row.symbol).requirePayload("Quote ${row.symbol}")
+        val ltp = quote.lastPrice ?: error("Groww quote has no LTP")
+        val margin = apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin")
+        val available = (margin.equity?.cncBalanceAvailable ?: margin.clearCash).coerceAtLeast(0.0)
+        val capital = min(settings.holdingBudgetRupees.toDouble(), available)
+        val qty = floor(capital / ltp).toInt()
+        require(qty > 0) { "Available CNC balance cannot fund one share of ${row.symbol}" }
+        val ref = stableRef("FLH", "${row.id}-${row.symbol}")
+        val order = placeMarket(token, row.symbol, "BUY", qty, "CNC", ref)
+        val filled = order.filledQuantity?.takeIf { it > 0 } ?: qty
+        val entry = order.averageFillPrice?.takeIf { it > 0.0 } ?: ltp
+        managedDao.insertPosition(
+            ManagedPositionEntity(
+                engine = ENGINE_FORECAST_HOLDING, symbol = row.symbol, product = "CNC", side = "LONG", quantity = filled,
+                entryPrice = entry, stopPrice = entry * (1.0 - HOLDING_FAILSAFE_STOP_PCT),
+                targetPrice = entry * (1.0 + row.targetPct / 100.0),
+                strategy = "Forecast holding · ${row.strategy}", regime = row.regime, confidence = row.confidence,
+                sourceEventId = null, openOrderId = order.growwOrderId, openReferenceId = ref,
+                openedAtMs = System.currentTimeMillis(), lastPrice = entry,
+                maxFavourablePrice = entry, maxAdversePrice = entry, lastEvaluatedAtMs = System.currentTimeMillis(),
+                anchorPrice = entry, capitalDeployed = entry * filled, campaignBudget = capital
+            )
+        )
+        auditLogger.log("FORECAST", "LONG_HOLDING_OPENED", mapOf("symbol" to row.symbol, "qty" to filled, "entry" to entry, "trail_arm_pct" to row.targetPct))
+        return "BUY ${row.symbol} opened as CNC holding · qty $filled @ ₹${fmt(entry)} · trailing arms at +${fmt(row.targetPct)}%"
+    }
 
     suspend fun pendingForecastNotifications(): List<ForecastDto> {
         val today = LocalDate.now(INDIA).toString()
-        val rows = learningDao.pendingForecastNotifications(today)
+        disableLegacyForecastRows(today)
+        val rows = learningDao.pendingForecastNotifications(today).filter { it.side == "LONG" }
         rows.forEach { learningDao.markForecastNotified(it.id) }
         return rows.map { it.toForecastDto() }
     }
 
-    suspend fun executeForecast(symbol: String, side: String): String {
-        val normalizedSide = side.uppercase(Locale.US)
-        require(normalizedSide in setOf("LONG", "SHORT")) { "Choose LONG or SHORT" }
-        val now = ZonedDateTime.now(INDIA)
-        require(now.dayOfWeek.value < 6 && now.toLocalTime() >= LocalTime.of(9, 15) && now.toLocalTime() < LocalTime.of(15, 0)) {
-            "Forecast orders are intraday only between 09:15 and 15:00 IST"
-        }
-        val settings = preferences.settings.first()
-        require(settings.liveExecutionEffective) { "Enable live execution before placing a Forecast order" }
-        val token = ensureToken() ?: error("Authenticate Groww first")
-        val row = learningDao.intradayForecastsForSide(now.toLocalDate().toString(), normalizedSide)
-            .firstOrNull { it.symbol.equals(symbol, true) }
-            ?: error("No active " + normalizedSide + " recommendation for " + symbol)
-        val engine = if (normalizedSide == "LONG") ENGINE_FORECAST_LONG else ENGINE_FORECAST_SHORT
-        if (managedDao.openPosition(engine, row.symbol) != null) return "Forecast " + normalizedSide + " already open for " + row.symbol
-        preLiveGuard(settings)
-        val risk = liveRiskState(token, settings)
-        require(risk.allowNewRisk) { risk.reason }
-        assertNoExternalMisConflict(token, row.symbol)
-
-        val quote = apiFactory.groww.quote(bearer(token), tradingSymbol = row.symbol).requirePayload("Quote " + row.symbol)
-        val ltp = quote.lastPrice ?: error("Groww quote has no LTP")
-        val perTradeBudget = min(50_000.0, max(10_000.0, settings.dailyBudgetRupees.toDouble() / 10.0))
-        val qty = floor(perTradeBudget / ltp).toInt()
-        require(qty > 0) { "Forecast budget cannot fund one share" }
-        val tx = if (normalizedSide == "LONG") "BUY" else "SELL"
-        val ref = stableRef(if (normalizedSide == "LONG") "FCL" else "FCS", row.id.toString() + "-" + row.symbol)
-        val order = placeMarket(token, row.symbol, tx, qty, "MIS", ref)
-        val filled = order.filledQuantity?.takeIf { it > 0 } ?: qty
-        val entry = order.averageFillPrice?.takeIf { it > 0 } ?: ltp
-        val target = if (normalizedSide == "LONG") entry * (1.0 + row.targetPct / 100.0)
-            else max(.05, entry * (1.0 - row.targetPct / 100.0))
-        val stop = if (normalizedSide == "LONG") max(.05, entry * .99) else entry * 1.01
-        managedDao.insertPosition(
-            ManagedPositionEntity(
-                engine = engine, symbol = row.symbol, product = "MIS", side = normalizedSide, quantity = filled,
-                entryPrice = entry, stopPrice = stop, targetPrice = target,
-                strategy = "Forecast " + normalizedSide + " · " + row.strategy,
-                regime = row.regime, confidence = row.confidence, sourceEventId = null,
-                openOrderId = order.growwOrderId, openReferenceId = ref, openedAtMs = System.currentTimeMillis(),
-                lastPrice = entry, maxFavourablePrice = entry, maxAdversePrice = entry, lastEvaluatedAtMs = System.currentTimeMillis(),
-                anchorPrice = entry, capitalDeployed = entry * filled, campaignBudget = perTradeBudget
-            )
-        )
-        val p = managedDao.openPosition(engine, row.symbol) ?: error("Forecast position ledger insert failed")
-        val smart = protectManagedPosition(token, p)
-        managedDao.updatePosition(p.copy(smartOrderId = smart))
-        auditLogger.log("FORECAST", "ORDER_OPENED", mapOf(
-            "symbol" to row.symbol, "side" to normalizedSide, "qty" to filled, "entry" to entry,
-            "trail_arm_pct" to row.targetPct, "strategy" to row.strategy, "regime" to row.regime
-        ))
-        return normalizedSide + " " + row.symbol + " opened · qty " + filled + " @ ₹" + fmt(entry) +
-            " · trail arms at " + fmt(row.targetPct) + "%"
-    }
-
     suspend fun monitorForecastOutcomes(): Int {
         val nowMs = System.currentTimeMillis()
-        if (nowMs - lastForecastOutcomeMonitorAtMs < 45_000L) return learningDao.activeIntradayForecasts().size
+        if (nowMs - lastForecastOutcomeMonitorAtMs < 45_000L) return learningDao.activeIntradayForecasts().count { it.side == "LONG" }
         lastForecastOutcomeMonitorAtMs = nowMs
         val active = learningDao.activeIntradayForecasts()
-        if (active.isEmpty()) return 0
-        val token = ensureToken() ?: return active.size
+        val token = ensureToken() ?: return active.count { it.side == "LONG" }
         val now = ZonedDateTime.now(INDIA)
         for (row in active) {
+            if (row.side != "LONG") {
+                learningDao.updateIntradayForecast(row.copy(status = "DISABLED_LONG_ONLY", lastObservedAtMs = nowMs))
+                continue
+            }
             runCatching {
                 val ltp = apiFactory.groww.quote(bearer(token), tradingSymbol = row.symbol)
                     .requirePayload("Forecast outcome quote ${row.symbol}").lastPrice ?: return@runCatching
-                val movePct = if (row.side == "LONG") (ltp / row.entryPrice - 1.0) * 100.0
-                    else (row.entryPrice / ltp - 1.0) * 100.0
-                val adversePct = if (row.side == "LONG") max(0.0, (row.entryPrice - ltp) / row.entryPrice * 100.0)
-                    else max(0.0, (ltp - row.entryPrice) / row.entryPrice * 100.0)
-                val hit = if (row.side == "LONG") ltp >= row.targetPrice else ltp <= row.targetPrice
+                val movePct = (ltp / row.entryPrice - 1.0) * 100.0
+                val adversePct = max(0.0, (row.entryPrice - ltp) / row.entryPrice * 100.0)
+                val hit = ltp >= row.targetPrice
                 val expired = now.toLocalDate().toString() != row.forecastDate || now.toLocalTime() >= LocalTime.of(15, 0)
                 val status = when { hit -> "TARGET_HIT"; expired -> "MISSED"; else -> "ACTIVE" }
                 val updated = row.copy(
@@ -599,12 +638,19 @@ class TradingRepository @Inject constructor(
                 if (status != "ACTIVE") refreshForecastChampion(updated)
             }
         }
-        return learningDao.activeIntradayForecasts().size
+        return learningDao.activeIntradayForecasts().count { it.side == "LONG" }
+    }
+
+    private suspend fun disableLegacyForecastRows(today: String) {
+        learningDao.intradayForecastsForDate(today)
+            .filter { it.side != "LONG" && it.status == "ACTIVE" }
+            .forEach { learningDao.updateIntradayForecast(it.copy(status = "DISABLED_LONG_ONLY", lastObservedAtMs = System.currentTimeMillis())) }
     }
 
     private suspend fun refreshForecastChampion(row: IntradayForecastEntity) {
+        if (row.side != "LONG") return
         val completed = learningDao.allIntradayForecasts().filter {
-            it.side == row.side && it.marketRegime == row.marketRegime && it.regime == row.regime &&
+            it.side == "LONG" && it.marketRegime == row.marketRegime && it.regime == row.regime &&
                 it.strategy == row.strategy && it.status in setOf("TARGET_HIT", "MISSED")
         }
         if (completed.isEmpty()) return
@@ -616,7 +662,7 @@ class TradingRepository @Inject constructor(
         val frozen = previous?.frozen == true || (wins >= 5 && days >= 3 && symbols >= 3)
         learningDao.upsertForecastChampion(
             ForecastChampionEntity(
-                key = row.championKey, side = row.side, marketRegime = row.marketRegime, regime = row.regime,
+                key = row.championKey, side = "LONG", marketRegime = row.marketRegime, regime = row.regime,
                 strategy = row.strategy, wins = wins, losses = losses, sampleCount = completed.size,
                 distinctDays = days, distinctSymbols = symbols, frozen = frozen,
                 firstSeenAtMs = previous?.firstSeenAtMs ?: completed.minOf { it.generatedAtMs },
@@ -631,2303 +677,232 @@ class TradingRepository @Inject constructor(
         val existing = learningDao.latestResearchReport()
         if (!force && existing?.reportDate == today) return ResearchDto(existing.reportDate, existing.title, existing.summary)
         val stats = learningStats()
-        val forecasts = learningDao.intradayForecastsForDate(today)
-        val longs = forecasts.filter { it.side == "LONG" }
-        val shorts = forecasts.filter { it.side == "SHORT" }
-        val longWins = longs.count { it.status == "TARGET_HIT" }
-        val shortWins = shorts.count { it.status == "TARGET_HIT" }
+        val forecasts = learningDao.intradayForecastsForSide(today, "LONG")
+        val wins = forecasts.count { it.status == "TARGET_HIT" }
         val matched = forecasts.count { it.multifyMatched }
-        val frozen = learningDao.allForecastChampions().filter { it.frozen }
+        val frozen = learningDao.allForecastChampions().count { it.side == "LONG" && it.frozen }
         val report = buildString {
-            append("LONG target: " + fmt(stats.longAveragePct) + "% from the rolling 30 recommendation trading days. ")
-            append("SHORT direct-downside target: " + fmt(stats.shortAverageDownPct) + "% from " + stats.shortObservedCalls + " post-sell observations. ")
-            append("Today LONG target hits: " + longWins + "/" + longs.size + "; SHORT target hits: " + shortWins + "/" + shorts.size + ". ")
-            append("Multify later matched " + matched + "/" + forecasts.size + " forecast symbols; this is secondary research, not the success label. ")
-            append("Frozen champions: " + frozen.size + ". ")
-            append("Live champions remain frozen after qualification; challengers may continue collecting shadow evidence without changing the live version.")
+            append("Rolling 30-trading-day LONG target: ${fmt(stats.longAveragePct)}% (median ${fmt(stats.longMedianPct)}%). ")
+            append("Today target hits: $wins/${forecasts.size}. ")
+            append("Multify later matched $matched/${forecasts.size} forecast symbols; matching is secondary research, not the success label. ")
+            append("Frozen LONG champions: $frozen. ")
+            append("Live champions remain frozen after qualification while challengers continue collecting evidence.")
         }
-        val entity = ResearchReportEntity(reportDate=today, generatedAtMs=System.currentTimeMillis(), title="After-market forecast review", summary=report)
+        val entity = com.multify.traderpro.data.local.ResearchReportEntity(
+            reportDate = today, generatedAtMs = System.currentTimeMillis(),
+            title = "After-market LONG forecast review", summary = report
+        )
         learningDao.insertResearchReport(entity)
-        auditLogger.log("RESEARCH", "AFTER_HOURS_FORECAST_REPORT", mapOf(
-            "date" to today, "long_wins" to longWins, "long_total" to longs.size,
-            "short_wins" to shortWins, "short_total" to shorts.size, "multify_matches" to matched,
-            "frozen_champions" to frozen.size
-        ))
+        auditLogger.log("RESEARCH", "AFTER_HOURS_LONG_REPORT", mapOf("date" to today, "wins" to wins, "total" to forecasts.size, "matches" to matched))
         return ResearchDto(today, entity.title, report)
-    }
-
-    suspend fun saveBrokerSettings(
-        apiKeyOrToken: String,
-        totpSecret: String,
-        expectedStaticIp: String,
-        packageFilter: String,
-        dailyBudgetRupees: Long
-    ) {
-        require(dailyBudgetRupees in MIN_BUDGET..MAX_BUDGET) { "Intraday budget must be between ₹10,000 and ₹2,00,000" }
-        require(expectedStaticIp.isBlank() || isValidIp(expectedStaticIp)) { "Enter a valid IPv4/IPv6 static IP" }
-        preferences.updateBrokerSettings(expectedStaticIp, packageFilter, dailyBudgetRupees)
-        if (apiKeyOrToken.isNotBlank()) secretStore.putApiKey(apiKeyOrToken)
-        if (totpSecret.isNotBlank()) secretStore.putTotpSecret(totpSecret)
-        if (apiKeyOrToken.isNotBlank() || totpSecret.isNotBlank()) {
-            secretStore.clearAccessToken()
-            preferences.updateAuthState(authenticated = false)
-        }
-        auditLogger.log("SYSTEM", "SETTINGS_SAVED", mapOf(
-            "static_ip_configured" to expectedStaticIp.isNotBlank(),
-            "package_filter" to packageFilter.trim(),
-            "intraday_budget" to dailyBudgetRupees,
-            "credentials_replaced" to (apiKeyOrToken.isNotBlank() || totpSecret.isNotBlank())
-        ))
-    }
-
-    suspend fun setIntradayBudget(value: Long) {
-        preferences.setIntradayBudget(value)
-        auditLogger.log("RISK", "INTRADAY_BUDGET_CHANGED", mapOf("budget" to value.coerceIn(MIN_BUDGET, MAX_BUDGET)))
-    }
-    suspend fun setFastTrackBudget(value: Long) {
-        preferences.setFastTrackBudget(value)
-        auditLogger.log("FAST_TRACK", "BUDGET_CHANGED", mapOf("budget" to value.coerceIn(MIN_BUDGET, MAX_BUDGET)))
-    }
-    suspend fun setPostSellShortEnabled(value: Boolean) {
-        preferences.setPostSellShortEnabled(value)
-        auditLogger.log("FAST_TRACK", "POST_SELL_SHORT_CHANGED", mapOf("enabled" to value))
-    }
-    suspend fun setExecutionMode(value: String) {
-        preferences.setExecutionMode(value)
-        val normalized = preferences.settings.first().executionMode
-        auditLogger.log("SETTINGS", "EXECUTION_MODE", mapOf("mode" to normalized))
-    }
-    suspend fun setWaveCount(value: Int) {
-        preferences.setWaveCount(value)
-        auditLogger.log("SETTINGS", "WAVE_COUNT", mapOf("waves" to value.coerceIn(1, 20)))
-    }
-    suspend fun setFirstWaveMode(value: String) = setExecutionMode(value)
-    suspend fun setActiveWaveCount(value: Long) = setWaveCount(value.toInt())
-
-    suspend fun setWaveRiskSettings(
-        spacingPercent: Double, waveCapital: Long, maximumWaves: Int,
-        maxCampaignCapital: Long, maxDailyLoss: Long, maxSingleStockLoss: Long
-    ) {
-        preferences.setWaveRiskSettings(spacingPercent, waveCapital, maximumWaves, maxCampaignCapital, maxDailyLoss, maxSingleStockLoss)
-        auditLogger.log("SETTINGS", "ADAPTIVE_WAVE_RISK", mapOf(
-            "spacing_percent" to spacingPercent, "wave_capital" to waveCapital, "maximum_waves" to maximumWaves,
-            "max_campaign_capital" to maxCampaignCapital, "max_daily_loss" to maxDailyLoss,
-            "max_single_stock_loss" to maxSingleStockLoss
-        ))
-    }
-
-    suspend fun recordListenerConnected() = preferences.recordListenerConnected()
-    suspend fun recordListenerReconnect() = preferences.recordListenerReconnect()
-    suspend fun recordNotificationReceived() = preferences.recordNotification()
-    suspend fun recordEventProcessingLatency(latencyMs: Long) = preferences.recordEventLatency(latencyMs)
-    suspend fun recordServiceHeartbeat() = preferences.recordServiceHeartbeat()
-
-    fun hasBrokerCredentials(): Boolean = secretStore.hasApiKey() && secretStore.hasTotpSecret()
-    fun hasAccessToken(): Boolean = secretStore.hasAccessToken()
-
-    suspend fun authenticate(): AuthenticationResult {
-        auditLogger.log("AUTH", "AUTHENTICATION_ATTEMPT", mapOf("method" to "TOTP"))
-        val settings = preferences.settings.first()
-        val apiKey = secretStore.getApiKey() ?: error("Groww TOTP token is not configured")
-        val totpSecret = secretStore.getTotpSecret() ?: error("Groww TOTP secret is not configured")
-        val publicIp = runCatching { apiFactory.publicIp.currentIp().ip.trim() }.getOrDefault("")
-        val staticMatched = settings.expectedStaticIp.isNotBlank() && publicIp.isNotBlank() && normalizeIp(publicIp) == normalizeIp(settings.expectedStaticIp)
-
-        val totp = TotpGenerator.generate(totpSecret)
-        val tokenResponse = try {
-            apiFactory.groww.createAccessToken(
-                authorization = "Bearer $apiKey",
-                request = TokenRequest(keyType = "totp", totp = totp)
-            )
-        } catch (e: HttpException) {
-            error(growwAuthError(e))
-        }
-        val token = tokenResponse.token?.takeIf { it.isNotBlank() }
-            ?: error(buildString {
-                append("Groww did not return an access token")
-                tokenResponse.error?.code?.takeIf { it.isNotBlank() }?.let { append(" ($it)") }
-                tokenResponse.error?.message?.takeIf { it.isNotBlank() }?.let { append(": $it") }
-                append(". Verify the TOTP token/secret and keep Automatic date & time enabled.")
-            })
-        secretStore.putAccessToken(token)
-
-        val profile = apiFactory.groww.userProfile(bearer(token)).requirePayload("Groww profile")
-        val cashEnabled = profile.nseEnabled && profile.activeSegments.any { it.equals("CASH", true) }
-        require(cashEnabled) { "Groww profile is not enabled for NSE CASH trading" }
-        val margin = apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin")
-        val expiry = tokenResponse.expiry.orEmpty()
-        preferences.updateAuthState(
-            authenticated = true,
-            authenticatedAtMs = System.currentTimeMillis(),
-            accessTokenExpiry = expiry,
-            brokerUcc = profile.ucc.orEmpty(),
-            brokerDdpiEnabled = profile.ddpiEnabled,
-            verifiedPublicIp = publicIp,
-            staticIpMatched = staticMatched
-        )
-        auditLogger.log("AUTH", "AUTHENTICATION_SUCCESS", mapOf(
-            "nse_cash_enabled" to cashEnabled,
-            "ddpi_enabled" to profile.ddpiEnabled,
-            "static_ip_matched" to staticMatched,
-            "mis_balance_available" to (margin.equity?.misBalanceAvailable ?: 0.0)
-        ))
-        return AuthenticationResult(
-            authenticated = true,
-            ucc = profile.ucc.orEmpty(),
-            nseCashEnabled = cashEnabled,
-            publicIp = publicIp,
-            staticIpMatched = staticMatched,
-            accessTokenExpiry = expiry,
-            misBalanceAvailable = margin.equity?.misBalanceAvailable ?: 0.0,
-            ddpiEnabled = profile.ddpiEnabled,
-            detail = buildString {
-                append("Groww authenticated")
-                if (profile.ucc?.isNotBlank() == true) append(" · UCC ${profile.ucc}")
-                append(if (profile.ddpiEnabled) " · DDPI enabled" else " · DDPI not enabled")
-                if (publicIp.isNotBlank()) append(" · egress $publicIp")
-                if (settings.expectedStaticIp.isNotBlank()) append(if (staticMatched) " · static IP matched" else " · STATIC IP MISMATCH")
-            }
-        )
-    }
-
-    suspend fun refreshDashboard(): DashboardDto {
-        var settings = preferences.settings.first()
-        val token = secretStore.getAccessToken()
-        if (!settings.brokerAuthenticated || token.isNullOrBlank()) return disconnectedDashboard(settings)
-        return try {
-            val margin = apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin")
-            ensureHistoricalSeed()
-            val shadow = paperSnapshot()
-            val live = managedSnapshot(token, setOf(ENGINE_INTRADAY, ENGINE_FORECAST_LONG, ENGINE_FORECAST_SHORT))
-            val fast = managedSnapshot(token, setOf(ENGINE_FAST_TRACK, ENGINE_FAST_SHORT))
-            val learning = learningStats()
-            val forecasts = learningDao.intradayForecastsForDate(LocalDate.now(INDIA).toString()).map { it.toForecastDto() }
-            val forecastChampions = learningDao.allForecastChampions().map { c ->
-                ForecastChampionDto(c.side, c.marketRegime, c.regime, c.strategy, c.wins, c.losses, c.sampleCount, c.distinctDays, c.distinctSymbols, c.frozen)
-            }
-            val latestResearch = learningDao.latestResearchReport()?.let { ResearchDto(it.reportDate, it.title, it.summary) } ?: ResearchDto()
-            val strategyInsights = learningDao.recentStrategySnapshots(12).map { x ->
-                StrategyInsightDto(
-                    atMs = x.atMs, symbol = x.symbol, side = x.side, strategy = x.strategy, regime = x.regime,
-                    confidence = x.confidence, score = x.directionalScore, ltp = x.ltp, rsi = x.rsi14, rvol = x.rvol,
-                    orderBookImbalance = x.orderBookImbalance, votes = x.votes
-                )
-            }
-            val main = if (settings.liveExecutionEffective) live else shadow
-            if (settings.liveExecutionEffective) {
-                preferences.updateLivePeakPnl(main.totalPnl)
-            } else {
-                preferences.updateShadowPeakPnl(main.totalPnl)
-            }
-            settings = preferences.settings.first()
-            val mainPeakPnl = if (settings.liveExecutionEffective) settings.livePeakPnl else settings.shadowPeakPnl
-
-            val eventRecent = dao.recentNow(8).mapNotNull { e ->
-                e.backendAction?.let {
-                    RecentDecisionDto(
-                        at = formatEventTime(e.receivedAtMs), symbol = e.symbol, action = it,
-                        reason = e.backendReason.orEmpty(), strategy = null, quantity = 0
-                    )
-                }
-            }
-            val recent = (main.recentTrades + eventRecent).sortedByDescending { it.at }.take(10)
-            val symbolStatus = nseSymbols.status()
-            DashboardDto(
-                serviceStatus = "device",
-                mode = if (settings.liveExecutionEffective) "live" else "paper",
-                armed = settings.liveExecutionEffective,
-                halted = settings.safetyHalt,
-                marketSession = marketSession(),
-                asOf = ZonedDateTime.now(INDIA).format(DateTimeFormatter.ISO_OFFSET_DATE_TIME),
-                broker = BrokerStatusDto(
-                    configured = hasBrokerCredentials(), connected = true, name = "Groww",
-                    detail = "Direct API · app-owned P&L ledger · UCC ${settings.brokerUcc.ifBlank { "verified" }} · MIS available ₹${(margin.equity?.misBalanceAvailable ?: 0.0).toInt()} · NSE master ${symbolStatus.count} symbols"
-                ),
-                risk = riskStatus(settings, main.totalPnl, mainPeakPnl),
-                summary = main.summary,
-                fastTrackSummary = fast.summary,
-                combinedAppPnl = live.totalPnl + fast.totalPnl,
-                shadowQualificationDays = shadowQualificationDays(),
-                learning = learning,
-                forecasts = forecasts,
-                forecastChampions = forecastChampions,
-                research = latestResearch,
-                strategyInsights = strategyInsights,
-                health = run {
-                    val nowMs = System.currentTimeMillis()
-                    val heartbeatAge = if (settings.serviceHeartbeatAtMs > 0) nowMs - settings.serviceHeartbeatAtMs else Long.MAX_VALUE
-                    val dataAge = if (settings.lastMarketDataAtMs > 0) nowMs - settings.lastMarketDataAtMs else Long.MAX_VALUE
-                    EngineHealthDto(
-                        listener = if (heartbeatAge <= 30_000L) "HEALTHY" else "UNHEALTHY",
-                        broker = "CONNECTED",
-                        marketData = if (dataAge <= MAX_MARKET_DATA_AGE_MS * 3) "FRESH" else "STALE",
-                        symbolMaster = if (nseSymbols.isStale()) "STALE" else "FRESH",
-                        foregroundService = if (heartbeatAge <= 30_000L) "RUNNING" else "NOT_HEARTBEATING",
-                        lastNotificationAtMs = settings.lastNotificationAtMs,
-                        reconnectCount = settings.listenerReconnectCount,
-                        lastReconnectAtMs = settings.lastListenerReconnectAtMs,
-                        lastEventProcessingLatencyMs = settings.lastEventProcessingLatencyMs,
-                        marketDataAgeMs = dataAge
-                    )
-                },
-                positions = main.positions,
-                recentDecisions = recent
-            )
-        } catch (t: Throwable) {
-            if (t.message?.contains("401") == true || t.message?.contains("author", true) == true) {
-                preferences.updateAuthState(authenticated = false)
-            }
-            disconnectedDashboard(preferences.settings.first()).copy(
-                broker = BrokerStatusDto(configured = hasBrokerCredentials(), connected = false, name = "Groww", detail = t.message)
-            )
-        }
-    }
-
-    suspend fun setLiveExecution(enabled: Boolean) {
-        if (!enabled) {
-            preferences.setLiveExecution(false)
-            auditLogger.log("LIVE", "LIVE_EXECUTION_DISABLED")
-            return
-        }
-        val s = preferences.settings.first()
-        require(s.brokerAuthenticated && secretStore.hasAccessToken()) { "Refresh & Authenticate before enabling live execution" }
-        require(s.expectedStaticIp.isNotBlank()) { "Configure the Groww-whitelisted static IP first" }
-        require(s.staticIpMatched) { "Current internet egress does not match the configured static IP" }
-        require(s.dailyBudgetRupees in MIN_BUDGET..MAX_BUDGET) { "Choose an intraday budget from ₹10,000 to ₹2,00,000" }
-        require(!s.safetyHalt) { "Reset the safety halt before enabling live execution" }
-        preferences.setLiveExecution(true)
-        auditLogger.log("LIVE", "LIVE_EXECUTION_ENABLED", mapOf("budget" to s.dailyBudgetRupees, "min_confidence" to s.minLiveConfidence))
-    }
-
-    suspend fun setFastTrackExecution(enabled: Boolean) {
-        if (!enabled) {
-            preferences.setFastTrack(false)
-            auditLogger.log("FAST_TRACK", "FAST_TRACK_DISABLED")
-            return
-        }
-        val s = preferences.settings.first()
-        require(s.brokerAuthenticated && secretStore.hasAccessToken()) { "Refresh & Authenticate before enabling notification auto buy/sell" }
-        require(s.staticIpMatched) { "Current internet egress does not match the configured static IP" }
-        require(s.brokerDdpiEnabled) { "Groww DDPI is required for unattended CNC delivery sells" }
-        require(s.fastTrackBudgetRupees in MIN_BUDGET..MAX_BUDGET) { "Choose a Manual budget from ₹10,000 to ₹2,00,000" }
-        require(!s.safetyHalt) { "Reset the safety halt first" }
-        preferences.setFastTrack(true)
-        auditLogger.log("FAST_TRACK", "FAST_TRACK_ENABLED", mapOf("budget" to s.fastTrackBudgetRupees, "post_sell_short" to s.postSellShortEnabled))
-    }
-
-    suspend fun resetHalt() {
-        preferences.setSafetyHalt(false)
-        preferences.setLiveExecution(false)
-        preferences.setFastTrack(false)
-        auditLogger.log("SAFETY", "HALT_RESET", mapOf("live_remains_off" to true, "fast_track_remains_off" to true))
-    }
-
-    suspend fun forceLocalDisarm() {
-        preferences.setSafetyHalt(true)
-        preferences.setLiveExecution(false)
-        preferences.setFastTrack(false)
-        auditLogger.log("SAFETY", "LOCAL_DISARM", mapOf("reason" to "safety_event_or_protection_failure"))
-    }
-
-    suspend fun shouldCapturePackage(packageName: String): Boolean {
-        val filter = preferences.settings.first().packageFilter.trim()
-        return filter.isBlank() || packageName.contains(filter, ignoreCase = true)
-    }
-
-    suspend fun isLiveExecutionEnabled(): Boolean = preferences.settings.first().liveExecutionEffective
-
-    suspend fun processEvent(eventId: Long) {
-        ensureHistoricalSeed()
-        val event = dao.byId(eventId) ?: return
-        auditLogger.log("SIGNAL", "PROCESS_EVENT", mapOf("event_id" to eventId, "signal_type" to event.signalType, "symbol" to event.symbol))
-        dao.updateForwarding(eventId, "ANALYZING", null, null, null)
-        val parsed = parser.parse(event.title, event.text, event.bigText)
-        when (parsed.type) {
-            SignalType.AUTO_PAUSED -> {
-                forceLocalDisarm()
-                dao.updateForwarding(eventId, "HALTED", "SAFETY_HALT", "Multify reported paused/unprotected quantity. All app live engines disabled.", null)
-                return
-            }
-            SignalType.PRE_ALERT -> {
-                val hot = runCatching { prepareHotMode() }.getOrElse { "HOT preparation partial: ${it.message}" }
-                dao.updateForwarding(eventId, "ANALYZED", "PRE_ALERT_HOT", "$hot · direct execution path armed for the next paid equity release.", null)
-                return
-            }
-            SignalType.BUY_SUBMITTED -> {
-                val dash = refreshDashboard()
-                dao.updateForwarding(eventId, "ANALYZED", "RECONCILED", "App ledger reconciled · ${dash.positions.size} app-managed position(s).", null)
-                return
-            }
-            SignalType.UNKNOWN -> {
-                dao.updateForwarding(eventId, "IGNORED", "IGNORED", "Free/non-equity/unsupported notification ignored.", null)
-                return
-            }
-            else -> Unit
-        }
-
-        val symbol = parsed.symbol
-        if (!symbol.isNullOrBlank() && !nseSymbols.isKnown(symbol) && !nseSymbols.isStale()) {
-            dao.updateForwarding(eventId, "IGNORED", "SYMBOL_NOT_IN_NSE_MASTER", "$symbol is not in the current NSE equity master; no order was sent.", null)
-            return
-        }
-
-        var settings = preferences.settings.first()
-        var token = secretStore.getAccessToken()
-        if (!settings.brokerAuthenticated || token.isNullOrBlank()) {
-            if (hasBrokerCredentials()) {
-                val autoAuth = runCatching { authenticate() }
-                if (autoAuth.isSuccess) {
-                    settings = preferences.settings.first()
-                    token = secretStore.getAccessToken()
-                } else {
-                    dao.updateForwarding(eventId, "CAPTURED", "AUTO_AUTH_FAILED", "Signal stored. Automatic Groww TOTP refresh failed: ${autoAuth.exceptionOrNull()?.message.orEmpty()}", null)
-                    return
-                }
-            } else {
-                dao.updateForwarding(eventId, "CAPTURED", "AUTH_REQUIRED", "Signal stored. Save Groww TOTP credentials to enable market analysis.", null)
-                return
-            }
-        }
-        val accessToken = token ?: return
-
-        try {
-            when (parsed.type) {
-                SignalType.TRADE_RELEASE -> {
-                    handleBuyRelease(eventId, parsed, accessToken, settings)
-                }
-                SignalType.BOOK_PROFIT -> {
-                    handleBookProfit(eventId, parsed, accessToken, settings)
-                }
-                else -> Unit
-            }
-        } catch (t: Throwable) {
-            auditLogger.log("ENGINE", "PROCESS_EVENT_ERROR", mapOf("event_id" to eventId, "type" to t.javaClass.simpleName, "message" to (t.message ?: "")))
-            dao.updateForwarding(eventId, "ERROR", "ENGINE_ERROR", t.message ?: t.javaClass.simpleName, t.javaClass.simpleName)
-            if (t.message?.contains("401") == true || t.message?.contains("author", true) == true) preferences.updateAuthState(authenticated = false)
-            throw t
-        }
-    }
-
-    data class LogExportResult(val entries: Int, val signalCount: Int, val tradeCount: Int)
-
-    suspend fun exportCompleteLogs(uri: Uri): LogExportResult {
-        val settings = preferences.settings.first()
-        val signals = dao.allNow()
-        val shadowPositions = shadowDao.allPositions()
-        val shadowTrades = shadowDao.allTrades()
-        val managedPositions = managedDao.allPositions()
-        val managedTrades = managedDao.allTrades()
-        val learningCalls = learningDao.allCalls()
-        val priceObservations = learningDao.allObservations()
-        val strategySnapshots = learningDao.allStrategySnapshots()
-        val forecasts = learningDao.allForecasts()
-        val researchReports = learningDao.allResearchReports()
-        val waveCampaigns = learningDao.allWaveCampaigns()
-        val waveObservations = learningDao.allWaveObservations()
-        val waveDecisions = learningDao.allWaveDecisions()
-        val waveOutcomes = learningDao.allWaveOutcomes()
-        val currentWaveStats = waveStats()
-        val nseStatus = nseSymbols.status()
-        val gson = GsonBuilder().setPrettyPrinting().create()
-        val now = System.currentTimeMillis()
-        val zone = ZoneId.of("Asia/Kolkata")
-
-        val safeSettings = linkedMapOf<String, Any?>(
-            "intraday_budget_rupees" to settings.dailyBudgetRupees,
-            "fast_track_budget_rupees" to settings.fastTrackBudgetRupees,
-            "shadow_budget_rupees" to SHADOW_BUDGET,
-            "live_execution_effective" to settings.liveExecutionEffective,
-            "fast_track_effective" to settings.fastTrackEffective,
-            "post_sell_short_enabled" to settings.postSellShortEnabled,
-            "execution_mode" to settings.executionMode,
-            "wave_count" to settings.waveCount,
-            "package_filter" to settings.packageFilter,
-            "credentials_configured" to hasBrokerCredentials(),
-            "broker_authenticated" to settings.brokerAuthenticated,
-            "authenticated_at_ms" to settings.authenticatedAtMs,
-            "access_token_expiry" to settings.accessTokenExpiry,
-            "ddpi_enabled" to settings.brokerDdpiEnabled,
-            "static_ip_configured" to settings.expectedStaticIp.isNotBlank(),
-            "static_ip_matched" to settings.staticIpMatched,
-            "safety_halt" to settings.safetyHalt,
-            "min_live_confidence" to settings.minLiveConfidence,
-            "shadow_peak_pnl" to settings.shadowPeakPnl,
-            "live_peak_pnl" to settings.livePeakPnl
-        )
-        val meta = linkedMapOf<String, Any?>(
-            "app" to "Multify Trader Pro",
-            "version_name" to BuildConfig.VERSION_NAME,
-            "version_code" to BuildConfig.VERSION_CODE,
-            "application_id" to BuildConfig.APPLICATION_ID,
-            "debug" to BuildConfig.DEBUG,
-            "exported_at_ms" to now,
-            "exported_at_utc" to Instant.ofEpochMilli(now).toString(),
-            "android_sdk" to Build.VERSION.SDK_INT,
-            "device_manufacturer" to Build.MANUFACTURER,
-            "device_model" to Build.MODEL,
-            "security_note" to "TOTP token, TOTP secret, access token, authorization headers, UCC and exact IP addresses are intentionally excluded."
-        )
-        val state = linkedMapOf<String, Any?>(
-            "meta" to meta,
-            "settings" to safeSettings,
-            "nse_symbol_master" to linkedMapOf("count" to nseStatus.count, "updated_at_ms" to nseStatus.updatedAtMs, "stale" to nseSymbols.isStale()),
-            "counts" to linkedMapOf(
-                "signals" to signals.size,
-                "shadow_positions" to shadowPositions.size,
-                "shadow_trades" to shadowTrades.size,
-                "managed_positions" to managedPositions.size,
-                "managed_trades" to managedTrades.size,
-                "learning_calls" to learningCalls.size,
-                "price_observations" to priceObservations.size,
-                "strategy_snapshots" to strategySnapshots.size,
-                "forecasts" to forecasts.size,
-                "research_reports" to researchReports.size,
-                "wave_campaigns" to waveCampaigns.size,
-                "wave_observations" to waveObservations.size,
-                "wave_decisions" to waveDecisions.size,
-                "wave_outcomes" to waveOutcomes.size
-            )
-        )
-
-        val output = appContext.contentResolver.openOutputStream(uri, "w") ?: error("Could not open the selected export file")
-        var entries = 0
-        ZipOutputStream(output.buffered()).use { zip ->
-            fun add(name: String, text: String) {
-                zip.putNextEntry(ZipEntry(name))
-                zip.write(text.toByteArray(Charsets.UTF_8))
-                zip.closeEntry()
-                entries++
-            }
-            add("README.txt", exportReadme())
-            add("app/current_state.json", gson.toJson(state))
-            add("app/audit_timeline.jsonl", auditLogger.readAll())
-            add("signals/signal_events.csv", signalCsv(signals))
-            add("shadow/open_and_historical_positions.csv", shadowPositionCsv(shadowPositions))
-            add("shadow/closed_trades.csv", shadowTradeCsv(shadowTrades))
-            add("managed/open_and_historical_positions.csv", managedPositionCsv(managedPositions))
-            add("managed/closed_trades.csv", managedTradeCsv(managedTrades))
-            add("learning/rolling_calls.json", gson.toJson(learningCalls))
-            add("learning/high_resolution_price_observations.json", gson.toJson(priceObservations))
-            add("learning/strategy_snapshots.json", gson.toJson(strategySnapshots))
-            add("forecast/all_forecasts.json", gson.toJson(forecasts))
-            add("research/after_market_reports.json", gson.toJson(researchReports))
-            add("research/multify_positive_close_fundamentals.csv", MultifyReverseEngineering.csv())
-            add("research/multify_reverse_engineering.txt", MultifyReverseEngineering.report())
-            add("waves/campaigns.json", gson.toJson(waveCampaigns))
-            add("waves/confirmed_pivots.json", gson.toJson(waveObservations))
-            add("waves/current_20_wave_averages.json", gson.toJson(currentWaveStats))
-            add("waves/adaptive_decisions_immutable.json", gson.toJson(waveDecisions))
-            add("waves/counterfactual_outcomes.json", gson.toJson(waveOutcomes))
-            add("learning/current_30day_stats.json", gson.toJson(learningStats()))
-            add("analysis/strategy_catalog.txt", strategyCatalogText())
-            add("analysis/strategy_performance.csv", strategyPerformanceCsv(shadowTrades, managedTrades))
-            add("analysis/daily_pnl.csv", dailyPnlCsv(shadowTrades, managedTrades, zone))
-            add("analysis/decision_timeline.csv", decisionTimelineCsv(signals, shadowTrades, managedTrades))
-        }
-        auditLogger.log("DIAGNOSTICS", "LOG_EXPORT_COMPLETED", mapOf("entries" to entries, "signals" to signals.size, "trades" to (shadowTrades.size + managedTrades.size)))
-        return LogExportResult(entries, signals.size, shadowTrades.size + managedTrades.size)
-    }
-
-    private fun strategyCatalogText(): String = """
-        Active dynamic strategy families
-        ================================
-        - Multify event prior + anchored VWAP
-        - Rolling 30-trading-day learned long target (seeded from uploaded history)
-        - Post-sell retracement learner: starts at 100%, capped at 100%, adapts downward after observations
-        - High-resolution +1s/+2s/+5s/+10s/+15s/+30s/+1m/+2m/+5m event response sampling
-        - Order-book imbalance / total buy-vs-sell pressure when Groww supplies it
-        - VWAP continuation, reclaim and mean reversion
-        - EMA 9/20 trend separation + price-structure slope
-        - MACD momentum confirmation
-        - 5-minute and 15-minute opening-range breakout/breakdown
-        - Donchian breakout/breakdown
-        - Keltner-style ATR expansion
-        - Bollinger compression to volume breakout/breakdown
-        - Relative-volume price impulse
-        - Failed breakout / failed breakdown liquidity sweeps
-        - RSI trend, exhaustion and chase filters
-        - Candlestick confirmation: engulfing, pin bars, marubozu
-        - Dynamic regime switch: TREND / COMPRESSION / MEAN_REVERSION / MIXED
-        - Multify DNA research: 20 positive-result + positive-session-close cases with public fundamentals
-        - DNA findings are hypothesis generation only; no fundamental weight reaches live execution without positive+negative walk-forward validation
-
-        Risk/execution policy
-        =====================
-        - Multify-only fill ledger; unrelated Groww trades excluded
-        - Shadow budget fixed at ₹2,00,000
-        - 20-wave pivot memory: Wave 1 Up from rolling Multify history/live outcomes; all Down legs and Waves 2–20 from confirmed live pivots
-        - No uncontrolled averaging. A 2% Wave 2+ displacement only makes the configured tranche eligible.
-        - LONG/SHORT/HOLD approval is required before any additional tranche; cumulative capital is bounded by the hard campaign cap.
-        - ₹5,000 is a milestone, not a profit ceiling
-        - -₹1,500 soft defensive band; no mechanical panic close
-        - -₹2,500 hard daily cap with earlier live risk reduction for slippage
-        - Rolling averages are dynamic trail-arm thresholds: each new trading day can move them up or down as the 30-day window rolls
-        - Reaching the learned average arms profit trailing; it does not force an immediate exit
-        - Once armed, a trailing stop can only tighten in the favourable direction and is never loosened by a later average change
-        - Same-symbol external MIS conflict detection
-        - Broker-side OCO protection on app MIS fills
-        - Hard intraday force-flat for app MIS exposure
-    """.trimIndent() + "\n"
-
-    private fun exportReadme(): String = """
-        Multify Trader Pro complete diagnostic export
-        =============================================
-
-        Purpose
-        -------
-        This archive is designed for strategy review, shadow/live comparison, notification parsing review,
-        risk-control review, and debugging across Dashboard, Signals, Strategies, Manual/Fast Track and System.
-
-        Included
-        --------
-        app/current_state.json                 Safe application/runtime/settings snapshot and NSE-master status
-        app/audit_timeline.jsonl               System/auth/toggle/safety/engine audit events recorded by v3.1+
-        signals/signal_events.csv              Captured recognized Multify notifications and final engine decisions
-        shadow/open_and_historical_positions.csv  Shadow position records
-        shadow/closed_trades.csv               Shadow fills, costs, P&L, MFE/MAE, strategy/regime/confidence
-        managed/open_and_historical_positions.csv App-owned LIVE / FAST_TRACK / FAST_SHORT position records
-        managed/closed_trades.csv              App-owned closed real-order ledger only; unrelated Groww trades excluded
-        analysis/strategy_performance.csv      Aggregated strategy/regime/symbol performance
-        analysis/daily_pnl.csv                 Per-day app-only P&L by engine
-        analysis/decision_timeline.csv         Time-ordered signals and closed trade outcomes
-
-        Security
-        --------
-        This export NEVER includes the Groww TOTP token, TOTP secret, access token, authorization headers,
-        UCC, or exact configured/current public IP addresses. Do not share screenshots that reveal credentials.
-
-        Note
-        ----
-        Audit timeline recording begins with v3.1. Historical signal/trade tables retained from earlier versions
-        are still exported in full, subject to the app's local retention policy.
-    """.trimIndent() + "\n"
-
-    private fun csvCell(v: Any?): String {
-        val raw = when (v) { null -> ""; else -> v.toString() }
-        return if (raw.any { it == ',' || it == '"' || it == '\n' || it == '\r' }) "\"${raw.replace("\"", "\"\"")}\"" else raw
-    }
-
-    private fun row(vararg values: Any?): String = values.joinToString(",") { csvCell(it) } + "\n"
-
-    private fun signalCsv(items: List<SignalEventEntity>): String = buildString {
-        append(row("id","received_at_ms","posted_at_ms","source_package","app_label","title","text","big_text","signal_type","symbol","summary","parser_confidence","state","engine_action","engine_reason","last_error"))
-        items.forEach { e -> append(row(e.id,e.receivedAtMs,e.postedAtMs,e.sourcePackage,e.appLabel,e.title,e.text,e.bigText,e.signalType,e.symbol,e.summary,e.confidence,e.forwardingState,e.backendAction,e.backendReason,e.lastError)) }
-    }
-
-    private fun shadowPositionCsv(items: List<ShadowPositionEntity>): String = buildString {
-        append(row("id","symbol","side","quantity","entry","stop","target","strategy","regime","confidence","source_event_id","opened_at_ms","last_price","max_favourable_price","max_adverse_price","last_evaluated_at_ms","status"))
-        items.forEach { p -> append(row(p.id,p.symbol,p.side,p.quantity,p.entryPrice,p.stopPrice,p.targetPrice,p.strategy,p.regime,p.confidence,p.sourceEventId,p.openedAtMs,p.lastPrice,p.maxFavourablePrice,p.maxAdversePrice,p.lastEvaluatedAtMs,p.status)) }
-    }
-
-    private fun shadowTradeCsv(items: List<ShadowTradeEntity>): String = buildString {
-        append(row("id","engine","symbol","side","quantity","entry","exit","gross_pnl","estimated_costs","net_pnl","exit_reason","strategy","regime","confidence","mfe_rupees","mae_rupees","source_event_id","opened_at_ms","closed_at_ms"))
-        items.forEach { t -> append(row(t.id,"SHADOW",t.symbol,t.side,t.quantity,t.entryPrice,t.exitPrice,t.grossPnl,t.estimatedCosts,t.netPnl,t.exitReason,t.strategy,t.regime,t.confidence,t.mfeRupees,t.maeRupees,t.sourceEventId,t.openedAtMs,t.closedAtMs)) }
-    }
-
-    private fun managedPositionCsv(items: List<ManagedPositionEntity>): String = buildString {
-        append(row("id","engine","symbol","product","side","quantity","entry","stop","target","strategy","regime","confidence","source_event_id","open_order_id","open_reference_id","smart_order_id","opened_at_ms","last_price","max_favourable_price","max_adverse_price","last_evaluated_at_ms","status"))
-        items.forEach { p -> append(row(p.id,p.engine,p.symbol,p.product,p.side,p.quantity,p.entryPrice,p.stopPrice,p.targetPrice,p.strategy,p.regime,p.confidence,p.sourceEventId,p.openOrderId,p.openReferenceId,p.smartOrderId,p.openedAtMs,p.lastPrice,p.maxFavourablePrice,p.maxAdversePrice,p.lastEvaluatedAtMs,p.status)) }
-    }
-
-    private fun managedTradeCsv(items: List<ManagedTradeEntity>): String = buildString {
-        append(row("id","engine","symbol","product","side","quantity","entry","exit","gross_pnl","estimated_costs","net_pnl","exit_reason","strategy","regime","confidence","mfe_rupees","mae_rupees","source_event_id","open_order_id","close_order_id","opened_at_ms","closed_at_ms"))
-        items.forEach { t -> append(row(t.id,t.engine,t.symbol,t.product,t.side,t.quantity,t.entryPrice,t.exitPrice,t.grossPnl,t.estimatedCosts,t.netPnl,t.exitReason,t.strategy,t.regime,t.confidence,t.mfeRupees,t.maeRupees,t.sourceEventId,t.openOrderId,t.closeOrderId,t.openedAtMs,t.closedAtMs)) }
-    }
-
-    private data class PerfTrade(val engine:String,val symbol:String,val strategy:String,val regime:String,val net:Double,val gross:Double,val costs:Double,val mfe:Double,val mae:Double)
-
-    private fun strategyPerformanceCsv(shadow: List<ShadowTradeEntity>, managed: List<ManagedTradeEntity>): String {
-        val trades = shadow.map { PerfTrade("SHADOW",it.symbol,it.strategy,it.regime,it.netPnl,it.grossPnl,it.estimatedCosts,it.mfeRupees,it.maeRupees) } +
-            managed.map { PerfTrade(it.engine,it.symbol,it.strategy,it.regime,it.netPnl,it.grossPnl,it.estimatedCosts,it.mfeRupees,it.maeRupees) }
-        return buildString {
-            append(row("engine","symbol","strategy","regime","trades","wins","losses","win_rate","gross_pnl","costs","net_pnl","avg_net","avg_mfe","avg_mae","profit_factor"))
-            trades.groupBy { listOf(it.engine,it.symbol,it.strategy,it.regime) }.toSortedMap(compareBy { it.joinToString("|") }).forEach { (k,v) ->
-                val wins=v.count { it.net>0 }; val losses=v.count { it.net<0 }; val gross=v.sumOf{it.gross}; val costs=v.sumOf{it.costs}; val net=v.sumOf{it.net}
-                val winGross=v.filter{it.net>0}.sumOf{it.net}; val lossGross=-v.filter{it.net<0}.sumOf{it.net}; val pf=if(lossGross>0) winGross/lossGross else if(winGross>0) 999.0 else 0.0
-                append(row(k[0],k[1],k[2],k[3],v.size,wins,losses,if(v.isNotEmpty()) wins.toDouble()/v.size else 0.0,gross,costs,net,if(v.isNotEmpty()) net/v.size else 0.0,v.map{it.mfe}.averageOrZero(),v.map{it.mae}.averageOrZero(),pf))
-            }
-        }
-    }
-
-    private data class DayTrade(val engine:String,val closedAtMs:Long,val net:Double,val gross:Double,val costs:Double)
-    private fun dailyPnlCsv(shadow: List<ShadowTradeEntity>, managed: List<ManagedTradeEntity>, zone: ZoneId): String {
-        val trades=shadow.map{DayTrade("SHADOW",it.closedAtMs,it.netPnl,it.grossPnl,it.estimatedCosts)}+managed.map{DayTrade(it.engine,it.closedAtMs,it.netPnl,it.grossPnl,it.estimatedCosts)}
-        return buildString {
-            append(row("date_ist","engine","trades","wins","gross_pnl","costs","net_pnl"))
-            trades.groupBy { Pair(Instant.ofEpochMilli(it.closedAtMs).atZone(zone).toLocalDate().toString(),it.engine) }.toSortedMap(compareBy<Pair<String,String>>{it.first}.thenBy{it.second}).forEach { (k,v) ->
-                append(row(k.first,k.second,v.size,v.count{it.net>0},v.sumOf{it.gross},v.sumOf{it.costs},v.sumOf{it.net}))
-            }
-        }
-    }
-
-    private fun decisionTimelineCsv(signals: List<SignalEventEntity>, shadow: List<ShadowTradeEntity>, managed: List<ManagedTradeEntity>): String {
-        data class T(val at:Long,val section:String,val symbol:String?,val action:String,val detail:String,val strategy:String?,val net:Double?)
-        val all = signals.map { T(it.receivedAtMs,"SIGNAL",it.symbol,it.backendAction ?: it.signalType,it.backendReason ?: it.summary,null,null) } +
-            shadow.map { T(it.closedAtMs,"SHADOW",it.symbol,"CLOSE_${it.side}",it.exitReason,it.strategy,it.netPnl) } +
-            managed.map { T(it.closedAtMs,it.engine,it.symbol,"CLOSE_${it.side}",it.exitReason,it.strategy,it.netPnl) }
-        return buildString {
-            append(row("at_ms","section","symbol","action","detail","strategy","net_pnl"))
-            all.sortedBy { it.at }.forEach { t -> append(row(t.at,t.section,t.symbol,t.action,t.detail,t.strategy,t.net)) }
-        }
-    }
-
-    private fun List<Double>.averageOrZero(): Double = if (isEmpty()) 0.0 else average()
-
-    suspend fun pruneLocalHistory(retainDays: Int = 60) {
-        dao.deleteOlderThan(System.currentTimeMillis() - retainDays * 86_400_000L)
-    }
-
-    /**
-     * A new Multify recommendation is the highest-priority first-wave event.
-     *
-     * Existing first-wave positions in another symbol are handled deterministically:
-     * - net green after estimated costs -> exit and release focus/capital for the new call;
-     * - net red -> keep the broker protection/monitoring alive, but stop adding exposure, flipping and
-     *   strategy churn for that symbol for the rest of the call cycle;
-     * - later-wave positions may continue as one secondary symbol. Any additional later-wave symbol is
-     *   converted to prediction-only so the engine concentrates on at most two actively-managed names.
-     *
-     * "Do not monitor" therefore means no new trading decisions. Safety/OCO/trailing reconciliation
-     * remains active so a losing position is never left unmanaged.
-     */
-    private suspend fun prioritizeNewRecommendation(newSymbol: String, token: String, settings: AppSettings) {
-        if (!settings.liveExecutionEffective && !settings.fastTrackEffective) return
-        val existing = managedDao.openPositions().filter { !it.symbol.equals(newSymbol, true) }
-        if (existing.isEmpty()) return
-
-        var keptSecondary = false
-        existing.sortedByDescending { it.openedAtMs }.forEach { p ->
-            val mark = runCatching {
-                apiFactory.groww.quote(bearer(token), tradingSymbol = p.symbol)
-                    .requirePayload("Priority quote ${p.symbol}").lastPrice
-            }.getOrNull() ?: p.lastPrice
-            val net = calculatePnl(p.side, p.quantity, p.entryPrice, mark).net
-            val isFirstWave = p.addCount <= 0 || p.engine == ENGINE_FAST_TRACK || p.engine == ENGINE_FAST_SHORT
-
-            if (isFirstWave) {
-                if (net > 0.0) {
-                    if (p.product == "MIS") assertManagedMisStillOwned(token, p)
-                    closeManaged(token, p, mark, "NEW_MULTIFY_PRIORITY_GREEN_EXIT")
-                    auditLogger.log("PRIORITY", "FIRST_WAVE_GREEN_EXIT", mapOf(
-                        "old_symbol" to p.symbol, "new_symbol" to newSymbol, "side" to p.side, "net_before_exit" to net
-                    ))
-                } else {
-                    val held = p.copy(
-                        regime = REGIME_RECOVERY_HOLD,
-                        strategy = "RECOVERY HOLD after new Multify call · ${p.strategy}",
-                        lastEvaluatedAtMs = System.currentTimeMillis()
-                    )
-                    managedDao.updatePosition(held)
-                    auditLogger.log("PRIORITY", "FIRST_WAVE_RED_RECOVERY_HOLD", mapOf(
-                        "old_symbol" to p.symbol, "new_symbol" to newSymbol, "side" to p.side, "net_mark" to net,
-                        "safety_monitoring" to true, "new_trading_decisions" to false
-                    ))
-                }
-                return@forEach
-            }
-
-            // After wave 1, exactly one older symbol may keep executing alongside the new priority stock.
-            if (!keptSecondary) {
-                keptSecondary = true
-                if (p.regime == REGIME_SECONDARY_PREVIEW) {
-                    managedDao.updatePosition(p.copy(regime = "PIVOT_ACTIVE", lastEvaluatedAtMs = System.currentTimeMillis()))
-                }
-                auditLogger.log("PRIORITY", "SECONDARY_PIVOT_CONTINUES", mapOf(
-                    "symbol" to p.symbol, "new_symbol" to newSymbol, "wave" to (p.addCount + 1)
-                ))
-            } else {
-                managedDao.updatePosition(p.copy(
-                    regime = REGIME_SECONDARY_PREVIEW,
-                    strategy = "PREDICTION ONLY secondary limit · ${p.strategy}",
-                    lastEvaluatedAtMs = System.currentTimeMillis()
-                ))
-                auditLogger.log("PRIORITY", "SECONDARY_LIMIT_PREVIEW_ONLY", mapOf(
-                    "symbol" to p.symbol, "new_symbol" to newSymbol, "wave" to (p.addCount + 1)
-                ))
-            }
-        }
-    }
-
-    suspend fun waveStats(): List<WaveStatDto> {
-        ensureHistoricalSeed()
-        val cutoff = LocalDate.now(INDIA).minusDays(29)
-        val pivots = learningDao.allWaveObservations().filter { row ->
-            runCatching { !LocalDate.parse(row.callDate).isBefore(cutoff) }.getOrDefault(false)
-        }
-        val learned = learningStats()
-        return (1..20).map { wave ->
-            val upRows = pivots.filter { it.wave == wave && it.direction.equals("UP", true) }
-            val downRows = pivots.filter { it.wave == wave && it.direction.equals("DOWN", true) }
-            val averageUp = if (wave == 1) learned.longAveragePct.takeIf { learned.rollingCalls > 0 } else upRows.map { it.movePct }.takeIf { it.isNotEmpty() }?.average()
-            WaveStatDto(
-                wave = wave,
-                averageUpPct = averageUp,
-                averageDownPct = downRows.map { it.movePct }.takeIf { it.isNotEmpty() }?.average(),
-                upSamples = if (wave == 1) learned.rollingCalls else upRows.size,
-                downSamples = downRows.size,
-                upSource = if (wave == 1) "30D_EXCEL_LIVE" else "LIVE_PIVOT",
-                downSource = "LIVE_PIVOT"
-            )
-        }
-    }
-
-    private suspend fun waveLongArmPct(wave: Int): Double =
-        waveStats().firstOrNull { it.wave == wave }?.averageUpPct?.takeIf { it > 0.0 }
-            ?: DEFAULT_UNTRAINED_WAVE_ARM_PCT
-
-    private suspend fun waveShortArmPct(wave: Int): Double =
-        waveStats().firstOrNull { it.wave == wave }?.averageDownPct?.takeIf { it > 0.0 }
-            ?: DEFAULT_UNTRAINED_WAVE_ARM_PCT
-
-    private suspend fun startOrReanchorWaveCampaign(eventId: Long, symbol: String, price: Double, source: String) {
-        if (price <= 0.0) return
-        val now = System.currentTimeMillis()
-        val existing = learningDao.waveCampaignForEvent(eventId)
-        if (existing == null) {
-            learningDao.activeWaveCampaigns().filter { it.symbol.equals(symbol, true) }.forEach { old ->
-                learningDao.updateWaveCampaign(old.copy(active = false, completedAtMs = now, updatedAtMs = now))
-            }
-            learningDao.insertWaveCampaign(
-                WaveCampaignEntity(
-                    eventId = eventId,
-                    symbol = symbol.uppercase(Locale.US),
-                    callDate = LocalDate.now(INDIA).toString(),
-                    startPrice = price,
-                    startAtMs = now,
-                    startSource = source,
-                    wave = 1,
-                    leg = "UP",
-                    legStartPrice = price,
-                    legStartAtMs = now,
-                    extremePrice = price,
-                    extremeAtMs = now,
-                    legArmed = false,
-                    initialAdversePrice = price,
-                    lastPrice = price,
-                    active = true,
-                    updatedAtMs = now
-                )
-            )
-            auditLogger.log("WAVES", "CAMPAIGN_STARTED", mapOf(
-                "event_id" to eventId, "symbol" to symbol, "price" to price,
-                "source" to source, "pivot_pct" to (WAVE_PIVOT_FRACTION * 100.0)
-            ))
-            return
-        }
-        if (source == "LIVE_FILL" && existing.startSource != "LIVE_FILL") {
-            learningDao.updateWaveCampaign(existing.copy(
-                startPrice = price, startAtMs = now, startSource = source,
-                wave = 1, leg = "UP", legStartPrice = price, legStartAtMs = now,
-                extremePrice = price, extremeAtMs = now, legArmed = false,
-                initialAdversePrice = price, lastPrice = price, active = true,
-                completedAtMs = null, updatedAtMs = now
-            ))
-            auditLogger.log("WAVES", "CAMPAIGN_REANCHORED_TO_LIVE_FILL", mapOf(
-                "event_id" to eventId, "symbol" to symbol, "price" to price
-            ))
-        }
-    }
-
-    private suspend fun updateWaveCampaignTick(campaign: WaveCampaignEntity, price: Double, maxWaves: Int): WaveCampaignEntity {
-        if (!campaign.active || price <= 0.0) return campaign
-        val now = System.currentTimeMillis()
-        val direction = if (campaign.leg.equals("DOWN", true)) "DOWN" else "UP"
-        val nextExtreme = if (direction == "UP") max(campaign.extremePrice, price) else min(campaign.extremePrice, price)
-        val extremeAt = if (nextExtreme != campaign.extremePrice) now else campaign.extremeAtMs
-        val armPct = if (direction == "UP") waveLongArmPct(campaign.wave) else waveShortArmPct(campaign.wave)
-        val armFraction = (armPct / 100.0).coerceAtLeast(WAVE_PIVOT_FRACTION)
-        val armed = campaign.legArmed || WavePivotMath.shouldArm(direction, campaign.legStartPrice, nextExtreme, armFraction)
-        val initialAdverse = if (direction == "UP") min(campaign.initialAdversePrice, price) else max(campaign.initialAdversePrice, price)
-
-        if (armed && WavePivotMath.shouldConfirm(direction, nextExtreme, price, WAVE_PIVOT_FRACTION)) {
-            val movePct = WavePivotMath.movePct(campaign.legStartPrice, nextExtreme)
-            val reversalPct = WavePivotMath.reversalFraction(direction, nextExtreme, price) * 100.0
-            learningDao.insertWaveObservation(
-                WaveObservationEntity(
-                    campaignId = campaign.id, eventId = campaign.eventId, symbol = campaign.symbol,
-                    callDate = campaign.callDate, wave = campaign.wave, direction = direction,
-                    startPrice = campaign.legStartPrice, extremePrice = nextExtreme, confirmationPrice = price,
-                    startAtMs = campaign.legStartAtMs, extremeAtMs = extremeAt, confirmedAtMs = now,
-                    movePct = movePct, reversalPct = reversalPct, source = "LIVE_PIVOT"
-                )
-            )
-            val completed = direction == "DOWN" && campaign.wave >= maxWaves.coerceIn(1, 20)
-            val nextWave = if (direction == "DOWN") (campaign.wave + 1).coerceAtMost(20) else campaign.wave
-            val nextLeg = if (direction == "UP") "DOWN" else "UP"
-            val updated = campaign.copy(
-                wave = nextWave, leg = nextLeg, legStartPrice = price, legStartAtMs = now,
-                extremePrice = price, extremeAtMs = now, legArmed = false,
-                initialAdversePrice = price, lastPrice = price, active = !completed,
-                completedAtMs = if (completed) now else null, updatedAtMs = now
-            )
-            learningDao.updateWaveCampaign(updated)
-            auditLogger.log("WAVES", if (direction == "UP") "UP_CONFIRMED" else "DOWN_CONFIRMED", mapOf(
-                "symbol" to campaign.symbol, "wave" to campaign.wave, "move_pct" to movePct,
-                "confirm" to price, "next_leg" to nextLeg, "active" to !completed
-            ))
-            return updated
-        }
-
-        val updated = campaign.copy(
-            extremePrice = nextExtreme, extremeAtMs = extremeAt, legArmed = armed,
-            initialAdversePrice = initialAdverse, lastPrice = price, updatedAtMs = now
-        )
-        learningDao.updateWaveCampaign(updated)
-        return updated
-    }
-
-    private suspend fun recentAdaptiveWaves(settings: AppSettings): List<AdaptiveWaveDto> =
-        learningDao.recentWaveDecisions(20).map { d ->
-            AdaptiveWaveDto(
-                symbol = d.symbol,
-                waveNumber = d.waveNumber,
-                triggerPct = d.triggerPct,
-                currentSide = d.currentSide,
-                decision = d.selectedDirection,
-                longProbability = d.longProbability,
-                shortProbability = d.shortProbability,
-                evLongRupees = d.evLongRupees,
-                evShortRupees = d.evShortRupees,
-                confidence = d.confidence,
-                regime = d.regime,
-                reasons = d.topPositiveFeatures,
-                alternativeRejected = d.rejectionReason,
-                waveCapitalRupees = d.waveCapitalRupees,
-                campaignCapitalUsed = d.campaignCapitalAfter,
-                campaignCapitalRemaining = max(0.0, settings.maxCampaignCapitalRupees - d.campaignCapitalAfter),
-                dataAgeMs = d.dataAgeMs,
-                actualOrderSubmitted = d.actualOrderSubmitted
-            )
-        }
-
-    suspend fun monitorAdaptiveWaves(): Int {
-        val campaigns = learningDao.activeWaveCampaigns()
-        if (campaigns.isEmpty()) return 0
-        val token = ensureToken() ?: return campaigns.size
-        val settings = preferences.settings.first()
-        for (campaign in campaigns) {
-            runCatching {
-                val quoteStarted = System.currentTimeMillis()
-                val quote = apiFactory.groww.quote(bearer(token), tradingSymbol = campaign.symbol)
-                    .requirePayload("Adaptive wave quote " + campaign.symbol)
-                val ltp = quote.lastPrice ?: return@runCatching
-                val snapshotAt = System.currentTimeMillis()
-                preferences.recordMarketData(snapshotAt)
-                val requested = WaveCapitalPolicy.triggeredWave(campaign.startPrice, ltp, settings.waveSpacingPercent, settings.waveCount)
-                val previous = learningDao.waveDecisionsForCampaign(campaign.id)
-                val lastWave = previous.maxOfOrNull { it.waveNumber } ?: 1
-                if (requested <= lastWave || requested <= 1) return@runCatching
-
-                // Process only the next missing checkpoint so a fast gap does not fabricate several
-                // decisions from one market snapshot. The next service tick will take a fresh snapshot.
-                val waveNumber = lastWave + 1
-                val managed = managedDao.openPosition(ENGINE_INTRADAY, campaign.symbol)
-                val currentSide = managed?.side
-                    ?: previous.lastOrNull { it.selectedDirection in setOf("LONG", "SHORT") }?.selectedDirection
-                    ?: "LONG"
-                val previousCommitted = previous.maxOfOrNull { it.campaignCapitalAfter } ?: 0.0
-                val campaignUsed = max(managed?.capitalDeployed ?: 0.0, previousCommitted)
-                val day = if (settings.liveExecutionEffective) managedSnapshot(token, setOf(ENGINE_INTRADAY)).summary else paperSnapshot().summary
-                val openStockPnl = managed?.let { p ->
-                    if (p.side == "LONG") (ltp - p.entryPrice) * p.quantity else (p.entryPrice - ltp) * p.quantity
-                } ?: 0.0
-                val realisedStockPnl = managedDao.tradesSince(startOfIndiaDayMs())
-                    .filter { it.symbol.equals(campaign.symbol, true) }
-                    .sumOf { it.netPnl }
-                val singleStockPnl = realisedStockPnl + openStockPnl
-                val eligibility = WaveCapitalPolicy.eligibility(
-                    requestedWave = waveNumber,
-                    lastProcessedWave = lastWave,
-                    waveCapitalRupees = settings.waveCapitalRupees.toDouble(),
-                    campaignCapitalUsed = campaignUsed,
-                    maxCampaignCapital = settings.maxCampaignCapitalRupees.toDouble(),
-                    dailyLossRupees = max(0.0, -day.totalPnl),
-                    maxDailyLossRupees = settings.maxDailyLossRupees.toDouble(),
-                    singleStockLossRupees = max(0.0, -singleStockPnl),
-                    maxSingleStockLossRupees = settings.maxSingleStockLossRupees.toDouble()
-                )
-                if (!eligibility.eligible) {
-                    recordAdaptiveHold(campaign, waveNumber, ltp, currentSide, eligibility.reason, campaignUsed, snapshotAt, quoteStarted)
-                    return@runCatching
-                }
-
-                val synthetic = ParsedSignal(SignalType.TRADE_RELEASE, symbol = campaign.symbol, rawText = "adaptive-wave-$waveNumber", confidence = 1.0)
-                val longEval = analyze(campaign.symbol, token, longSide = true, signal = synthetic, eventId = campaign.eventId, includeEventPrior = false)
-                val shortEval = analyze(campaign.symbol, token, longSide = false, signal = synthetic, eventId = campaign.eventId, includeEventPrior = false)
-                val f = longEval.features
-                val trajectory = MarketTrajectoryMath.classify(f, longEval.directionalScore, shortEval.directionalScore)
-                val prior = previous.lastOrNull()?.selectedDirection ?: "HOLD"
-                val heartbeatAge = if (settings.serviceHeartbeatAtMs > 0L) {
-                    (snapshotAt - settings.serviceHeartbeatAtMs).coerceAtLeast(0L)
-                } else Long.MAX_VALUE
-                val health = ExecutionHealthPolicy.evaluate(
-                    ExecutionHealthInput(
-                        brokerAuthenticated = settings.brokerAuthenticated && secretStore.hasAccessToken(),
-                        staticIpMatched = settings.staticIpMatched,
-                        marketOpen = marketSession() == "OPEN",
-                        quoteAgeMs = (snapshotAt - quoteStarted).coerceAtLeast(0L),
-                        maxQuoteAgeMs = MAX_MARKET_DATA_AGE_MS,
-                        listenerHeartbeatAgeMs = heartbeatAge,
-                        maxListenerHeartbeatAgeMs = MAX_LISTENER_HEARTBEAT_AGE_MS,
-                        symbolMasterFresh = !nseSymbols.isStale(),
-                        decisionComplete = f.candles.size >= 3,
-                        safetyHalt = settings.safetyHalt
-                    )
-                )
-                val rawDecision = AdaptiveDirectionEngine.decide(
-                    AdaptiveDirectionInput(
-                        currentSide = currentSide,
-                        waveCapitalRupees = eligibility.availableCapitalRupees,
-                        price = ltp,
-                        atr = f.atr14 ?: max(ltp * .004, .05),
-                        spreadBps = f.spreadBps,
-                        longDirectionalScore = longEval.directionalScore,
-                        longConfidence = longEval.confidence,
-                        shortDirectionalScore = shortEval.directionalScore,
-                        shortConfidence = shortEval.confidence,
-                        trajectoryComposite = trajectory.composite,
-                        marketBias = 0.0,
-                        sectorBias = 0.0,
-                        dataFresh = health.marketDataFresh,
-                        decisionComplete = health.decisionComplete,
-                        priorDecision = prior
-                    )
-                )
-                val decision = when {
-                    settings.executionMode == "LONG_ONLY" && rawDecision.action == "SHORT" ->
-                        rawDecision.copy(action = "HOLD", reason = "LONG ONLY mode rejected Adaptive SHORT; no trade")
-                    settings.executionMode == "SHORT_ONLY" && rawDecision.action == "LONG" ->
-                        rawDecision.copy(action = "HOLD", reason = "SHORT ONLY mode rejected Adaptive LONG; no trade")
-                    else -> rawDecision
-                }
-                executeAndRecordAdaptiveWave(
-                    token = token, settings = settings, campaign = campaign, waveNumber = waveNumber,
-                    ltp = ltp, currentSide = currentSide, campaignUsed = campaignUsed,
-                    capital = eligibility.availableCapitalRupees, decision = decision,
-                    longEval = longEval, shortEval = shortEval, trajectoryRegime = trajectory.regime,
-                    snapshotAt = snapshotAt, quoteStarted = quoteStarted,
-                    brokerHealthy = health.brokerHealthy, listenerHealthy = health.listenerHealthy,
-                    liveOrderAllowed = health.liveOrderAllowed, healthReason = health.reason
-                )
-            }.onFailure {
-                auditLogger.log("ADAPTIVE_WAVE", "CHECKPOINT_ERROR", mapOf("symbol" to campaign.symbol, "message" to (it.message ?: "")))
-            }
-        }
-        return learningDao.activeWaveCampaigns().size
-    }
-
-    private suspend fun recordAdaptiveHold(
-        campaign: WaveCampaignEntity, waveNumber: Int, ltp: Double, currentSide: String,
-        reason: String, campaignUsed: Double, snapshotAt: Long, quoteStarted: Long
-    ) {
-        if (learningDao.waveDecisionForCampaign(campaign.id, waveNumber) != null) return
-        val triggerPct = (ltp / campaign.startPrice - 1.0) * 100.0
-        val id = learningDao.insertWaveDecision(
-            WaveDecisionEntity(
-                campaignId = campaign.id, eventId = campaign.eventId, symbol = campaign.symbol, callDate = LocalDate.now(INDIA).toString(),
-                waveNumber = waveNumber, triggerAtMs = snapshotAt, snapshotAtMs = snapshotAt, triggerPrice = ltp, triggerPct = triggerPct,
-                currentSide = currentSide, selectedDirection = "HOLD", longScore = 0.0, shortScore = 0.0,
-                longProbability = .5, shortProbability = .5, evLongRupees = 0.0, evShortRupees = 0.0,
-                evLongPct = 0.0, evShortPct = 0.0, confidence = .5, regime = "RISK_VETO",
-                topPositiveFeatures = "", topNegativeFeatures = reason, rejectionReason = reason,
-                snapshotJson = "{\"reason\":${gsonQuote(reason)},\"price\":$ltp}", modelVersion = AdaptiveDirectionEngine.MODEL_VERSION,
-                dataAgeMs = snapshotAt - quoteStarted, brokerHealthy = true, listenerHealthy = true,
-                waveCapitalRupees = 0.0, campaignCapitalBefore = campaignUsed, campaignCapitalAfter = campaignUsed,
-                actualOrderSubmitted = false, createdAtMs = snapshotAt
-            )
-        )
-        if (id > 0L) learningDao.insertWaveOutcome(WaveOutcomeEntity(decisionId = id, symbol = campaign.symbol, entryPrice = ltp, lastPrice = ltp, lastObservedAtMs = snapshotAt))
-        auditLogger.log("ADAPTIVE_WAVE", "HOLD_RISK_VETO", mapOf("symbol" to campaign.symbol, "wave" to waveNumber, "reason" to reason))
-    }
-
-    private suspend fun executeAndRecordAdaptiveWave(
-        token: String, settings: AppSettings, campaign: WaveCampaignEntity, waveNumber: Int, ltp: Double,
-        currentSide: String, campaignUsed: Double, capital: Double,
-        decision: com.multify.traderpro.engine.AdaptiveDirectionDecision,
-        longEval: StrategyEvaluation, shortEval: StrategyEvaluation, trajectoryRegime: String,
-        snapshotAt: Long, quoteStarted: Long,
-        brokerHealthy: Boolean, listenerHealthy: Boolean,
-        liveOrderAllowed: Boolean, healthReason: String
-    ) {
-        if (learningDao.waveDecisionForCampaign(campaign.id, waveNumber) != null) return
-        val positives = (if (decision.action == "SHORT") shortEval.votes else longEval.votes)
-            .sortedByDescending { it.score }.take(6).joinToString(" · ") { "${it.name}: ${it.note}" }
-        val negatives = (if (decision.action == "SHORT") longEval.votes else shortEval.votes)
-            .sortedByDescending { it.score }.take(4).joinToString(" · ") { "${it.name}: ${it.note}" }
-        val triggerPct = (ltp / campaign.startPrice - 1.0) * 100.0
-        val snapshot = linkedMapOf<String, Any?>(
-            "timestamp_ms" to snapshotAt, "price" to ltp, "wave" to waveNumber, "trigger_pct" to triggerPct,
-            "vwap" to longEval.features.vwap, "vwap_slope" to longEval.features.vwapSlope,
-            "ema9" to longEval.features.ema9, "ema20" to longEval.features.ema20, "ema50" to longEval.features.ema50,
-            "ema9_slope" to longEval.features.ema9Slope, "ema20_slope" to longEval.features.ema20Slope,
-            "atr14" to longEval.features.atr14, "rsi14" to longEval.features.rsi14, "rsi_slope" to longEval.features.rsiSlope,
-            "rvol" to longEval.features.rvol, "volume_acceleration" to longEval.features.volumeAcceleration,
-            "green_volume_share" to longEval.features.greenVolumeShare, "structure_score" to longEval.features.structureScore,
-            "session_high_distance_pct" to longEval.features.sessionHighDistancePct, "session_low_distance_pct" to longEval.features.sessionLowDistancePct,
-            "macd_histogram" to longEval.features.macdHistogram, "macd_histogram_slope" to longEval.features.macdHistogramSlope,
-            "spread_bps" to longEval.features.spreadBps,
-            "order_book_imbalance" to longEval.features.orderBookImbalance, "day_change_pct" to longEval.features.dayChangePct,
-            "market_context" to "UNAVAILABLE_NEUTRAL", "sector_context" to "UNAVAILABLE_NEUTRAL",
-            "news_context" to "UNAVAILABLE_NEUTRAL_NO_LOOKAHEAD", "trajectory_regime" to trajectoryRegime,
-            "expected_long_gain_pct" to decision.expectedLongGainPct,
-            "expected_long_loss_pct" to decision.expectedLongLossPct,
-            "expected_short_gain_pct" to decision.expectedShortGainPct,
-            "expected_short_loss_pct" to decision.expectedShortLossPct,
-            "estimated_costs_rupees" to decision.estimatedCostsRupees,
-            "ev_gap_rupees" to decision.expectedValueGapRupees,
-            "broker_healthy" to brokerHealthy, "listener_healthy" to listenerHealthy,
-            "live_order_allowed" to liveOrderAllowed, "execution_health_reason" to healthReason,
-            "decision_reason" to decision.reason
-        )
-        var orderSubmitted = false
-        var orderRef: String? = null
-        val managed = managedDao.openPosition(ENGINE_INTRADAY, campaign.symbol)
-        if (decision.action != "HOLD" && settings.liveExecutionEffective && liveOrderAllowed && managed != null && managed.product == "MIS") {
-            preLiveGuard(settings)
-            if (decision.action == managed.side) {
-                val add = addManagedWave(token, managed, decision.action, capital, ltp, longEval.features.atr14 ?: max(ltp * .004, .05), waveNumber)
-                orderSubmitted = add.first
-                orderRef = add.second
-            } else {
-                // One real direction only: flatten/reconcile before the opposite wave. CNC/recovery paths never enter here.
-                val closed = closeManaged(token, managed, ltp, "ADAPTIVE_WAVE_${waveNumber}_FLIP_TO_${decision.action}")
-                val refreshed = preferences.settings.first()
-                val afterRisk = liveRiskState(token, refreshed)
-                if (afterRisk.allowNewRisk && refreshed.liveExecutionEffective) {
-                    assertNoExternalMisConflict(token, campaign.symbol)
-                    val chosen = if (decision.action == "LONG") longEval else shortEval
-                    val atr = chosen.features.atr14 ?: max(ltp * .004, .05)
-                    val stop = if (decision.action == "LONG") ltp - atr else ltp + atr
-                    val target = if (decision.action == "LONG") ltp + atr * 1.5 else max(.05, ltp - atr * 1.5)
-                    val qty = floor(capital / ltp).toInt()
-                    if (qty > 0) {
-                        openManagedReversal(token, managed, decision.action, qty, ltp, stop, target, chosen, waveAnchor = campaign.startPrice, waveIndex = waveNumber - 1, campaignBudget = settings.maxCampaignCapitalRupees.toDouble())
-                        orderSubmitted = managedDao.openPosition(ENGINE_INTRADAY, campaign.symbol) != null
-                        orderRef = if (orderSubmitted) "FLIP_AFTER_${closed.closeOrderId}" else null
-                    }
-                }
-            }
-        }
-
-        val capitalAfter = when {
-            decision.action == "HOLD" -> campaignUsed
-            settings.liveExecutionEffective && !orderSubmitted -> campaignUsed
-            else -> min(settings.maxCampaignCapitalRupees.toDouble(), campaignUsed + capital)
-        }
-        if (decision.action != "HOLD" && settings.liveExecutionEffective && !liveOrderAllowed) {
-            auditLogger.log("ADAPTIVE_WAVE", "LIVE_ORDER_HEALTH_VETO", mapOf(
-                "symbol" to campaign.symbol, "wave" to waveNumber, "selected" to decision.action,
-                "reason" to healthReason
-            ))
-        }
-
-        val id = learningDao.insertWaveDecision(
-            WaveDecisionEntity(
-                campaignId = campaign.id, eventId = campaign.eventId, symbol = campaign.symbol, callDate = LocalDate.now(INDIA).toString(),
-                waveNumber = waveNumber, triggerAtMs = snapshotAt, snapshotAtMs = snapshotAt, triggerPrice = ltp, triggerPct = triggerPct,
-                currentSide = currentSide, selectedDirection = decision.action,
-                longScore = longEval.directionalScore, shortScore = shortEval.directionalScore,
-                longProbability = decision.longProbability, shortProbability = decision.shortProbability,
-                evLongRupees = decision.longExpectedValueRupees, evShortRupees = decision.shortExpectedValueRupees,
-                evLongPct = decision.longExpectedValuePct, evShortPct = decision.shortExpectedValuePct,
-                confidence = decision.confidence, regime = trajectoryRegime,
-                topPositiveFeatures = positives, topNegativeFeatures = negatives,
-                rejectionReason = when {
-                    decision.action == "HOLD" -> decision.reason
-                    settings.liveExecutionEffective && !liveOrderAllowed -> "Selected ${decision.action}; real order blocked: $healthReason"
-                    else -> "Alternative rejected by lower after-cost EV"
-                },
-                snapshotJson = GsonBuilder().create().toJson(snapshot), modelVersion = AdaptiveDirectionEngine.MODEL_VERSION,
-                dataAgeMs = snapshotAt - quoteStarted, brokerHealthy = brokerHealthy, listenerHealthy = listenerHealthy,
-                waveCapitalRupees = if (decision.action == "HOLD") 0.0 else capital,
-                campaignCapitalBefore = campaignUsed, campaignCapitalAfter = capitalAfter,
-                actualOrderSubmitted = orderSubmitted, orderReference = orderRef, createdAtMs = snapshotAt
-            )
-        )
-        if (id > 0L) learningDao.insertWaveOutcome(WaveOutcomeEntity(decisionId = id, symbol = campaign.symbol, entryPrice = ltp, lastPrice = ltp, lastObservedAtMs = snapshotAt))
-        auditLogger.log("ADAPTIVE_WAVE", decision.action, mapOf(
-            "symbol" to campaign.symbol, "wave" to waveNumber, "trigger_pct" to triggerPct,
-            "p_up" to decision.longProbability, "p_down" to decision.shortProbability,
-            "ev_long" to decision.longExpectedValueRupees, "ev_short" to decision.shortExpectedValueRupees,
-            "capital" to capital, "capital_before" to campaignUsed, "capital_after" to capitalAfter,
-            "real_order" to orderSubmitted, "health_allowed" to liveOrderAllowed,
-            "health_reason" to healthReason, "reason" to decision.reason
-        ))
-    }
-
-    private suspend fun addManagedWave(
-        token: String, position: ManagedPositionEntity, side: String, capital: Double, ltp: Double, atr: Double, waveNumber: Int
-    ): Pair<Boolean, String?> {
-        val qty = floor(capital / ltp).toInt()
-        if (qty <= 0) return false to null
-        position.smartOrderId?.let { runCatching { apiFactory.groww.cancelSmartOrder(bearer(token), smartOrderId = it) } }
-        val tx = if (side == "LONG") "BUY" else "SELL"
-        val ref = stableRef("MWA", "${position.id}-$waveNumber-${System.currentTimeMillis()}")
-        val order = placeMarket(token, position.symbol, tx, qty, "MIS", ref)
-        val filled = order.filledQuantity?.takeIf { it > 0 } ?: qty
-        val fill = order.averageFillPrice?.takeIf { it > 0 } ?: ltp
-        val newQty = position.quantity + filled
-        val newAverage = ((position.entryPrice * position.quantity) + (fill * filled)) / newQty
-        val stop = if (side == "LONG") max(position.stopPrice ?: newAverage - atr, newAverage - atr) else min(position.stopPrice ?: newAverage + atr, newAverage + atr)
-        val target = if (side == "LONG") max(position.targetPrice ?: newAverage + atr * 1.5, newAverage + atr * 1.5) else min(position.targetPrice ?: newAverage - atr * 1.5, max(.05, newAverage - atr * 1.5))
-        val updated = position.copy(
-            quantity = newQty, entryPrice = newAverage, stopPrice = stop, targetPrice = target,
-            capitalDeployed = position.capitalDeployed + fill * filled, addCount = waveNumber - 1,
-            lastPrice = fill, lastEvaluatedAtMs = System.currentTimeMillis(), smartOrderId = null
-        )
-        managedDao.updatePosition(updated)
-        val smart = protectManagedPosition(token, updated)
-        managedDao.updatePosition(updated.copy(smartOrderId = smart))
-        return true to (order.growwOrderId.ifBlank { ref })
-    }
-
-    suspend fun monitorWaveOutcomes(): Int {
-        val active = learningDao.activeWaveOutcomes()
-        if (active.isEmpty()) return 0
-        val token = ensureToken() ?: return active.size
-        val now = System.currentTimeMillis()
-        for (outcome in active) {
-            val decision = learningDao.waveDecisionById(outcome.decisionId) ?: continue
-            runCatching {
-                val price = apiFactory.groww.quote(bearer(token), tradingSymbol = outcome.symbol)
-                    .requirePayload("Counterfactual quote " + outcome.symbol).lastPrice ?: return@runCatching
-                val qty = floor(max(1.0, decision.waveCapitalRupees) / outcome.entryPrice).toInt().coerceAtLeast(1)
-                val elapsedSeconds = ((now - decision.triggerAtMs) / 1000L).coerceAtLeast(0L)
-                val phase = "WAVE_DECISION"
-                val sampledOffsets = learningDao.observationsForEventPhase(-decision.id, phase).map { it.offsetSeconds }.toSet()
-                WAVE_OUTCOME_OFFSETS_SECONDS.filter { elapsedSeconds >= it && it !in sampledOffsets }.forEach { offset ->
-                    learningDao.insertObservation(
-                        PriceObservationEntity(
-                            eventId = -decision.id, symbol = outcome.symbol, phase = phase, offsetSeconds = offset,
-                            observedAtMs = now, price = price
-                        )
-                    )
-                }
-                val longPnl = calculatePnl("LONG", qty, outcome.entryPrice, price).net
-                val shortPnl = calculatePnl("SHORT", qty, outcome.entryPrice, price).net
-                val selected = when (decision.selectedDirection) { "LONG" -> longPnl; "SHORT" -> shortPnl; else -> 0.0 }
-                val longMfe = max(outcome.longMfeRupees, max(0.0, longPnl))
-                val longMae = min(outcome.longMaeRupees, min(0.0, longPnl))
-                val shortMfe = max(outcome.shortMfeRupees, max(0.0, shortPnl))
-                val shortMae = min(outcome.shortMaeRupees, min(0.0, shortPnl))
-                val finalized = if (now - decision.triggerAtMs >= COUNTERFACTUAL_WINDOW_MS || ZonedDateTime.now(INDIA).toLocalTime() >= LocalTime.of(15, 20)) now else null
-                learningDao.updateWaveOutcome(outcome.copy(
-                    longMfeRupees = longMfe, longMaeRupees = longMae, shortMfeRupees = shortMfe, shortMaeRupees = shortMae,
-                    longNetRupees = longPnl, shortNetRupees = shortPnl, selectedNetRupees = selected,
-                    oldAveragingNetRupees = longPnl,
-                    noTradeAvoidanceRupees = max(0.0, -max(longPnl, shortPnl)),
-                    bestRealisticNetRupees = max(0.0, max(longPnl, shortPnl)),
-                    lastPrice = price, lastObservedAtMs = now, finalizedAtMs = finalized
-                ))
-            }
-        }
-        return learningDao.activeWaveOutcomes().size
-    }
-
-    private fun gsonQuote(value: String): String = GsonBuilder().create().toJson(value)
-
-    suspend fun monitorWaveCampaigns(): Int {
-        val active = learningDao.activeWaveCampaigns()
-        if (active.isEmpty()) return 0
-        val token = ensureToken() ?: return active.size
-        val settings = preferences.settings.first()
-        active.forEach { campaign ->
-            runCatching {
-                val price = apiFactory.groww.quote(bearer(token), tradingSymbol = campaign.symbol)
-                    .requirePayload("Wave pivot quote " + campaign.symbol).lastPrice ?: campaign.lastPrice
-                updateWaveCampaignTick(campaign, price, settings.waveCount)
-            }.onFailure {
-                auditLogger.log("WAVES", "TICK_ERROR", mapOf("symbol" to campaign.symbol, "message" to (it.message ?: "")))
-            }
-        }
-        return learningDao.activeWaveCampaigns().size
-    }
-
-    suspend fun submitManualSignal(symbol: String, action: String, observedPrice: Double? = null): Long {
-        val normalizedSymbol = symbol.trim().uppercase(Locale.US)
-        require(normalizedSymbol.isNotBlank()) { "Enter an NSE symbol" }
-        val normalizedAction = action.trim().uppercase(Locale.US).replace(' ', '_')
-        require(normalizedAction in setOf("BUY", "BOOK_PROFIT")) { "Choose BUY or BOOK PROFIT" }
-        if (!nseSymbols.isKnown(normalizedSymbol) && !nseSymbols.isStale()) error("$normalizedSymbol is not in the current NSE equity master")
-        val now = System.currentTimeMillis()
-        val signalType = if (normalizedAction == "BUY") SignalType.TRADE_RELEASE else SignalType.BOOK_PROFIT
-        val id = dao.insert(
-            SignalEventEntity(
-                fingerprint = sha256("$MANUAL_SOURCE|$normalizedSymbol|$normalizedAction|$now"),
-                receivedAtMs = now, postedAtMs = now, sourcePackage = MANUAL_SOURCE, appLabel = "Manual signal",
-                title = normalizedAction.replace('_', ' '), text = normalizedSymbol,
-                bigText = observedPrice?.let { "$normalizedSymbol @ ₹${fmt(it)}" } ?: normalizedSymbol,
-                signalType = signalType.name, symbol = normalizedSymbol,
-                summary = "Manual $normalizedAction · $normalizedSymbol",
-                confidence = 1.0
-            )
-        )
-        require(id > 0L) { "Manual signal was not stored" }
-        val token = ensureToken()
-        if (token == null) {
-            dao.updateForwarding(id, "CAPTURED", "AUTH_REQUIRED", "Manual signal stored. Authenticate Groww to process market data.", null)
-            return id
-        }
-        val settings = preferences.settings.first()
-        val parsed = ParsedSignal(
-            type = signalType, symbol = normalizedSymbol,
-            exitPrice = if (signalType == SignalType.BOOK_PROFIT) observedPrice else null,
-            rawText = "manual:$normalizedAction:$normalizedSymbol", confidence = 1.0
-        )
-        if (signalType == SignalType.TRADE_RELEASE) {
-            handleBuyRelease(id, parsed, token, settings)
-        } else {
-            handleBookProfit(id, parsed, token, settings)
-        }
-        auditLogger.log("SIGNAL", "MANUAL_SIGNAL", mapOf("event_id" to id, "symbol" to normalizedSymbol, "action" to normalizedAction, "observed_price" to observedPrice))
-        return id
-    }
-
-    private suspend fun handleBuyRelease(eventId: Long, signal: ParsedSignal, token: String, settings: AppSettings) {
-        val symbol = signal.symbol ?: error("Trade release has no symbol")
-        val quote = apiFactory.groww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Quote " + symbol)
-        val ltp = quote.lastPrice ?: error("Groww quote does not contain LTP")
-        recordLiveBuy(eventId, signal, ltp)
-        val learned = learningStats()
-        val targetPct = learned.longAveragePct.coerceAtLeast(0.20)
-        val target = ltp * (1.0 + targetPct / 100.0)
-        val stop = max(.05, ltp * .99)
-
-        if (!settings.liveExecutionEffective) {
-            shadowDao.openPosition(symbol)?.let { closeShadow(it, ltp, "MULTIFY_NEW_CALL_REPLACE") }
-            val qty = floor(SHADOW_BUDGET / ltp).toInt().coerceAtLeast(1)
-            openShadowDirect(
-                symbol = symbol, side = "LONG", quantity = qty, entry = ltp, stop = stop, target = target,
-                strategy = "Multify Auto LONG · rolling target " + fmt(targetPct) + "%",
-                regime = "MULTIFY_AUTO_LONG", confidence = 1.0, sourceEventId = eventId,
-                campaignBudget = SHADOW_BUDGET, capitalDeployed = qty * ltp
-            )
-            dao.updateForwarding(eventId, "ANALYZED", "PAPER_MULTIFY_LONG",
-                "Immediate Multify shadow LONG @ ₹" + fmt(ltp) + " · trail arms at +" + fmt(targetPct) + "%.", null)
-            runCatching { analyze(symbol, token, longSide = true, signal = signal, eventId = eventId) }
-            return
-        }
-
-        if (settings.executionMode == "SHORT_ONLY") {
-            dao.updateForwarding(eventId, "ANALYZED", "MULTIFY_LONG_DISABLED", "SHORT-only mode: Multify LONG not opened.", null)
-            runCatching { analyze(symbol, token, longSide = true, signal = signal, eventId = eventId) }
-            return
-        }
-        if (managedDao.openPosition(ENGINE_INTRADAY, symbol) != null) {
-            dao.updateForwarding(eventId, "ANALYZED", "MULTIFY_ALREADY_OPEN", "Multify Auto already owns an open position in " + symbol + ".", null)
-            return
-        }
-        val risk = liveRiskState(token, settings)
-        if (!risk.allowNewRisk) {
-            dao.updateForwarding(eventId, "ANALYZED", "LIVE_DEFENSIVE_WAIT", risk.reason, null)
-            return
-        }
-        preLiveGuard(settings)
-        assertNoExternalMisConflict(token, symbol)
-        val qty = floor(settings.dailyBudgetRupees.toDouble() / ltp).toInt()
-        if (qty <= 0) error("Configured capital cannot fund one share")
-        val ref = stableRef("MUL", eventId.toString() + "-" + symbol + "-L")
-        val order = placeMarket(token, symbol, "BUY", qty, "MIS", ref)
-        val filled = order.filledQuantity?.takeIf { it > 0 } ?: qty
-        val entry = order.averageFillPrice?.takeIf { it > 0 } ?: ltp
-        val entryTarget = entry * (1.0 + targetPct / 100.0)
-        val entryStop = max(.05, entry * .99)
-        managedDao.insertPosition(
-            ManagedPositionEntity(
-                engine = ENGINE_INTRADAY, symbol = symbol, product = "MIS", side = "LONG", quantity = filled,
-                entryPrice = entry, stopPrice = entryStop, targetPrice = entryTarget,
-                strategy = "Multify Auto LONG · rolling target " + fmt(targetPct) + "%",
-                regime = "MULTIFY_AUTO_LONG", confidence = 1.0, sourceEventId = eventId,
-                openOrderId = order.growwOrderId, openReferenceId = ref, openedAtMs = System.currentTimeMillis(),
-                lastPrice = entry, maxFavourablePrice = entry, maxAdversePrice = entry, lastEvaluatedAtMs = System.currentTimeMillis(),
-                anchorPrice = entry, capitalDeployed = entry * filled, campaignBudget = entry * filled
-            )
-        )
-        val managed = managedDao.openPosition(ENGINE_INTRADAY, symbol) ?: error("App ledger failed to record Multify LONG")
-        val smart = protectManagedPosition(token, managed)
-        managedDao.updatePosition(managed.copy(smartOrderId = smart))
-        dao.updateForwarding(eventId, "DELIVERED", "MULTIFY_LONG_PROTECTED",
-            "Immediate Multify LONG · qty " + filled + " @ ₹" + fmt(entry) + " · trail arm +" + fmt(targetPct) + "%.", null)
-        runCatching { analyze(symbol, token, longSide = true, signal = signal, eventId = eventId) }
-    }
-
-    private suspend fun handleBookProfit(eventId: Long, signal: ParsedSignal, token: String, settings: AppSettings) {
-        val symbol = signal.symbol ?: error("Book-profit signal has no symbol")
-        val quoteNow = apiFactory.groww.quote(bearer(token), tradingSymbol = symbol)
-            .requirePayload("Quote " + symbol).lastPrice ?: signal.exitPrice ?: error("No exit quote")
-        recordLiveSell(eventId, symbol, quoteNow)
-        val learned = learningStats()
-        val shortPct = learned.shortAverageDownPct.coerceAtLeast(0.20)
-
-        if (!settings.liveExecutionEffective) {
-            val open = shadowDao.openPosition(symbol)
-            val capital = open?.let { it.entryPrice * it.quantity } ?: SHADOW_BUDGET
-            if (open != null) closeShadow(open, quoteNow, "MULTIFY_BOOK_PROFIT")
-            if (settings.executionMode != "LONG_ONLY" && settings.postSellShortEnabled) {
-                val qty = floor(capital / quoteNow).toInt().coerceAtLeast(1)
-                val target = max(.05, quoteNow * (1.0 - shortPct / 100.0))
-                val stop = quoteNow * 1.01
-                openShadowDirect(
-                    symbol, "SHORT", qty, quoteNow, stop, target,
-                    "Multify Auto SHORT · average downside " + fmt(shortPct) + "%",
-                    "MULTIFY_AUTO_SHORT", 1.0, eventId, capital, qty * quoteNow
-                )
-                dao.updateForwarding(eventId, "ANALYZED", "PAPER_MULTIFY_SHORT",
-                    "Multify LONG closed; immediate shadow SHORT @ ₹" + fmt(quoteNow) + " · trail arms at -" + fmt(shortPct) + "%.", null)
-            } else {
-                dao.updateForwarding(eventId, "ANALYZED", "MULTIFY_LONG_CLOSED", "Multify LONG closed; post-sell SHORT is disabled.", null)
-            }
-            runCatching { analyze(symbol, token, longSide = false, signal = signal, eventId = eventId) }
-            return
-        }
-
-        val liveLong = managedDao.openPosition(ENGINE_INTRADAY, symbol)?.takeIf { it.side == "LONG" }
-        val capital = liveLong?.capitalDeployed?.takeIf { it > 0.0 } ?: settings.dailyBudgetRupees.toDouble()
-        liveLong?.let {
-            assertManagedMisStillOwned(token, it)
-            closeManaged(token, it, quoteNow, "MULTIFY_BOOK_PROFIT")
-        }
-        if (settings.executionMode == "LONG_ONLY" || !settings.postSellShortEnabled) {
-            dao.updateForwarding(eventId, "ANALYZED", "MULTIFY_LONG_CLOSED", "Multify LONG closed; post-sell SHORT is disabled.", null)
-            runCatching { analyze(symbol, token, longSide = false, signal = signal, eventId = eventId) }
-            return
-        }
-        if (managedDao.openPosition(ENGINE_INTRADAY, symbol) != null) return
-        val risk = liveRiskState(token, settings)
-        if (!risk.allowNewRisk) {
-            dao.updateForwarding(eventId, "ANALYZED", "LIVE_DEFENSIVE_WAIT", risk.reason, null)
-            return
-        }
-        preLiveGuard(settings)
-        assertNoExternalMisConflict(token, symbol)
-        val qty = floor(capital / quoteNow).toInt()
-        if (qty <= 0) error("Multify short capital cannot fund one share")
-        val ref = stableRef("MUS", eventId.toString() + "-" + symbol + "-S")
-        val order = placeMarket(token, symbol, "SELL", qty, "MIS", ref)
-        val filled = order.filledQuantity?.takeIf { it > 0 } ?: qty
-        val entry = order.averageFillPrice?.takeIf { it > 0 } ?: quoteNow
-        val target = max(.05, entry * (1.0 - shortPct / 100.0))
-        val stop = entry * 1.01
-        managedDao.insertPosition(
-            ManagedPositionEntity(
-                engine = ENGINE_INTRADAY, symbol = symbol, product = "MIS", side = "SHORT", quantity = filled,
-                entryPrice = entry, stopPrice = stop, targetPrice = target,
-                strategy = "Multify Auto SHORT · average downside " + fmt(shortPct) + "%",
-                regime = "MULTIFY_AUTO_SHORT", confidence = 1.0, sourceEventId = eventId,
-                openOrderId = order.growwOrderId, openReferenceId = ref, openedAtMs = System.currentTimeMillis(),
-                lastPrice = entry, maxFavourablePrice = entry, maxAdversePrice = entry, lastEvaluatedAtMs = System.currentTimeMillis(),
-                anchorPrice = entry, capitalDeployed = entry * filled, campaignBudget = capital
-            )
-        )
-        val short = managedDao.openPosition(ENGINE_INTRADAY, symbol) ?: error("App ledger failed to record Multify SHORT")
-        val smart = protectManagedPosition(token, short)
-        managedDao.updatePosition(short.copy(smartOrderId = smart))
-        dao.updateForwarding(eventId, "DELIVERED", "MULTIFY_SHORT_PROTECTED",
-            "Immediate Multify SHORT · qty " + filled + " @ ₹" + fmt(entry) + " · trail arm -" + fmt(shortPct) + "%.", null)
-        runCatching { analyze(symbol, token, longSide = false, signal = signal, eventId = eventId) }
-    }
-
-    private suspend fun handleFastTrackBuy(eventId: Long, signal: ParsedSignal, token: String, settings: AppSettings) {
-        val symbol = signal.symbol ?: return
-        if (!settings.fastTrackEffective) return
-        if (managedDao.openPosition(ENGINE_FAST_TRACK, symbol) != null) return
-        require(settings.brokerDdpiEnabled) { "Fast Track requires Groww DDPI for unattended delivery exits" }
-        val quote = apiFactory.groww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Quote $symbol")
-        val ltp = quote.lastPrice ?: return
-        val learned = learningStats()
-        val totalBudget = settings.fastTrackBudgetRupees.toDouble()
-        val initialCapital = totalBudget
-        val qty = floor(initialCapital / ltp).toInt()
-        if (qty <= 0) return
-        val margin = apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin")
-        val cash = margin.equity?.cncBalanceAvailable ?: margin.clearCash
-        require(cash >= qty * ltp) { "Fast Track CNC requires ₹${(qty * ltp).toInt()} but available CNC cash is about ₹${cash.toInt()}" }
-        val ref = stableRef("MFM", "$eventId-$symbol-B")
-        val order = placeMarket(token, symbol, "BUY", qty, "CNC", ref)
-        val filled = order.filledQuantity?.takeIf { it > 0 } ?: qty
-        val entry = order.averageFillPrice?.takeIf { it > 0 } ?: ltp
-        val target = entry * (1.0 + learned.longAveragePct / 100.0)
-        managedDao.insertPosition(
-            ManagedPositionEntity(
-                engine = ENGINE_FAST_TRACK, symbol = symbol, product = "CNC", side = "LONG", quantity = filled,
-                entryPrice = entry, stopPrice = null, targetPrice = target, strategy = "Multify notification follow · rolling ${fmt(learned.longAveragePct)}% exit",
-                regime = "DELIVERY", confidence = 1.0, sourceEventId = eventId, openOrderId = order.growwOrderId,
-                openReferenceId = ref, openedAtMs = System.currentTimeMillis(), lastPrice = entry,
-                maxFavourablePrice = entry, maxAdversePrice = entry, lastEvaluatedAtMs = System.currentTimeMillis(),
-                anchorPrice = entry, capitalDeployed = entry * filled, campaignBudget = entry * filled, addCount = 0
-            )
-        )
-        auditLogger.log("FAST_TRACK", "CNC_BUY_FILLED", mapOf(
-            "symbol" to symbol, "entry" to entry, "quantity" to filled, "configured_cap" to totalBudget,
-            "fixed_capital" to (entry * filled), "capital_top_up_allowed" to false,
-            "rolling_long_target_pct" to learned.longAveragePct
-        ))
-    }
-
-    private suspend fun handleFastTrackSell(eventId: Long, signal: ParsedSignal, token: String, settings: AppSettings) {
-        val symbol = signal.symbol ?: return
-        val quote = apiFactory.groww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Quote $symbol")
-        val ltp = quote.lastPrice ?: signal.exitPrice ?: return
-        var longTrade = managedDao.latestTrade(ENGINE_FAST_TRACK, symbol, "LONG", startOfIndiaDayMs())
-        val holding = managedDao.openPosition(ENGINE_FAST_TRACK, symbol)
-        if (holding != null) {
-            val brokerHolding = apiFactory.groww.holdings(bearer(token)).requirePayload("Groww holdings")
-                .holdings.firstOrNull { it.tradingSymbol.equals(symbol, true) }
-            require((brokerHolding?.quantity ?: 0) >= holding.quantity) {
-                "Fast Track owns ${holding.quantity} $symbol shares in its ledger, but Groww holdings are lower. External/manual activity detected; automatic sell blocked."
-            }
-            if (ltp < holding.entryPrice) {
-                auditLogger.log("FAST_TRACK", "MULTIFY_SELL_HELD_RED", mapOf("symbol" to symbol, "ltp" to ltp, "average_entry" to holding.entryPrice, "pnl_pct" to ((ltp/holding.entryPrice-1)*100)))
-                return
-            }
-            longTrade = closeManaged(token, holding, ltp, "MULTIFY_BOOK_PROFIT_GREEN")
-        }
-        val closed = longTrade ?: return
-        if (closed.exitPrice <= closed.entryPrice) return
-        openFastTrackShortFromLong(token, closed, ltp, eventId, settings, "MULTIFY_BOOK_PROFIT")
-    }
-
-    private suspend fun openShadowPostLongShort(
-        closed: ShadowTradeEntity, entryPrice: Double, sourceEventId: Long?, token: String, settings: AppSettings, trigger: String
-    ) {
-        if (closed.side != "LONG" || closed.exitPrice <= closed.entryPrice) return
-        if (shadowDao.openPosition(closed.symbol) != null) return
-        if (!paperRiskAllowsNewTrade(token, settings, closed.symbol)) return
-        val learned = learningStats()
-        val target = AdaptiveLearningMath.shortTarget(entryPrice, closed.entryPrice, closed.exitPrice, learned.shortRetracementFraction)
-        val stop = entryPrice * (1.0 + FAST_SHORT_STOP_PCT)
-        val fixedCapitalCap = closed.entryPrice * closed.quantity
-        val qty = floor(fixedCapitalCap / entryPrice).toInt()
-        if (qty <= 0) return
-        openShadowDirect(
-            symbol = closed.symbol, side = "SHORT", quantity = qty, entry = entryPrice, stop = stop, target = target,
-            strategy = "Adaptive post-long short · ${fmt(learned.shortRetracementPct)}% retracement", regime = "POST_SELL",
-            confidence = 1.0, sourceEventId = sourceEventId, campaignBudget = fixedCapitalCap, capitalDeployed = qty * entryPrice
-        )
-        auditLogger.log("SHADOW", "ADAPTIVE_SHORT_OPEN", mapOf(
-            "symbol" to closed.symbol, "trigger" to trigger, "entry" to entryPrice, "long_entry" to closed.entryPrice,
-            "long_exit" to closed.exitPrice, "retracement_pct" to learned.shortRetracementPct, "target" to target
-        ))
-    }
-
-    private suspend fun openFastTrackShortFromLong(
-        token: String, closed: ManagedTradeEntity, entryPrice: Double, sourceEventId: Long?, settings: AppSettings, trigger: String
-    ) {
-        if (closed.side != "LONG" || closed.exitPrice <= closed.entryPrice) return
-        if (!settings.postSellShortEnabled || marketSession() != "OPEN") return
-        if (ZonedDateTime.now(INDIA).toLocalTime().isAfter(LocalTime.of(15, 5))) return
-        if (settings.safetyHalt || managedDao.openPosition(ENGINE_FAST_SHORT, closed.symbol) != null) return
-        val risk = liveRiskState(token, settings)
-        if (!risk.allowNewRisk) return
-        assertNoExternalMisConflict(token, closed.symbol)
-        val learned = learningStats()
-        val target = AdaptiveLearningMath.shortTarget(entryPrice, closed.entryPrice, closed.exitPrice, learned.shortRetracementFraction)
-        val stop = entryPrice * (1.0 + FAST_SHORT_STOP_PCT)
-        val fixedCapitalCap = closed.entryPrice * closed.quantity
-        val allocation = BudgetAllocator.allocate(fixedCapitalCap, .90, entryPrice, stop - entryPrice, entryPrice - target, 0)
-        if (!allocation.allowed) return
-        auditLogger.log("FAST_TRACK", "POST_LONG_SHORT_PLAN", mapOf(
-            "symbol" to closed.symbol, "trigger" to trigger, "long_entry" to closed.entryPrice, "long_exit" to closed.exitPrice,
-            "long_price_gain_per_share" to (closed.exitPrice - closed.entryPrice), "learned_retracement_fraction" to learned.shortRetracementFraction,
-            "planned_short_entry" to entryPrice, "planned_short_target" to target
-        ))
-        val ref = stableRef("MFS", "${sourceEventId ?: closed.id}-${closed.symbol}-${System.currentTimeMillis()}")
-        val order = placeMarket(token, closed.symbol, "SELL", allocation.quantity, "MIS", ref)
-        val qty = order.filledQuantity?.takeIf { it > 0 } ?: allocation.quantity
-        val actualEntry = order.averageFillPrice?.takeIf { it > 0 } ?: entryPrice
-        val actualTarget = AdaptiveLearningMath.shortTarget(actualEntry, closed.entryPrice, closed.exitPrice, learned.shortRetracementFraction)
-        managedDao.insertPosition(
-            ManagedPositionEntity(
-                engine = ENGINE_FAST_SHORT, symbol = closed.symbol, product = "MIS", side = "SHORT", quantity = qty,
-                entryPrice = actualEntry, stopPrice = actualEntry * (1.0 + FAST_SHORT_STOP_PCT), targetPrice = actualTarget,
-                strategy = "Adaptive post-long short · ${fmt(learned.shortRetracementPct)}% of preceding long move", regime = "FAST_TRACK", confidence = .90,
-                sourceEventId = sourceEventId, openOrderId = order.growwOrderId, openReferenceId = ref,
-                openedAtMs = System.currentTimeMillis(), lastPrice = actualEntry, maxFavourablePrice = actualEntry,
-                maxAdversePrice = actualEntry, lastEvaluatedAtMs = System.currentTimeMillis(), anchorPrice = actualEntry,
-                capitalDeployed = actualEntry * qty, campaignBudget = min(fixedCapitalCap, actualEntry * qty)
-            )
-        )
-        val short = managedDao.openPosition(ENGINE_FAST_SHORT, closed.symbol) ?: return
-        val smart = protectManagedPosition(token, short)
-        managedDao.updatePosition(short.copy(smartOrderId = smart))
-    }
-
-    private suspend fun analyze(
-        symbol: String, token: String, longSide: Boolean, signal: ParsedSignal, eventId: Long? = null, includeEventPrior: Boolean = true
-    ): StrategyEvaluation {
-        val auth = bearer(token)
-        val quote = apiFactory.groww.quote(auth, tradingSymbol = symbol).requirePayload("Quote $symbol")
-        val now = ZonedDateTime.now(INDIA)
-        val start = now.toLocalDate().atTime(9, 15).format(HIST_FORMAT)
-        val end = now.toLocalDateTime().format(HIST_FORMAT)
-        var intervalMinutes = 5
-        var historical = apiFactory.groww.historicalCandles(
-            authorization = auth, growwSymbol = "NSE-$symbol", startTime = start, endTime = end, candleInterval = "5minute"
-        ).requirePayload("Historical candles $symbol")
-        if (now.toLocalTime().isBefore(LocalTime.of(9, 40)) || historical.candles.size < 5) {
-            intervalMinutes = 1
-            historical = apiFactory.groww.historicalCandles(
-                authorization = auth, growwSymbol = "NSE-$symbol", startTime = start, endTime = end, candleInterval = "1minute"
-            ).requirePayload("1-minute historical candles $symbol")
-        }
-        require(historical.candles.size >= 3) { "Not enough intraday candles yet; signal retained" }
-        val features = LocalStrategyEngine.buildFeatures(quote, historical, intervalMinutes)
-        val evaluation = if (longSide) LocalStrategyEngine.evaluateLong(signal, features, includeEventPrior) else LocalStrategyEngine.evaluateShort(features, includeEventPrior)
-        auditLogger.log("STRATEGY", "EVALUATION", mapOf(
-            "symbol" to symbol,
-            "side" to evaluation.side,
-            "regime" to evaluation.regime,
-            "selected_strategy" to evaluation.strategy,
-            "directional_score" to evaluation.directionalScore,
-            "confidence" to evaluation.confidence,
-            "reason" to evaluation.reason,
-            "interval_minutes" to intervalMinutes,
-            "candle_count" to historical.candles.size,
-            "ltp" to features.ltp,
-            "bid" to features.bid,
-            "ask" to features.ask,
-            "spread_bps" to features.spreadBps,
-            "vwap" to features.vwap,
-            "ema9" to features.ema9,
-            "ema20" to features.ema20,
-            "atr14" to features.atr14,
-            "rsi14" to features.rsi14,
-            "bollinger_width" to features.bollWidth,
-            "macd_histogram" to features.macdHistogram,
-            "trend_slope_atr" to features.trendSlopeAtr,
-            "relative_volume" to features.rvol,
-            "donchian_high" to features.donchianHigh,
-            "donchian_low" to features.donchianLow,
-            "orb5_high" to features.orb5High,
-            "orb5_low" to features.orb5Low,
-            "orb15_high" to features.orb15High,
-            "orb15_low" to features.orb15Low,
-            "order_book_imbalance" to features.orderBookImbalance,
-            "day_change_pct" to features.dayChangePct,
-            "market_cap" to features.marketCap,
-            "range_52_position" to features.range52Position,
-            "votes" to evaluation.votes.joinToString(" || ") { "${it.name}=${String.format(Locale.US, "%.4f", it.score)} (${it.note})" }
-        ))
-        learningDao.insertStrategySnapshot(
-            StrategySnapshotEntity(
-                atMs = System.currentTimeMillis(), eventId = eventId, symbol = symbol, side = evaluation.side,
-                regime = evaluation.regime, strategy = evaluation.strategy, directionalScore = evaluation.directionalScore, confidence = evaluation.confidence,
-                ltp = features.ltp, vwap = features.vwap, ema9 = features.ema9, ema20 = features.ema20, atr14 = features.atr14,
-                rsi14 = features.rsi14, rvol = features.rvol, macdHistogram = features.macdHistogram, spreadBps = features.spreadBps,
-                orderBookImbalance = features.orderBookImbalance, dayChangePct = features.dayChangePct, marketCap = features.marketCap,
-                votes = evaluation.votes.joinToString(" || ") { "${it.name}=${String.format(Locale.US, "%.4f", it.score)} (${it.note})" }
-            )
-        )
-        return evaluation
-    }
-
-    suspend fun monitorShadowPositions(): Int {
-        val settings = preferences.settings.first()
-        val open = shadowDao.openPositions()
-        if (open.isEmpty()) return 0
-        val token = ensureToken() ?: return open.size
-        val now = ZonedDateTime.now(INDIA)
-        val risk = shadowRiskState(token, settings)
-        if (risk.hardStop) {
-            open.forEach { p ->
-                val ltp = runCatching { apiFactory.groww.quote(bearer(token), tradingSymbol = p.symbol).requirePayload("Quote").lastPrice }.getOrNull() ?: p.lastPrice
-                closeShadow(p, ltp, "HARD_DAILY_LOSS_CAP")
-            }
-            return 0
-        }
-        for (position in open) runCatching { monitorOneShadow(position, token, settings, now, risk) }
-        return shadowDao.openPositions().size
     }
 
     suspend fun monitorManagedPositions(): Int {
         val open = managedDao.openPositions()
         if (open.isEmpty()) return 0
         val token = ensureToken() ?: return open.size
-        val settings = preferences.settings.first()
-        val now = ZonedDateTime.now(INDIA)
-        val misRisk = liveRiskState(token, settings)
-        if (misRisk.hardStop) {
-            preferences.setSafetyHalt(true)
-            managedDao.openPositions().forEach { p ->
-                runCatching {
-                    if (p.product == "MIS") assertManagedMisStillOwned(token, p)
-                    val ltp = apiFactory.groww.quote(bearer(token), tradingSymbol = p.symbol).requirePayload("Quote ${p.symbol}").lastPrice ?: p.lastPrice
-                    closeManaged(token, p, ltp, "HARD_DAILY_LOSS_PREEMPT")
+        if (marketSession() != "OPEN") return open.size
+        for (position in open) {
+            runCatching {
+                if (position.side != "LONG") {
+                    closeLegacyNonLong(token, position)
+                    return@runCatching
                 }
+                monitorLongHolding(position, token)
+            }.onFailure {
+                auditLogger.log("HOLDING", "MONITOR_ERROR", mapOf("symbol" to position.symbol, "message" to (it.message ?: it.javaClass.simpleName)))
             }
-            return managedDao.openPositions().size
         }
-        val ordered = open.sortedWith(compareBy<ManagedPositionEntity> {
-            when {
-                it.addCount <= 0 && it.regime != REGIME_RECOVERY_HOLD -> 0 // active first wave: highest priority
-                it.regime == REGIME_RECOVERY_HOLD -> 2               // safety-only recovery hold
-                else -> 1                                             // later-wave secondary
-            }
-        }.thenBy { it.openedAtMs })
-        for (position in ordered) runCatching { monitorOneManaged(position, token, settings, now, misRisk) }
         return managedDao.openPositions().size
     }
 
-    private suspend fun monitorOneShadow(position: ShadowPositionEntity, token: String, settings: AppSettings, now: ZonedDateTime, risk: RiskState) {
+    private suspend fun monitorLongHolding(position: ManagedPositionEntity, token: String) {
         val quote = apiFactory.groww.quote(bearer(token), tradingSymbol = position.symbol).requirePayload("Quote ${position.symbol}")
         val ltp = quote.lastPrice ?: return
-        var updated = updateShadowMark(position, ltp)
-        val followLong = updated.side == "LONG" && updated.regime in setOf("FOLLOW", "MULTIFY_AUTO_LONG")
-        val followShort = updated.side == "SHORT" && updated.regime in setOf("POST_SELL", "MULTIFY_AUTO_SHORT")
-
-        if (followLong) {
-            val learned = learningStats()
-            val learnedTarget = updated.entryPrice * (1.0 + learned.longAveragePct / 100.0)
-            if (kotlin.math.abs(updated.targetPrice - learnedTarget) > .01) {
-                updated = updated.copy(
-                    targetPrice = learnedTarget,
-                    strategy = "Multify follow · rolling ${fmt(learned.longAveragePct)}% trail arm"
-                )
-                shadowDao.updatePosition(updated)
-            }
-
-            val atr = max(ltp * .004, .05)
-            var trailArmed = LearnedTrailingPolicy.isArmed("LONG", updated.stopPrice, updated.entryPrice)
-            if (!trailArmed && LearnedTrailingPolicy.shouldArm("LONG", updated.entryPrice, ltp, learned.longAveragePct)) {
-                val candidateStop = LearnedTrailingPolicy.ratchetStop(
-                    side = "LONG", entryPrice = updated.entryPrice, ltp = ltp, atr = atr, currentStop = updated.stopPrice
-                )
-                updated = updated.copy(stopPrice = candidateStop)
-                shadowDao.updatePosition(updated)
-                trailArmed = true
-                auditLogger.log("TRAILING_STOP", "ROLLING_AVERAGE_ARMED", mapOf(
-                    "symbol" to updated.symbol, "side" to "LONG", "wave" to 1,
-                    "rolling_average_pct" to learned.longAveragePct, "threshold_price" to learnedTarget,
-                    "ltp" to ltp, "new_stop" to candidateStop, "window_trading_days" to learned.rollingTradingDays,
-                    "window_calls" to learned.rollingCalls
-                ))
-            }
-
-            if (trailArmed) {
-                if (ltp <= updated.stopPrice) {
-                    val closed = closeShadow(updated, ltp, "ROLLING_30D_TRAILING_PROFIT_STOP")
-                    recordAdaptiveExit(updated.symbol, closed.exitPrice)
-                    openShadowPostLongShort(closed, ltp, updated.sourceEventId, token, settings, "ADAPTIVE_TRAILING_EXIT")
-                    return
-                }
-                val candidateStop = LearnedTrailingPolicy.ratchetStop(
-                    side = "LONG", entryPrice = updated.entryPrice, ltp = ltp, atr = atr, currentStop = updated.stopPrice
-                )
-                if (candidateStop > updated.stopPrice + .01) {
-                    updated = updated.copy(stopPrice = candidateStop)
-                    shadowDao.updatePosition(updated)
-                    auditLogger.log("TRAILING_STOP", "ROLLING_AVERAGE_RATCHET", mapOf(
-                        "symbol" to updated.symbol, "side" to "LONG", "wave" to 1,
-                        "rolling_average_pct" to learned.longAveragePct, "ltp" to ltp, "new_stop" to candidateStop
-                    ))
-                }
-            }
-
-            // Before the learned average is reached, Multify-following longs may remain virtual holdings overnight when red.
-            // After the trail is armed, the stop is one-way only; later average changes never loosen it.
-            if (now.toLocalTime() >= LocalTime.of(15, 22)) return
-            if (System.currentTimeMillis() - updated.openedAtMs >= 75_000L) {
-                val synthetic = ParsedSignal(SignalType.TRADE_RELEASE, symbol = updated.symbol, rawText = "shadow-follow-monitor", confidence = 1.0)
-                runCatching { analyze(updated.symbol, token, longSide = true, signal = synthetic) }
-            }
-            return
-        }
-
-        if (followShort) {
-            val forceFlat = now.dayOfWeek.value >= 6 || !now.toLocalTime().isBefore(LocalTime.of(15, 20))
-            if (forceFlat) {
-                closeShadow(updated, ltp, "POST_SELL_FORCE_FLAT")
-                return
-            }
-            val learned = learningStats()
-            val armPct = learned.shortAverageDownPct.coerceAtLeast(0.20)
-            val armTarget = max(.05, updated.entryPrice * (1.0 - armPct / 100.0))
-            if (kotlin.math.abs(updated.targetPrice - armTarget) > .01) {
-                updated = updated.copy(
-                    targetPrice = armTarget,
-                    strategy = "Multify Auto SHORT · rolling " + fmt(armPct) + "% trail arm"
-                )
-                shadowDao.updatePosition(updated)
-            }
-            val atr = max(ltp * .004, .05)
-            var trailArmed = LearnedTrailingPolicy.isArmed("SHORT", updated.stopPrice, updated.entryPrice)
-            if (!trailArmed && LearnedTrailingPolicy.shouldArm("SHORT", updated.entryPrice, ltp, armPct)) {
-                val candidateStop = LearnedTrailingPolicy.ratchetStop(
-                    side = "SHORT", entryPrice = updated.entryPrice, ltp = ltp, atr = atr, currentStop = updated.stopPrice
-                )
-                updated = updated.copy(stopPrice = candidateStop)
-                shadowDao.updatePosition(updated)
-                trailArmed = true
-                auditLogger.log("TRAILING_STOP", "SHORT_AVERAGE_ARMED", mapOf(
-                    "symbol" to updated.symbol, "rolling_average_pct" to armPct,
-                    "threshold_price" to armTarget, "ltp" to ltp, "new_stop" to candidateStop
-                ))
-            }
-            if (trailArmed) {
-                if (ltp >= updated.stopPrice) {
-                    closeShadow(updated, ltp, "SHORT_TRAILING_PROFIT_STOP")
-                    return
-                }
-                val candidateStop = LearnedTrailingPolicy.ratchetStop(
-                    side = "SHORT", entryPrice = updated.entryPrice, ltp = ltp, atr = atr, currentStop = updated.stopPrice
-                )
-                if (candidateStop < updated.stopPrice - .01) {
-                    updated = updated.copy(stopPrice = candidateStop)
-                    shadowDao.updatePosition(updated)
-                }
-            } else if (ltp >= updated.stopPrice) {
-                closeShadow(updated, ltp, "POST_SELL_PROTECTIVE_STOP")
-                return
-            }
-            if (System.currentTimeMillis() - updated.lastEvaluatedAtMs >= 75_000L) {
-                val synthetic = ParsedSignal(SignalType.BOOK_PROFIT, symbol = updated.symbol, rawText = "post-sell-shadow-monitor", confidence = 1.0)
-                runCatching { analyze(updated.symbol, token, longSide = false, signal = synthetic) }
-                shadowDao.openPosition(updated.symbol)?.let { p ->
-                    if (p.id == updated.id) shadowDao.updatePosition(p.copy(lastEvaluatedAtMs = System.currentTimeMillis()))
-                }
-            }
-            return
-        }
-
-        val forceFlat = now.dayOfWeek.value >= 6 || !now.toLocalTime().isBefore(LocalTime.of(15, 20))
-        val stopHit = if (updated.side == "LONG") ltp <= updated.stopPrice else ltp >= updated.stopPrice
-        if (forceFlat) { closeShadow(updated, ltp, "FORCE_FLAT_15_20"); return }
-        if (stopHit) { closeShadow(updated, ltp, "PROTECTIVE_STOP"); return }
-        if (System.currentTimeMillis() - updated.openedAtMs < 75_000L) return
-
-        val synthetic = ParsedSignal(SignalType.TRADE_RELEASE, symbol = updated.symbol, rawText = "shadow-monitor", confidence = 1.0)
-        val same = analyze(updated.symbol, token, longSide = updated.side == "LONG", signal = synthetic, includeEventPrior = false)
-        val opposite = analyze(updated.symbol, token, longSide = updated.side == "SHORT", signal = synthetic, includeEventPrior = false)
-        val atr = same.features.atr14 ?: max(ltp * .004, .05)
-        val targetHit = if (updated.side == "LONG") ltp >= updated.targetPrice else ltp <= updated.targetPrice
-        if (targetHit) {
-            if (same.confidence >= RUNNER_CONFIDENCE && same.directionalScore >= .08) {
-                val newStop = if (updated.side == "LONG") max(updated.stopPrice, max(updated.entryPrice + atr * .20, ltp - atr * .85)) else min(updated.stopPrice, min(updated.entryPrice - atr * .20, ltp + atr * .85))
-                val newTarget = if (updated.side == "LONG") ltp + atr * 1.25 else max(.05, ltp - atr * 1.25)
-                updated = updated.copy(stopPrice = newStop, targetPrice = newTarget)
-                shadowDao.updatePosition(updated)
-            } else {
-                closeShadow(updated, ltp, "TARGET_CHECKPOINT_WEAKENING")
-                return
-            }
-        }
-        if (risk.defensive && same.confidence < DEFENSIVE_HOLD_CONFIDENCE) {
-            closeShadow(updated, ltp, "DEFENSIVE_DAILY_RISK_EXIT")
-            return
-        }
-        if (risk.profitProtect && same.confidence < RUNNER_CONFIDENCE) {
-            closeShadow(updated, ltp, "PROFIT_HIGH_WATER_PROTECT")
-            return
-        }
-        if (opposite.confidence >= PAPER_REVERSAL_CONFIDENCE && opposite.directionalScore >= .12 && same.confidence < .62) {
-            closeShadow(updated, ltp, "STRATEGY_REVERSAL")
-            if (!paperRiskAllowsNewTrade(token, settings, updated.symbol)) return
-            val side = if (updated.side == "LONG") "SHORT" else "LONG"
-            val stop = if (side == "LONG") ltp - atr * .95 else ltp + atr * .95
-            val target = if (side == "LONG") ltp + atr * 1.55 else max(.05, ltp - atr * 1.55)
-            val fixedCapitalCap = FixedCapitalPolicy.cap(updated.campaignBudget, updated.capitalDeployed, updated.entryPrice * updated.quantity)
-            val allocation = BudgetAllocator.allocate(fixedCapitalCap, opposite.confidence, ltp, abs(ltp - stop), abs(target - ltp), 0)
-            if (allocation.allowed) openShadow(updated.symbol, side, allocation.quantity, ltp, stop, target, opposite, updated.sourceEventId, fixedCapitalCap)
-        }
-    }
-
-    private suspend fun monitorOneManaged(position: ManagedPositionEntity, token: String, settings: AppSettings, now: ZonedDateTime, risk: RiskState) {
-        val quote = apiFactory.groww.quote(bearer(token), tradingSymbol = position.symbol).requirePayload("Quote ${position.symbol}")
-        val ltp = quote.lastPrice ?: return
-        var updated = updateManagedMark(position, ltp)
-        if (position.product == "CNC") {
-            if (updated.engine == ENGINE_FAST_TRACK && updated.side == "LONG") {
-                val learned = learningStats()
-                val target = updated.entryPrice * (1.0 + learned.longAveragePct / 100.0)
-                if (updated.targetPrice == null || kotlin.math.abs((updated.targetPrice ?: target) - target) > .01) {
-                    updated = updated.copy(
-                        targetPrice = target,
-                        strategy = "Multify notification follow · rolling ${fmt(learned.longAveragePct)}% trail arm"
-                    )
-                    managedDao.updatePosition(updated)
-                }
-
-                val recoveryOnly = updated.regime == REGIME_RECOVERY_HOLD
-                val atr = max(ltp * .004, .05)
-                var trailArmed = LearnedTrailingPolicy.isArmed("LONG", updated.stopPrice, updated.entryPrice)
-                if (!trailArmed && LearnedTrailingPolicy.shouldArm("LONG", updated.entryPrice, ltp, learned.longAveragePct)) {
-                    val candidateStop = LearnedTrailingPolicy.ratchetStop(
-                        side = "LONG", entryPrice = updated.entryPrice, ltp = ltp, atr = atr, currentStop = updated.stopPrice
-                    )
-                    updated = updated.copy(stopPrice = candidateStop)
-                    managedDao.updatePosition(updated)
-                    trailArmed = true
-                    auditLogger.log("TRAILING_STOP", "ROLLING_AVERAGE_ARMED", mapOf(
-                        "symbol" to updated.symbol, "side" to "LONG", "wave" to 1,
-                        "rolling_average_pct" to learned.longAveragePct, "threshold_price" to target,
-                        "ltp" to ltp, "new_stop" to candidateStop, "window_trading_days" to learned.rollingTradingDays,
-                        "window_calls" to learned.rollingCalls
-                    ))
-                }
-
-                if (trailArmed) {
-                    val stop = updated.stopPrice
-                    if (stop != null && ltp <= stop) {
-                        val closed = closeManaged(token, updated, ltp, if (recoveryOnly) "RECOVERY_TRAILING_PROFIT_STOP" else "ROLLING_30D_TRAILING_PROFIT_STOP")
-                        recordAdaptiveExit(updated.symbol, closed.exitPrice)
-                        if (!recoveryOnly) {
-                            openFastTrackShortFromLong(token, closed, closed.exitPrice, updated.sourceEventId, settings, "ADAPTIVE_TRAILING_EXIT")
-                        }
-                        return
-                    }
-                    val candidateStop = LearnedTrailingPolicy.ratchetStop(
-                        side = "LONG", entryPrice = updated.entryPrice, ltp = ltp, atr = atr, currentStop = updated.stopPrice
-                    )
-                    if (updated.stopPrice == null || candidateStop > (updated.stopPrice ?: updated.entryPrice) + .01) {
-                        updated = updated.copy(stopPrice = candidateStop)
-                        managedDao.updatePosition(updated)
-                        auditLogger.log("TRAILING_STOP", "ROLLING_AVERAGE_RATCHET", mapOf(
-                            "symbol" to updated.symbol, "side" to "LONG", "wave" to 1,
-                            "rolling_average_pct" to learned.longAveragePct, "ltp" to ltp, "new_stop" to candidateStop
-                        ))
-                    }
-                }
-            }
-            return
-        }
-
-        assertManagedMisStillOwned(token, updated)
-        if (!updated.smartOrderId.isNullOrBlank()) {
-            val smart = runCatching { apiFactory.groww.smartOrderStatus(bearer(token), smartOrderId = updated.smartOrderId).requirePayload("OCO status") }.getOrNull()
-            if (smart != null && smart.status.equals("COMPLETED", true)) {
-                closeManagedLedgerOnly(updated, ltp, "OCO_COMPLETED_RECONCILED")
-                return
-            }
-        }
-        if (now.dayOfWeek.value >= 6 || !now.toLocalTime().isBefore(LocalTime.of(15, 20))) {
-            closeManaged(token, updated, ltp, "FORCE_FLAT_15_20")
-            return
-        }
-        val stop = updated.stopPrice
-        if (stop != null && ((updated.side == "LONG" && ltp <= stop) || (updated.side == "SHORT" && ltp >= stop))) {
-            closeManaged(token, updated, ltp, "PROTECTIVE_STOP")
-            return
-        }
-        val trailArmEngine = updated.engine in setOf(ENGINE_INTRADAY, ENGINE_FORECAST_LONG, ENGINE_FORECAST_SHORT)
-        val monitorWarmupMs = if (trailArmEngine) 5_000L else 75_000L
-        if (System.currentTimeMillis() - updated.openedAtMs < monitorWarmupMs) return
-        val synthetic = ParsedSignal(SignalType.TRADE_RELEASE, symbol = updated.symbol, rawText = "live-monitor", confidence = 1.0)
-        val same = analyze(updated.symbol, token, longSide = updated.side == "LONG", signal = synthetic)
-        val opposite = analyze(updated.symbol, token, longSide = updated.side == "SHORT", signal = synthetic)
-        val atr = same.features.atr14 ?: max(ltp * .004, .05)
-        // The first LONG/SHORT average is the only profit-trailing arm threshold.
-        val learnedNow = learningStats()
-        val frozenForecastPct = updated.targetPrice?.let { target ->
-            if (updated.entryPrice > 0.0) kotlin.math.abs(target / updated.entryPrice - 1.0) * 100.0 else null
-        }
-        val learnedArmPct = when {
-            updated.engine == ENGINE_FORECAST_LONG || updated.engine == ENGINE_FORECAST_SHORT -> frozenForecastPct
-            updated.side == "LONG" -> learnedNow.longAveragePct
-            else -> learnedNow.shortAverageDownPct
-        }
-        val favourableAtr = if (updated.side == "LONG") (ltp - updated.entryPrice) / atr else (updated.entryPrice - ltp) / atr
-        val alreadyArmed = LearnedTrailingPolicy.isArmed(updated.side, updated.stopPrice, updated.entryPrice)
-        val thresholdPct = LearnedTrailingPolicy.thresholdPct(
-            learnedPct = learnedArmPct,
-            entryPrice = updated.entryPrice,
-            atr = atr
+        preferences.recordMarketData()
+        var updated = position.copy(
+            lastPrice = ltp, maxFavourablePrice = max(position.maxFavourablePrice, ltp),
+            maxAdversePrice = min(position.maxAdversePrice, ltp), lastEvaluatedAtMs = System.currentTimeMillis()
         )
-        if (alreadyArmed || LearnedTrailingPolicy.shouldArm(updated.side, updated.entryPrice, ltp, thresholdPct)) {
+        managedDao.updatePosition(updated)
+        val hardStop = updated.stopPrice
+        if (hardStop != null && !LearnedTrailingPolicy.isArmed(hardStop, updated.entryPrice) && ltp <= hardStop) {
+            closeLongHolding(token, updated, ltp, "HOLDING_FAILSAFE_STOP")
+            return
+        }
+        val learned = learningStats()
+        val frozenPct = updated.targetPrice?.let { if (updated.entryPrice > 0.0) (it / updated.entryPrice - 1.0) * 100.0 else null }
+        val armPct = if (updated.engine == ENGINE_FORECAST_HOLDING) frozenPct else learned.longAveragePct
+        val atr = max(ltp * .004, .05)
+        val thresholdPct = LearnedTrailingPolicy.thresholdPct(armPct, updated.entryPrice, atr)
+        val alreadyArmed = LearnedTrailingPolicy.isArmed(updated.stopPrice, updated.entryPrice)
+        if (alreadyArmed || LearnedTrailingPolicy.shouldArm(updated.entryPrice, ltp, thresholdPct)) {
             val currentStop = updated.stopPrice
-            val candidateStop = LearnedTrailingPolicy.ratchetStop(
-                side = updated.side, entryPrice = updated.entryPrice, ltp = ltp, atr = atr, currentStop = currentStop
-            )
-            val improves = if (updated.side == "LONG") candidateStop > (currentStop ?: updated.entryPrice) + 0.01
-                else candidateStop < (currentStop ?: updated.entryPrice) - 0.01
-            if (improves || !alreadyArmed) {
+            val candidateStop = LearnedTrailingPolicy.ratchetStop(updated.entryPrice, ltp, atr, currentStop)
+            if (!alreadyArmed || candidateStop > (currentStop ?: updated.entryPrice) + .01) {
                 updated = updated.copy(stopPrice = candidateStop, lastEvaluatedAtMs = System.currentTimeMillis())
                 managedDao.updatePosition(updated)
-                modifyOcoIfPossible(token, updated)
-                auditLogger.log("TRAILING_STOP", if (alreadyArmed) "AVERAGE_RATCHET" else "AVERAGE_ARMED", mapOf(
-                    "symbol" to updated.symbol, "side" to updated.side,
-                    "ltp" to ltp, "atr" to atr, "new_stop" to candidateStop,
-                    "favourable_atr" to favourableAtr, "learned_average_pct" to learnedArmPct,
-                    "effective_arm_pct" to thresholdPct,
-                    "source" to if (learnedArmPct != null) "FIRST_LONG_SHORT_AVERAGE" else "ATR_FALLBACK"
+                auditLogger.log("TRAILING_STOP", if (alreadyArmed) "LONG_RATCHET" else "LONG_ARMED", mapOf(
+                    "symbol" to updated.symbol, "ltp" to ltp, "new_stop" to candidateStop, "target_pct" to thresholdPct
                 ))
             }
         }
-        val targetHit = updated.targetPrice?.let { target -> if (updated.side == "LONG") ltp >= target else ltp <= target } ?: false
-        // Multify Auto and Forecast targets are trail-arm thresholds, never forced exits.
-        if (targetHit && !trailArmEngine) {
-            if (same.confidence >= RUNNER_CONFIDENCE && same.directionalScore >= .08) {
-                val currentStop = updated.stopPrice ?: updated.entryPrice
-                val newStop = if (updated.side == "LONG") max(currentStop, max(updated.entryPrice + atr * .20, ltp - atr * .85)) else min(currentStop, min(updated.entryPrice - atr * .20, ltp + atr * .85))
-                val newTarget = if (updated.side == "LONG") ltp + atr * 1.25 else max(.05, ltp - atr * 1.25)
-                updated = updated.copy(stopPrice = newStop, targetPrice = newTarget)
-                managedDao.updatePosition(updated)
-                modifyOcoIfPossible(token, updated)
-            } else {
-                closeManaged(token, updated, ltp, "TARGET_CHECKPOINT_WEAKENING")
-                return
-            }
+        val activeStop = updated.stopPrice
+        if (LearnedTrailingPolicy.isArmed(activeStop, updated.entryPrice) && activeStop != null && ltp <= activeStop) {
+            closeLongHolding(token, updated, ltp, "LONG_TRAILING_PROFIT_STOP")
         }
-        if (risk.defensive && same.confidence < DEFENSIVE_HOLD_CONFIDENCE) {
-            closeManaged(token, updated, ltp, "DEFENSIVE_DAILY_RISK_EXIT")
-            return
-        }
-        if (risk.profitProtect && same.confidence < RUNNER_CONFIDENCE) {
-            closeManaged(token, updated, ltp, "PROFIT_HIGH_WATER_PROTECT")
-            return
-        }
-
     }
 
-    private suspend fun openManagedReversal(
-        token: String, old: ManagedPositionEntity, side: String, qty: Int, ltp: Double, stop: Double, target: Double, analysis: StrategyEvaluation,
-        waveAnchor: Double = old.anchorPrice.takeIf { it > 0.0 } ?: old.entryPrice,
-        waveIndex: Int = old.addCount, campaignBudget: Double = old.campaignBudget.takeIf { it > 0.0 } ?: 0.0
-    ) {
-        val tx = if (side == "LONG") "BUY" else "SELL"
-        val ref = stableRef("MIR", "${old.id}-${System.currentTimeMillis()}-$side")
-        val order = placeMarket(token, old.symbol, tx, qty, "MIS", ref)
-        val filled = order.filledQuantity?.takeIf { it > 0 } ?: qty
-        val entry = order.averageFillPrice?.takeIf { it > 0 } ?: ltp
-        managedDao.insertPosition(
-            ManagedPositionEntity(
-                engine = ENGINE_INTRADAY, symbol = old.symbol, product = "MIS", side = side, quantity = filled,
-                entryPrice = entry, stopPrice = stop, targetPrice = target, strategy = analysis.strategy,
-                regime = analysis.regime, confidence = analysis.confidence, sourceEventId = old.sourceEventId,
-                openOrderId = order.growwOrderId, openReferenceId = ref, openedAtMs = System.currentTimeMillis(),
-                lastPrice = entry, maxFavourablePrice = entry, maxAdversePrice = entry, lastEvaluatedAtMs = System.currentTimeMillis(),
-                anchorPrice = waveAnchor, capitalDeployed = entry * filled, campaignBudget = campaignBudget, addCount = waveIndex
+    private suspend fun closeLegacyNonLong(token: String, position: ManagedPositionEntity) {
+        if (marketSession() != "OPEN") return
+        val ltp = apiFactory.groww.quote(bearer(token), tradingSymbol = position.symbol)
+            .requirePayload("Quote ${position.symbol}").lastPrice ?: position.lastPrice
+        val ref = stableRef("LGC", "${position.id}-${position.symbol}")
+        val order = placeMarket(token, position.symbol, "BUY", position.quantity, position.product, ref)
+        val exit = order.averageFillPrice?.takeIf { it > 0.0 } ?: ltp
+        managedDao.insertTrade(
+            ManagedTradeEntity(
+                engine = "LEGACY_CLEANUP", symbol = position.symbol, product = position.product, side = "LONG",
+                quantity = position.quantity, entryPrice = position.entryPrice, exitPrice = exit,
+                grossPnl = 0.0, estimatedCosts = 0.0, netPnl = 0.0,
+                exitReason = "UPGRADE_TO_LONG_ONLY", strategy = "Legacy exposure cleanup",
+                regime = "LONG_ONLY_MIGRATION", confidence = 1.0, mfeRupees = 0.0, maeRupees = 0.0,
+                sourceEventId = position.sourceEventId, openOrderId = position.openOrderId, closeOrderId = order.growwOrderId,
+                openedAtMs = position.openedAtMs, closedAtMs = System.currentTimeMillis()
             )
         )
-        val p = managedDao.openPosition(ENGINE_INTRADAY, old.symbol) ?: return
-        val smart = protectManagedPosition(token, p)
-        managedDao.updatePosition(p.copy(smartOrderId = smart))
+        managedDao.deletePosition(position.id)
+        auditLogger.log("SAFETY", "LEGACY_NON_LONG_CLOSED", mapOf("symbol" to position.symbol, "qty" to position.quantity))
     }
 
-    private suspend fun openShadowDirect(
-        symbol: String, side: String, quantity: Int, entry: Double, stop: Double, target: Double,
-        strategy: String, regime: String, confidence: Double, sourceEventId: Long?,
-        campaignBudget: Double, capitalDeployed: Double
-    ) {
-        if (quantity <= 0 || shadowDao.openPosition(symbol) != null) return
-        val now = System.currentTimeMillis()
-        shadowDao.insertPosition(
-            ShadowPositionEntity(
-                symbol = symbol, side = side, quantity = quantity, entryPrice = entry,
-                stopPrice = stop, targetPrice = target, strategy = strategy, regime = regime,
-                confidence = confidence, sourceEventId = sourceEventId, openedAtMs = now,
-                lastPrice = entry, maxFavourablePrice = entry, maxAdversePrice = entry, lastEvaluatedAtMs = now,
-                anchorPrice = entry, capitalDeployed = capitalDeployed, campaignBudget = min(campaignBudget, capitalDeployed), addCount = 0
-            )
-        )
-    }
-
-    private suspend fun openShadow(symbol: String, side: String, quantity: Int, entry: Double, stop: Double, target: Double, analysis: StrategyEvaluation, sourceEventId: Long?, capitalCap: Double) {
-        if (quantity <= 0 || shadowDao.openPosition(symbol) != null) return
-        val now = System.currentTimeMillis()
-        shadowDao.insertPosition(
-            ShadowPositionEntity(
-                symbol = symbol, side = side, quantity = quantity, entryPrice = entry,
-                stopPrice = stop, targetPrice = target, strategy = analysis.strategy,
-                regime = analysis.regime, confidence = analysis.confidence, sourceEventId = sourceEventId,
-                openedAtMs = now, lastPrice = entry, maxFavourablePrice = entry,
-                maxAdversePrice = entry, lastEvaluatedAtMs = now, anchorPrice = entry,
-                capitalDeployed = entry * quantity, campaignBudget = min(capitalCap, entry * quantity)
-            )
-        )
-    }
-
-    private suspend fun updateShadowMark(position: ShadowPositionEntity, ltp: Double): ShadowPositionEntity {
-        val favourable = if (position.side == "LONG") max(position.maxFavourablePrice, ltp) else min(position.maxFavourablePrice, ltp)
-        val adverse = if (position.side == "LONG") min(position.maxAdversePrice, ltp) else max(position.maxAdversePrice, ltp)
-        val updated = position.copy(lastPrice = ltp, maxFavourablePrice = favourable, maxAdversePrice = adverse, lastEvaluatedAtMs = System.currentTimeMillis())
-        shadowDao.updatePosition(updated)
-        return updated
-    }
-
-    private suspend fun updateManagedMark(position: ManagedPositionEntity, ltp: Double): ManagedPositionEntity {
-        val favourable = if (position.side == "LONG") max(position.maxFavourablePrice, ltp) else min(position.maxFavourablePrice, ltp)
-        val adverse = if (position.side == "LONG") min(position.maxAdversePrice, ltp) else max(position.maxAdversePrice, ltp)
-        val updated = position.copy(lastPrice = ltp, maxFavourablePrice = favourable, maxAdversePrice = adverse, lastEvaluatedAtMs = System.currentTimeMillis())
-        managedDao.updatePosition(updated)
-        return updated
-    }
-
-    private suspend fun closeShadow(position: ShadowPositionEntity, exit: Double, reason: String): ShadowTradeEntity {
-        val pnl = calculatePnl(position.side, position.quantity, position.entryPrice, exit)
-        val trade = ShadowTradeEntity(
-            symbol = position.symbol, side = position.side, quantity = position.quantity,
-            entryPrice = position.entryPrice, exitPrice = exit, grossPnl = pnl.gross,
-            estimatedCosts = pnl.costs, netPnl = pnl.net, exitReason = reason,
-            strategy = position.strategy, regime = position.regime, confidence = position.confidence,
-            mfeRupees = mfe(position.side, position.quantity, position.entryPrice, position.maxFavourablePrice),
-            maeRupees = mae(position.side, position.quantity, position.entryPrice, position.maxAdversePrice),
-            sourceEventId = position.sourceEventId, openedAtMs = position.openedAtMs, closedAtMs = System.currentTimeMillis()
-        )
-        shadowDao.insertTrade(trade)
-        shadowDao.deletePosition(position.id)
-        return trade
-    }
-
-    private suspend fun closeManaged(token: String, position: ManagedPositionEntity, mark: Double, reason: String): ManagedTradeEntity {
-        position.smartOrderId?.let { runCatching { apiFactory.groww.cancelSmartOrder(bearer(token), smartOrderId = it) } }
-        val tx = if (position.side == "LONG") "SELL" else "BUY"
-        val expectedAfter = if (position.product == "MIS") {
-            managedDao.openPositionsForProduct(position.symbol, "MIS")
-                .filter { it.id != position.id }
-                .sumOf { signedQty(it) }
-        } else null
-        val ref = stableRef(if (position.product == "CNC") "MFX" else "MFC", "${position.id}-${System.currentTimeMillis()}-$reason")
-        val order = placeMarket(token, position.symbol, tx, position.quantity, position.product, ref)
-        val exit = order.averageFillPrice?.takeIf { it > 0 } ?: mark
-        val trade = closeManagedLedger(position, exit, reason, order.growwOrderId)
-        if (expectedAfter != null) {
-            val broker = waitForMisPositionQty(token, position.symbol, expectedAfter)
-            if (broker.quantity != expectedAfter) {
-                preferences.setSafetyHalt(true)
-                error("MIS reconciliation failed after closing ${position.symbol}: expected app net $expectedAfter, broker net ${broker.quantity}. Live engines halted before any reversal/new order.")
-            }
-        }
-        return trade
-    }
-
-    private suspend fun closeManagedLedgerOnly(position: ManagedPositionEntity, exit: Double, reason: String): ManagedTradeEntity {
-        return closeManagedLedger(position, exit, reason, "OCO:${position.smartOrderId.orEmpty()}")
-    }
-
-    private suspend fun closeManagedLedger(position: ManagedPositionEntity, exit: Double, reason: String, closeOrderId: String): ManagedTradeEntity {
-        val pnl = calculatePnl(position.side, position.quantity, position.entryPrice, exit)
+    private suspend fun closeLongHolding(token: String, position: ManagedPositionEntity, mark: Double, reason: String): ManagedTradeEntity {
+        require(position.side == "LONG") { "Only LONG holdings are supported" }
+        val ref = stableRef("CLS", "${position.id}-${position.symbol}-$reason")
+        val order = placeMarket(token, position.symbol, "SELL", position.quantity, "CNC", ref)
+        val exit = order.averageFillPrice?.takeIf { it > 0.0 } ?: mark
+        val gross = (exit - position.entryPrice) * position.quantity
+        val costs = estimatedCashCosts(position.entryPrice, exit, position.quantity)
         val trade = ManagedTradeEntity(
-            engine = position.engine, symbol = position.symbol, product = position.product, side = position.side,
+            engine = position.engine, symbol = position.symbol, product = "CNC", side = "LONG",
             quantity = position.quantity, entryPrice = position.entryPrice, exitPrice = exit,
-            grossPnl = pnl.gross, estimatedCosts = pnl.costs, netPnl = pnl.net, exitReason = reason,
+            grossPnl = gross, estimatedCosts = costs, netPnl = gross - costs, exitReason = reason,
             strategy = position.strategy, regime = position.regime, confidence = position.confidence,
-            mfeRupees = mfe(position.side, position.quantity, position.entryPrice, position.maxFavourablePrice),
-            maeRupees = mae(position.side, position.quantity, position.entryPrice, position.maxAdversePrice),
-            sourceEventId = position.sourceEventId, openOrderId = position.openOrderId, closeOrderId = closeOrderId,
+            mfeRupees = max(0.0, position.maxFavourablePrice - position.entryPrice) * position.quantity,
+            maeRupees = max(0.0, position.entryPrice - position.maxAdversePrice) * position.quantity,
+            sourceEventId = position.sourceEventId, openOrderId = position.openOrderId, closeOrderId = order.growwOrderId,
             openedAtMs = position.openedAtMs, closedAtMs = System.currentTimeMillis()
         )
         managedDao.insertTrade(trade)
         managedDao.deletePosition(position.id)
+        auditLogger.log("HOLDING", "LONG_CLOSED", mapOf("symbol" to position.symbol, "reason" to reason, "exit" to exit))
         return trade
     }
-
-    private data class PnlCalc(val gross: Double, val costs: Double, val net: Double)
-    private fun calculatePnl(side: String, quantity: Int, entry: Double, exit: Double): PnlCalc {
-        val gross = if (side == "LONG") (exit - entry) * quantity else (entry - exit) * quantity
-        val entryNotional = entry * quantity
-        val exitNotional = exit * quantity
-        val brokerage = min(20.0, max(1.0, entryNotional * .001)) + min(20.0, max(1.0, exitNotional * .001))
-        val costs = brokerage + (entryNotional + exitNotional) * .00045
-        return PnlCalc(gross, costs, gross - costs)
-    }
-
-    private fun mfe(side: String, q: Int, entry: Double, favourable: Double): Double = if (side == "LONG") (favourable - entry) * q else (entry - favourable) * q
-    private fun mae(side: String, q: Int, entry: Double, adverse: Double): Double = if (side == "LONG") (adverse - entry) * q else (entry - adverse) * q
 
     private data class Snapshot(
         val summary: DaySummaryDto,
         val positions: List<PositionDto>,
-        val recentTrades: List<RecentDecisionDto>
-    ) { val totalPnl: Double get() = summary.totalPnl }
+        val recentDecisions: List<RecentDecisionDto>
+    )
 
-    private suspend fun paperSnapshot(): Snapshot {
-        val open = shadowDao.openPositions()
-        val trades = shadowDao.tradesSince(startOfIndiaDayMs())
+    private suspend fun managedSnapshot(token: String): Snapshot {
+        val open = managedDao.openPositions().filter { it.side == "LONG" }
         val positions = open.map { p ->
-            val pnl = if (p.side == "LONG") (p.lastPrice - p.entryPrice) * p.quantity else (p.entryPrice - p.lastPrice) * p.quantity
+            val ltp = runCatching {
+                apiFactory.groww.quote(bearer(token), tradingSymbol = p.symbol).requirePayload("Quote ${p.symbol}").lastPrice
+            }.getOrNull() ?: p.lastPrice
+            val pnl = (ltp - p.entryPrice) * p.quantity
             PositionDto(
-                symbol = p.symbol, side = p.side, quantity = p.quantity, averagePrice = p.entryPrice,
-                ltp = p.lastPrice, pnl = pnl, stopPrice = p.stopPrice, targetPrice = p.targetPrice,
-                strategy = "SHADOW ₹2L · ${p.strategy} · ${(p.confidence * 100).toInt()}%"
+                symbol = p.symbol, quantity = p.quantity, averagePrice = p.entryPrice, ltp = ltp, pnl = pnl,
+                stopPrice = p.stopPrice, targetPrice = p.targetPrice, strategy = p.strategy, product = "CNC"
             )
+        }
+        val recent = managedDao.tradesSince(startOfIndiaDayMs()).filter { it.side == "LONG" }.take(6).map { t ->
+            RecentDecisionDto(formatEventTime(t.closedAtMs), t.symbol, "LONG_CLOSED", t.exitReason, t.strategy, t.quantity)
         }
         return Snapshot(
             summary = DaySummaryDto(
-                realisedPnl = trades.sumOf { it.netPnl }, unrealisedPnl = positions.sumOf { it.pnl },
-                trades = trades.size, wins = trades.count { it.netPnl > 0 }, losses = trades.count { it.netPnl < 0 },
-                grossExposure = positions.sumOf { it.quantity * (it.ltp ?: it.averagePrice) }
+                unrealisedPnl = positions.sumOf { it.pnl },
+                grossExposure = positions.sumOf { it.quantity * (it.ltp ?: it.averagePrice) },
+                openPositions = positions.size
             ),
             positions = positions,
-            recentTrades = trades.take(6).map { t ->
-                RecentDecisionDto(formatEventTime(t.closedAtMs), t.symbol, "PAPER_${t.side}_CLOSED", "${t.exitReason} · net ₹${fmt(t.netPnl)} · costs ₹${fmt(t.estimatedCosts)}", t.strategy, t.quantity)
-            }
+            recentDecisions = recent
         )
     }
 
-    private suspend fun managedSnapshot(token: String, engines: Set<String>): Snapshot {
-        val allOpen = managedDao.openPositions().filter { it.engine in engines }
-        val trades = managedDao.tradesSince(startOfIndiaDayMs()).filter { it.engine in engines }
-        val positions = allOpen.map { p ->
-            val ltp = runCatching { apiFactory.groww.quote(bearer(token), tradingSymbol = p.symbol).requirePayload("Quote").lastPrice }.getOrNull() ?: p.lastPrice
-            val pnl = if (p.side == "LONG") (ltp - p.entryPrice) * p.quantity else (p.entryPrice - ltp) * p.quantity
-            PositionDto(
-                symbol = p.symbol, side = p.side, quantity = p.quantity, averagePrice = p.entryPrice, ltp = ltp, pnl = pnl,
-                stopPrice = p.stopPrice, targetPrice = p.targetPrice,
-                strategy = "${p.engine} · APP-OWNED · ${p.strategy}"
-            )
-        }
-        return Snapshot(
-            summary = DaySummaryDto(
-                realisedPnl = trades.sumOf { it.netPnl }, unrealisedPnl = positions.sumOf { it.pnl }, trades = trades.size,
-                wins = trades.count { it.netPnl > 0 }, losses = trades.count { it.netPnl < 0 },
-                grossExposure = positions.sumOf { it.quantity * (it.ltp ?: it.averagePrice) }
-            ),
-            positions = positions,
-            recentTrades = trades.take(6).map { t ->
-                RecentDecisionDto(formatEventTime(t.closedAtMs), t.symbol, "${t.engine}_${t.side}_CLOSED", "${t.exitReason} · net ₹${fmt(t.netPnl)} · app-owned qty ${t.quantity}", t.strategy, t.quantity)
-            }
-        )
-    }
-
-    private data class RiskState(val totalPnl: Double, val defensive: Boolean, val hardStop: Boolean, val profitProtect: Boolean, val allowNewRisk: Boolean, val reason: String)
-
-    private suspend fun shadowRiskState(token: String, settings: AppSettings): RiskState {
-        val s = paperSnapshot()
-        val total = s.totalPnl
-        preferences.updateShadowPeakPnl(total)
-        val peak = preferences.settings.first().shadowPeakPnl
-        val hard = total <= -settings.maxDailyLossRupees.toDouble()
-        val defensiveLevel = min(SOFT_LOSS_LEVEL, settings.maxDailyLossRupees * .60)
-        val defensive = total <= -defensiveLevel
-        val profitProtect = peak >= PROFIT_MILESTONE && total <= max(PROFIT_MILESTONE * .70, peak * .70)
-        return RiskState(total, defensive, hard, profitProtect, !hard && !defensive && !profitProtect,
-            when { hard -> "Shadow hard loss cap reached"; defensive -> "Shadow P&L entered the configured defensive loss band; new risk paused"; profitProtect -> "Shadow high-water profit protection is active"; else -> "Normal" })
-    }
-
-    private suspend fun liveRiskState(token: String, settings: AppSettings): RiskState {
-        val live = managedSnapshot(token, setOf(ENGINE_INTRADAY, ENGINE_FAST_TRACK, ENGINE_FAST_SHORT, ENGINE_FORECAST_LONG, ENGINE_FORECAST_SHORT))
-        val total = live.totalPnl
-        preferences.updateLivePeakPnl(total)
-        val peak = preferences.settings.first().livePeakPnl
-        val emergency = max(250.0, settings.maxDailyLossRupees * .90)
-        val hard = total <= -emergency
-        val defensiveLevel = min(SOFT_LOSS_LEVEL, settings.maxDailyLossRupees * .60)
-        val defensive = total <= -defensiveLevel
-        val profitProtect = peak >= PROFIT_MILESTONE && total <= max(PROFIT_MILESTONE * .70, peak * .70)
-        return RiskState(total, defensive, hard, profitProtect, !hard && !defensive && !profitProtect,
-            when { hard -> "App-only P&L is near the configured daily loss cap; emergency risk reduction active"; defensive -> "App-only P&L entered the configured defensive loss band; no new risk"; profitProtect -> "Profit high-water protection is active"; else -> "Normal" })
-    }
-
-    private suspend fun paperRiskAllowsNewTrade(token: String, settings: AppSettings, symbol: String): Boolean {
-        val risk = shadowRiskState(token, settings)
-        if (!risk.allowNewRisk) return false
-        return shadowDao.tradeCountSince(symbol, startOfIndiaDayMs()) < MAX_PAPER_TRADES_PER_SYMBOL
-    }
-
-    private suspend fun shadowQualificationDays(): Int {
-        val since = LocalDate.now(INDIA).minusDays(20).atStartOfDay(INDIA).toInstant().toEpochMilli()
-        val trades = shadowDao.tradesSince(since)
-        val totals = trades.groupBy { java.time.Instant.ofEpochMilli(it.closedAtMs).atZone(INDIA).toLocalDate() }
-            .mapValues { (_, xs) -> xs.sumOf { it.netPnl } }
-        var streak = 0
-        val days = totals.keys.sortedDescending()
-        for (day in days) {
-            if (day.dayOfWeek.value >= 6) continue
-            if ((totals[day] ?: 0.0) >= PROFIT_MILESTONE) streak++ else break
-            if (streak >= 5) break
-        }
-        return streak
-    }
-
-    private suspend fun placeMarket(token: String, symbol: String, transaction: String, qty: Int, product: String, reference: String): OrderPayload {
-        require(qty > 0) { "Order quantity is zero" }
-        val auth = bearer(token)
-        val response = apiFactory.groww.placeOrder(
-            auth,
-            OrderCreateRequest(tradingSymbol = symbol, quantity = qty, product = product, transactionType = transaction, orderReferenceId = reference)
-        ).requirePayload("Place $transaction $symbol")
-        val id = response.growwOrderId
-        if (id.isBlank()) error("Groww did not return an order ID")
-        repeat(10) {
-            delay(450)
-            val status = apiFactory.groww.orderStatus(auth, id).requirePayload("Order status")
-            if (status.orderStatus.equals("EXECUTED", true) || (status.filledQuantity ?: 0) >= qty) return status.copy(growwOrderId = id, orderReferenceId = reference)
-            if (status.orderStatus.equals("REJECTED", true) || status.orderStatus.equals("FAILED", true) || status.orderStatus.equals("CANCELLED", true)) error("Groww order ${status.orderStatus}: ${status.remark.orEmpty()}")
-        }
-        error("Groww order $id was not confirmed filled; no duplicate retry was attempted")
-    }
-
-    private fun brokerProtectionTarget(position: ManagedPositionEntity): Double {
-        val armTarget = position.targetPrice ?: return position.entryPrice
-        val trailArmEngine = position.engine in setOf(ENGINE_INTRADAY, ENGINE_FORECAST_LONG, ENGINE_FORECAST_SHORT)
-        if (!trailArmEngine) return armTarget
-        val armDistance = kotlin.math.abs(armTarget / position.entryPrice - 1.0)
-        val failSafeDistance = max(0.06, armDistance * 3.0)
-        return if (position.side == "LONG") position.entryPrice * (1.0 + failSafeDistance)
-            else max(.05, position.entryPrice * (1.0 - failSafeDistance))
-    }
-
-    private suspend fun protectManagedPosition(token: String, position: ManagedPositionEntity): String {
-        val stop = position.stopPrice ?: error("MIS protection requires stop")
-        val target = brokerProtectionTarget(position)
-        val expected = managedDao.openPositionsForProduct(position.symbol, "MIS").sumOf { signedQty(it) }
-        val broker = waitForMisPositionQty(token, position.symbol, expected)
-        require(broker.quantity == expected) { "External/manual MIS quantity detected for ${position.symbol}; expected app net $expected, broker net ${broker.quantity}" }
-        val transaction = if (position.side == "LONG") "SELL" else "BUY"
-        try {
-            return apiFactory.groww.createOco(
-                bearer(token),
-                OcoCreateRequest(
-                    referenceId = stableRef("MFO", "${position.openOrderId}-${position.symbol}"),
-                    tradingSymbol = position.symbol, quantity = position.quantity, netPositionQuantity = broker.quantity,
-                    transactionType = transaction, target = OcoLeg(fmt(target), "LIMIT", fmt(target)),
-                    stopLoss = OcoLeg(fmt(stop), "SL_M", null)
+    suspend fun sampleSignal(eventId: Long) {
+        val event = dao.byId(eventId) ?: return
+        val symbol = event.symbol ?: return
+        val token = ensureToken() ?: return
+        val offsets = listOf(1, 5, 30, 60, 120, 300)
+        var elapsed = 0
+        for (offset in offsets) {
+            delay((offset - elapsed) * 1000L)
+            elapsed = offset
+            val price = runCatching {
+                apiFactory.groww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Signal sample $symbol").lastPrice
+            }.getOrNull() ?: continue
+            learningDao.insertObservation(
+                PriceObservationEntity(
+                    eventId = eventId, symbol = symbol,
+                    phase = if (event.signalType == SignalType.TRADE_RELEASE.name) "POST_LONG_CALL" else "POST_LONG_EXIT",
+                    offsetSeconds = offset, observedAtMs = System.currentTimeMillis(), price = price
                 )
-            ).requirePayload("Create OCO protection").smartOrderId.also { require(it.isNotBlank()) { "Groww did not return OCO id" } }
-        } catch (t: Throwable) {
-            val tx = if (position.side == "LONG") "SELL" else "BUY"
-            val emergency = runCatching { placeMarket(token, position.symbol, tx, position.quantity, "MIS", stableRef("MFE", position.openOrderId)) }.getOrNull()
-            if (emergency != null) closeManagedLedger(position, emergency.averageFillPrice ?: position.lastPrice, "PROTECTION_FAILED_EMERGENCY_FLATTEN", emergency.growwOrderId)
-            preferences.setSafetyHalt(true)
-            error("Protection failed after fill; emergency flatten requested and all live engines halted: ${t.message}")
+            )
         }
     }
 
-    private suspend fun modifyOcoIfPossible(token: String, position: ManagedPositionEntity) {
-        val id = position.smartOrderId ?: return
-        val stop = position.stopPrice ?: return
-        val target = brokerProtectionTarget(position)
-        runCatching {
-            apiFactory.groww.modifyOco(
-                bearer(token), id,
-                OcoModifyRequest(quantity = position.quantity, target = OcoModifyLeg(fmt(target)), stopLoss = OcoModifyLeg(fmt(stop)))
-            ).requirePayload("Modify OCO")
+    data class LogExportResult(val entries: Int, val signalCount: Int, val tradeCount: Int)
+
+    suspend fun exportCompleteLogs(uri: Uri): LogExportResult {
+        val gson = GsonBuilder().setPrettyPrinting().create()
+        val settings = preferences.settings.first()
+        val signals = dao.allNow()
+        val positions = managedDao.allPositions().filter { it.side == "LONG" }
+        val trades = managedDao.allTrades().filter { it.side == "LONG" }
+        val calls = learningDao.allCalls().filter { it.action.equals("BUY", true) }.map {
+            mapOf(
+                "date" to it.callDate, "symbol" to it.symbol, "source" to it.source,
+                "entry_price" to it.entryPrice, "target_price" to it.targetPrice, "target_pct" to it.targetPct,
+                "exit_price" to it.multifyExitPrice, "long_return_pct" to it.longRealizedPct
+            )
         }
+        val forecasts = learningDao.allIntradayForecasts().filter { it.side == "LONG" }
+        val champions = learningDao.allForecastChampions().filter { it.side == "LONG" }
+        val research = learningDao.allResearchReports()
+        val safeSettings = mapOf(
+            "holding_budget_rupees" to settings.holdingBudgetRupees,
+            "arm_effective" to settings.armEffective,
+            "package_filter" to settings.packageFilter,
+            "broker_authenticated" to settings.brokerAuthenticated,
+            "ddpi_enabled" to settings.brokerDdpiEnabled,
+            "static_ip_matched" to settings.staticIpMatched,
+            "safety_halt" to settings.safetyHalt,
+            "version" to BuildConfig.VERSION_NAME
+        )
+        appContext.contentResolver.openOutputStream(uri)?.use { raw ->
+            ZipOutputStream(raw).use { zip ->
+                fun add(name: String, value: Any) {
+                    zip.putNextEntry(ZipEntry(name))
+                    zip.write(gson.toJson(value).toByteArray(Charsets.UTF_8))
+                    zip.closeEntry()
+                }
+                add("settings.json", safeSettings)
+                add("signals.json", signals)
+                add("holdings.json", positions)
+                add("closed_long_trades.json", trades)
+                add("long_learning.json", calls)
+                add("long_forecasts.json", forecasts)
+                add("long_champions.json", champions)
+                add("research.json", research)
+            }
+        } ?: error("Unable to open export destination")
+        return LogExportResult(8, signals.size, trades.size)
     }
 
-    private suspend fun assertNoExternalMisConflict(token: String, symbol: String) {
-        val broker = currentPosition(token, symbol, "MIS").quantity
-        val app = managedDao.openPositionsForProduct(symbol, "MIS").sumOf { signedQty(it) }
-        require(broker == app) { "EXTERNAL POSITION DETECTED for $symbol MIS: broker net $broker vs app-owned net $app. New app orders are blocked." }
-    }
-
-    private suspend fun assertManagedMisStillOwned(token: String, position: ManagedPositionEntity) {
-        if (position.product != "MIS") return
-        val broker = currentPosition(token, position.symbol, "MIS").quantity
-        val app = managedDao.openPositionsForProduct(position.symbol, "MIS").sumOf { signedQty(it) }
-        if (broker != app) {
-            preferences.setSafetyHalt(true)
-            error("EXTERNAL POSITION DETECTED for ${position.symbol}: broker MIS net $broker vs app-owned net $app. Live engines halted to avoid touching manual trades.")
-        }
-    }
-
-    private fun signedQty(p: ManagedPositionEntity): Int = if (p.side == "LONG") p.quantity else -p.quantity
-
-    private suspend fun waitForMisPositionQty(token: String, symbol: String, expected: Int): GrowwPosition {
-        var latest = currentPosition(token, symbol, "MIS")
-        if (latest.quantity == expected) return latest
-        repeat(9) {
-            delay(400)
-            latest = currentPosition(token, symbol, "MIS")
-            if (latest.quantity == expected) return latest
-        }
-        return latest
-    }
-
-    private suspend fun currentPosition(token: String, symbol: String, product: String): GrowwPosition {
-        return apiFactory.groww.positions(bearer(token)).requirePayload("Groww positions")
-            .positions.firstOrNull { it.tradingSymbol.equals(symbol, true) && it.product.equals(product, true) }
-            ?: GrowwPosition(tradingSymbol = symbol, quantity = 0, product = product)
+    suspend fun shouldCapturePackage(packageName: String): Boolean {
+        val filter = preferences.settings.first().packageFilter.trim()
+        return filter.isBlank() || packageName.contains(filter, ignoreCase = true)
     }
 
     private suspend fun ensureToken(): String? {
@@ -2942,37 +917,50 @@ class TradingRepository @Inject constructor(
         return token
     }
 
-    private fun preLiveGuard(settings: AppSettings) {
-        require(settings.liveExecutionEffective) { "Live execution is OFF" }
+    private fun preArmGuard(settings: AppSettings) {
+        require(settings.armEffective) { "ARM is OFF" }
         require(settings.brokerAuthenticated) { "Groww is not authenticated" }
         require(settings.staticIpMatched) { "Static IP verification failed" }
+        require(settings.brokerDdpiEnabled) { "DDPI is required for CNC holdings" }
         require(!settings.safetyHalt) { "Safety halt is active" }
         require(marketSession() == "OPEN") { "NSE regular market session is not open" }
     }
 
-    private fun disconnectedDashboard(settings: AppSettings) = DashboardDto(
-        serviceStatus = "device", mode = if (settings.liveExecutionEffective) "live" else "paper",
-        armed = settings.liveExecutionEffective, halted = settings.safetyHalt, marketSession = marketSession(),
-        asOf = ZonedDateTime.now(INDIA).format(DateTimeFormatter.ISO_OFFSET_DATE_TIME),
-        broker = BrokerStatusDto(configured = hasBrokerCredentials(), connected = false, name = "Groww", detail = "Refresh & Authenticate required"),
-        risk = riskStatus(settings, 0.0, if (settings.liveExecutionEffective) settings.livePeakPnl else settings.shadowPeakPnl), summary = DaySummaryDto(), fastTrackSummary = DaySummaryDto(),
-        combinedAppPnl = 0.0, shadowQualificationDays = 0, positions = emptyList(), recentDecisions = emptyList()
+    private suspend fun placeMarket(token: String, symbol: String, transaction: String, qty: Int, product: String, reference: String): OrderPayload {
+        require(qty > 0) { "Order quantity is zero" }
+        val response = apiFactory.groww.placeOrder(
+            bearer(token),
+            OrderCreateRequest(tradingSymbol = symbol, quantity = qty, product = product, transactionType = transaction, orderReferenceId = reference)
+        ).requirePayload("Place $transaction $symbol")
+        val id = response.growwOrderId
+        require(id.isNotBlank()) { "Groww did not return an order ID" }
+        repeat(10) {
+            delay(450)
+            val status = apiFactory.groww.orderStatus(bearer(token), id).requirePayload("Order status")
+            if (status.orderStatus.equals("EXECUTED", true) || (status.filledQuantity ?: 0) >= qty) return status.copy(growwOrderId = id, orderReferenceId = reference)
+            if (status.orderStatus.equals("REJECTED", true) || status.orderStatus.equals("FAILED", true) || status.orderStatus.equals("CANCELLED", true)) {
+                error("Groww order ${status.orderStatus}: ${status.remark.orEmpty()}")
+            }
+        }
+        error("Groww order $id was not confirmed filled; no duplicate retry was attempted")
+    }
+
+    private fun IntradayForecastEntity.toForecastDto() = ForecastDto(
+        rank = rank, symbol = symbol, confidence = confidence, score = score, reason = reason,
+        multifyMatched = multifyMatched, entryPrice = entryPrice, targetPrice = targetPrice, targetPct = targetPct,
+        status = status, strategy = strategy, regime = regime, marketRegime = marketRegime,
+        championTag = championKey, maxFavourablePct = maxFavourablePct, maxAdversePct = maxAdversePct,
+        generatedAtMs = generatedAtMs
     )
 
-    private fun riskStatus(s: AppSettings, currentPnl: Double, peakPnl: Double) = RiskStatusDto(
-        maxDailyLoss = s.maxDailyLossRupees.toDouble(),
-        softDailyLoss = min(SOFT_LOSS_LEVEL, s.maxDailyLossRupees * .60),
-        profitMilestone = PROFIT_MILESTONE,
-        riskPerTrade = max(150.0, s.dailyBudgetRupees * .005),
-        maxExposure = s.dailyBudgetRupees.toDouble(),
-        riskMode = when {
-            currentPnl <= -max(250.0, s.maxDailyLossRupees * .90) -> "HARD STOP"
-            currentPnl <= -min(SOFT_LOSS_LEVEL, s.maxDailyLossRupees * .60) -> "DEFENSIVE"
-            peakPnl >= PROFIT_MILESTONE && currentPnl <= peakPnl * .70 -> "PROFIT PROTECT"
-            currentPnl >= PROFIT_MILESTONE -> "MILESTONE+"
-            else -> "NORMAL"
-        },
-        dailyPeakPnl = peakPnl
+    private fun championKey(marketRegime: String, regime: String, strategy: String): String =
+        listOf("LONG", marketRegime, regime, strategy).joinToString("|") { it.uppercase(Locale.US).replace("|", "/") }
+
+    private fun disconnectedDashboard(settings: AppSettings) = DashboardDto(
+        armed = settings.armEffective, halted = settings.safetyHalt, marketSession = marketSession(),
+        asOf = ZonedDateTime.now(INDIA).format(DateTimeFormatter.ISO_OFFSET_DATE_TIME),
+        broker = BrokerStatusDto(configured = hasBrokerCredentials(), connected = false, detail = "Refresh & Authenticate required"),
+        risk = RiskStatusDto(maxExposure = settings.holdingBudgetRupees.toDouble(), riskMode = if (settings.safetyHalt) "HALTED" else "DISARMED")
     )
 
     private fun marketSession(): String {
@@ -2994,15 +982,15 @@ class TradingRepository @Inject constructor(
             raw.isNotBlank() -> raw.take(180)
             else -> "Bad request"
         }
-        return "Groww TOTP authentication failed (HTTP ${e.code()}): $detail. Verify the TOTP token and TOTP secret, and keep Automatic date & time enabled."
+        return "Groww TOTP authentication failed (HTTP ${e.code()}): $detail"
     }
 
+    private fun estimatedCashCosts(entry: Double, exit: Double, qty: Int): Double = (entry + exit) * qty * 0.0006
     private fun startOfIndiaDayMs(): Long = LocalDate.now(INDIA).atStartOfDay(INDIA).toInstant().toEpochMilli()
     private fun bearer(token: String) = "Bearer $token"
     private fun sha256(s: String): String = MessageDigest.getInstance("SHA-256").digest(s.toByteArray()).joinToString("") { "%02x".format(it) }
     private fun stableRef(prefix: String, seed: String): String = (prefix + sha256(seed).take(14)).take(18)
     private fun fmt(v: Double): String = String.format(Locale.US, "%.2f", v)
-    private fun pct(v: Double): String = String.format(Locale.US, "%.0f%%", v * 100)
     private fun normalizeIp(v: String) = v.trim().lowercase(Locale.US)
     private fun isValidIp(v: String): Boolean = v.trim().matches(Regex("^[0-9a-fA-F:.]+$")) && v.length in 3..45
     private fun formatEventTime(ms: Long): String = java.text.SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(java.util.Date(ms))
@@ -3012,39 +1000,12 @@ class TradingRepository @Inject constructor(
         private val HIST_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
         private const val MIN_BUDGET = 10_000L
         private const val MAX_BUDGET = 200_000L
-        private const val SHADOW_BUDGET = 200_000.0
-        private const val PROFIT_MILESTONE = 5_000.0
-        private const val SOFT_LOSS_LEVEL = 1_500.0
-        private const val HARD_LOSS_CAP = 2_500.0
-        // Live flattening starts before the hard cap because real fills can slip.
-        private const val LIVE_EMERGENCY_TRIGGER = 2_250.0
-        private const val PAPER_REVERSAL_CONFIDENCE = 0.76
-        private const val RUNNER_CONFIDENCE = 0.72
-        private const val DEFENSIVE_HOLD_CONFIDENCE = 0.80
-        private const val MULTIFY_SELL_SHORT_GATE = 0.66
-        private const val MAX_PAPER_TRADES_PER_SYMBOL = 10
-        private const val DEFAULT_UNTRAINED_WAVE_ARM_PCT = 0.40
-        private const val WAVE_PIVOT_FRACTION = 0.004
         private const val MANUAL_SOURCE = "com.multify.traderpro.manual"
-        private const val MAX_MARKET_DATA_AGE_MS = 5_000L
-        private const val MAX_LISTENER_HEARTBEAT_AGE_MS = 30_000L
-        private const val COUNTERFACTUAL_WINDOW_MS = 30L * 60L * 1000L
-        private val WAVE_OUTCOME_OFFSETS_SECONDS = listOf(15, 30, 60, 120, 300, 600, 900, 1800)
-        // Supplied workbook (2026-06-30 through 2026-09-30 BUY calls): entry-to-target mean = 3.68097%.
-        private const val UPLOADED_THREE_MONTH_TARGET_PCT = 3.680970873786408
-        // Rolling newest 30 recommendation trading dates after the appended Oct 1/Oct 5 records.
-        private const val DEFAULT_LONG_TARGET_PCT = 2.983877551020408
-        private const val HISTORICAL_SHORT_BACKFILL_INTERVAL_MS = 30L * 60L * 1000L
-        private const val HISTORICAL_SHORT_BACKFILL_REQUEST_DELAY_MS = 350L
-        private const val MAX_HISTORICAL_SHORT_BACKFILLS_PER_PASS = 8
-        private const val FAST_SHORT_STOP_PCT = 0.0035
-        const val ENGINE_INTRADAY = "INTRADAY"
-        const val ENGINE_FAST_TRACK = "FAST_TRACK"
-        const val ENGINE_FAST_SHORT = "FAST_SHORT"
-        const val ENGINE_FORECAST_LONG = "FORECAST_LONG"
-        const val ENGINE_FORECAST_SHORT = "FORECAST_SHORT"
         private const val FORECAST_SCAN_INTERVAL_MS = 10L * 60L * 1000L
-        private const val REGIME_RECOVERY_HOLD = "RECOVERY_HOLD_NEW_CALL"
-        private const val REGIME_SECONDARY_PREVIEW = "SECONDARY_PREDICTION_ONLY"
+        private const val HOLDING_FAILSAFE_STOP_PCT = 0.12
+        private const val UPLOADED_THREE_MONTH_TARGET_PCT = 3.680970873786408
+        private const val DEFAULT_LONG_TARGET_PCT = 2.983877551020408
+        const val ENGINE_MULTIFY_HOLDING = "MULTIFY_HOLDING"
+        const val ENGINE_FORECAST_HOLDING = "FORECAST_HOLDING"
     }
 }
