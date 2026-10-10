@@ -118,5 +118,7 @@ data class EngineHealthDto(
     val reconnectCount: Long = 0L,
     val lastReconnectAtMs: Long = 0L,
     val lastEventProcessingLatencyMs: Long = 0L,
+    val lastOrderDispatchPrepMicros: Long = 0L,
+    val lastBrokerAckLatencyMs: Long = 0L,
     val marketDataAgeMs: Long = Long.MAX_VALUE
 )

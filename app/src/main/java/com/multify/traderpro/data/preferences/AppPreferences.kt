@@ -35,6 +35,8 @@ data class AppSettings(
     val listenerReconnectCount: Long = 0L,
     val lastListenerReconnectAtMs: Long = 0L,
     val lastEventProcessingLatencyMs: Long = 0L,
+    val lastOrderDispatchPrepMicros: Long = 0L,
+    val lastBrokerAckLatencyMs: Long = 0L,
     val serviceHeartbeatAtMs: Long = 0L,
     val lastMarketDataAtMs: Long = 0L
 ) {
@@ -65,6 +67,8 @@ class AppPreferences @Inject constructor(
         val listenerReconnectCount = longPreferencesKey("listener_reconnect_count")
         val lastListenerReconnectAtMs = longPreferencesKey("last_listener_reconnect_at_ms")
         val lastEventProcessingLatencyMs = longPreferencesKey("last_event_processing_latency_ms")
+        val lastOrderDispatchPrepMicros = longPreferencesKey("last_order_dispatch_prep_micros")
+        val lastBrokerAckLatencyMs = longPreferencesKey("last_broker_ack_latency_ms")
         val serviceHeartbeatAtMs = longPreferencesKey("service_heartbeat_at_ms")
         val lastMarketDataAtMs = longPreferencesKey("last_market_data_at_ms")
     }
@@ -144,6 +148,13 @@ class AppPreferences @Inject constructor(
         context.dataStore.edit { it[Keys.lastEventProcessingLatencyMs] = latencyMs.coerceAtLeast(0L) }
     }
 
+    suspend fun recordOrderLatency(dispatchPrepMicros: Long, brokerAckLatencyMs: Long) {
+        context.dataStore.edit {
+            it[Keys.lastOrderDispatchPrepMicros] = dispatchPrepMicros.coerceAtLeast(0L)
+            it[Keys.lastBrokerAckLatencyMs] = brokerAckLatencyMs.coerceAtLeast(0L)
+        }
+    }
+
     suspend fun recordServiceHeartbeat(nowMs: Long = System.currentTimeMillis()) {
         context.dataStore.edit { it[Keys.serviceHeartbeatAtMs] = nowMs }
     }
@@ -171,6 +182,8 @@ class AppPreferences @Inject constructor(
         listenerReconnectCount = this[Keys.listenerReconnectCount] ?: 0L,
         lastListenerReconnectAtMs = this[Keys.lastListenerReconnectAtMs] ?: 0L,
         lastEventProcessingLatencyMs = this[Keys.lastEventProcessingLatencyMs] ?: 0L,
+        lastOrderDispatchPrepMicros = this[Keys.lastOrderDispatchPrepMicros] ?: 0L,
+        lastBrokerAckLatencyMs = this[Keys.lastBrokerAckLatencyMs] ?: 0L,
         serviceHeartbeatAtMs = this[Keys.serviceHeartbeatAtMs] ?: 0L,
         lastMarketDataAtMs = this[Keys.lastMarketDataAtMs] ?: 0L
     )
