@@ -1,6 +1,13 @@
 package com.multify.traderpro.engine
 
 object AdaptiveLearningMath {
+    fun realizedReturnPct(storedPct: Double?, entryPrice: Double, exitPrice: Double?): Double? {
+        storedPct?.takeIf { it.isFinite() }?.let { return it }
+        val exit = exitPrice?.takeIf { it.isFinite() } ?: return null
+        if (!entryPrice.isFinite() || entryPrice <= 0.0) return null
+        return (exit - entryPrice) / entryPrice * 100.0
+    }
+
     fun rollingMean(values: List<Double>, fallback: Double): Double =
         values.filter { it.isFinite() }.takeIf { it.isNotEmpty() }?.average() ?: fallback
 
