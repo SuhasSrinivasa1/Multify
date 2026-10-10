@@ -41,8 +41,8 @@ class MultifyNotificationListenerService : NotificationListenerService() {
     @Inject lateinit var auditLogger: AuditLogger
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    // Trade release and book-profit events use a dedicated single-lane executor so the first-wave
-    // BUY -> long exit -> short entry -> short exit path cannot queue behind research/monitor work.
+    // Multify buy and book-profit events use a dedicated serialized lane so holdings actions
+    // cannot queue behind forecast scans or research work.
     private val priorityScope = CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(1))
     private var shadowMonitorJob: Job? = null
 
@@ -61,15 +61,13 @@ class MultifyNotificationListenerService : NotificationListenerService() {
         super.onListenerConnected()
         auditLogger.log("RUNTIME", "NOTIFICATION_LISTENER_CONNECTED")
         scope.launch { repository.recordListenerConnected() }
-        notifyStatus("Signal capture active", "Listening for Multify Auto + independent LONG / SHORT intraday forecasts")
+        notifyStatus("Signal capture active", "Listening for Multify ARM + LONG-only holding forecasts")
         if (shadowMonitorJob?.isActive != true) {
             shadowMonitorJob = scope.launch {
                 runCatching { repository.ensureHistoricalSeed() }
                 while (isActive) {
                     runCatching { repository.recordServiceHeartbeat() }
-                    val shadowCount = runCatching { repository.monitorShadowPositions() }.getOrDefault(0)
                     val managedCount = runCatching { repository.monitorManagedPositions() }.getOrDefault(0)
-                    val learningCount = runCatching { repository.monitorLearningObservations() }.getOrDefault(0)
                     val forecastOutcomeCount = runCatching { repository.monitorForecastOutcomes() }.getOrDefault(0)
                     val now = java.time.ZonedDateTime.now(java.time.ZoneId.of("Asia/Kolkata"))
                     if (now.dayOfWeek.value < 6 &&
@@ -78,18 +76,16 @@ class MultifyNotificationListenerService : NotificationListenerService() {
                     ) {
                         runCatching { repository.generateDailyForecasts(false) }
                         runCatching { repository.pendingForecastNotifications() }.getOrDefault(emptyList()).forEach { f ->
-                            val direction = if (f.bias == "LONG") "LONG opportunity" else "SHORT opportunity"
                             val message = f.symbol + " · entry ₹" + String.format(java.util.Locale.US, "%.2f", f.entryPrice) +
-                                " · target " + (if (f.bias == "LONG") "+" else "-") +
-                                String.format(java.util.Locale.US, "%.2f", f.targetPct) + "% · " +
+                                " · target +" + String.format(java.util.Locale.US, "%.2f", f.targetPct) + "% · " +
                                 String.format(java.util.Locale.US, "%.0f%% confidence", f.confidence * 100.0)
-                            notifyStatus(direction + " · " + f.symbol, message)
+                            notifyStatus("LONG holding opportunity · " + f.symbol, message)
                         }
                     }
                     if (now.dayOfWeek.value < 6 && now.toLocalTime() >= java.time.LocalTime.of(15, 35)) {
                         runCatching { repository.runAfterHoursResearch(false) }
                     }
-                    delay(if (shadowCount + managedCount + learningCount + forecastOutcomeCount > 0) 2_000L else 10_000L)
+                    delay(if (managedCount + forecastOutcomeCount > 0) 2_000L else 10_000L)
                 }
             }
         }
@@ -149,12 +145,10 @@ class MultifyNotificationListenerService : NotificationListenerService() {
             val isSafetyEvent = parsed.type == SignalType.AUTO_PAUSED
             if (isSafetyEvent) {
                 repository.forceLocalDisarm()
-                notifyStatus("Live execution disabled", "Multify reported an unprotected/paused position. Review broker state before resetting the halt.")
+                notifyStatus("ARM disabled", "Multify reported a safety pause. Review broker state before resetting the halt.")
             }
 
-            // First-wave lifecycle events are the top processing priority. They run on a dedicated
-            // serialized lane, separate from market monitors/research, so a new Multify BUY or
-            // Book Profit cannot sit behind slower background work. WorkManager remains recovery only.
+            // Multify holdings lifecycle events have top processing priority. WorkManager remains recovery only.
             val critical = parsed.type == SignalType.TRADE_RELEASE || parsed.type == SignalType.BOOK_PROFIT
             val executor = if (critical) priorityScope else scope
             executor.launch {
