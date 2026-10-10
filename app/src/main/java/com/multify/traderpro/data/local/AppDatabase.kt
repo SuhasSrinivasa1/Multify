@@ -10,13 +10,14 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         SignalEventEntity::class,
         ManagedPositionEntity::class,
         ManagedTradeEntity::class,
+        ExecutionSampleEntity::class,
         LearningCallEntity::class,
         PriceObservationEntity::class,
         LongForecastEntity::class,
         ForecastChampionEntity::class,
         ResearchReportEntity::class
     ],
-    version = 10,
+    version = 11,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -161,6 +162,26 @@ abstract class AppDatabase : RoomDatabase() {
                            ELSE 0.0
                        END"""
                 )
+            }
+        }
+
+        val MIGRATION_10_11 = object : Migration(10, 11) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("""CREATE TABLE execution_samples (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    transactionType TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    quantity INTEGER NOT NULL,
+                    product TEXT NOT NULL,
+                    orderId TEXT NOT NULL,
+                    submittedAtMs INTEGER NOT NULL,
+                    filledAtMs INTEGER NOT NULL,
+                    totalExecutionMs INTEGER NOT NULL,
+                    appDispatchMicros INTEGER NOT NULL,
+                    brokerAckMs INTEGER NOT NULL
+                )""")
+                db.execSQL("CREATE INDEX index_execution_samples_transactionType_filledAtMs ON execution_samples(transactionType, filledAtMs)")
+                db.execSQL("CREATE INDEX index_execution_samples_filledAtMs ON execution_samples(filledAtMs)")
             }
         }
 
