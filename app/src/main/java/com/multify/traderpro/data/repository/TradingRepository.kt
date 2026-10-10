@@ -19,6 +19,8 @@ import com.multify.traderpro.data.local.LearningCallEntity
 import com.multify.traderpro.data.local.PriceObservationEntity
 import com.multify.traderpro.data.local.StrategySnapshotEntity
 import com.multify.traderpro.data.local.ForecastEntity
+import com.multify.traderpro.data.local.IntradayForecastEntity
+import com.multify.traderpro.data.local.ForecastChampionEntity
 import com.multify.traderpro.data.local.ResearchReportEntity
 import com.multify.traderpro.data.local.ShadowDao
 import com.multify.traderpro.data.local.ShadowPositionEntity
@@ -45,6 +47,7 @@ import com.multify.traderpro.data.network.RecentDecisionDto
 import com.multify.traderpro.data.network.RiskStatusDto
 import com.multify.traderpro.data.network.LearningStatsDto
 import com.multify.traderpro.data.network.ForecastDto
+import com.multify.traderpro.data.network.ForecastChampionDto
 import com.multify.traderpro.data.network.ResearchDto
 import com.multify.traderpro.data.network.StrategyInsightDto
 import com.multify.traderpro.data.network.WaveStatDto
@@ -121,6 +124,8 @@ class TradingRepository @Inject constructor(
     val settings: Flow<AppSettings> = preferences.settings
     val recentEvents: Flow<List<SignalEventEntity>> = dao.observeRecent(100)
     private var lastHistoricalShortBackfillAttemptMs: Long = 0L
+    private var lastForecastScanAtMs: Long = 0L
+    private var lastForecastOutcomeMonitorAtMs: Long = 0L
     @Volatile private var historicalSeedEnsured: Boolean = false
 
 
@@ -206,6 +211,12 @@ class TradingRepository @Inject constructor(
         // Each trading day gets one vote so a day with several Multify calls cannot dominate the learner.
         val shortDaily = shortRows.groupBy({ it.first }, { it.second }).values.map { day -> day.average() }
         val shortFraction = AdaptiveLearningMath.shortRetracementFraction(shortDaily)
+        val shortDownRows = rolling.filter { it.shortObservationFinalized }.mapNotNull { call ->
+            val sell = call.multifyExitPrice ?: return@mapNotNull null
+            val low = call.minPostSellPrice ?: return@mapNotNull null
+            if (sell > 0.0 && low <= sell) ((sell - low) / sell * 100.0).takeIf { it in 0.0..25.0 } else null
+        }
+        val shortAverageDownPct = AdaptiveLearningMath.rollingMean(shortDownRows, 0.75)
         return LearningStatsDto(
             rollingTradingDays = keepDates.size,
             rollingCalls = rolling.size,
@@ -219,7 +230,8 @@ class TradingRepository @Inject constructor(
             liveCompletedCalls = calls.count { it.source == "LIVE" && it.longRealizedPct != null },
             shortObservedCalls = shortRows.size,
             shortRetracementFraction = shortFraction,
-            shortRetracementPct = shortFraction * 100.0
+            shortRetracementPct = shortFraction * 100.0,
+            shortAverageDownPct = shortAverageDownPct
         )
     }
 
@@ -235,10 +247,12 @@ class TradingRepository @Inject constructor(
             )
         )
         learningDao.markForecastMatch(LocalDate.now(INDIA).toString(), symbol, "LONG")
+        learningDao.markIntradayForecastMatch(LocalDate.now(INDIA).toString(), symbol)
     }
 
     private suspend fun recordLiveSell(eventId: Long, symbol: String, price: Double) {
         learningDao.markForecastMatch(LocalDate.now(INDIA).toString(), symbol, "SHORT")
+        learningDao.markIntradayForecastMatch(LocalDate.now(INDIA).toString(), symbol)
         val call = learningDao.latestLiveCall(symbol) ?: return
         if (call.sellAtMs != null) return
         val pct = if (call.entryPrice > 0) (price - call.entryPrice) / call.entryPrice * 100.0 else null
@@ -627,10 +641,13 @@ class TradingRepository @Inject constructor(
             val margin = apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin")
             ensureHistoricalSeed()
             val shadow = paperSnapshot()
-            val live = managedSnapshot(token, setOf(ENGINE_INTRADAY))
+            val live = managedSnapshot(token, setOf(ENGINE_INTRADAY, ENGINE_FORECAST_LONG, ENGINE_FORECAST_SHORT))
             val fast = managedSnapshot(token, setOf(ENGINE_FAST_TRACK, ENGINE_FAST_SHORT))
             val learning = learningStats()
-            val forecasts = learningDao.forecastsForDate(LocalDate.now(INDIA).toString()).map { it.toDto() }
+            val forecasts = learningDao.intradayForecastsForDate(LocalDate.now(INDIA).toString()).map { it.toForecastDto() }
+            val forecastChampions = learningDao.allForecastChampions().map { c ->
+                ForecastChampionDto(c.side, c.marketRegime, c.regime, c.strategy, c.wins, c.losses, c.sampleCount, c.distinctDays, c.distinctSymbols, c.frozen)
+            }
             val latestResearch = learningDao.latestResearchReport()?.let { ResearchDto(it.reportDate, it.title, it.summary) } ?: ResearchDto()
             val strategyInsights = learningDao.recentStrategySnapshots(12).map { x ->
                 StrategyInsightDto(
@@ -678,6 +695,7 @@ class TradingRepository @Inject constructor(
                 shadowQualificationDays = shadowQualificationDays(),
                 learning = learning,
                 forecasts = forecasts,
+                forecastChampions = forecastChampions,
                 research = latestResearch,
                 strategyInsights = strategyInsights,
                 waveStats = waveStats,
@@ -2887,6 +2905,9 @@ class TradingRepository @Inject constructor(
         const val ENGINE_INTRADAY = "INTRADAY"
         const val ENGINE_FAST_TRACK = "FAST_TRACK"
         const val ENGINE_FAST_SHORT = "FAST_SHORT"
+        const val ENGINE_FORECAST_LONG = "FORECAST_LONG"
+        const val ENGINE_FORECAST_SHORT = "FORECAST_SHORT"
+        private const val FORECAST_SCAN_INTERVAL_MS = 10L * 60L * 1000L
         private const val REGIME_RECOVERY_HOLD = "RECOVERY_HOLD_NEW_CALL"
         private const val REGIME_SECONDARY_PREVIEW = "SECONDARY_PREDICTION_ONLY"
     }
