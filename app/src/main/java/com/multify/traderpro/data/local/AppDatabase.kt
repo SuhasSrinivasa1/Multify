@@ -12,11 +12,11 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         ManagedTradeEntity::class,
         LearningCallEntity::class,
         PriceObservationEntity::class,
-        IntradayForecastEntity::class,
+        LongForecastEntity::class,
         ForecastChampionEntity::class,
         ResearchReportEntity::class
     ],
-    version = 8,
+    version = 9,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -72,5 +72,75 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL("DROP TABLE IF EXISTS shadow_positions")
             }
         }
+        val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("""CREATE TABLE long_forecasts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    forecastDate TEXT NOT NULL,
+                    rank INTEGER NOT NULL,
+                    symbol TEXT NOT NULL,
+                    entryPrice REAL NOT NULL,
+                    targetPct REAL NOT NULL,
+                    targetPrice REAL NOT NULL,
+                    confidence REAL NOT NULL,
+                    score REAL NOT NULL,
+                    strategy TEXT NOT NULL,
+                    regime TEXT NOT NULL,
+                    marketRegime TEXT NOT NULL,
+                    sectorRegime TEXT NOT NULL,
+                    championKey TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    generatedAtMs INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    targetHitAtMs INTEGER,
+                    lastPrice REAL NOT NULL,
+                    maxFavourablePct REAL NOT NULL,
+                    maxAdversePct REAL NOT NULL,
+                    lastObservedAtMs INTEGER NOT NULL,
+                    notified INTEGER NOT NULL,
+                    multifyMatched INTEGER NOT NULL
+                )""")
+                db.execSQL("""INSERT INTO long_forecasts (
+                    id,forecastDate,rank,symbol,entryPrice,targetPct,targetPrice,confidence,score,strategy,regime,
+                    marketRegime,sectorRegime,championKey,reason,generatedAtMs,status,targetHitAtMs,lastPrice,
+                    maxFavourablePct,maxAdversePct,lastObservedAtMs,notified,multifyMatched
+                ) SELECT
+                    id,forecastDate,rank,symbol,entryPrice,targetPct,targetPrice,confidence,score,strategy,regime,
+                    marketRegime,sectorRegime,championKey,reason,generatedAtMs,status,targetHitAtMs,lastPrice,
+                    maxFavourablePct,maxAdversePct,lastObservedAtMs,notified,multifyMatched
+                FROM intraday_forecasts WHERE side='LONG'""")
+                db.execSQL("DROP TABLE intraday_forecasts")
+                db.execSQL("CREATE UNIQUE INDEX index_long_forecasts_forecastDate_rank ON long_forecasts(forecastDate,rank)")
+                db.execSQL("CREATE UNIQUE INDEX index_long_forecasts_forecastDate_symbol ON long_forecasts(forecastDate,symbol)")
+                db.execSQL("CREATE INDEX index_long_forecasts_status_forecastDate ON long_forecasts(status,forecastDate)")
+
+                db.execSQL("""CREATE TABLE forecast_champions_new (
+                    key TEXT PRIMARY KEY NOT NULL,
+                    marketRegime TEXT NOT NULL,
+                    sectorRegime TEXT NOT NULL,
+                    regime TEXT NOT NULL,
+                    strategy TEXT NOT NULL,
+                    wins INTEGER NOT NULL,
+                    losses INTEGER NOT NULL,
+                    sampleCount INTEGER NOT NULL,
+                    distinctDays INTEGER NOT NULL,
+                    distinctSymbols INTEGER NOT NULL,
+                    frozen INTEGER NOT NULL,
+                    firstSeenAtMs INTEGER NOT NULL,
+                    lastUpdatedAtMs INTEGER NOT NULL
+                )""")
+                db.execSQL("""INSERT OR REPLACE INTO forecast_champions_new (
+                    key,marketRegime,sectorRegime,regime,strategy,wins,losses,sampleCount,distinctDays,distinctSymbols,
+                    frozen,firstSeenAtMs,lastUpdatedAtMs
+                ) SELECT
+                    key,marketRegime,sectorRegime,regime,strategy,wins,losses,sampleCount,distinctDays,distinctSymbols,
+                    frozen,firstSeenAtMs,lastUpdatedAtMs
+                FROM forecast_champions WHERE side='LONG'""")
+                db.execSQL("DROP TABLE forecast_champions")
+                db.execSQL("ALTER TABLE forecast_champions_new RENAME TO forecast_champions")
+                db.execSQL("CREATE UNIQUE INDEX index_forecast_champions_marketRegime_regime_strategy ON forecast_champions(marketRegime,regime,strategy)")
+            }
+        }
+
     }
 }

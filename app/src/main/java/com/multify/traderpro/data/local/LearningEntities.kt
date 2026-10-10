@@ -48,17 +48,16 @@ data class PriceObservationEntity(
 )
 
 @Entity(
-    tableName = "intraday_forecasts",
+    tableName = "long_forecasts",
     indices = [
-        Index(value = ["forecastDate", "side", "rank"], unique = true),
-        Index(value = ["forecastDate", "side", "symbol"], unique = true),
+        Index(value = ["forecastDate", "rank"], unique = true),
+        Index(value = ["forecastDate", "symbol"], unique = true),
         Index(value = ["status", "forecastDate"])
     ]
 )
-data class IntradayForecastEntity(
+data class LongForecastEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val forecastDate: String,
-    val side: String,
     val rank: Int,
     val symbol: String,
     val entryPrice: Double,
@@ -85,11 +84,10 @@ data class IntradayForecastEntity(
 
 @Entity(
     tableName = "forecast_champions",
-    indices = [Index(value = ["side", "marketRegime", "regime", "strategy"], unique = true)]
+    indices = [Index(value = ["marketRegime", "regime", "strategy"], unique = true)]
 )
 data class ForecastChampionEntity(
     @PrimaryKey val key: String,
-    val side: String,
     val marketRegime: String,
     val sectorRegime: String = "UNAVAILABLE",
     val regime: String,
