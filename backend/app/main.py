@@ -5,7 +5,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query
 
 from .broker import BrokerError, GrowwBroker
 from .config import get_settings
-from .models import Envelope, GatewayHealth, KillSwitchRequest, OcoIntent, OrderIntent
+from .models import GatewayHealth, HoldingOrderIntent, KillSwitchRequest
 from .risk import RiskEngine, RiskViolation
 from .security import require_phone_auth
 from .service import LiveTradingService
@@ -24,7 +24,7 @@ async def lifespan(_: FastAPI):
     await broker.close()
 
 
-app = FastAPI(title="Multify Live Gateway", version="4.5.0", lifespan=lifespan)
+app = FastAPI(title="Multify LONG Holdings Gateway", version="6.1.0", lifespan=lifespan)
 
 
 def ok(payload=None) -> dict:
@@ -44,7 +44,12 @@ async def health():
     except Exception:
         pass
     settings = get_settings()
-    return GatewayHealth(status="ok", broker_authenticated=authenticated, kill_switch=settings.kill_switch or read_risk_value("kill_switch", "0") == "1", db_ok=True)
+    return GatewayHealth(
+        status="ok",
+        broker_authenticated=authenticated,
+        kill_switch=settings.kill_switch or read_risk_value("kill_switch", "0") == "1",
+        db_ok=True,
+    )
 
 
 @app.get("/v1/user/detail", dependencies=[Depends(require_phone_auth)])
@@ -96,12 +101,16 @@ async def candles(groww_symbol: str, start_time: str, end_time: str, candle_inte
         fail("BROKER", str(exc), 502)
 
 
-@app.post("/v1/gateway/orders", dependencies=[Depends(require_phone_auth)])
-async def order(intent: OrderIntent):
+@app.post("/v1/gateway/holdings/order", dependencies=[Depends(require_phone_auth)])
+async def holding_order(intent: HoldingOrderIntent):
     try:
-        return ok(await service.execute_order(intent))
+        return ok(await service.execute_holding_order(intent))
     except RiskViolation as exc:
-        audit("RISK", "ORDER_BLOCKED", {"symbol": intent.symbol, "reason": str(exc), "priority": intent.priority})
+        audit(
+            "RISK",
+            "HOLDING_ORDER_BLOCKED",
+            {"symbol": intent.symbol, "action": intent.action, "reason": str(exc)},
+        )
         fail("RISK_BLOCK", str(exc), 409)
     except BrokerError as exc:
         fail("BROKER", str(exc), 502)
@@ -111,33 +120,6 @@ async def order(intent: OrderIntent):
 async def order_status(order_id: str):
     try:
         return await broker.order_status(order_id)
-    except BrokerError as exc:
-        fail("BROKER", str(exc), 502)
-
-
-@app.post("/v1/gateway/oco", dependencies=[Depends(require_phone_auth)])
-async def oco(intent: OcoIntent):
-    try:
-        return ok(await service.execute_oco(intent))
-    except (RiskViolation, BrokerError) as exc:
-        fail("OCO_FAILED", str(exc), 409)
-
-
-@app.put("/v1/gateway/oco/{smart_order_id}", dependencies=[Depends(require_phone_auth)])
-async def modify_oco(smart_order_id: str, target_price: float, stop_price: float, quantity: int):
-    try:
-        return await broker.modify_oco(smart_order_id, {
-            "smart_order_type": "OCO", "segment": "CASH", "duration": "DAY", "quantity": quantity, "product_type": "MIS",
-            "target": {"trigger_price": f"{target_price:.2f}"}, "stop_loss": {"trigger_price": f"{stop_price:.2f}"},
-        })
-    except BrokerError as exc:
-        fail("BROKER", str(exc), 502)
-
-
-@app.post("/v1/gateway/oco/{smart_order_id}/cancel", dependencies=[Depends(require_phone_auth)])
-async def cancel_oco(smart_order_id: str):
-    try:
-        return await broker.cancel_oco(smart_order_id)
     except BrokerError as exc:
         fail("BROKER", str(exc), 502)
 

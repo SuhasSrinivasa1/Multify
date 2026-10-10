@@ -105,15 +105,3 @@ class GrowwBroker:
 
     async def order_status(self, order_id: str) -> dict:
         return await self._request("GET", f"v1/order/detail/{order_id}", params={"segment": "CASH"})
-
-    async def create_oco(self, body: dict) -> dict:
-        return await self._request("POST", "v1/order-advance/create", json=body)
-
-    async def modify_oco(self, smart_order_id: str, body: dict) -> dict:
-        return await self._request("PUT", f"v1/order-advance/modify/{smart_order_id}", json=body)
-
-    async def cancel_oco(self, smart_order_id: str) -> dict:
-        return await self._request("POST", f"v1/order-advance/cancel/CASH/OCO/{smart_order_id}")
-
-    async def smart_order_status(self, smart_order_id: str) -> dict:
-        return await self._request("GET", f"v1/order-advance/status/CASH/OCO/internal/{smart_order_id}")
