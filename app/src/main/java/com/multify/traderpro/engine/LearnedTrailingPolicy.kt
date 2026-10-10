@@ -21,7 +21,7 @@ object LearnedTrailingPolicy {
 
     fun shouldArm(entryPrice: Double, ltp: Double, thresholdPct: Double): Boolean {
         if (entryPrice <= 0.0 || thresholdPct <= 0.0) return false
-        return ltp >= entryPrice * (1.0 + thresholdPct / 100.0)
+        return ltp + 1e-9 >= entryPrice * (1.0 + thresholdPct / 100.0)
     }
 
     fun isArmed(stopPrice: Double?, entryPrice: Double): Boolean =
