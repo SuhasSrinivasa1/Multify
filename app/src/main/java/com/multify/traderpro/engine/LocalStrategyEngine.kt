@@ -66,7 +66,6 @@ data class FeatureSnapshot(
 data class StrategyVote(val name: String, val score: Double, val note: String)
 
 data class StrategyEvaluation(
-    val side: String,
     val regime: String,
     val directionalScore: Double,
     val confidence: Double,
@@ -246,17 +245,17 @@ object LocalStrategyEngine {
             "MEAN_REVERSION" -> votes += StrategyVote("Regime switch", -.05, "chase penalty")
             "COMPRESSION" -> votes += StrategyVote("Squeeze filter", if (rv > 1.1) .10 else -.05, "compression regime")
         }
-        return finish("LONG", regime, votes, f)
+        return finish(regime, votes, f)
     }
 
-    private fun finish(side: String, regime: String, votes: List<StrategyVote>, f: FeatureSnapshot): StrategyEvaluation {
+    private fun finish(regime: String, votes: List<StrategyVote>, f: FeatureSnapshot): StrategyEvaluation {
         val raw = votes.sumOf { it.score }
         val score = (raw / max(2.5, votes.size * .32)).coerceIn(-1.0, 1.0)
         val confidence = (0.50 + score * 0.42).coerceIn(0.05, 0.95)
         val best = votes.maxByOrNull { abs(it.score) }
         val top = votes.sortedByDescending { abs(it.score) }.take(3)
         val reason = top.joinToString(" · ") { "${it.name}: ${it.note}" }
-        return StrategyEvaluation(side, regime, score, confidence, best?.name ?: "No validated setup", reason, votes, f)
+        return StrategyEvaluation(regime, score, confidence, best?.name ?: "No validated setup", reason, votes, f)
     }
 
     private fun regime(f: FeatureSnapshot): String {
