@@ -16,7 +16,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         ForecastChampionEntity::class,
         ResearchReportEntity::class
     ],
-    version = 9,
+    version = 10,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -141,6 +141,29 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL("CREATE UNIQUE INDEX index_forecast_champions_marketRegime_regime_strategy ON forecast_champions(marketRegime,regime,strategy)")
             }
         }
+
+        val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE managed_positions ADD COLUMN trailingArmPct REAL NOT NULL DEFAULT 0.0")
+                db.execSQL("ALTER TABLE managed_positions ADD COLUMN trailingLastRatchetPrice REAL NOT NULL DEFAULT 0.0")
+                db.execSQL(
+                    """UPDATE managed_positions
+                       SET trailingArmPct = CASE
+                           WHEN targetPrice IS NOT NULL AND entryPrice > 0.0 AND targetPrice > entryPrice
+                           THEN (targetPrice / entryPrice - 1.0) * 100.0
+                           ELSE 0.0
+                       END"""
+                )
+                db.execSQL(
+                    """UPDATE managed_positions
+                       SET trailingLastRatchetPrice = CASE
+                           WHEN stopPrice IS NOT NULL AND stopPrice > entryPrice THEN maxFavourablePrice
+                           ELSE 0.0
+                       END"""
+                )
+            }
+        }
+
 
     }
 }
