@@ -57,6 +57,11 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL("CREATE INDEX index_learning_calls_symbol_callDate ON learning_calls(symbol,callDate)")
                 db.execSQL("CREATE INDEX index_learning_calls_source ON learning_calls(source)")
 
+                db.execSQL("DELETE FROM intraday_forecasts WHERE side!='LONG'")
+                db.execSQL("DELETE FROM forecast_champions WHERE side!='LONG'")
+                db.execSQL("DELETE FROM managed_trades WHERE side!='LONG'")
+                db.execSQL("DELETE FROM price_observations WHERE phase='POST_SELL'")
+
                 db.execSQL("DROP TABLE IF EXISTS forecasts")
                 db.execSQL("DROP TABLE IF EXISTS strategy_snapshots")
                 db.execSQL("DROP TABLE IF EXISTS wave_outcomes")
