@@ -92,7 +92,7 @@ import java.util.Locale
 
 private enum class Destination(val label: String, val subtitle: String, val icon: ImageVector) {
     Execution("Execution", "ARM status and app-owned CNC holdings", Icons.Default.Dashboard),
-    Averages("LONG Averages", "Rolling LONG target and distribution", Icons.Default.Analytics),
+    Averages("LONG Averages", "Rolling realized returns and distribution", Icons.Default.Analytics),
     Forecast("Forecast", "Up to five LONG holding candidates", Icons.Default.Science),
     Settings("Settings", "Broker, ARM, holding budget and device controls", Icons.Default.Settings)
 }
@@ -454,12 +454,12 @@ private fun LongAveragesScreen(state: TraderUiState) {
         contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp, 14.dp, 16.dp, 32.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        item { SectionTitle("Multify LONG average", "Rolling 30 recommendation trading days; only LONG statistics are calculated.") }
+        item { SectionTitle("Multify LONG average", "Rolling 30 completed recommendation trading days using actual Multify exit returns, including losses.") }
         item {
             MetricCard(
                 label = "Multify Avg LONG %",
                 value = String.format(Locale.US, "%.2f%%", learning.longAveragePct),
-                supporting = "${learning.rollingCalls} calls across ${learning.rollingTradingDays} recommendation trading days",
+                supporting = "${learning.rollingCalls} completed calls across ${learning.rollingTradingDays} recommendation trading days",
                 modifier = Modifier.fillMaxWidth(),
                 accent = MaterialTheme.colorScheme.primary
             )
@@ -479,7 +479,7 @@ private fun LongAveragesScreen(state: TraderUiState) {
                     KeyValueRow("P25", String.format(Locale.US, "%.2f%%", learning.longP25Pct))
                     KeyValueRow("P75", String.format(Locale.US, "%.2f%%", learning.longP75Pct))
                     Text(
-                        "The rolling mean is a profit-trailing arming level for LONG holdings; reaching it does not force an immediate sale.",
+                        "Mean, median, trimmed mean, EWMA, P25 and P75 all use realized entry-to-Multify-exit returns. The arithmetic mean is the trailing-arm level; losses remain included.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -560,7 +560,7 @@ private fun ForecastScreen(
                 else "Learning",
                 supporting = if (forecastLearning.completedForecasts > 0)
                     "rolling 30 forecast trading days · ${forecastLearning.completedForecasts} completed"
-                else "Multify LONG mean bootstraps the first forecast target",
+                else "Multify realized LONG mean bootstraps the first forecast target",
                 modifier = Modifier.fillMaxWidth(),
                 accent = MaterialTheme.colorScheme.primary
             )
