@@ -109,7 +109,7 @@ import java.util.Locale
 
 private enum class Destination(val label: String, val subtitle: String, val icon: ImageVector) {
     Execution("Execution", "Live state, positions, decisions and health", Icons.Default.Dashboard),
-    Averages("Averages", "Rolling LONG / SHORT learning and trail-arm levels", Icons.Default.Analytics),
+    Averages("Averages", "First LONG / SHORT targets and champion evidence", Icons.Default.Analytics),
     Forecast("Forecast", "Five candidates, Multify DNA and after-market research", Icons.Default.Science),
     Settings("Settings", "Broker, execution, risk and device controls", Icons.Default.Settings)
 }
@@ -187,7 +187,12 @@ fun TraderApp(viewModel: TraderViewModel = hiltViewModel()) {
                     onResetHalt = { showResetConfirm = true }
                 )
                 Destination.Averages -> AveragesScreen(state)
-                Destination.Forecast -> ForecastScreen(state = state, onGenerate = viewModel::generateForecasts, onResearch = viewModel::runAfterHoursResearch)
+                Destination.Forecast -> ForecastScreen(
+                    state = state,
+                    onGenerate = viewModel::generateForecasts,
+                    onResearch = viewModel::runAfterHoursResearch,
+                    onTrade = viewModel::executeForecast
+                )
                 Destination.Settings -> SystemScreen(
                     state = state,
                     onSave = viewModel::saveBrokerSettings,
@@ -198,9 +203,8 @@ fun TraderApp(viewModel: TraderViewModel = hiltViewModel()) {
                     onResetHalt = { showResetConfirm = true },
                     onExportLogs = { logExportLauncher.launch(defaultLogFileName()) },
                     onExecutionMode = viewModel::setExecutionMode,
-                    onWaveCount = viewModel::setWaveCount,
                     onBudgetChanged = viewModel::setIntradayBudget,
-                    onWaveRiskChanged = viewModel::setWaveRiskSettings,
+                    onPostSellShortChanged = viewModel::setPostSellShortEnabled,
                     onSubmitManualSignal = viewModel::submitManualSignal
                 )
             }
@@ -327,7 +331,7 @@ private fun DashboardScreen(
             }
         }
         if (dashboard != null) {
-            item { SectionTitle("Today's execution audit", "Shadow always mirrors the selected fixed capital and wave depth. App P&L contains only Multify Trader Pro-owned positions.") }
+            item { SectionTitle("Today's execution audit", "Multify Auto and Forecast positions are app-owned and auditable; unrelated Groww positions are excluded.") }
             item {
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
                     MetricCard(
@@ -406,12 +410,6 @@ private fun DashboardScreen(
                 items(dashboard.positions, key = { it.symbol }) { PositionCard(it) }
             }
 
-            item { SectionTitle("AUTO adaptive direction", "At each eligible 2% Wave 2+ checkpoint, LONG, SHORT and HOLD compete on after-cost expected value. Only one real direction can be active.") }
-            if (dashboard.adaptiveWaves.isEmpty()) {
-                item { EmptyState("Waiting for Wave 2+", "A 2% displacement makes ₹${state.settings.waveCapitalRupees} eligible; it does not automatically create an order.") }
-            } else {
-                items(dashboard.adaptiveWaves.take(12), key = { "${it.symbol}-${it.waveNumber}" }) { AdaptiveWaveCard(it) }
-            }
             item {
                 Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha=.45f)), shape = RoundedCornerShape(18.dp)) {
                     Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
@@ -428,7 +426,7 @@ private fun DashboardScreen(
                 }
             }
 
-            item { SectionTitle("Recent engine decisions", "Every action is auditable. Wave pivots learn independently while fixed-capital execution never averages down or adds notional after entry.") }
+            item { SectionTitle("Recent engine decisions", "Every action is auditable. Multify Auto and Forecast remain independent, with no averaging or later-wave capital.") }
             if (dashboard.recentDecisions.isEmpty()) {
                 item { EmptyState("No decisions yet", "Captured Multify signals will appear here after local analysis.") }
             } else {
@@ -459,88 +457,58 @@ private fun DashboardScreen(
 
 @Composable
 private fun AveragesScreen(state: TraderUiState) {
-    val dashboard = state.dashboard
-    val learning = dashboard?.learning ?: com.multify.traderpro.data.network.LearningStatsDto()
-    val rows = dashboard?.waveStats.orEmpty()
-    val wave1 = rows.firstOrNull { it.wave == 1 }
-    val wave1Long = wave1?.averageUpPct?.takeIf { learning.rollingCalls > 0 }
-
+    val learning = state.dashboard?.learning ?: com.multify.traderpro.data.network.LearningStatsDto()
+    val champions = state.dashboard?.forecastChampions.orEmpty()
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp, 14.dp, 16.dp, 32.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
+        item { SectionTitle("First LONG / SHORT learning", "Only the first intraday move matters now. No Wave 2–10 logic is active.") }
         item {
-            SectionTitle(
-                "Averages · learned movement map",
-                "The single source of truth for rolling LONG/SHORT averages and the profit-trailing arm levels used by the engine."
-            )
-        }
-        item {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = .35f)),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = .18f)),
-                shape = RoundedCornerShape(22.dp)
-            ) {
-                Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
-                    Text("Wave 1 LONG · current trail arm", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text(
-                        wave1Long?.let { String.format(Locale.US, "%.2f%%", it) } ?: "Learning",
-                        style = MaterialTheme.typography.headlineSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    Text(
-                        if (learning.rollingCalls > 0)
-                            "Latest ${learning.rollingTradingDays} recommendation trading days · ${learning.rollingCalls} calls"
-                        else "Waiting for qualifying Multify history/live observations",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = .18f))
-                    KeyValueRow("Median", if (learning.rollingCalls > 0) String.format(Locale.US, "%.2f%%", learning.longMedianPct) else "Learning")
-                    KeyValueRow("Trimmed mean", if (learning.rollingCalls > 0) String.format(Locale.US, "%.2f%%", learning.longTrimmedMeanPct) else "Learning")
-                    KeyValueRow("EWMA", if (learning.rollingCalls > 0) String.format(Locale.US, "%.2f%%", learning.longEwmaPct) else "Learning")
-                    KeyValueRow("P25 / P75", if (learning.rollingCalls > 0) String.format(Locale.US, "%.2f%% / %.2f%%", learning.longP25Pct, learning.longP75Pct) else "Learning")
-                }
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                MetricCard("LONG trail arm", String.format(Locale.US, "%.2f%%", learning.longAveragePct), learning.rollingCalls.toString() + " Multify calls · 30 trading days", Modifier.weight(1f), MaterialTheme.colorScheme.primary)
+                MetricCard("SHORT trail arm", String.format(Locale.US, "%.2f%%", learning.shortAverageDownPct), learning.shortObservedCalls.toString() + " post-sell observations", Modifier.weight(1f), MaterialTheme.colorScheme.secondary)
             }
         }
         item {
-            SectionTitle(
-                "10-wave averages table",
-                "Every row is always visible. LONG avg is upside movement; SHORT avg is downside movement. N is the number of observations."
-            )
-        }
-        item { WaveAveragesTable(rows, learning) }
-        item {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = .24f)),
-                shape = RoundedCornerShape(20.dp)
-            ) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
-                    Text("How the table drives exits", fontWeight = FontWeight.SemiBold)
-                    Text("1. Before trailing is armed, the latest learned wave average is the threshold.", style = MaterialTheme.typography.bodyMedium)
-                    Text("2. The rolling window can move an unarmed threshold up or down as trading days enter and leave.", style = MaterialTheme.typography.bodyMedium)
-                    Text("3. Reaching the threshold arms profit trailing; it does not force an immediate exit.", style = MaterialTheme.typography.bodyMedium)
-                    Text("4. After arming, the stop is one-way only and can never be loosened by a later average change.", style = MaterialTheme.typography.bodyMedium)
-                }
-            }
-        }
-        item {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = .28f)),
-                shape = RoundedCornerShape(20.dp)
-            ) {
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha=.24f)), shape = RoundedCornerShape(20.dp)) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("Short retracement learner", fontWeight = FontWeight.SemiBold)
-                    KeyValueRow("Post-sell move capture", String.format(Locale.US, "%.0f%% of prior long move", learning.shortRetracementPct))
+                    Text("LONG distribution", fontWeight = FontWeight.SemiBold)
+                    KeyValueRow("Mean", String.format(Locale.US, "%.2f%%", learning.longAveragePct))
+                    KeyValueRow("Median", String.format(Locale.US, "%.2f%%", learning.longMedianPct))
+                    KeyValueRow("Trimmed mean", String.format(Locale.US, "%.2f%%", learning.longTrimmedMeanPct))
+                    KeyValueRow("EWMA", String.format(Locale.US, "%.2f%%", learning.longEwmaPct))
+                    KeyValueRow("P25 / P75", String.format(Locale.US, "%.2f%% / %.2f%%", learning.longP25Pct, learning.longP75Pct))
+                    Text("The LONG mean is frozen into each new recommendation. Reaching it arms profit trailing rather than forcing an exit.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+        item {
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha=.28f)), shape = RoundedCornerShape(20.dp)) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("SHORT learning", fontWeight = FontWeight.SemiBold)
+                    KeyValueRow("Direct average downside", String.format(Locale.US, "%.2f%%", learning.shortAverageDownPct))
+                    KeyValueRow("Post-sell retracement context", String.format(Locale.US, "%.0f%% of prior long move", learning.shortRetracementPct))
                     KeyValueRow("Observations", learning.shortObservedCalls.toString())
-                    Text(
-                        "This is separate from the wave SHORT-average column. The wave table measures downside movement by wave; this statistic estimates how much of the preceding long move is typically retraced after Multify sells.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    Text("Standalone SHORT recommendations use the direct downside percentage. Post-sell retracement remains research context for Multify Auto.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+        item { SectionTitle("Frozen champions", "A strategy freezes after at least five wins spanning three trading days and three different stocks.") }
+        if (champions.none { it.frozen }) {
+            item { EmptyState("No frozen champion yet", "The engine is still collecting independent target-hit outcomes across stocks and days.") }
+        } else {
+            items(champions.filter { it.frozen }.take(10)) { c ->
+                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha=.20f)), shape = RoundedCornerShape(18.dp)) {
+                    Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text(c.side + " · " + c.marketRegime, fontWeight = FontWeight.SemiBold)
+                            StatusPill("FROZEN", StatusTone.Positive)
+                        }
+                        Text(c.strategy + " · " + c.regime, style = MaterialTheme.typography.bodyMedium)
+                        Text(c.wins.toString() + " wins · " + c.losses.toString() + " misses · " + c.distinctDays.toString() + " days · " + c.distinctSymbols.toString() + " stocks", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                 }
             }
         }
@@ -979,46 +947,86 @@ private fun StrategiesScreen(state: TraderUiState) {
 }
 
 @Composable
-private fun ForecastScreen(state: TraderUiState, onGenerate: () -> Unit, onResearch: () -> Unit) {
+private fun ForecastScreen(
+    state: TraderUiState,
+    onGenerate: () -> Unit,
+    onResearch: () -> Unit,
+    onTrade: (String, String) -> Unit
+) {
     val dashboard = state.dashboard
     val rows = dashboard?.forecasts.orEmpty()
+    val longs = rows.filter { it.bias == "LONG" }.sortedBy { it.rank }
+    val shorts = rows.filter { it.bias == "SHORT" }.sortedBy { it.rank }
+    val learning = dashboard?.learning ?: com.multify.traderpro.data.network.LearningStatsDto()
     val report = dashboard?.research ?: com.multify.traderpro.data.network.ResearchDto()
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp, 14.dp, 16.dp, 32.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        item { SectionTitle("Forecast · five daily candidates", "Five timestamped candidates are frozen from the rolling Multify-like universe. Matching Multify later is evaluation data, not an input to rewrite the forecast.") }
+        item { SectionTitle("Intraday Forecast", "Recommendations are released progressively between 09:15 and 15:00 IST. LONG reverse-engineers successful Multify-like setups; SHORT is an independent bearish learner.") }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                Button(onClick = onGenerate, modifier = Modifier.weight(1f)) { Text("Generate 5") }
-                OutlinedButton(onClick = onResearch, modifier = Modifier.weight(1f)) { Text("Run replay") }
+                MetricCard("LONG success target", String.format(Locale.US, "%.2f%%", learning.longAveragePct), "current Multify positive mean", Modifier.weight(1f), MaterialTheme.colorScheme.primary)
+                MetricCard("SHORT success target", String.format(Locale.US, "%.2f%%", learning.shortAverageDownPct), "learned direct downside", Modifier.weight(1f), MaterialTheme.colorScheme.secondary)
             }
         }
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                Button(onClick = onGenerate, modifier = Modifier.weight(1f)) { Text("Refresh scanner") }
+                OutlinedButton(onClick = onResearch, modifier = Modifier.weight(1f)) { Text("Run research") }
+            }
+        }
+        item { ForecastRecommendationTable("LONG recommendations", "Up to five staggered Multify-like intraday opportunities", longs, "BUY") { onTrade(it, "LONG") } }
+        item { ForecastRecommendationTable("SHORT recommendations", "Up to five staggered independent bearish opportunities", shorts, "SHORT") { onTrade(it, "SHORT") } }
         item { MultifyDnaResearch() }
-        if (rows.isEmpty()) {
-            item { EmptyState("No forecast yet", "Authenticate Groww and tap Generate 5. During market hours the listener also creates the day's five candidates automatically.") }
-        } else {
-            items(rows.sortedBy { it.rank }) { f ->
-                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha=.24f)), shape = RoundedCornerShape(20.dp)) {
-                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                            Text("#${f.rank}  ${f.symbol}", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                            StatusPill(f.bias, if (f.bias == "LONG") StatusTone.Positive else StatusTone.Warning)
-                        }
-                        Text(String.format(Locale.US, "Confidence %.0f%% · score %.2f", f.confidence * 100.0, f.score), style = MaterialTheme.typography.bodyMedium)
-                        Text(f.reason, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        if (f.multifyMatched) Text(if (f.multifyDirectionMatched) "✓ Multify later matched symbol + direction" else "• Multify later matched symbol", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelMedium)
-                    }
-                }
-            }
-        }
         item {
             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha=.30f)), shape = RoundedCornerShape(20.dp)) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
                     Text("After-market research", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                     Text(report.title, fontWeight = FontWeight.Medium)
-                    Text(report.summary.ifBlank { "The first report is generated after market close or when you tap Run replay." }, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(report.summary.ifBlank { "The first report is generated after market close or when you tap Run research." }, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ForecastRecommendationTable(
+    title: String,
+    subtitle: String,
+    rows: List<com.multify.traderpro.data.network.ForecastDto>,
+    action: String,
+    onTrade: (String) -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        SectionTitle(title, subtitle)
+        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha=.24f)), shape = RoundedCornerShape(20.dp)) {
+            Column(Modifier.fillMaxWidth().padding(12.dp)) {
+                Row(Modifier.fillMaxWidth().padding(bottom = 7.dp)) {
+                    Text("#", Modifier.weight(.35f), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                    Text("Stock", Modifier.weight(1f), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                    Text("Entry", Modifier.weight(.9f), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                    Text("Target", Modifier.weight(.9f), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                    Text("Status", Modifier.weight(.85f), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha=.18f))
+                if (rows.isEmpty()) {
+                    Text("Waiting for the next intraday scan window.", modifier = Modifier.padding(vertical = 14.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                } else {
+                    rows.forEachIndexed { index, f ->
+                        Row(Modifier.fillMaxWidth().padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text(f.rank.toString(), Modifier.weight(.35f), style = MaterialTheme.typography.bodySmall)
+                            Text(f.symbol, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
+                            Text(money(f.entryPrice), Modifier.weight(.9f), style = MaterialTheme.typography.bodySmall)
+                            Text(money(f.targetPrice), Modifier.weight(.9f), style = MaterialTheme.typography.bodySmall)
+                            Text(f.status.replace('_', ' '), Modifier.weight(.85f), style = MaterialTheme.typography.labelSmall)
+                        }
+                        Text(String.format(Locale.US, "%.0f%% confidence · %s · %s", f.confidence * 100.0, f.strategy, f.marketRegime), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        Button(onClick = { onTrade(f.symbol) }, enabled = f.status == "ACTIVE", modifier = Modifier.fillMaxWidth().padding(top = 7.dp)) { Text(action + " " + f.symbol) }
+                        if (index != rows.lastIndex) HorizontalDivider(modifier = Modifier.padding(top = 10.dp), color = MaterialTheme.colorScheme.outline.copy(alpha=.10f))
+                    }
                 }
             }
         }
@@ -1290,9 +1298,8 @@ private fun SystemScreen(
     onResetHalt: () -> Unit,
     onExportLogs: () -> Unit,
     onExecutionMode: (String) -> Unit,
-    onWaveCount: (Int) -> Unit,
     onBudgetChanged: (Long) -> Unit,
-    onWaveRiskChanged: (Double, Long, Int, Long, Long, Long) -> Unit,
+    onPostSellShortChanged: (Boolean) -> Unit,
     onSubmitManualSignal: (String, String, String) -> Unit
 ) {
     val context = LocalContext.current
@@ -1300,345 +1307,103 @@ private fun SystemScreen(
     var totpSecret by remember { mutableStateOf("") }
     var staticIp by remember(state.settings.expectedStaticIp) { mutableStateOf(state.settings.expectedStaticIp) }
     var packageFilter by remember(state.settings.packageFilter) { mutableStateOf(state.settings.packageFilter) }
-
     var budget by remember(state.settings.dailyBudgetRupees) { mutableStateOf(state.settings.dailyBudgetRupees.toFloat()) }
-    var waveSpacing by remember(state.settings.waveSpacingBps) { mutableStateOf(state.settings.waveSpacingPercent.toFloat()) }
-    var waveCapital by remember(state.settings.waveCapitalRupees) { mutableStateOf(state.settings.waveCapitalRupees.toFloat()) }
-    var campaignCap by remember(state.settings.maxCampaignCapitalRupees) { mutableStateOf(state.settings.maxCampaignCapitalRupees.toFloat()) }
-    var dailyLoss by remember(state.settings.maxDailyLossRupees) { mutableStateOf(state.settings.maxDailyLossRupees.toFloat()) }
-    var stockLoss by remember(state.settings.maxSingleStockLossRupees) { mutableStateOf(state.settings.maxSingleStockLossRupees.toFloat()) }
-
     var manualSymbol by remember { mutableStateOf("") }
     var manualPrice by remember { mutableStateOf("") }
-
     val notificationAccess = notificationAccessEnabled(context)
     val batteryUnrestricted = batteryOptimizationIgnored(context)
-    val deviceName = "${Build.MANUFACTURER.replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.US) else it.toString() }} ${Build.MODEL}".trim()
-    val isVivo = Build.MANUFACTURER.equals("vivo", ignoreCase = true)
     val live = state.settings.liveExecutionEffective
-    val canEnableLive = state.settings.brokerAuthenticated &&
-        state.settings.staticIpMatched &&
-        !state.settings.safetyHalt &&
-        state.settings.dailyBudgetRupees >= 10_000L
-
+    val canEnableLive = state.settings.brokerAuthenticated && state.settings.staticIpMatched && !state.settings.safetyHalt
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp, 14.dp, 16.dp, 32.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
+        item { SectionTitle("Settings", "Broker connection, Multify Auto, capital, permissions and diagnostics.") }
         item {
-            SectionTitle(
-                "Settings",
-                "One place for broker connection, execution mode, capital/risk, manual fallback, device permissions and diagnostics."
-            )
-        }
-
-        item {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = .26f)),
-                shape = RoundedCornerShape(20.dp)
-            ) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(11.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Default.Lock, null, tint = MaterialTheme.colorScheme.primary)
-                        Spacer(Modifier.size(9.dp))
-                        Column {
-                            Text("Broker connection", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                            Text("Groww credentials + static-IP verification", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                    }
-                    OutlinedTextField(
-                        value = apiKey,
-                        onValueChange = { apiKey = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        label = { Text("Groww TOTP token") },
-                        placeholder = { Text(if (state.credentialsConfigured) "Saved securely — enter only to replace" else "Paste Groww TOTP token") },
-                        visualTransformation = PasswordVisualTransformation(),
-                        singleLine = true
-                    )
-                    OutlinedTextField(
-                        value = totpSecret,
-                        onValueChange = { totpSecret = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        label = { Text("Groww TOTP secret") },
-                        placeholder = { Text(if (state.credentialsConfigured) "Saved securely — enter only to replace" else "Paste Groww TOTP secret") },
-                        visualTransformation = PasswordVisualTransformation(),
-                        singleLine = true
-                    )
-                    OutlinedTextField(
-                        value = staticIp,
-                        onValueChange = { staticIp = it.trim() },
-                        modifier = Modifier.fillMaxWidth(),
-                        label = { Text("Groww-whitelisted static IP") },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii)
-                    )
-                    OutlinedTextField(
-                        value = packageFilter,
-                        onValueChange = { packageFilter = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        label = { Text("Multify package filter (optional)") },
-                        singleLine = true
-                    )
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        OutlinedButton(
-                            onClick = { onSave(apiKey, totpSecret, staticIp, packageFilter, state.settings.dailyBudgetRupees.toString()) },
-                            modifier = Modifier.weight(1f)
-                        ) { Text("Save broker") }
-                        Button(
-                            onClick = onAuthenticate,
-                            enabled = state.credentialsConfigured && staticIp.isNotBlank(),
-                            modifier = Modifier.weight(1f)
-                        ) { Text("Authenticate") }
-                    }
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = .16f))
-                    KeyValueRow("Credentials", if (state.credentialsConfigured) "Configured" else "Not configured")
-                    KeyValueRow("Groww", if (state.settings.brokerAuthenticated) "Authenticated" else "Not authenticated")
-                    KeyValueRow("DDPI", if (state.settings.brokerDdpiEnabled) "Enabled" else "Not enabled")
-                    KeyValueRow("Static IP", if (state.settings.staticIpMatched) "Verified" else "Not verified")
-                    if (state.settings.accessTokenExpiry.isNotBlank()) KeyValueRow("Token expiry", state.settings.accessTokenExpiry)
-                }
-            }
-        }
-
-        item {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = .22f)),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = .16f)),
-                shape = RoundedCornerShape(20.dp)
-            ) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text("Trading controls", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                    Text("Mode, wave depth and all capital/risk limits live here only.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-
-                    Text("Execution mode", fontWeight = FontWeight.SemiBold)
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        listOf("AUTO" to "AUTO", "LONG" to "LONG_ONLY", "SHORT" to "SHORT_ONLY").forEach { (label, mode) ->
-                            if (state.settings.executionMode == mode) {
-                                Button(onClick = { onExecutionMode(mode) }, modifier = Modifier.weight(1f)) { Text(label) }
-                            } else {
-                                OutlinedButton(onClick = { onExecutionMode(mode) }, modifier = Modifier.weight(1f)) { Text(label) }
-                            }
-                        }
-                    }
-
-                    Text("Active waves · ${state.settings.waveCount} / 20")
-                    Slider(
-                        value = state.settings.waveCount.toFloat(),
-                        onValueChange = { onWaveCount(it.toInt().coerceIn(1, 20)) },
-                        valueRange = 1f..20f,
-                        steps = 18
-                    )
-
-                    Text("Initial intraday budget · ${money(budget.toDouble())}")
-                    Slider(
-                        value = budget,
-                        onValueChange = { budget = (it / 10_000f).toInt().coerceIn(1, 20) * 10_000f },
-                        valueRange = 10_000f..200_000f,
-                        steps = 18
-                    )
-
-                    Text("Wave spacing · ${String.format(Locale.US, "%.1f%%", waveSpacing)}")
-                    Slider(
-                        value = waveSpacing,
-                        onValueChange = { waveSpacing = (it * 2f).toInt() / 2f },
-                        valueRange = .5f..5f,
-                        steps = 8
-                    )
-
-                    Text("Wave 2+ eligible tranche · ${money(waveCapital.toDouble())}")
-                    Slider(
-                        value = waveCapital,
-                        onValueChange = { waveCapital = (it / 1_000f).toInt().coerceIn(1, 20) * 1_000f },
-                        valueRange = 1_000f..20_000f,
-                        steps = 18
-                    )
-
-                    Text("Maximum campaign capital · ${money(campaignCap.toDouble())}")
-                    Slider(
-                        value = campaignCap,
-                        onValueChange = { campaignCap = (it / 10_000f).toInt().coerceIn(1, 50) * 10_000f },
-                        valueRange = 10_000f..500_000f,
-                        steps = 48
-                    )
-
-                    Text("Maximum daily loss · ${money(dailyLoss.toDouble())}")
-                    Slider(
-                        value = dailyLoss,
-                        onValueChange = { dailyLoss = (it / 500f).toInt().coerceIn(1, 20) * 500f },
-                        valueRange = 500f..10_000f,
-                        steps = 18
-                    )
-
-                    Text("Maximum single-stock loss · ${money(stockLoss.toDouble())}")
-                    Slider(
-                        value = stockLoss,
-                        onValueChange = { stockLoss = (it / 250f).toInt().coerceIn(1, 20) * 250f },
-                        valueRange = 250f..5_000f,
-                        steps = 18
-                    )
-
-                    Button(
-                        onClick = {
-                            onBudgetChanged(budget.toLong())
-                            onWaveRiskChanged(
-                                waveSpacing.toDouble(),
-                                waveCapital.toLong(),
-                                state.settings.waveCount,
-                                campaignCap.toLong(),
-                                dailyLoss.toLong(),
-                                stockLoss.toLong()
-                            )
-                        },
-                        modifier = Modifier.fillMaxWidth()
-                    ) { Text("Save trading controls") }
-
-                    Text(
-                        "A wave checkpoint only makes the configured tranche eligible. LONG/SHORT/HOLD approval is still required, and campaign/loss caps remain hard boundaries.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-        }
-
-        item {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = .26f)),
-                shape = RoundedCornerShape(20.dp)
-            ) {
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha=.24f)), shape = RoundedCornerShape(20.dp)) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("Live execution", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                    KeyValueRow("Profit milestone", "₹5,000 · no profit ceiling")
-                    KeyValueRow("Live confidence gate", String.format(Locale.US, "%.0f%%", state.settings.minLiveConfidence * 100))
+                    Text("Broker connection", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    OutlinedTextField(apiKey, { apiKey = it }, Modifier.fillMaxWidth(), label = { Text("Groww TOTP token") }, visualTransformation = PasswordVisualTransformation(), singleLine = true)
+                    OutlinedTextField(totpSecret, { totpSecret = it }, Modifier.fillMaxWidth(), label = { Text("Groww TOTP secret") }, visualTransformation = PasswordVisualTransformation(), singleLine = true)
+                    OutlinedTextField(staticIp, { staticIp = it.trim() }, Modifier.fillMaxWidth(), label = { Text("Groww-whitelisted static IP") }, singleLine = true)
+                    OutlinedTextField(packageFilter, { packageFilter = it }, Modifier.fillMaxWidth(), label = { Text("Multify package filter (optional)") }, singleLine = true)
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        OutlinedButton(onClick = { onSave(apiKey, totpSecret, staticIp, packageFilter, budget.toLong().toString()) }, modifier = Modifier.weight(1f)) { Text("Save") }
+                        Button(onClick = onAuthenticate, enabled = state.credentialsConfigured, modifier = Modifier.weight(1f)) { Text("Authenticate") }
+                    }
+                    KeyValueRow("Groww", if (state.settings.brokerAuthenticated) "Authenticated" else "Not authenticated")
+                    KeyValueRow("Static IP", if (state.settings.staticIpMatched) "Verified" else "Not verified")
+                }
+            }
+        }
+        item {
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha=.22f)), shape = RoundedCornerShape(20.dp)) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text("Multify Auto", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    Text("Actual Multify calls are independent from Forecast. BUY opens the first LONG immediately; Book Profit closes it and AUTO can open the first SHORT immediately.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf("AUTO" to "AUTO", "LONG" to "LONG_ONLY", "SHORT" to "SHORT_ONLY").forEach { pair ->
+                            val label = pair.first
+                            val mode = pair.second
+                            if (state.settings.executionMode == mode) Button(onClick = { onExecutionMode(mode) }, modifier = Modifier.weight(1f)) { Text(label) }
+                            else OutlinedButton(onClick = { onExecutionMode(mode) }, modifier = Modifier.weight(1f)) { Text(label) }
+                        }
+                    }
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
-                            Text(if (live) "LIVE buy & sell enabled" else "Live execution off", fontWeight = FontWeight.SemiBold)
-                            Text(
-                                when {
-                                    state.settings.safetyHalt -> "Blocked by safety halt"
-                                    !state.settings.brokerAuthenticated -> "Authenticate Groww first"
-                                    !state.settings.staticIpMatched -> "Static IP verification required"
-                                    live -> "Real eligible Groww orders may be submitted"
-                                    else -> "Shadow/decision analysis continues"
-                                },
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
+                            Text("AUTO post-sell short", fontWeight = FontWeight.SemiBold)
+                            Text("After Multify Book Profit closes the LONG, open the first SHORT immediately.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Switch(checked = state.settings.postSellShortEnabled, onCheckedChange = onPostSellShortChanged)
+                    }
+                    Text("Intraday capital · " + money(budget.toDouble()))
+                    Slider(value = budget, onValueChange = { budget = (it / 10_000f).toInt().coerceIn(1,20) * 10_000f }, onValueChangeFinished = { onBudgetChanged(budget.toLong()) }, valueRange = 10_000f..200_000f, steps = 18)
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(if (live) "Live execution enabled" else "Live execution off", fontWeight = FontWeight.SemiBold)
+                            Text("Forecast BUY/SHORT buttons also require this explicit live gate.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         Switch(checked = live, onCheckedChange = { onLiveRequested() }, enabled = live || canEnableLive)
                     }
                     if (state.settings.safetyHalt) {
-                        Button(
-                            onClick = onResetHalt,
-                            modifier = Modifier.fillMaxWidth(),
-                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-                        ) {
-                            Icon(Icons.Default.Warning, null)
-                            Spacer(Modifier.size(8.dp))
-                            Text("Reset safety halt after broker review")
-                        }
+                        Button(onClick = onResetHalt, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) { Text("Reset safety halt after broker review") }
                     }
                 }
             }
         }
-
         item {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = .26f)),
-                shape = RoundedCornerShape(20.dp)
-            ) {
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha=.24f)), shape = RoundedCornerShape(20.dp)) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("Manual signal fallback", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                    Text("Use only when a paid Multify Equity notification was missed.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    OutlinedTextField(
-                        value = manualSymbol,
-                        onValueChange = { manualSymbol = it.uppercase(Locale.US).filter { ch -> ch.isLetterOrDigit() || ch in "&._-" } },
-                        modifier = Modifier.fillMaxWidth(),
-                        label = { Text("NSE symbol") },
-                        singleLine = true
-                    )
-                    OutlinedTextField(
-                        value = manualPrice,
-                        onValueChange = { manualPrice = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        label = { Text("Observed price (optional)") },
-                        supportingText = { Text("Audit reference only; Groww quote drives analysis.") },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                        singleLine = true
-                    )
+                    Text("Manual Multify fallback", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    OutlinedTextField(manualSymbol, { manualSymbol = it.uppercase(Locale.US).filter { ch -> ch.isLetterOrDigit() || ch in "&._-" } }, Modifier.fillMaxWidth(), label = { Text("NSE symbol") }, singleLine = true)
+                    OutlinedTextField(manualPrice, { manualPrice = it }, Modifier.fillMaxWidth(), label = { Text("Observed price (optional)") }, singleLine = true)
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Button(
-                            onClick = { onSubmitManualSignal(manualSymbol, "BUY", manualPrice) },
-                            enabled = manualSymbol.isNotBlank(),
-                            modifier = Modifier.weight(1f)
-                        ) { Text("BUY") }
-                        OutlinedButton(
-                            onClick = { onSubmitManualSignal(manualSymbol, "BOOK_PROFIT", manualPrice) },
-                            enabled = manualSymbol.isNotBlank(),
-                            modifier = Modifier.weight(1f)
-                        ) { Text("BOOK PROFIT") }
+                        Button(onClick = { onSubmitManualSignal(manualSymbol, "BUY", manualPrice) }, enabled = manualSymbol.isNotBlank(), modifier = Modifier.weight(1f)) { Text("BUY") }
+                        OutlinedButton(onClick = { onSubmitManualSignal(manualSymbol, "BOOK_PROFIT", manualPrice) }, enabled = manualSymbol.isNotBlank(), modifier = Modifier.weight(1f)) { Text("BOOK PROFIT") }
                     }
                 }
             }
         }
-
         item {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = .26f)),
-                shape = RoundedCornerShape(20.dp)
-            ) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface), shape = RoundedCornerShape(20.dp)) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("Device & runtime", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                    KeyValueRow("Device", deviceName)
                     KeyValueRow("Notification access", if (notificationAccess) "Enabled" else "Required")
                     KeyValueRow("Background battery", if (batteryUnrestricted) "Unrestricted" else "Optimized")
-                    KeyValueRow("Static IP", if (state.settings.staticIpMatched) "Verified" else "Not verified")
-                    OutlinedButton(onClick = { openNotificationAccessSettings(context) }, modifier = Modifier.fillMaxWidth()) {
-                        Icon(Icons.Default.NotificationsActive, null)
-                        Spacer(Modifier.size(8.dp))
-                        Text("Notification access")
-                    }
-                    Button(onClick = { requestUnrestrictedBattery(context) }, modifier = Modifier.fillMaxWidth()) {
-                        Icon(Icons.Default.Bolt, null)
-                        Spacer(Modifier.size(8.dp))
-                        Text(if (batteryUnrestricted) "Background unrestricted" else "Allow unrestricted background")
-                    }
-                    if (isVivo) {
-                        OutlinedButton(onClick = { openAppDetails(context) }, modifier = Modifier.fillMaxWidth()) {
-                            Icon(Icons.Default.Settings, null)
-                            Spacer(Modifier.size(8.dp))
-                            Text("Vivo app settings / Auto-start")
-                        }
-                    }
+                    OutlinedButton(onClick = { openNotificationAccessSettings(context) }, modifier = Modifier.fillMaxWidth()) { Text("Notification access") }
+                    Button(onClick = { requestUnrestrictedBattery(context) }, modifier = Modifier.fillMaxWidth()) { Text("Allow unrestricted background") }
                 }
             }
         }
-
         item {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .45f)),
-                shape = RoundedCornerShape(20.dp)
-            ) {
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha=.45f)), shape = RoundedCornerShape(20.dp)) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("Diagnostics", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                     KeyValueRow("Version", BuildConfig.VERSION_NAME)
                     KeyValueRow("Build", BuildConfig.VERSION_CODE.toString())
                     KeyValueRow("Package", BuildConfig.APPLICATION_ID)
-                    Text(
-                        "Exports include signals, decisions, app-owned trades, wave averages, learning calls, forecasts, Multify DNA research, strategy snapshots, risk/system events and symbol-master status. Credentials and access tokens are excluded.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Button(onClick = onExportLogs, modifier = Modifier.fillMaxWidth()) {
-                        Icon(Icons.Default.FileDownload, null)
-                        Spacer(Modifier.size(8.dp))
-                        Text("Export complete logs")
-                    }
+                    Button(onClick = onExportLogs, modifier = Modifier.fillMaxWidth()) { Text("Export complete logs") }
                 }
             }
         }
