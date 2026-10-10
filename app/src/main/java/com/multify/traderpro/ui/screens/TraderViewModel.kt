@@ -224,7 +224,19 @@ class TraderViewModel @Inject constructor(
             remote.value = remote.value.copy(loading = true, error = null, message = null)
             runCatching { repository.generateDailyForecasts(force = true) }
                 .onSuccess { rows ->
-                    remote.value = remote.value.copy(loading = false, message = "Forecast refreshed · ${rows.size} candidates", error = null)
+                    remote.value = remote.value.copy(loading = false, message = "Forecast scanner refreshed · ${rows.count { it.bias == "LONG" }} LONG / ${rows.count { it.bias == "SHORT" }} SHORT", error = null)
+                    refresh(silent = true)
+                }
+                .onFailure { remote.value = remote.value.copy(loading = false, error = it.userMessage()) }
+        }
+    }
+
+    fun executeForecast(symbol: String, side: String) {
+        viewModelScope.launch {
+            remote.value = remote.value.copy(loading = true, error = null, message = null)
+            runCatching { repository.executeForecast(symbol, side) }
+                .onSuccess { result ->
+                    remote.value = remote.value.copy(loading = false, message = result, error = null)
                     refresh(silent = true)
                 }
                 .onFailure { remote.value = remote.value.copy(loading = false, error = it.userMessage()) }
