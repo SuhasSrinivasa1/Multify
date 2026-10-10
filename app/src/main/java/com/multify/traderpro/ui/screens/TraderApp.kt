@@ -329,6 +329,18 @@ private fun ExecutionScreen(
                         KeyValueRow("Static IP", if (state.settings.staticIpMatched) "Verified" else "Not verified")
                         KeyValueRow("Listener", dashboard.health.listener)
                         KeyValueRow("Broker", dashboard.health.broker)
+                        KeyValueRow(
+                            "App order dispatch",
+                            if (dashboard.health.lastOrderDispatchPrepMicros > 0L)
+                                String.format(Locale.US, "%.1f ms · target <100 ms", dashboard.health.lastOrderDispatchPrepMicros / 1000.0)
+                            else "Waiting for first order"
+                        )
+                        KeyValueRow(
+                            "Broker ACK",
+                            if (dashboard.health.lastBrokerAckLatencyMs > 0L)
+                                dashboard.health.lastBrokerAckLatencyMs.toString() + " ms · external"
+                            else "Waiting for first order"
+                        )
                         KeyValueRow("Market data", dashboard.health.marketData)
                         KeyValueRow("Symbol master", dashboard.health.symbolMaster)
                     }
