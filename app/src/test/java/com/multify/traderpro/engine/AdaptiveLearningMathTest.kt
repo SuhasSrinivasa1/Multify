@@ -4,6 +4,15 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class AdaptiveLearningMathTest {
+    @Test fun realizedReturnPrefersRecordedMultifyReturnAndFallsBackToPrices() {
+        assertEquals(-0.90, AdaptiveLearningMath.realizedReturnPct(-0.90, 440.95, 437.0)!!, 0.0001)
+        assertEquals(1.0, AdaptiveLearningMath.realizedReturnPct(null, 100.0, 101.0)!!, 0.0001)
+    }
+
+    @Test fun rollingMeanIncludesLosses() {
+        assertEquals(0.25, AdaptiveLearningMath.rollingMean(listOf(-1.0, 0.0, 1.0, 1.0), 0.0), 0.0001)
+    }
+
     @Test fun rollingMeanUsesObservedLongValues() {
         assertEquals(2.0, AdaptiveLearningMath.rollingMean(listOf(1.0, 2.0, 3.0), 0.0), 0.0001)
         assertEquals(4.0, AdaptiveLearningMath.rollingMean(emptyList(), 4.0), 0.0001)
