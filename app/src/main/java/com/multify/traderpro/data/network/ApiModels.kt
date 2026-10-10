@@ -8,37 +8,26 @@ data class BrokerStatusDto(
 )
 
 data class RiskStatusDto(
-    val maxDailyLoss: Double = 2_500.0,
-    val softDailyLoss: Double = 1_500.0,
-    val profitMilestone: Double = 5_000.0,
-    val riskPerTrade: Double = 0.0,
     val maxExposure: Double = 0.0,
-    val riskMode: String = "NORMAL",
-    val dailyPeakPnl: Double = 0.0
+    val riskMode: String = "NORMAL"
 )
 
 data class DaySummaryDto(
-    val realisedPnl: Double = 0.0,
     val unrealisedPnl: Double = 0.0,
-    val trades: Int = 0,
-    val wins: Int = 0,
-    val losses: Int = 0,
-    val grossExposure: Double = 0.0
-) {
-    val winRate: Double get() = if (wins + losses == 0) 0.0 else wins.toDouble() / (wins + losses).toDouble() * 100.0
-    val totalPnl: Double get() = realisedPnl + unrealisedPnl
-}
+    val grossExposure: Double = 0.0,
+    val openPositions: Int = 0
+)
 
 data class PositionDto(
     val symbol: String = "",
-    val side: String = "FLAT",
     val quantity: Int = 0,
     val averagePrice: Double = 0.0,
     val ltp: Double? = null,
     val pnl: Double = 0.0,
     val stopPrice: Double? = null,
     val targetPrice: Double? = null,
-    val strategy: String? = null
+    val strategy: String? = null,
+    val product: String = "CNC"
 )
 
 data class RecentDecisionDto(
@@ -52,7 +41,6 @@ data class RecentDecisionDto(
 
 data class DashboardDto(
     val serviceStatus: String = "device",
-    val mode: String = "paper",
     val armed: Boolean = false,
     val halted: Boolean = false,
     val marketSession: String = "UNKNOWN",
@@ -60,51 +48,16 @@ data class DashboardDto(
     val broker: BrokerStatusDto = BrokerStatusDto(),
     val risk: RiskStatusDto = RiskStatusDto(),
     val summary: DaySummaryDto = DaySummaryDto(),
-    val fastTrackSummary: DaySummaryDto = DaySummaryDto(),
-    val combinedAppPnl: Double = 0.0,
-    val shadowQualificationDays: Int = 0,
     val learning: LearningStatsDto = LearningStatsDto(),
     val forecasts: List<ForecastDto> = emptyList(),
     val forecastChampions: List<ForecastChampionDto> = emptyList(),
     val research: ResearchDto = ResearchDto(),
-    val strategyInsights: List<StrategyInsightDto> = emptyList(),
-    val waveStats: List<WaveStatDto> = emptyList(),
-    val waveSignals: List<WaveSignalDto> = emptyList(),
-    val adaptiveWaves: List<AdaptiveWaveDto> = emptyList(),
     val health: EngineHealthDto = EngineHealthDto(),
     val positions: List<PositionDto> = emptyList(),
     val recentDecisions: List<RecentDecisionDto> = emptyList()
 )
 
-
-data class WaveStatDto(
-    val wave: Int = 1,
-    val averageUpPct: Double? = null,
-    val averageDownPct: Double? = null,
-    val upSamples: Int = 0,
-    val downSamples: Int = 0,
-    val upSource: String = "LIVE_PIVOT",
-    val downSource: String = "LIVE_PIVOT"
-)
-
-data class WaveSignalDto(
-    val symbol: String = "",
-    val currentSide: String = "FLAT",
-    val nextWave: Int = 2,
-    val triggerDistancePct: Double = 2.0,
-    val greenSide: String = "HOLD",
-    val longProbability: Double = 0.5,
-    val shortProbability: Double = 0.5,
-    val executionMode: String = "PREVIEW_ONLY",
-    val focusState: String = "ACTIVE",
-    val firstWaveMode: String = "AUTO",
-    val learnedLongAveragePct: Double = 0.0,
-    val learnedShortRetracementPct: Double = 100.0,
-    val reason: String = ""
-)
-
 data class LearningStatsDto(
-    val rollingCalendarDays: Int = 30,
     val rollingTradingDays: Int = 0,
     val rollingCalls: Int = 0,
     val longAveragePct: Double = 0.0,
@@ -114,22 +67,16 @@ data class LearningStatsDto(
     val longP25Pct: Double = 0.0,
     val longP75Pct: Double = 0.0,
     val seededThreeMonthAveragePct: Double = 0.0,
-    val liveCompletedCalls: Int = 0,
-    val shortObservedCalls: Int = 0,
-    val shortRetracementFraction: Double = 1.0,
-    val shortRetracementPct: Double = 100.0,
-    val shortAverageDownPct: Double = 0.0
+    val liveCompletedCalls: Int = 0
 )
 
 data class ForecastDto(
     val rank: Int = 0,
     val symbol: String = "",
-    val bias: String = "LONG",
     val confidence: Double = 0.0,
     val score: Double = 0.0,
     val reason: String = "",
     val multifyMatched: Boolean = false,
-    val multifyDirectionMatched: Boolean = false,
     val entryPrice: Double = 0.0,
     val targetPrice: Double = 0.0,
     val targetPct: Double = 0.0,
@@ -144,7 +91,6 @@ data class ForecastDto(
 )
 
 data class ForecastChampionDto(
-    val side: String = "LONG",
     val marketRegime: String = "UNKNOWN",
     val regime: String = "UNKNOWN",
     val strategy: String = "",
@@ -160,44 +106,6 @@ data class ResearchDto(
     val date: String = "",
     val title: String = "No research report yet",
     val summary: String = ""
-)
-
-
-data class StrategyInsightDto(
-    val atMs: Long = 0L,
-    val symbol: String = "",
-    val side: String = "LONG",
-    val strategy: String = "",
-    val regime: String = "",
-    val confidence: Double = 0.0,
-    val score: Double = 0.0,
-    val ltp: Double = 0.0,
-    val rsi: Double? = null,
-    val rvol: Double? = null,
-    val orderBookImbalance: Double? = null,
-    val votes: String = ""
-)
-
-
-data class AdaptiveWaveDto(
-    val symbol: String = "",
-    val waveNumber: Int = 0,
-    val triggerPct: Double = 0.0,
-    val currentSide: String = "NEUTRAL",
-    val decision: String = "HOLD",
-    val longProbability: Double = 0.5,
-    val shortProbability: Double = 0.5,
-    val evLongRupees: Double = 0.0,
-    val evShortRupees: Double = 0.0,
-    val confidence: Double = 0.0,
-    val regime: String = "UNKNOWN",
-    val reasons: String = "",
-    val alternativeRejected: String = "",
-    val waveCapitalRupees: Double = 0.0,
-    val campaignCapitalUsed: Double = 0.0,
-    val campaignCapitalRemaining: Double = 0.0,
-    val dataAgeMs: Long = Long.MAX_VALUE,
-    val actualOrderSubmitted: Boolean = false
 )
 
 data class EngineHealthDto(
