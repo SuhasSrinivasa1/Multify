@@ -516,6 +516,61 @@ class TradingRepository @Inject constructor(
         return rows.map { it.toForecastDto() }
     }
 
+    suspend fun executeForecast(symbol: String, side: String): String {
+        val normalizedSide = side.uppercase(Locale.US)
+        require(normalizedSide in setOf("LONG", "SHORT")) { "Choose LONG or SHORT" }
+        val now = ZonedDateTime.now(INDIA)
+        require(now.dayOfWeek.value < 6 && now.toLocalTime() >= LocalTime.of(9, 15) && now.toLocalTime() < LocalTime.of(15, 0)) {
+            "Forecast orders are intraday only between 09:15 and 15:00 IST"
+        }
+        val settings = preferences.settings.first()
+        require(settings.liveExecutionEffective) { "Enable live execution before placing a Forecast order" }
+        val token = ensureToken() ?: error("Authenticate Groww first")
+        val row = learningDao.intradayForecastsForSide(now.toLocalDate().toString(), normalizedSide)
+            .firstOrNull { it.symbol.equals(symbol, true) }
+            ?: error("No active " + normalizedSide + " recommendation for " + symbol)
+        val engine = if (normalizedSide == "LONG") ENGINE_FORECAST_LONG else ENGINE_FORECAST_SHORT
+        if (managedDao.openPosition(engine, row.symbol) != null) return "Forecast " + normalizedSide + " already open for " + row.symbol
+        preLiveGuard(settings)
+        val risk = liveRiskState(token, settings)
+        require(risk.allowNewRisk) { risk.reason }
+        assertNoExternalMisConflict(token, row.symbol)
+
+        val quote = apiFactory.groww.quote(bearer(token), tradingSymbol = row.symbol).requirePayload("Quote " + row.symbol)
+        val ltp = quote.lastPrice ?: error("Groww quote has no LTP")
+        val perTradeBudget = min(50_000.0, max(10_000.0, settings.dailyBudgetRupees.toDouble() / 10.0))
+        val qty = floor(perTradeBudget / ltp).toInt()
+        require(qty > 0) { "Forecast budget cannot fund one share" }
+        val tx = if (normalizedSide == "LONG") "BUY" else "SELL"
+        val ref = stableRef(if (normalizedSide == "LONG") "FCL" else "FCS", row.id.toString() + "-" + row.symbol)
+        val order = placeMarket(token, row.symbol, tx, qty, "MIS", ref)
+        val filled = order.filledQuantity?.takeIf { it > 0 } ?: qty
+        val entry = order.averageFillPrice?.takeIf { it > 0 } ?: ltp
+        val target = if (normalizedSide == "LONG") entry * (1.0 + row.targetPct / 100.0)
+            else max(.05, entry * (1.0 - row.targetPct / 100.0))
+        val stop = if (normalizedSide == "LONG") max(.05, entry * .99) else entry * 1.01
+        managedDao.insertPosition(
+            ManagedPositionEntity(
+                engine = engine, symbol = row.symbol, product = "MIS", side = normalizedSide, quantity = filled,
+                entryPrice = entry, stopPrice = stop, targetPrice = target,
+                strategy = "Forecast " + normalizedSide + " · " + row.strategy,
+                regime = row.regime, confidence = row.confidence, sourceEventId = null,
+                openOrderId = order.growwOrderId, openReferenceId = ref, openedAtMs = System.currentTimeMillis(),
+                lastPrice = entry, maxFavourablePrice = entry, maxAdversePrice = entry, lastEvaluatedAtMs = System.currentTimeMillis(),
+                anchorPrice = entry, capitalDeployed = entry * filled, campaignBudget = perTradeBudget
+            )
+        )
+        val p = managedDao.openPosition(engine, row.symbol) ?: error("Forecast position ledger insert failed")
+        val smart = protectManagedPosition(token, p)
+        managedDao.updatePosition(p.copy(smartOrderId = smart))
+        auditLogger.log("FORECAST", "ORDER_OPENED", mapOf(
+            "symbol" to row.symbol, "side" to normalizedSide, "qty" to filled, "entry" to entry,
+            "trail_arm_pct" to row.targetPct, "strategy" to row.strategy, "regime" to row.regime
+        ))
+        return normalizedSide + " " + row.symbol + " opened · qty " + filled + " @ ₹" + fmt(entry) +
+            " · trail arms at " + fmt(row.targetPct) + "%"
+    }
+
     suspend fun monitorForecastOutcomes(): Int {
         val nowMs = System.currentTimeMillis()
         if (nowMs - lastForecastOutcomeMonitorAtMs < 45_000L) return learningDao.activeIntradayForecasts().size
@@ -2330,7 +2385,7 @@ class TradingRepository @Inject constructor(
         val opposite = analyze(updated.symbol, token, longSide = updated.side == "SHORT", signal = synthetic, includeEventPrior = false)
         val atr = same.features.atr14 ?: max(ltp * .004, .05)
         val targetHit = if (updated.side == "LONG") ltp >= updated.targetPrice else ltp <= updated.targetPrice
-        if (targetHit) {
+        if (targetHit && !trailArmEngine) {
             if (same.confidence >= RUNNER_CONFIDENCE && same.directionalScore >= .08) {
                 val newStop = if (updated.side == "LONG") max(updated.stopPrice, max(updated.entryPrice + atr * .20, ltp - atr * .85)) else min(updated.stopPrice, min(updated.entryPrice - atr * .20, ltp + atr * .85))
                 val newTarget = if (updated.side == "LONG") ltp + atr * 1.25 else max(.05, ltp - atr * 1.25)
@@ -2438,22 +2493,27 @@ class TradingRepository @Inject constructor(
             closeManaged(token, updated, ltp, "PROTECTIVE_STOP")
             return
         }
-        val tradingDecisionsEnabled = updated.regime != REGIME_RECOVERY_HOLD && updated.regime != REGIME_SECONDARY_PREVIEW
-        // Wave progression is owned exclusively by the persistent v4.4 pivot campaign engine.
-        // Position size is never increased at a wave boundary.
-        if (System.currentTimeMillis() - updated.openedAtMs < 75_000L) return
+        val trailArmEngine = updated.engine in setOf(ENGINE_INTRADAY, ENGINE_FORECAST_LONG, ENGINE_FORECAST_SHORT)
+        val monitorWarmupMs = if (trailArmEngine) 5_000L else 75_000L
+        if (System.currentTimeMillis() - updated.openedAtMs < monitorWarmupMs) return
         val synthetic = ParsedSignal(SignalType.TRADE_RELEASE, symbol = updated.symbol, rawText = "live-monitor", confidence = 1.0)
         val same = analyze(updated.symbol, token, longSide = updated.side == "LONG", signal = synthetic)
         val opposite = analyze(updated.symbol, token, longSide = updated.side == "SHORT", signal = synthetic)
         val atr = same.features.atr14 ?: max(ltp * .004, .05)
-        // Learned wave average is the arming threshold. Once armed, the stop only ratchets favourably.
-        val waveNumber = (updated.addCount + 1).coerceIn(1, 10)
-        val waveStat = waveStats().firstOrNull { it.wave == waveNumber }
-        val learnedWavePct = if (updated.side == "LONG") waveStat?.averageUpPct else waveStat?.averageDownPct
+        // The first LONG/SHORT average is the only profit-trailing arm threshold.
+        val learnedNow = learningStats()
+        val frozenForecastPct = updated.targetPrice?.let { target ->
+            if (updated.entryPrice > 0.0) kotlin.math.abs(target / updated.entryPrice - 1.0) * 100.0 else null
+        }
+        val learnedArmPct = when {
+            updated.engine == ENGINE_FORECAST_LONG || updated.engine == ENGINE_FORECAST_SHORT -> frozenForecastPct
+            updated.side == "LONG" -> learnedNow.longAveragePct
+            else -> learnedNow.shortAverageDownPct
+        }
         val favourableAtr = if (updated.side == "LONG") (ltp - updated.entryPrice) / atr else (updated.entryPrice - ltp) / atr
         val alreadyArmed = LearnedTrailingPolicy.isArmed(updated.side, updated.stopPrice, updated.entryPrice)
         val thresholdPct = LearnedTrailingPolicy.thresholdPct(
-            learnedPct = learnedWavePct,
+            learnedPct = learnedArmPct,
             entryPrice = updated.entryPrice,
             atr = atr
         )
@@ -2468,12 +2528,12 @@ class TradingRepository @Inject constructor(
                 updated = updated.copy(stopPrice = candidateStop, lastEvaluatedAtMs = System.currentTimeMillis())
                 managedDao.updatePosition(updated)
                 modifyOcoIfPossible(token, updated)
-                auditLogger.log("TRAILING_STOP", if (alreadyArmed) "WAVE_AVERAGE_RATCHET" else "WAVE_AVERAGE_ARMED", mapOf(
-                    "symbol" to updated.symbol, "side" to updated.side, "wave" to waveNumber,
+                auditLogger.log("TRAILING_STOP", if (alreadyArmed) "AVERAGE_RATCHET" else "AVERAGE_ARMED", mapOf(
+                    "symbol" to updated.symbol, "side" to updated.side,
                     "ltp" to ltp, "atr" to atr, "new_stop" to candidateStop,
-                    "favourable_atr" to favourableAtr, "learned_average_pct" to learnedWavePct,
+                    "favourable_atr" to favourableAtr, "learned_average_pct" to learnedArmPct,
                     "effective_arm_pct" to thresholdPct,
-                    "source" to if (learnedWavePct != null) "LEARNED_WAVE_AVERAGE" else "ATR_FALLBACK"
+                    "source" to if (learnedArmPct != null) "FIRST_LONG_SHORT_AVERAGE" else "ATR_FALLBACK"
                 ))
             }
         }
@@ -2720,7 +2780,7 @@ class TradingRepository @Inject constructor(
     }
 
     private suspend fun liveRiskState(token: String, settings: AppSettings): RiskState {
-        val live = managedSnapshot(token, setOf(ENGINE_INTRADAY, ENGINE_FAST_TRACK, ENGINE_FAST_SHORT))
+        val live = managedSnapshot(token, setOf(ENGINE_INTRADAY, ENGINE_FAST_TRACK, ENGINE_FAST_SHORT, ENGINE_FORECAST_LONG, ENGINE_FORECAST_SHORT))
         val total = live.totalPnl
         preferences.updateLivePeakPnl(total)
         val peak = preferences.settings.first().livePeakPnl
@@ -2772,9 +2832,19 @@ class TradingRepository @Inject constructor(
         error("Groww order $id was not confirmed filled; no duplicate retry was attempted")
     }
 
+    private fun brokerProtectionTarget(position: ManagedPositionEntity): Double {
+        val armTarget = position.targetPrice ?: return position.entryPrice
+        val trailArmEngine = position.engine in setOf(ENGINE_INTRADAY, ENGINE_FORECAST_LONG, ENGINE_FORECAST_SHORT)
+        if (!trailArmEngine) return armTarget
+        val armDistance = kotlin.math.abs(armTarget / position.entryPrice - 1.0)
+        val failSafeDistance = max(0.06, armDistance * 3.0)
+        return if (position.side == "LONG") position.entryPrice * (1.0 + failSafeDistance)
+            else max(.05, position.entryPrice * (1.0 - failSafeDistance))
+    }
+
     private suspend fun protectManagedPosition(token: String, position: ManagedPositionEntity): String {
         val stop = position.stopPrice ?: error("MIS protection requires stop")
-        val target = position.targetPrice ?: error("MIS protection requires target")
+        val target = brokerProtectionTarget(position)
         val expected = managedDao.openPositionsForProduct(position.symbol, "MIS").sumOf { signedQty(it) }
         val broker = waitForMisPositionQty(token, position.symbol, expected)
         require(broker.quantity == expected) { "External/manual MIS quantity detected for ${position.symbol}; expected app net $expected, broker net ${broker.quantity}" }
@@ -2801,7 +2871,7 @@ class TradingRepository @Inject constructor(
     private suspend fun modifyOcoIfPossible(token: String, position: ManagedPositionEntity) {
         val id = position.smartOrderId ?: return
         val stop = position.stopPrice ?: return
-        val target = position.targetPrice ?: return
+        val target = brokerProtectionTarget(position)
         runCatching {
             apiFactory.groww.modifyOco(
                 bearer(token), id,
