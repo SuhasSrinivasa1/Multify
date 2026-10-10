@@ -62,6 +62,43 @@ interface LearningDao {
     @Query("UPDATE forecasts SET multifyMatched=1, multifyDirectionMatched=CASE WHEN bias=:bias THEN 1 ELSE multifyDirectionMatched END WHERE forecastDate=:date AND symbol=:symbol")
     suspend fun markForecastMatch(date: String, symbol: String, bias: String)
 
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertIntradayForecast(item: IntradayForecastEntity): Long
+
+    @Update
+    suspend fun updateIntradayForecast(item: IntradayForecastEntity)
+
+    @Query("SELECT * FROM intraday_forecasts WHERE forecastDate=:date ORDER BY side ASC, rank ASC")
+    suspend fun intradayForecastsForDate(date: String): List<IntradayForecastEntity>
+
+    @Query("SELECT * FROM intraday_forecasts WHERE forecastDate=:date AND side=:side ORDER BY rank ASC")
+    suspend fun intradayForecastsForSide(date: String, side: String): List<IntradayForecastEntity>
+
+    @Query("SELECT * FROM intraday_forecasts WHERE status='ACTIVE' ORDER BY generatedAtMs ASC")
+    suspend fun activeIntradayForecasts(): List<IntradayForecastEntity>
+
+    @Query("SELECT * FROM intraday_forecasts ORDER BY generatedAtMs ASC")
+    suspend fun allIntradayForecasts(): List<IntradayForecastEntity>
+
+    @Query("SELECT * FROM intraday_forecasts WHERE notified=0 AND forecastDate=:date ORDER BY generatedAtMs ASC")
+    suspend fun pendingForecastNotifications(date: String): List<IntradayForecastEntity>
+
+    @Query("UPDATE intraday_forecasts SET notified=1 WHERE id=:id")
+    suspend fun markForecastNotified(id: Long)
+
+    @Query("UPDATE intraday_forecasts SET multifyMatched=1 WHERE forecastDate=:date AND symbol=:symbol")
+    suspend fun markIntradayForecastMatch(date: String, symbol: String)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertForecastChampion(item: ForecastChampionEntity)
+
+    @Query("SELECT * FROM forecast_champions ORDER BY frozen DESC, side ASC, wins DESC, sampleCount DESC")
+    suspend fun allForecastChampions(): List<ForecastChampionEntity>
+
+    @Query("SELECT * FROM forecast_champions WHERE key=:key LIMIT 1")
+    suspend fun forecastChampion(key: String): ForecastChampionEntity?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertResearchReport(item: ResearchReportEntity): Long
 

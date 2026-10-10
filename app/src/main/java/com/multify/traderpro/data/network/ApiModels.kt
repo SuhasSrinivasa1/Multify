@@ -65,6 +65,7 @@ data class DashboardDto(
     val shadowQualificationDays: Int = 0,
     val learning: LearningStatsDto = LearningStatsDto(),
     val forecasts: List<ForecastDto> = emptyList(),
+    val forecastChampions: List<ForecastChampionDto> = emptyList(),
     val research: ResearchDto = ResearchDto(),
     val strategyInsights: List<StrategyInsightDto> = emptyList(),
     val waveStats: List<WaveStatDto> = emptyList(),
@@ -116,7 +117,8 @@ data class LearningStatsDto(
     val liveCompletedCalls: Int = 0,
     val shortObservedCalls: Int = 0,
     val shortRetracementFraction: Double = 1.0,
-    val shortRetracementPct: Double = 100.0
+    val shortRetracementPct: Double = 100.0,
+    val shortAverageDownPct: Double = 0.0
 )
 
 data class ForecastDto(
@@ -127,7 +129,31 @@ data class ForecastDto(
     val score: Double = 0.0,
     val reason: String = "",
     val multifyMatched: Boolean = false,
-    val multifyDirectionMatched: Boolean = false
+    val multifyDirectionMatched: Boolean = false,
+    val entryPrice: Double = 0.0,
+    val targetPrice: Double = 0.0,
+    val targetPct: Double = 0.0,
+    val status: String = "ACTIVE",
+    val strategy: String = "",
+    val regime: String = "UNKNOWN",
+    val marketRegime: String = "UNKNOWN",
+    val championTag: String = "",
+    val maxFavourablePct: Double = 0.0,
+    val maxAdversePct: Double = 0.0,
+    val generatedAtMs: Long = 0L
+)
+
+data class ForecastChampionDto(
+    val side: String = "LONG",
+    val marketRegime: String = "UNKNOWN",
+    val regime: String = "UNKNOWN",
+    val strategy: String = "",
+    val wins: Int = 0,
+    val losses: Int = 0,
+    val sampleCount: Int = 0,
+    val distinctDays: Int = 0,
+    val distinctSymbols: Int = 0,
+    val frozen: Boolean = false
 )
 
 data class ResearchDto(

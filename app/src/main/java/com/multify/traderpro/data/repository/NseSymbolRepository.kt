@@ -26,6 +26,11 @@ class NseSymbolRepository @Inject constructor(
         updatedAtMs = prefs.getLong(KEY_UPDATED, 0L)
     )
 
+    fun symbols(): List<String> {
+        val packed = prefs.getString(KEY_SYMBOLS, "").orEmpty()
+        return if (packed.isBlank()) emptyList() else packed.split('|').filter { it.isNotBlank() }
+    }
+
     fun isKnown(symbol: String): Boolean {
         val packed = prefs.getString(KEY_SYMBOLS, "").orEmpty()
         if (packed.isBlank()) return true

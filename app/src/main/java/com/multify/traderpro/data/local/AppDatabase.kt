@@ -16,13 +16,15 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         PriceObservationEntity::class,
         StrategySnapshotEntity::class,
         ForecastEntity::class,
+        IntradayForecastEntity::class,
+        ForecastChampionEntity::class,
         ResearchReportEntity::class,
         WaveCampaignEntity::class,
         WaveObservationEntity::class,
         WaveDecisionEntity::class,
         WaveOutcomeEntity::class
     ],
-    version = 6,
+    version = 7,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -353,6 +355,58 @@ abstract class AppDatabase : RoomDatabase() {
                 )""")
                 db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_wave_outcomes_decisionId ON wave_outcomes(decisionId)")
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_wave_outcomes_symbol_lastObservedAtMs ON wave_outcomes(symbol, lastObservedAtMs)")
+            }
+        }
+
+        val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("""CREATE TABLE IF NOT EXISTS intraday_forecasts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    forecastDate TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    rank INTEGER NOT NULL,
+                    symbol TEXT NOT NULL,
+                    entryPrice REAL NOT NULL,
+                    targetPct REAL NOT NULL,
+                    targetPrice REAL NOT NULL,
+                    confidence REAL NOT NULL,
+                    score REAL NOT NULL,
+                    strategy TEXT NOT NULL,
+                    regime TEXT NOT NULL,
+                    marketRegime TEXT NOT NULL,
+                    sectorRegime TEXT NOT NULL,
+                    championKey TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    generatedAtMs INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    targetHitAtMs INTEGER,
+                    lastPrice REAL NOT NULL,
+                    maxFavourablePct REAL NOT NULL,
+                    maxAdversePct REAL NOT NULL,
+                    lastObservedAtMs INTEGER NOT NULL,
+                    notified INTEGER NOT NULL,
+                    multifyMatched INTEGER NOT NULL
+                )""")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_intraday_forecasts_forecastDate_side_rank ON intraday_forecasts(forecastDate, side, rank)")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_intraday_forecasts_forecastDate_side_symbol ON intraday_forecasts(forecastDate, side, symbol)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_intraday_forecasts_status_forecastDate ON intraday_forecasts(status, forecastDate)")
+                db.execSQL("""CREATE TABLE IF NOT EXISTS forecast_champions (
+                    key TEXT PRIMARY KEY NOT NULL,
+                    side TEXT NOT NULL,
+                    marketRegime TEXT NOT NULL,
+                    sectorRegime TEXT NOT NULL,
+                    regime TEXT NOT NULL,
+                    strategy TEXT NOT NULL,
+                    wins INTEGER NOT NULL,
+                    losses INTEGER NOT NULL,
+                    sampleCount INTEGER NOT NULL,
+                    distinctDays INTEGER NOT NULL,
+                    distinctSymbols INTEGER NOT NULL,
+                    frozen INTEGER NOT NULL,
+                    firstSeenAtMs INTEGER NOT NULL,
+                    lastUpdatedAtMs INTEGER NOT NULL
+                )""")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_forecast_champions_side_marketRegime_regime_strategy ON forecast_champions(side, marketRegime, regime, strategy)")
             }
         }
 
