@@ -392,48 +392,97 @@ class TradingRepository @Inject constructor(
 
     suspend fun generateDailyForecasts(force: Boolean = false): List<ForecastDto> {
         ensureHistoricalSeed()
-        val today = LocalDate.now(INDIA).toString()
-        if (!force) {
-            val existing = learningDao.forecastsForDate(today)
-            if (existing.size >= 5) return existing.map { it.toDto() }
+        val now = ZonedDateTime.now(INDIA)
+        val today = now.toLocalDate().toString()
+        val existingAll = learningDao.intradayForecastsForDate(today)
+        if (now.dayOfWeek.value >= 6 || now.toLocalTime() < LocalTime.of(9, 15) || now.toLocalTime() > LocalTime.of(15, 0)) {
+            return existingAll.map { it.toForecastDto() }
         }
-        val token = ensureToken() ?: return learningDao.forecastsForDate(today).map { it.toDto() }
+        val nowMs = System.currentTimeMillis()
+        if (!force && nowMs - lastForecastScanAtMs < FORECAST_SCAN_INTERVAL_MS) return existingAll.map { it.toForecastDto() }
+        val token = ensureToken() ?: return existingAll.map { it.toForecastDto() }
+        lastForecastScanAtMs = nowMs
+
         val calls = learningDao.allCalls().filter { it.action.equals("BUY", true) }
-        val dates = calls.map { it.callDate }.distinct().sortedDescending().take(30).toSet()
-        val rolling = calls.filter { it.callDate in dates }
-        val candidates = rolling.groupBy { it.symbol }
-            .map { (symbol, xs) -> Triple(symbol, xs.size, xs.maxOf { it.callDate }) }
-            .sortedWith(compareByDescending<Triple<String,Int,String>> { it.second }.thenByDescending { it.third })
-            .take(18)
-        val scored = mutableListOf<ForecastEntity>()
-        for ((symbol, count, _) in candidates) {
-            val eval = runCatching { forecastEvaluation(symbol, token) }.getOrNull() ?: continue
-            val chosen = if (eval.first.confidence >= eval.second.confidence) eval.first else eval.second
-            val frequencyBonus = min(.08, count * .008)
-            val score = (chosen.confidence + frequencyBonus).coerceAtMost(.99)
-            scored += ForecastEntity(
-                forecastDate = today, rank = 0, symbol = symbol, bias = chosen.side,
-                confidence = chosen.confidence, score = score,
-                reason = "${chosen.strategy} · ${chosen.regime} · ${chosen.reason}", generatedAtMs = System.currentTimeMillis()
-            )
+        val recentDates = calls.map { it.callDate }.distinct().sortedDescending().take(30).toSet()
+        val rolling = calls.filter { it.callDate in recentDates }
+        val frequency = rolling.groupingBy { it.symbol }.eachCount()
+        val recentSymbols = frequency.entries.sortedByDescending { it.value }.take(10).map { it.key }
+        val dnaSymbols = MultifyReverseEngineering.positiveCases.map { it.symbol }
+        val master = nseSymbols.symbols()
+        val slot = (now.hour * 60 + now.minute) / 20
+        val rotating = if (master.isEmpty()) emptyList() else {
+            val seed = kotlin.math.abs(today.hashCode() + slot * 977)
+            (0 until min(18, master.size)).map { i -> master[Math.floorMod(seed + i * 131, master.size)] }
         }
-        val ranked = scored.sortedByDescending { it.score }.toMutableList()
-        if (ranked.size < 5) {
-            val have = ranked.map { it.symbol }.toSet()
-            candidates.filter { it.first !in have }.take(5 - ranked.size).forEach { (symbol, count, _) ->
-                ranked += ForecastEntity(
-                    forecastDate = today, rank = 0, symbol = symbol, bias = "LONG",
-                    confidence = .50, score = (.50 + min(.08, count * .008)).coerceAtMost(.58),
-                    reason = "Historical Multify-frequency fallback · live strategy snapshot unavailable",
-                    generatedAtMs = System.currentTimeMillis()
+        val universe = (dnaSymbols + recentSymbols + rotating).distinct().take(36)
+
+        data class PairEval(val symbol: String, val long: StrategyEvaluation, val short: StrategyEvaluation)
+        val evaluated = mutableListOf<PairEval>()
+        for (symbol in universe) {
+            val pair = runCatching { forecastEvaluation(symbol, token) }.getOrNull() ?: continue
+            val f = pair.first.features
+            if (f.ltp < 10.0 || (f.spreadBps ?: 0.0) > 45.0) continue
+            evaluated += PairEval(symbol, pair.first, pair.second)
+        }
+        val breadth = evaluated.mapNotNull { it.long.features.dayChangePct }.takeIf { it.isNotEmpty() }?.average() ?: 0.0
+        val marketRegime = when {
+            breadth >= 0.50 -> "BREADTH_BULL"
+            breadth <= -0.50 -> "BREADTH_BEAR"
+            else -> "BREADTH_NEUTRAL"
+        }
+        val champions = learningDao.allForecastChampions().associateBy { it.key }
+        val learned = learningStats()
+        val longTargetPct = learned.longAveragePct.coerceAtLeast(0.20)
+        val shortTargetPct = learned.shortAverageDownPct.coerceAtLeast(0.20)
+        val desired = when {
+            now.toLocalTime() < LocalTime.of(10, 15) -> 1
+            now.toLocalTime() < LocalTime.of(11, 15) -> 2
+            now.toLocalTime() < LocalTime.of(12, 15) -> 3
+            now.toLocalTime() < LocalTime.of(13, 15) -> 4
+            else -> 5
+        }
+
+        suspend fun addSide(side: String, targetPct: Double, selector: (PairEval) -> StrategyEvaluation) {
+            val existing = learningDao.intradayForecastsForSide(today, side)
+            if (existing.size >= desired) return
+            val have = existing.map { it.symbol }.toSet()
+            val ranked = evaluated.map { row ->
+                val eval = selector(row)
+                val key = championKey(side, marketRegime, eval.regime, eval.strategy)
+                val championBonus = if (champions[key]?.frozen == true) 0.06 else 0.0
+                val freqBonus = if (side == "LONG") min(0.06, (frequency[row.symbol] ?: 0) * 0.006) else 0.0
+                val dnaBonus = if (side == "LONG" && row.symbol in dnaSymbols) 0.04 else 0.0
+                Triple(row, eval, (eval.confidence + championBonus + freqBonus + dnaBonus).coerceAtMost(.99))
+            }.filter { it.first.symbol !in have }.sortedByDescending { it.third }
+
+            ranked.take(desired - existing.size).forEachIndexed { index, item ->
+                val eval = item.second
+                val price = eval.features.ltp
+                val target = if (side == "LONG") price * (1.0 + targetPct / 100.0)
+                    else max(.05, price * (1.0 - targetPct / 100.0))
+                val key = championKey(side, marketRegime, eval.regime, eval.strategy)
+                learningDao.upsertIntradayForecast(
+                    IntradayForecastEntity(
+                        forecastDate = today, side = side, rank = existing.size + index + 1, symbol = item.first.symbol,
+                        entryPrice = price, targetPct = targetPct, targetPrice = target,
+                        confidence = eval.confidence, score = item.third, strategy = eval.strategy, regime = eval.regime,
+                        marketRegime = marketRegime, championKey = key, reason = eval.reason,
+                        generatedAtMs = nowMs, lastPrice = price, lastObservedAtMs = nowMs
+                    )
                 )
             }
         }
-        val top = ranked.sortedByDescending { it.score }.take(5).mapIndexed { i, x -> x.copy(rank = i + 1) }
-        learningDao.deleteForecasts(today)
-        if (top.isNotEmpty()) learningDao.insertForecasts(top)
-        auditLogger.log("FORECAST", "DAILY_FORECAST_GENERATED", mapOf("date" to today, "count" to top.size, "universe" to candidates.size))
-        return top.map { it.toDto() }
+
+        addSide("LONG", longTargetPct) { it.long }
+        addSide("SHORT", shortTargetPct) { it.short }
+        val all = learningDao.intradayForecastsForDate(today)
+        auditLogger.log("FORECAST", "INTRADAY_SCAN", mapOf(
+            "date" to today, "universe" to universe.size, "evaluated" to evaluated.size,
+            "long_count" to all.count { it.side == "LONG" }, "short_count" to all.count { it.side == "SHORT" },
+            "market_regime" to marketRegime, "long_target_pct" to longTargetPct, "short_target_pct" to shortTargetPct
+        ))
+        return all.map { it.toForecastDto() }
     }
 
     private suspend fun forecastEvaluation(symbol: String, token: String): Pair<StrategyEvaluation, StrategyEvaluation> {
@@ -448,7 +497,78 @@ class TradingRepository @Inject constructor(
         return LocalStrategyEngine.evaluateLong(synthetic, f, includeEventPrior = false) to LocalStrategyEngine.evaluateShort(f, includeEventPrior = false)
     }
 
-    private fun ForecastEntity.toDto() = ForecastDto(rank, symbol, bias, confidence, score, reason, multifyMatched, multifyDirectionMatched)
+    private fun championKey(side: String, marketRegime: String, regime: String, strategy: String): String =
+        listOf(side, marketRegime, regime, strategy).joinToString("|") { it.uppercase(Locale.US).replace("|", "/") }
+
+    private fun IntradayForecastEntity.toForecastDto() = ForecastDto(
+        rank = rank, symbol = symbol, bias = side, confidence = confidence, score = score, reason = reason,
+        multifyMatched = multifyMatched, multifyDirectionMatched = multifyMatched,
+        entryPrice = entryPrice, targetPrice = targetPrice, targetPct = targetPct, status = status,
+        strategy = strategy, regime = regime, marketRegime = marketRegime,
+        championTag = championKey, maxFavourablePct = maxFavourablePct, maxAdversePct = maxAdversePct,
+        generatedAtMs = generatedAtMs
+    )
+
+    suspend fun pendingForecastNotifications(): List<ForecastDto> {
+        val today = LocalDate.now(INDIA).toString()
+        val rows = learningDao.pendingForecastNotifications(today)
+        rows.forEach { learningDao.markForecastNotified(it.id) }
+        return rows.map { it.toForecastDto() }
+    }
+
+    suspend fun monitorForecastOutcomes(): Int {
+        val nowMs = System.currentTimeMillis()
+        if (nowMs - lastForecastOutcomeMonitorAtMs < 45_000L) return learningDao.activeIntradayForecasts().size
+        lastForecastOutcomeMonitorAtMs = nowMs
+        val active = learningDao.activeIntradayForecasts()
+        if (active.isEmpty()) return 0
+        val token = ensureToken() ?: return active.size
+        val now = ZonedDateTime.now(INDIA)
+        for (row in active) {
+            runCatching {
+                val ltp = apiFactory.groww.quote(bearer(token), tradingSymbol = row.symbol)
+                    .requirePayload("Forecast outcome quote ${row.symbol}").lastPrice ?: return@runCatching
+                val movePct = if (row.side == "LONG") (ltp / row.entryPrice - 1.0) * 100.0
+                    else (row.entryPrice / ltp - 1.0) * 100.0
+                val adversePct = if (row.side == "LONG") max(0.0, (row.entryPrice - ltp) / row.entryPrice * 100.0)
+                    else max(0.0, (ltp - row.entryPrice) / row.entryPrice * 100.0)
+                val hit = if (row.side == "LONG") ltp >= row.targetPrice else ltp <= row.targetPrice
+                val expired = now.toLocalDate().toString() != row.forecastDate || now.toLocalTime() >= LocalTime.of(15, 0)
+                val status = when { hit -> "TARGET_HIT"; expired -> "MISSED"; else -> "ACTIVE" }
+                val updated = row.copy(
+                    status = status, targetHitAtMs = if (hit) nowMs else row.targetHitAtMs,
+                    lastPrice = ltp, maxFavourablePct = max(row.maxFavourablePct, max(0.0, movePct)),
+                    maxAdversePct = max(row.maxAdversePct, adversePct), lastObservedAtMs = nowMs
+                )
+                learningDao.updateIntradayForecast(updated)
+                if (status != "ACTIVE") refreshForecastChampion(updated)
+            }
+        }
+        return learningDao.activeIntradayForecasts().size
+    }
+
+    private suspend fun refreshForecastChampion(row: IntradayForecastEntity) {
+        val completed = learningDao.allIntradayForecasts().filter {
+            it.side == row.side && it.marketRegime == row.marketRegime && it.regime == row.regime &&
+                it.strategy == row.strategy && it.status in setOf("TARGET_HIT", "MISSED")
+        }
+        if (completed.isEmpty()) return
+        val wins = completed.count { it.status == "TARGET_HIT" }
+        val losses = completed.count { it.status == "MISSED" }
+        val days = completed.map { it.forecastDate }.distinct().size
+        val symbols = completed.map { it.symbol }.distinct().size
+        val previous = learningDao.forecastChampion(row.championKey)
+        val frozen = previous?.frozen == true || (wins >= 5 && days >= 3 && symbols >= 3)
+        learningDao.upsertForecastChampion(
+            ForecastChampionEntity(
+                key = row.championKey, side = row.side, marketRegime = row.marketRegime, regime = row.regime,
+                strategy = row.strategy, wins = wins, losses = losses, sampleCount = completed.size,
+                distinctDays = days, distinctSymbols = symbols, frozen = frozen,
+                firstSeenAtMs = previous?.firstSeenAtMs ?: completed.minOf { it.generatedAtMs },
+                lastUpdatedAtMs = System.currentTimeMillis()
+            )
+        )
+    }
 
     suspend fun runAfterHoursResearch(force: Boolean = false): ResearchDto {
         ensureHistoricalSeed()
