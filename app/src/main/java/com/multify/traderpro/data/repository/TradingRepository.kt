@@ -420,7 +420,7 @@ class TradingRepository @Inject constructor(
         val qty = floor(capital / ltp).toInt()
         require(qty > 0) { "Available CNC balance cannot fund one share of $symbol" }
         val ref = stableRef("MLH", "$eventId-$symbol")
-        val order = placeMarket(token, symbol, "BUY", qty, "CNC", ref)
+        val order = placeCncBuy(token, symbol, qty, ref)
         val filled = order.filledQuantity?.takeIf { it > 0 } ?: qty
         val entry = order.averageFillPrice?.takeIf { it > 0.0 } ?: ltp
         val learned = learningStats()
@@ -580,7 +580,7 @@ class TradingRepository @Inject constructor(
         val qty = floor(capital / ltp).toInt()
         require(qty > 0) { "Available CNC balance cannot fund one share of ${row.symbol}" }
         val ref = stableRef("FLH", "${row.id}-${row.symbol}")
-        val order = placeMarket(token, row.symbol, "BUY", qty, "CNC", ref)
+        val order = placeCncBuy(token, row.symbol, qty, ref)
         val filled = order.filledQuantity?.takeIf { it > 0 } ?: qty
         val entry = order.averageFillPrice?.takeIf { it > 0.0 } ?: ltp
         managedDao.insertPosition(
@@ -744,7 +744,7 @@ class TradingRepository @Inject constructor(
         val ltp = apiFactory.groww.quote(bearer(token), tradingSymbol = position.symbol)
             .requirePayload("Quote ${position.symbol}").lastPrice ?: position.lastPrice
         val ref = stableRef("LGC", "${position.id}-${position.symbol}")
-        val order = placeMarket(token, position.symbol, "BUY", position.quantity, position.product, ref)
+        val order = placeLegacyExposureFlatten(token, position, ref)
         val exit = order.averageFillPrice?.takeIf { it > 0.0 } ?: ltp
         managedDao.insertTrade(
             ManagedTradeEntity(
@@ -764,7 +764,7 @@ class TradingRepository @Inject constructor(
     private suspend fun closeLongHolding(token: String, position: ManagedPositionEntity, mark: Double, reason: String): ManagedTradeEntity {
         require(position.side == "LONG") { "Only LONG holdings are supported" }
         val ref = stableRef("CLS", "${position.id}-${position.symbol}-$reason")
-        val order = placeMarket(token, position.symbol, "SELL", position.quantity, "CNC", ref)
+        val order = placeOwnedCncSell(token, position, ref)
         val exit = order.averageFillPrice?.takeIf { it > 0.0 } ?: mark
         val gross = (exit - position.entryPrice) * position.quantity
         val costs = estimatedCashCosts(position.entryPrice, exit, position.quantity)
@@ -912,18 +912,47 @@ class TradingRepository @Inject constructor(
         require(marketSession() == "OPEN") { "NSE regular market session is not open" }
     }
 
-    private suspend fun placeMarket(token: String, symbol: String, transaction: String, qty: Int, product: String, reference: String): OrderPayload {
+    private suspend fun placeCncBuy(token: String, symbol: String, qty: Int, reference: String): OrderPayload =
+        submitMarketOrder(token, symbol, "BUY", qty, "CNC", reference)
+
+    private suspend fun placeOwnedCncSell(token: String, position: ManagedPositionEntity, reference: String): OrderPayload {
+        require(position.side == "LONG") { "Only app-owned LONG holdings may be sold" }
+        require(position.product == "CNC") { "Only CNC holdings may be sold by the long-only engine" }
+        return submitMarketOrder(token, position.symbol, "SELL", position.quantity, "CNC", reference)
+    }
+
+    private suspend fun placeLegacyExposureFlatten(token: String, position: ManagedPositionEntity, reference: String): OrderPayload {
+        require(position.side != "LONG") { "Legacy cleanup is only for pre-long-only exposure" }
+        return submitMarketOrder(token, position.symbol, "BUY", position.quantity, position.product, reference)
+    }
+
+    private suspend fun submitMarketOrder(
+        token: String,
+        symbol: String,
+        transaction: String,
+        qty: Int,
+        product: String,
+        reference: String
+    ): OrderPayload {
         require(qty > 0) { "Order quantity is zero" }
         val response = apiFactory.groww.placeOrder(
             bearer(token),
-            OrderCreateRequest(tradingSymbol = symbol, quantity = qty, product = product, transactionType = transaction, orderReferenceId = reference)
+            OrderCreateRequest(
+                tradingSymbol = symbol,
+                quantity = qty,
+                product = product,
+                transactionType = transaction,
+                orderReferenceId = reference
+            )
         ).requirePayload("Place $transaction $symbol")
         val id = response.growwOrderId
         require(id.isNotBlank()) { "Groww did not return an order ID" }
         repeat(10) {
             delay(450)
             val status = apiFactory.groww.orderStatus(bearer(token), id).requirePayload("Order status")
-            if (status.orderStatus.equals("EXECUTED", true) || (status.filledQuantity ?: 0) >= qty) return status.copy(growwOrderId = id, orderReferenceId = reference)
+            if (status.orderStatus.equals("EXECUTED", true) || (status.filledQuantity ?: 0) >= qty) {
+                return status.copy(growwOrderId = id, orderReferenceId = reference)
+            }
             if (status.orderStatus.equals("REJECTED", true) || status.orderStatus.equals("FAILED", true) || status.orderStatus.equals("CANCELLED", true)) {
                 error("Groww order ${status.orderStatus}: ${status.remark.orEmpty()}")
             }
