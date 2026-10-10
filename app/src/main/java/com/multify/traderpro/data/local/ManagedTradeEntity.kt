@@ -17,7 +17,6 @@ data class ManagedTradeEntity(
     val engine: String,
     val symbol: String,
     val product: String,
-    val side: String,
     val quantity: Int,
     val entryPrice: Double,
     val exitPrice: Double,

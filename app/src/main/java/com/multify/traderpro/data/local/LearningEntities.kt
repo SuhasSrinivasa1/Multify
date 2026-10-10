@@ -27,15 +27,15 @@ data class LearningCallEntity(
     val sellEventId: Long? = null,
     val buyAtMs: Long = 0L,
     val sellAtMs: Long? = null,
-    val minPostSellPrice: Double? = null,
-    val postSellRetracementFraction: Double? = null,
-    val shortObservationFinalized: Boolean = false,
     val updatedAtMs: Long = 0L
 )
 
 @Entity(
     tableName = "price_observations",
-    indices = [Index(value = ["eventId", "phase", "offsetSeconds"], unique = true), Index(value = ["symbol", "observedAtMs"])]
+    indices = [
+        Index(value = ["eventId", "phase", "offsetSeconds"], unique = true),
+        Index(value = ["symbol", "observedAtMs"])
+    ]
 )
 data class PriceObservationEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
@@ -48,65 +48,16 @@ data class PriceObservationEntity(
 )
 
 @Entity(
-    tableName = "strategy_snapshots",
-    indices = [Index(value = ["symbol", "atMs"]), Index(value = ["side", "atMs"])]
-)
-data class StrategySnapshotEntity(
-    @PrimaryKey(autoGenerate = true) val id: Long = 0,
-    val atMs: Long,
-    val eventId: Long?,
-    val symbol: String,
-    val side: String,
-    val regime: String,
-    val strategy: String,
-    val directionalScore: Double,
-    val confidence: Double,
-    val ltp: Double,
-    val vwap: Double?,
-    val ema9: Double?,
-    val ema20: Double?,
-    val atr14: Double?,
-    val rsi14: Double?,
-    val rvol: Double?,
-    val macdHistogram: Double?,
-    val spreadBps: Double?,
-    val orderBookImbalance: Double?,
-    val dayChangePct: Double?,
-    val marketCap: Double?,
-    val votes: String
-)
-
-@Entity(
-    tableName = "forecasts",
-    indices = [Index(value = ["forecastDate", "rank"], unique = true), Index(value = ["symbol", "forecastDate"])]
-)
-data class ForecastEntity(
-    @PrimaryKey(autoGenerate = true) val id: Long = 0,
-    val forecastDate: String,
-    val rank: Int,
-    val symbol: String,
-    val bias: String,
-    val confidence: Double,
-    val score: Double,
-    val reason: String,
-    val generatedAtMs: Long,
-    val multifyMatched: Boolean = false,
-    val multifyDirectionMatched: Boolean = false
-)
-
-
-@Entity(
-    tableName = "intraday_forecasts",
+    tableName = "long_forecasts",
     indices = [
-        Index(value = ["forecastDate", "side", "rank"], unique = true),
-        Index(value = ["forecastDate", "side", "symbol"], unique = true),
+        Index(value = ["forecastDate", "rank"], unique = true),
+        Index(value = ["forecastDate", "symbol"], unique = true),
         Index(value = ["status", "forecastDate"])
     ]
 )
-data class IntradayForecastEntity(
+data class LongForecastEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val forecastDate: String,
-    val side: String,
     val rank: Int,
     val symbol: String,
     val entryPrice: Double,
@@ -132,12 +83,11 @@ data class IntradayForecastEntity(
 )
 
 @Entity(
-    tableName = "forecast_champions",
-    indices = [Index(value = ["side", "marketRegime", "regime", "strategy"], unique = true)]
+    tableName = "long_champions",
+    indices = [Index(value = ["marketRegime", "regime", "strategy"], unique = true)]
 )
-data class ForecastChampionEntity(
+data class LongChampionEntity(
     @PrimaryKey val key: String,
-    val side: String,
     val marketRegime: String,
     val sectorRegime: String = "UNAVAILABLE",
     val regime: String,
