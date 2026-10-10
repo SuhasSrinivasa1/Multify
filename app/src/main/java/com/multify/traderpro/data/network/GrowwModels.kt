@@ -122,7 +122,7 @@ data class OrderCreateRequest(
     val validity: String = "DAY",
     val exchange: String = "NSE",
     val segment: String = "CASH",
-    val product: String = "MIS",
+    val product: String = "CNC",
     @SerializedName("order_type") val orderType: String = "MARKET",
     @SerializedName("transaction_type") val transactionType: String,
     @SerializedName("order_reference_id") val orderReferenceId: String
@@ -153,7 +153,7 @@ data class OcoCreateRequest(
     @SerializedName("transaction_type") val transactionType: String,
     val target: OcoLeg,
     @SerializedName("stop_loss") val stopLoss: OcoLeg,
-    @SerializedName("product_type") val productType: String = "MIS",
+    @SerializedName("product_type") val productType: String = "CNC",
     val exchange: String = "NSE",
     val duration: String = "DAY"
 )
@@ -167,7 +167,7 @@ data class OcoModifyRequest(
     val segment: String = "CASH",
     val duration: String = "DAY",
     val quantity: Int,
-    @SerializedName("product_type") val productType: String = "MIS",
+    @SerializedName("product_type") val productType: String = "CNC",
     val target: OcoModifyLeg,
     @SerializedName("stop_loss") val stopLoss: OcoModifyLeg
 )
