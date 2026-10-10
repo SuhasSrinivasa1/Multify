@@ -29,6 +29,7 @@ import com.multify.traderpro.data.network.LearningStatsDto
 import com.multify.traderpro.data.network.OrderCreateRequest
 import com.multify.traderpro.data.network.OrderPayload
 import com.multify.traderpro.data.network.PositionDto
+import com.multify.traderpro.data.network.QuotePayload
 import com.multify.traderpro.data.network.RecentDecisionDto
 import com.multify.traderpro.data.network.ResearchDto
 import com.multify.traderpro.data.network.RiskStatusDto
@@ -61,6 +62,7 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlin.math.abs
 import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
@@ -97,6 +99,9 @@ class TradingRepository @Inject constructor(
     @Volatile private var armHotState: ArmHotState? = null
     private var lastForecastScanAtMs = 0L
     private var lastForecastOutcomeMonitorAtMs = 0L
+    private val oneMinuteAtrCache = mutableMapOf<String, AtrCacheEntry>()
+
+    private data class AtrCacheEntry(val atr: Double, val atMs: Long)
 
     private data class ArmHotState(
         val token: String,
@@ -154,29 +159,38 @@ class TradingRepository @Inject constructor(
 
     suspend fun learningStats(): LearningStatsDto {
         ensureHistoricalSeed()
-        val calls = learningDao.allCalls().filter { it.action.equals("BUY", true) }
-        val dates = calls.mapNotNull { runCatching { LocalDate.parse(it.callDate) }.getOrNull() }.distinct().sortedDescending()
+        val completedCalls = learningDao.allCalls().filter {
+            it.action.equals("BUY", true) && (it.longRealizedPct != null || it.multifyExitPrice != null)
+        }
+        val dates = completedCalls.mapNotNull { runCatching { LocalDate.parse(it.callDate) }.getOrNull() }
+            .distinct().sortedDescending()
         val keepDates = dates.take(30).map { it.toString() }.toSet()
-        val rolling = calls.filter { it.callDate in keepDates }
-        fun targetPct(c: LearningCallEntity): Double? = c.targetPct ?: c.targetPrice?.let { target ->
-            if (c.entryPrice > 0.0) (target - c.entryPrice) / c.entryPrice * 100.0 else null
-        }
-        val values = rolling.mapNotNull(::targetPct).filter { it > 0.0 && it < 25.0 }
-        val dated = rolling.sortedBy { it.callDate }.mapNotNull(::targetPct).filter { it > 0.0 && it < 25.0 }
-        val seed = calls.filter { it.source == "SEED" }.mapNotNull(::targetPct).filter { it > 0.0 }.let {
-            if (it.isEmpty()) UPLOADED_THREE_MONTH_TARGET_PCT else it.average()
-        }
+        val rolling = completedCalls.filter { it.callDate in keepDates }
+
+        fun realizedPct(c: LearningCallEntity): Double? =
+            AdaptiveLearningMath.realizedReturnPct(c.longRealizedPct, c.entryPrice, c.multifyExitPrice)
+
+        val values = rolling.mapNotNull(::realizedPct).filter { it.isFinite() && abs(it) < 25.0 }
+        val dated = rolling
+            .sortedWith(compareBy<LearningCallEntity>({ it.callDate }, { it.sellAtMs ?: Long.MAX_VALUE }))
+            .mapNotNull(::realizedPct)
+            .filter { it.isFinite() && abs(it) < 25.0 }
+        val seedValues = completedCalls.filter { it.source == "SEED" }
+            .mapNotNull(::realizedPct)
+            .filter { it.isFinite() && abs(it) < 25.0 }
+        val seed = seedValues.takeIf { it.isNotEmpty() }?.average() ?: UPLOADED_THREE_MONTH_REALIZED_PCT
+
         return LearningStatsDto(
             rollingTradingDays = keepDates.size,
-            rollingCalls = rolling.size,
-            longAveragePct = AdaptiveLearningMath.rollingMean(values, DEFAULT_LONG_TARGET_PCT),
-            longMedianPct = AdaptiveLearningMath.median(values, DEFAULT_LONG_TARGET_PCT),
-            longTrimmedMeanPct = AdaptiveLearningMath.trimmedMean(values, DEFAULT_LONG_TARGET_PCT),
-            longEwmaPct = AdaptiveLearningMath.ewma(dated, DEFAULT_LONG_TARGET_PCT),
-            longP25Pct = AdaptiveLearningMath.quantile(values, .25, DEFAULT_LONG_TARGET_PCT),
-            longP75Pct = AdaptiveLearningMath.quantile(values, .75, DEFAULT_LONG_TARGET_PCT),
+            rollingCalls = values.size,
+            longAveragePct = AdaptiveLearningMath.rollingMean(values, DEFAULT_LONG_REALIZED_PCT),
+            longMedianPct = AdaptiveLearningMath.median(values, DEFAULT_LONG_REALIZED_PCT),
+            longTrimmedMeanPct = AdaptiveLearningMath.trimmedMean(values, DEFAULT_LONG_REALIZED_PCT),
+            longEwmaPct = AdaptiveLearningMath.ewma(dated, DEFAULT_LONG_REALIZED_PCT),
+            longP25Pct = AdaptiveLearningMath.quantile(values, .25, DEFAULT_LONG_REALIZED_PCT),
+            longP75Pct = AdaptiveLearningMath.quantile(values, .75, DEFAULT_LONG_REALIZED_PCT),
             seededThreeMonthAveragePct = seed,
-            liveCompletedCalls = calls.count { it.source == "LIVE" && it.longRealizedPct != null }
+            liveCompletedCalls = completedCalls.count { it.source == "LIVE" }
         )
     }
 
@@ -512,7 +526,7 @@ class TradingRepository @Inject constructor(
         recordLiveBuy(eventId, signal, entry)
 
         val learned = learningStats()
-        val trailArmPct = learned.longAveragePct.coerceAtLeast(0.20)
+        val trailArmPct = learned.longAveragePct.takeIf { it.isFinite() && it > 0.0 } ?: DEFAULT_LONG_REALIZED_PCT
         managedDao.insertPosition(
             ManagedPositionEntity(
                 engine = ENGINE_MULTIFY_HOLDING, symbol = symbol, product = "CNC", side = "LONG", quantity = filled,
@@ -522,7 +536,8 @@ class TradingRepository @Inject constructor(
                 regime = "HOLDING_LONG", confidence = 1.0, sourceEventId = eventId,
                 openOrderId = order.growwOrderId, openReferenceId = ref, openedAtMs = System.currentTimeMillis(),
                 lastPrice = entry, maxFavourablePrice = entry, maxAdversePrice = entry, lastEvaluatedAtMs = System.currentTimeMillis(),
-                anchorPrice = entry, capitalDeployed = entry * filled, campaignBudget = capital
+                anchorPrice = entry, capitalDeployed = entry * filled, campaignBudget = capital,
+                trailingArmPct = trailArmPct, trailingLastRatchetPrice = 0.0
             )
         )
         armHotState = hot?.copy(
@@ -695,7 +710,8 @@ class TradingRepository @Inject constructor(
                 sourceEventId = null, openOrderId = order.growwOrderId, openReferenceId = ref,
                 openedAtMs = System.currentTimeMillis(), lastPrice = entry,
                 maxFavourablePrice = entry, maxAdversePrice = entry, lastEvaluatedAtMs = System.currentTimeMillis(),
-                anchorPrice = entry, capitalDeployed = entry * filled, campaignBudget = capital
+                anchorPrice = entry, capitalDeployed = entry * filled, campaignBudget = capital,
+                trailingArmPct = row.targetPct, trailingLastRatchetPrice = 0.0
             )
         )
         auditLogger.log("FORECAST", "LONG_HOLDING_OPENED", mapOf("symbol" to row.symbol, "qty" to filled, "entry" to entry, "trail_arm_pct" to row.targetPct))
@@ -772,7 +788,7 @@ class TradingRepository @Inject constructor(
         val matched = forecasts.count { it.multifyMatched }
         val frozen = learningDao.allForecastChampions().count { it.frozen }
         val report = buildString {
-            append("Rolling 30-trading-day Multify LONG target: ${fmt(stats.longAveragePct)}% (median ${fmt(stats.longMedianPct)}%). ")
+            append("Rolling 30-trading-day Multify realized LONG return: ${fmt(stats.longAveragePct)}% (median ${fmt(stats.longMedianPct)}%). ")
             append(
                 if (forecastLearning.completedForecasts > 0)
                     "Rolling 30-trading-day forecast LONG average: ${fmt(forecastLearning.longAveragePct)}% across ${forecastLearning.completedForecasts} completed forecasts. "
@@ -821,32 +837,71 @@ class TradingRepository @Inject constructor(
             maxAdversePrice = min(position.maxAdversePrice, ltp), lastEvaluatedAtMs = System.currentTimeMillis()
         )
         managedDao.updatePosition(updated)
+
         val hardStop = updated.stopPrice
         if (hardStop != null && !LearnedTrailingPolicy.isArmed(hardStop, updated.entryPrice) && ltp <= hardStop) {
             closeLongHolding(token, updated, ltp, "HOLDING_FAILSAFE_STOP")
             return
         }
-        val learned = learningStats()
-        val frozenPct = updated.targetPrice?.let { if (updated.entryPrice > 0.0) (it / updated.entryPrice - 1.0) * 100.0 else null }
-        val armPct = if (updated.engine == ENGINE_FORECAST_HOLDING) frozenPct else learned.longAveragePct
-        val atr = max(ltp * .004, .05)
-        val thresholdPct = LearnedTrailingPolicy.thresholdPct(armPct, updated.entryPrice, atr)
+
+        val legacyFrozenPct = updated.targetPrice?.let {
+            if (updated.entryPrice > 0.0 && it > updated.entryPrice) (it / updated.entryPrice - 1.0) * 100.0 else null
+        }
+        val frozenPct = updated.trailingArmPct.takeIf { it.isFinite() && it > 0.0 } ?: legacyFrozenPct
+        val atr = currentOneMinuteAtr(updated.symbol, token, ltp)
+        val thresholdPct = LearnedTrailingPolicy.thresholdPct(frozenPct, updated.entryPrice, atr)
         val alreadyArmed = LearnedTrailingPolicy.isArmed(updated.stopPrice, updated.entryPrice)
-        if (alreadyArmed || LearnedTrailingPolicy.shouldArm(updated.entryPrice, ltp, thresholdPct)) {
+        val highWater = updated.maxFavourablePrice
+        val thresholdReached = alreadyArmed || LearnedTrailingPolicy.shouldArm(updated.entryPrice, ltp, thresholdPct)
+
+        if (thresholdReached && LearnedTrailingPolicy.shouldRatchet(alreadyArmed, updated.trailingLastRatchetPrice, highWater)) {
             val currentStop = updated.stopPrice
-            val candidateStop = LearnedTrailingPolicy.ratchetStop(updated.entryPrice, ltp, atr, currentStop)
-            if (!alreadyArmed || candidateStop > (currentStop ?: updated.entryPrice) + .01) {
-                updated = updated.copy(stopPrice = candidateStop, lastEvaluatedAtMs = System.currentTimeMillis())
-                managedDao.updatePosition(updated)
+            val candidateStop = LearnedTrailingPolicy.ratchetStop(updated.entryPrice, highWater, atr, currentStop)
+            val stopRaised = !alreadyArmed || candidateStop > (currentStop ?: updated.entryPrice) + .01
+            updated = updated.copy(
+                stopPrice = if (stopRaised) candidateStop else updated.stopPrice,
+                trailingLastRatchetPrice = highWater,
+                lastEvaluatedAtMs = System.currentTimeMillis()
+            )
+            managedDao.updatePosition(updated)
+            if (stopRaised) {
                 auditLogger.log("TRAILING_STOP", if (alreadyArmed) "LONG_RATCHET" else "LONG_ARMED", mapOf(
-                    "symbol" to updated.symbol, "ltp" to ltp, "new_stop" to candidateStop, "target_pct" to thresholdPct
+                    "symbol" to updated.symbol,
+                    "ltp" to ltp,
+                    "high_water" to highWater,
+                    "new_stop" to candidateStop,
+                    "arm_pct" to thresholdPct,
+                    "atr_1m" to atr,
+                    "trail_distance" to LearnedTrailingPolicy.trailDistance(highWater, atr)
                 ))
             }
         }
+
         val activeStop = updated.stopPrice
         if (LearnedTrailingPolicy.isArmed(activeStop, updated.entryPrice) && activeStop != null && ltp <= activeStop) {
             closeLongHolding(token, updated, ltp, "LONG_TRAILING_PROFIT_STOP")
         }
+    }
+
+    private suspend fun currentOneMinuteAtr(symbol: String, token: String, ltp: Double): Double {
+        val nowMs = System.currentTimeMillis()
+        oneMinuteAtrCache[symbol]?.takeIf { nowMs - it.atMs <= ONE_MINUTE_ATR_CACHE_MS }?.let { return it.atr }
+        val fallback = max(ltp * .004, .05)
+        val atr = runCatching {
+            val now = ZonedDateTime.now(INDIA)
+            val historical = apiFactory.groww.historicalCandles(
+                bearer(token),
+                growwSymbol = "NSE-$symbol",
+                startTime = now.minusMinutes(40).toLocalDateTime().format(HIST_FORMAT),
+                endTime = now.toLocalDateTime().format(HIST_FORMAT),
+                candleInterval = "1minute"
+            ).requirePayload("1-minute ATR candles $symbol")
+            LocalStrategyEngine.buildFeatures(QuotePayload(lastPrice = ltp), historical, 1).atr14
+                ?.takeIf { it.isFinite() && it > 0.0 }
+                ?: fallback
+        }.getOrDefault(fallback)
+        oneMinuteAtrCache[symbol] = AtrCacheEntry(atr, nowMs)
+        return atr
     }
 
     private suspend fun closeLegacyNonLong(token: String, position: ManagedPositionEntity) {
@@ -1182,8 +1237,9 @@ class TradingRepository @Inject constructor(
         private const val FAST_SIZE_PRICE_BUFFER = 1.01
         private const val ARM_HOT_REFRESH_MS = 30_000L
         private const val ARM_HOT_STATE_MAX_AGE_MS = 120_000L
-        private const val UPLOADED_THREE_MONTH_TARGET_PCT = 3.680970873786408
-        private const val DEFAULT_LONG_TARGET_PCT = 2.983877551020408
+        private const val ONE_MINUTE_ATR_CACHE_MS = 60_000L
+        private const val UPLOADED_THREE_MONTH_REALIZED_PCT = 0.49019417475728155
+        private const val DEFAULT_LONG_REALIZED_PCT = 0.33
         const val ENGINE_MULTIFY_HOLDING = "MULTIFY_HOLDING"
         const val ENGINE_FORECAST_HOLDING = "FORECAST_HOLDING"
     }
