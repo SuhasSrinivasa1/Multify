@@ -2516,7 +2516,8 @@ class TradingRepository @Inject constructor(
             }
         }
         val targetHit = updated.targetPrice?.let { target -> if (updated.side == "LONG") ltp >= target else ltp <= target } ?: false
-        if (targetHit) {
+        // Multify Auto and Forecast targets are trail-arm thresholds, never forced exits.
+        if (targetHit && !trailArmEngine) {
             if (same.confidence >= RUNNER_CONFIDENCE && same.directionalScore >= .08) {
                 val currentStop = updated.stopPrice ?: updated.entryPrice
                 val newStop = if (updated.side == "LONG") max(currentStop, max(updated.entryPrice + atr * .20, ltp - atr * .85)) else min(currentStop, min(updated.entryPrice - atr * .20, ltp + atr * .85))
