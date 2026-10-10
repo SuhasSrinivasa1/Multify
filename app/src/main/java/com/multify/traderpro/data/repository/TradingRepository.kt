@@ -960,15 +960,9 @@ class TradingRepository @Inject constructor(
         try {
             when (parsed.type) {
                 SignalType.TRADE_RELEASE -> {
-                    parsed.symbol?.let { prioritizeNewRecommendation(it, accessToken, settings) }
-                    // New Multify stock gets the fastest path: Fast Track entry is attempted before
-                    // any slower strategy qualification. The intelligent intraday engine then evaluates
-                    // the same signal, but never blocks notification-follow execution.
-                    if (settings.fastTrackEffective) handleFastTrackBuy(eventId, parsed, accessToken, settings)
                     handleBuyRelease(eventId, parsed, accessToken, settings)
                 }
                 SignalType.BOOK_PROFIT -> {
-                    if (settings.fastTrackEffective) handleFastTrackSell(eventId, parsed, accessToken, settings)
                     handleBookProfit(eventId, parsed, accessToken, settings)
                 }
                 else -> Unit
@@ -1848,7 +1842,6 @@ class TradingRepository @Inject constructor(
             rawText = "manual:$normalizedAction:$normalizedSymbol", confidence = 1.0
         )
         if (signalType == SignalType.TRADE_RELEASE) {
-            prioritizeNewRecommendation(normalizedSymbol, token, settings)
             handleBuyRelease(id, parsed, token, settings)
         } else {
             handleBookProfit(id, parsed, token, settings)
@@ -1859,208 +1852,146 @@ class TradingRepository @Inject constructor(
 
     private suspend fun handleBuyRelease(eventId: Long, signal: ParsedSignal, token: String, settings: AppSettings) {
         val symbol = signal.symbol ?: error("Trade release has no symbol")
-        val quote = apiFactory.groww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Quote $symbol")
+        val quote = apiFactory.groww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Quote " + symbol)
         val ltp = quote.lastPrice ?: error("Groww quote does not contain LTP")
         recordLiveBuy(eventId, signal, ltp)
-        startOrReanchorWaveCampaign(eventId, symbol, ltp, "MULTIFY_NOTIFICATION")
         val learned = learningStats()
+        val targetPct = learned.longAveragePct.coerceAtLeast(0.20)
+        val target = ltp * (1.0 + targetPct / 100.0)
+        val stop = max(.05, ltp * .99)
 
-        // SHADOW is a faithful Multify-following simulator first: every paid BUY creates a virtual long immediately.
-        // Strategy analysis runs as attribution/research and is not allowed to make the shadow dataset disappear.
         if (!settings.liveExecutionEffective) {
-            val risk = shadowRiskState(token, settings)
-            if (!risk.hardStop) {
-                shadowDao.openPosition(symbol)?.takeIf { it.side == "SHORT" }?.let { closeShadow(it, ltp, "MULTIFY_LONG_REVERSAL") }
-                if (shadowDao.openPosition(symbol) == null) {
-                    val initialCapital = SHADOW_BUDGET
-                    val qty = floor(initialCapital / ltp).toInt().coerceAtLeast(1)
-                    val target = ltp * (1.0 + learned.longAveragePct / 100.0)
-                    val stop = max(.05, ltp * .88)
-                    openShadowDirect(
-                        symbol = symbol, side = "LONG", quantity = qty, entry = ltp, stop = stop, target = target,
-                        strategy = "Multify follow + rolling ${fmt(learned.longAveragePct)}% target", regime = "FOLLOW",
-                        confidence = 1.0, sourceEventId = eventId, campaignBudget = SHADOW_BUDGET, capitalDeployed = qty * ltp
-                    )
-                    dao.updateForwarding(
-                        eventId, "ANALYZED", "PAPER_BUY_OPEN",
-                        "Immediate fixed-capital ₹2L shadow campaign · virtual $qty shares @ ₹${fmt(ltp)} · rolling 30-day long target ${fmt(learned.longAveragePct)}% · no averaging or capital top-ups.", null
-                    )
-                }
-            } else {
-                dao.updateForwarding(eventId, "ANALYZED", "PAPER_RISK_HALT", risk.reason, null)
-            }
+            shadowDao.openPosition(symbol)?.let { closeShadow(it, ltp, "MULTIFY_NEW_CALL_REPLACE") }
+            val qty = floor(SHADOW_BUDGET / ltp).toInt().coerceAtLeast(1)
+            openShadowDirect(
+                symbol = symbol, side = "LONG", quantity = qty, entry = ltp, stop = stop, target = target,
+                strategy = "Multify Auto LONG · rolling target " + fmt(targetPct) + "%",
+                regime = "MULTIFY_AUTO_LONG", confidence = 1.0, sourceEventId = eventId,
+                campaignBudget = SHADOW_BUDGET, capitalDeployed = qty * ltp
+            )
+            dao.updateForwarding(eventId, "ANALYZED", "PAPER_MULTIFY_LONG",
+                "Immediate Multify shadow LONG @ ₹" + fmt(ltp) + " · trail arms at +" + fmt(targetPct) + "%.", null)
             runCatching { analyze(symbol, token, longSide = true, signal = signal, eventId = eventId) }
             return
         }
 
-        if (settings.firstWaveMode == "SHORT") {
-            dao.updateForwarding(eventId, "ANALYZED", "FIRST_WAVE_SHORT_ONLY", "SHORT-only mode: first-wave long is monitored but not executed.", null)
+        if (settings.executionMode == "SHORT_ONLY") {
+            dao.updateForwarding(eventId, "ANALYZED", "MULTIFY_LONG_DISABLED", "SHORT-only mode: Multify LONG not opened.", null)
             runCatching { analyze(symbol, token, longSide = true, signal = signal, eventId = eventId) }
-            return
-        }
-        val analysis = analyze(symbol, token, longSide = true, signal = signal, eventId = eventId)
-        val f = analysis.features
-        val target = signal.target ?: f.ltp * (1.0 + learned.longAveragePct / 100.0)
-        val stop = signal.stopLoss ?: max(.05, f.ltp * .97)
-        val entryHigh = signal.entryHigh ?: f.ltp
-        val atr = f.atr14 ?: max(f.ltp * .004, .05)
-        if (f.ltp <= stop || target <= f.ltp) {
-            dao.updateForwarding(eventId, "ANALYZED", "WAIT", "Invalid/expired entry geometry at current LTP ₹${fmt(f.ltp)}.", null)
-            return
-        }
-        val extension = if (f.ltp > entryHigh) (f.ltp - entryHigh) / atr else 0.0
-        if (extension > .65) {
-            dao.updateForwarding(eventId, "ANALYZED", "WAIT_RETEST", "Price is ${fmt(extension)} ATR above the Multify entry range; no chase. Confidence ${pct(analysis.confidence)}.", null)
-            return
-        }
-        if ((f.spreadBps ?: 0.0) > 25.0) {
-            dao.updateForwarding(eventId, "ANALYZED", "WAIT_SPREAD", "Spread ${fmt(f.spreadBps ?: 0.0)} bps exceeds cap.", null)
-            return
-        }
-        val liveRisk = liveRiskState(token, settings)
-        if (!liveRisk.allowNewRisk) {
-            dao.updateForwarding(eventId, "ANALYZED", "LIVE_DEFENSIVE_WAIT", liveRisk.reason, null)
             return
         }
         if (managedDao.openPosition(ENGINE_INTRADAY, symbol) != null) {
-            dao.updateForwarding(eventId, "ANALYZED", "HOLD_LONG", "Multify intraday engine already owns $symbol; no duplicate app lot.", null)
+            dao.updateForwarding(eventId, "ANALYZED", "MULTIFY_ALREADY_OPEN", "Multify Auto already owns an open position in " + symbol + ".", null)
             return
         }
-        assertNoExternalMisConflict(token, symbol)
-        val campaignBudget = settings.dailyBudgetRupees.toDouble()
-        val initialBudget = campaignBudget
-        val allocation = BudgetAllocator.allocate(
-            budgetRupees = initialBudget, confidence = analysis.confidence, price = f.ltp,
-            stopDistance = f.ltp - stop, targetDistance = target - f.ltp, existingNetQuantity = 0
-        )
-        val reason = "${analysis.strategy} · ${analysis.regime} · confidence ${pct(analysis.confidence)} · ${allocation.reason}"
-        if (!allocation.allowed || analysis.confidence < settings.minLiveConfidence) {
-            dao.updateForwarding(eventId, "ANALYZED", "LIVE_WAIT", reason, null)
+        val risk = liveRiskState(token, settings)
+        if (!risk.allowNewRisk) {
+            dao.updateForwarding(eventId, "ANALYZED", "LIVE_DEFENSIVE_WAIT", risk.reason, null)
             return
         }
         preLiveGuard(settings)
-        val reference = stableRef("MFI", "$eventId-$symbol-B")
-        val order = placeMarket(token, symbol, "BUY", allocation.quantity, "MIS", reference)
-        val qty = order.filledQuantity?.takeIf { it > 0 } ?: allocation.quantity
-        val entry = order.averageFillPrice?.takeIf { it > 0 } ?: f.ltp
-        startOrReanchorWaveCampaign(eventId, symbol, entry, "LIVE_FILL")
+        assertNoExternalMisConflict(token, symbol)
+        val qty = floor(settings.dailyBudgetRupees.toDouble() / ltp).toInt()
+        if (qty <= 0) error("Configured capital cannot fund one share")
+        val ref = stableRef("MUL", eventId.toString() + "-" + symbol + "-L")
+        val order = placeMarket(token, symbol, "BUY", qty, "MIS", ref)
+        val filled = order.filledQuantity?.takeIf { it > 0 } ?: qty
+        val entry = order.averageFillPrice?.takeIf { it > 0 } ?: ltp
+        val entryTarget = entry * (1.0 + targetPct / 100.0)
+        val entryStop = max(.05, entry * .99)
         managedDao.insertPosition(
             ManagedPositionEntity(
-                engine = ENGINE_INTRADAY, symbol = symbol, product = "MIS", side = "LONG", quantity = qty,
-                entryPrice = entry, stopPrice = stop, targetPrice = target, strategy = analysis.strategy,
-                regime = analysis.regime, confidence = analysis.confidence, sourceEventId = eventId,
-                openOrderId = order.growwOrderId, openReferenceId = reference, openedAtMs = System.currentTimeMillis(),
+                engine = ENGINE_INTRADAY, symbol = symbol, product = "MIS", side = "LONG", quantity = filled,
+                entryPrice = entry, stopPrice = entryStop, targetPrice = entryTarget,
+                strategy = "Multify Auto LONG · rolling target " + fmt(targetPct) + "%",
+                regime = "MULTIFY_AUTO_LONG", confidence = 1.0, sourceEventId = eventId,
+                openOrderId = order.growwOrderId, openReferenceId = ref, openedAtMs = System.currentTimeMillis(),
                 lastPrice = entry, maxFavourablePrice = entry, maxAdversePrice = entry, lastEvaluatedAtMs = System.currentTimeMillis(),
-                anchorPrice = entry, capitalDeployed = entry * qty, campaignBudget = entry * qty
+                anchorPrice = entry, capitalDeployed = entry * filled, campaignBudget = entry * filled
             )
         )
-        val managed = managedDao.openPosition(ENGINE_INTRADAY, symbol) ?: error("App ledger failed to record live position")
+        val managed = managedDao.openPosition(ENGINE_INTRADAY, symbol) ?: error("App ledger failed to record Multify LONG")
         val smart = protectManagedPosition(token, managed)
         managedDao.updatePosition(managed.copy(smartOrderId = smart))
-        dao.updateForwarding(eventId, "DELIVERED", "LIVE_BUY_PROTECTED", "$reason · app-owned qty $qty · order ${order.growwOrderId}", null)
+        dao.updateForwarding(eventId, "DELIVERED", "MULTIFY_LONG_PROTECTED",
+            "Immediate Multify LONG · qty " + filled + " @ ₹" + fmt(entry) + " · trail arm +" + fmt(targetPct) + "%.", null)
+        runCatching { analyze(symbol, token, longSide = true, signal = signal, eventId = eventId) }
     }
 
     private suspend fun handleBookProfit(eventId: Long, signal: ParsedSignal, token: String, settings: AppSettings) {
         val symbol = signal.symbol ?: error("Book-profit signal has no symbol")
-        val quoteNow = apiFactory.groww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Quote $symbol").lastPrice
-            ?: signal.exitPrice ?: error("No exit quote")
+        val quoteNow = apiFactory.groww.quote(bearer(token), tradingSymbol = symbol)
+            .requirePayload("Quote " + symbol).lastPrice ?: signal.exitPrice ?: error("No exit quote")
         recordLiveSell(eventId, symbol, quoteNow)
         val learned = learningStats()
+        val shortPct = learned.shortAverageDownPct.coerceAtLeast(0.20)
 
         if (!settings.liveExecutionEffective) {
-            val existingShort = shadowDao.openPosition(symbol)?.takeIf { it.side == "SHORT" }
-            if (existingShort != null) {
-                dao.updateForwarding(eventId, "ANALYZED", "PAPER_HOLD_SHORT", "A post-long shadow short is already open. Multify sell confirms the downside phase; the existing learned target remains active.", null)
-                runCatching { analyze(symbol, token, longSide = false, signal = signal, eventId = eventId) }
-                return
-            }
-            val openLong = shadowDao.openPosition(symbol)?.takeIf { it.side == "LONG" }
-            var longTrade = shadowDao.latestTrade(symbol, "LONG", startOfIndiaDayMs())
-            if (openLong != null) {
-                if (quoteNow >= openLong.entryPrice) {
-                    closeShadow(openLong, quoteNow, "MULTIFY_BOOK_PROFIT_GREEN")
-                    longTrade = shadowDao.latestTrade(symbol, "LONG", startOfIndiaDayMs())
-                } else {
-                    dao.updateForwarding(eventId, "ANALYZED", "PAPER_HOLD_RED", "Multify sell arrived while shadow long is red. Recovery monitoring continues without averaging or added capital; no same-day short is opened.", null)
-                    runCatching { analyze(symbol, token, longSide = false, signal = signal, eventId = eventId) }
-                    return
-                }
-            }
-            val prior = longTrade
-            if (prior != null && prior.exitPrice > prior.entryPrice && paperRiskAllowsNewTrade(token, settings, symbol)) {
-                shadowDao.openPosition(symbol)?.let { closeShadow(it, quoteNow, "MULTIFY_SELL_REVERSAL") }
-                val longMove = prior.exitPrice - prior.entryPrice
-                val target = AdaptiveLearningMath.shortTarget(quoteNow, prior.entryPrice, prior.exitPrice, learned.shortRetracementFraction)
-                val stop = quoteNow * (1.0 + FAST_SHORT_STOP_PCT)
-                val fixedCapitalCap = prior.entryPrice * prior.quantity
-                val qty = floor(fixedCapitalCap / quoteNow).toInt()
-                if (qty <= 0) {
-                    dao.updateForwarding(eventId, "ANALYZED", "PAPER_NO_SHORT_FIXED_CAP", "The fixed campaign capital cannot open one share at the current price; no capital increase is allowed.", null)
-                    return
-                }
+            val open = shadowDao.openPosition(symbol)
+            val capital = open?.let { it.entryPrice * it.quantity } ?: SHADOW_BUDGET
+            if (open != null) closeShadow(open, quoteNow, "MULTIFY_BOOK_PROFIT")
+            if (settings.executionMode != "LONG_ONLY" && settings.postSellShortEnabled) {
+                val qty = floor(capital / quoteNow).toInt().coerceAtLeast(1)
+                val target = max(.05, quoteNow * (1.0 - shortPct / 100.0))
+                val stop = quoteNow * 1.01
                 openShadowDirect(
                     symbol, "SHORT", qty, quoteNow, stop, target,
-                    "Post-Multify sell · ${fmt(learned.shortRetracementPct)}% of preceding long move", "POST_SELL",
-                    1.0, eventId, fixedCapitalCap, qty * quoteNow
+                    "Multify Auto SHORT · average downside " + fmt(shortPct) + "%",
+                    "MULTIFY_AUTO_SHORT", 1.0, eventId, capital, qty * quoteNow
                 )
-                dao.updateForwarding(eventId, "ANALYZED", "PAPER_SHORT_OPEN", "Immediate shadow short @ ₹${fmt(quoteNow)} · preceding long move ₹${fmt(longMove)} · learned retracement ${fmt(learned.shortRetracementPct)}% · target ₹${fmt(target)}.", null)
+                dao.updateForwarding(eventId, "ANALYZED", "PAPER_MULTIFY_SHORT",
+                    "Multify LONG closed; immediate shadow SHORT @ ₹" + fmt(quoteNow) + " · trail arms at -" + fmt(shortPct) + "%.", null)
             } else {
-                dao.updateForwarding(eventId, "ANALYZED", "PAPER_NO_SHORT", "No profitable preceding shadow long is available for the post-sell short.", null)
+                dao.updateForwarding(eventId, "ANALYZED", "MULTIFY_LONG_CLOSED", "Multify LONG closed; post-sell SHORT is disabled.", null)
             }
             runCatching { analyze(symbol, token, longSide = false, signal = signal, eventId = eventId) }
             return
         }
 
         val liveLong = managedDao.openPosition(ENGINE_INTRADAY, symbol)?.takeIf { it.side == "LONG" }
-        val fixedPostSellCap = liveLong?.let {
-            FixedCapitalPolicy.cap(it.campaignBudget, it.capitalDeployed, it.entryPrice * it.quantity)
-        } ?: settings.dailyBudgetRupees.toDouble()
+        val capital = liveLong?.capitalDeployed?.takeIf { it > 0.0 } ?: settings.dailyBudgetRupees.toDouble()
         liveLong?.let {
             assertManagedMisStillOwned(token, it)
             closeManaged(token, it, quoteNow, "MULTIFY_BOOK_PROFIT")
         }
-        if (settings.firstWaveMode == "LONG" || !settings.postSellShortEnabled) {
-            dao.updateForwarding(eventId, "ANALYZED", "FIRST_WAVE_LONG_ONLY", "LONG-only mode: Multify book-profit closed the long; post-sell first-wave short is monitored but not executed.", null)
+        if (settings.executionMode == "LONG_ONLY" || !settings.postSellShortEnabled) {
+            dao.updateForwarding(eventId, "ANALYZED", "MULTIFY_LONG_CLOSED", "Multify LONG closed; post-sell SHORT is disabled.", null)
             runCatching { analyze(symbol, token, longSide = false, signal = signal, eventId = eventId) }
             return
         }
-        val analysis = analyze(symbol, token, longSide = false, signal = signal, eventId = eventId)
-        val f = analysis.features
-        val atr = f.atr14 ?: max(f.ltp * .004, .05)
-        val stop = f.ltp + atr * .90
-        val target = max(.05, f.ltp - atr * 1.55)
-        val shortGate = min(settings.minLiveConfidence, MULTIFY_SELL_SHORT_GATE)
-        val liveRisk = liveRiskState(token, settings)
-        if (!liveRisk.allowNewRisk) {
-            dao.updateForwarding(eventId, "ANALYZED", "LIVE_WAIT_SHORT", liveRisk.reason, null)
-            return
-        }
-        assertNoExternalMisConflict(token, symbol)
-        val allocation = BudgetAllocator.allocate(fixedPostSellCap, max(analysis.confidence, .76), f.ltp, stop - f.ltp, f.ltp - target, 0)
-        val reason = "${analysis.strategy} · ${analysis.regime} · short confidence ${pct(analysis.confidence)} · Multify sell prior · ${allocation.reason}"
-        if (!allocation.allowed || analysis.confidence < shortGate) {
-            dao.updateForwarding(eventId, "ANALYZED", "LIVE_WAIT_SHORT", reason, null)
+        if (managedDao.openPosition(ENGINE_INTRADAY, symbol) != null) return
+        val risk = liveRiskState(token, settings)
+        if (!risk.allowNewRisk) {
+            dao.updateForwarding(eventId, "ANALYZED", "LIVE_DEFENSIVE_WAIT", risk.reason, null)
             return
         }
         preLiveGuard(settings)
-        val reference = stableRef("MFI", "$eventId-$symbol-S")
-        val order = placeMarket(token, symbol, "SELL", allocation.quantity, "MIS", reference)
-        val qty = order.filledQuantity?.takeIf { it > 0 } ?: allocation.quantity
-        val entry = order.averageFillPrice?.takeIf { it > 0 } ?: f.ltp
+        assertNoExternalMisConflict(token, symbol)
+        val qty = floor(capital / quoteNow).toInt()
+        if (qty <= 0) error("Multify short capital cannot fund one share")
+        val ref = stableRef("MUS", eventId.toString() + "-" + symbol + "-S")
+        val order = placeMarket(token, symbol, "SELL", qty, "MIS", ref)
+        val filled = order.filledQuantity?.takeIf { it > 0 } ?: qty
+        val entry = order.averageFillPrice?.takeIf { it > 0 } ?: quoteNow
+        val target = max(.05, entry * (1.0 - shortPct / 100.0))
+        val stop = entry * 1.01
         managedDao.insertPosition(
             ManagedPositionEntity(
-                engine = ENGINE_INTRADAY, symbol = symbol, product = "MIS", side = "SHORT", quantity = qty,
-                entryPrice = entry, stopPrice = stop, targetPrice = target, strategy = analysis.strategy,
-                regime = analysis.regime, confidence = max(analysis.confidence, .76), sourceEventId = eventId,
-                openOrderId = order.growwOrderId, openReferenceId = reference, openedAtMs = System.currentTimeMillis(),
+                engine = ENGINE_INTRADAY, symbol = symbol, product = "MIS", side = "SHORT", quantity = filled,
+                entryPrice = entry, stopPrice = stop, targetPrice = target,
+                strategy = "Multify Auto SHORT · average downside " + fmt(shortPct) + "%",
+                regime = "MULTIFY_AUTO_SHORT", confidence = 1.0, sourceEventId = eventId,
+                openOrderId = order.growwOrderId, openReferenceId = ref, openedAtMs = System.currentTimeMillis(),
                 lastPrice = entry, maxFavourablePrice = entry, maxAdversePrice = entry, lastEvaluatedAtMs = System.currentTimeMillis(),
-                anchorPrice = entry, capitalDeployed = entry * qty, campaignBudget = min(fixedPostSellCap, entry * qty)
+                anchorPrice = entry, capitalDeployed = entry * filled, campaignBudget = capital
             )
         )
-        val managed = managedDao.openPosition(ENGINE_INTRADAY, symbol) ?: error("App ledger failed to record short")
-        val smart = protectManagedPosition(token, managed)
-        managedDao.updatePosition(managed.copy(smartOrderId = smart))
-        dao.updateForwarding(eventId, "DELIVERED", "LIVE_SHORT_PROTECTED", "$reason · app-owned qty $qty", null)
+        val short = managedDao.openPosition(ENGINE_INTRADAY, symbol) ?: error("App ledger failed to record Multify SHORT")
+        val smart = protectManagedPosition(token, short)
+        managedDao.updatePosition(short.copy(smartOrderId = smart))
+        dao.updateForwarding(eventId, "DELIVERED", "MULTIFY_SHORT_PROTECTED",
+            "Immediate Multify SHORT · qty " + filled + " @ ₹" + fmt(entry) + " · trail arm -" + fmt(shortPct) + "%.", null)
+        runCatching { analyze(symbol, token, longSide = false, signal = signal, eventId = eventId) }
     }
 
     private suspend fun handleFastTrackBuy(eventId: Long, signal: ParsedSignal, token: String, settings: AppSettings) {
