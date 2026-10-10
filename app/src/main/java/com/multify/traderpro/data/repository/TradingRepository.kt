@@ -6,6 +6,7 @@ import android.os.SystemClock
 import com.google.gson.GsonBuilder
 import com.google.gson.JsonParser
 import com.multify.traderpro.BuildConfig
+import com.multify.traderpro.data.local.ExecutionSampleEntity
 import com.multify.traderpro.data.local.ForecastChampionEntity
 import com.multify.traderpro.data.local.LongForecastEntity
 import com.multify.traderpro.data.local.LearningCallEntity
@@ -21,6 +22,8 @@ import com.multify.traderpro.data.network.BrokerStatusDto
 import com.multify.traderpro.data.network.DashboardDto
 import com.multify.traderpro.data.network.DaySummaryDto
 import com.multify.traderpro.data.network.EngineHealthDto
+import com.multify.traderpro.data.network.ExecutionAverageDto
+import com.multify.traderpro.data.network.ExecutionStatsDto
 import com.multify.traderpro.data.network.ForecastChampionDto
 import com.multify.traderpro.data.network.ForecastDto
 import com.multify.traderpro.data.network.ForecastLearningStatsDto
@@ -42,6 +45,7 @@ import com.multify.traderpro.domain.NotificationParser
 import com.multify.traderpro.domain.ParsedSignal
 import com.multify.traderpro.domain.SignalType
 import com.multify.traderpro.engine.AdaptiveLearningMath
+import com.multify.traderpro.engine.ExecutionTelemetryMath
 import com.multify.traderpro.engine.LearnedTrailingPolicy
 import com.multify.traderpro.engine.LocalStrategyEngine
 import com.multify.traderpro.engine.MultifyReverseEngineering
@@ -364,6 +368,7 @@ class TradingRepository @Inject constructor(
             val learning = learningStats()
             val forecastLearning = forecastLearningStats()
             val snapshot = managedSnapshot(token)
+            val execution = executionStats()
             val today = LocalDate.now(INDIA).toString()
             val forecasts = learningDao.longForecastsForDate(today).map { it.toForecastDto() }
             val champions = learningDao.allForecastChampions()
@@ -387,7 +392,7 @@ class TradingRepository @Inject constructor(
                     maxExposure = settings.holdingBudgetRupees.toDouble(),
                     riskMode = when { settings.safetyHalt -> "HALTED"; settings.armEffective -> "ARMED"; else -> "DISARMED" }
                 ),
-                summary = snapshot.summary, learning = learning, forecastLearning = forecastLearning,
+                summary = snapshot.summary, execution = execution, learning = learning, forecastLearning = forecastLearning,
                 forecasts = forecasts, forecastChampions = champions,
                 research = research,
                 health = EngineHealthDto(
@@ -961,6 +966,22 @@ class TradingRepository @Inject constructor(
         val recentDecisions: List<RecentDecisionDto>
     )
 
+    private suspend fun executionStats(): ExecutionStatsDto {
+        fun aggregate(rows: List<ExecutionSampleEntity>): ExecutionAverageDto {
+            val dispatchRows = rows.filter { it.appDispatchMicros > 0L }
+            return ExecutionAverageDto(
+                averageFillMs = ExecutionTelemetryMath.averageMillis(rows.map { it.totalExecutionMs }),
+                averageAppDispatchMs = ExecutionTelemetryMath.averageDispatchMillis(rows.map { it.appDispatchMicros }),
+                sampleCount = rows.size,
+                dispatchSampleCount = dispatchRows.size
+            )
+        }
+        return ExecutionStatsDto(
+            buyLong = aggregate(managedDao.recentExecutionSamples("BUY", EXECUTION_SAMPLE_LIMIT)),
+            sellLong = aggregate(managedDao.recentExecutionSamples("SELL", EXECUTION_SAMPLE_LIMIT))
+        )
+    }
+
     private suspend fun managedSnapshot(token: String): Snapshot {
         val open = managedDao.openPositions().filter { it.side == "LONG" }
         val positions = open.map { p ->
@@ -1017,6 +1038,7 @@ class TradingRepository @Inject constructor(
         val signals = dao.allNow()
         val positions = managedDao.allPositions().filter { it.side == "LONG" }
         val trades = managedDao.allTrades().filter { it.side == "LONG" }
+        val executionSamples = managedDao.allExecutionSamples()
         val calls = learningDao.allCalls().filter { it.action.equals("BUY", true) }.map {
             mapOf(
                 "date" to it.callDate, "symbol" to it.symbol, "source" to it.source,
@@ -1048,13 +1070,14 @@ class TradingRepository @Inject constructor(
                 add("signals.json", signals)
                 add("holdings.json", positions)
                 add("closed_long_trades.json", trades)
+                add("execution_samples.json", executionSamples)
                 add("long_learning.json", calls)
                 add("long_forecasts.json", forecasts)
                 add("long_champions.json", champions)
                 add("research.json", research)
             }
         } ?: error("Unable to open export destination")
-        return LogExportResult(8, signals.size, trades.size)
+        return LogExportResult(9, signals.size, trades.size)
     }
 
     suspend fun shouldCapturePackage(packageName: String): Boolean {
@@ -1141,6 +1164,7 @@ class TradingRepository @Inject constructor(
         require(qty > 0) { "Order quantity is zero" }
         val dispatchStartedNs = SystemClock.elapsedRealtimeNanos()
         val dispatchPrepMicros = notificationStartedNs?.let { ((dispatchStartedNs - it).coerceAtLeast(0L)) / 1_000L } ?: 0L
+        val submittedAtMs = System.currentTimeMillis()
         val brokerStartedNs = SystemClock.elapsedRealtimeNanos()
         val response = apiFactory.groww.placeOrder(
             bearer(token),
@@ -1167,6 +1191,30 @@ class TradingRepository @Inject constructor(
             delay(450)
             val status = apiFactory.groww.orderStatus(bearer(token), id).requirePayload("Order status")
             if (status.orderStatus.equals("EXECUTED", true) || (status.filledQuantity ?: 0) >= qty) {
+                val filledAtMs = System.currentTimeMillis()
+                val totalExecutionMs = ((SystemClock.elapsedRealtimeNanos() - brokerStartedNs).coerceAtLeast(0L)) / 1_000_000L
+                if (product == "CNC" && transaction in setOf("BUY", "SELL") && !reference.startsWith("LGC")) {
+                    managedDao.insertExecutionSample(
+                        ExecutionSampleEntity(
+                            transactionType = transaction,
+                            symbol = symbol,
+                            quantity = qty,
+                            product = product,
+                            orderId = id,
+                            submittedAtMs = submittedAtMs,
+                            filledAtMs = filledAtMs,
+                            totalExecutionMs = totalExecutionMs,
+                            appDispatchMicros = dispatchPrepMicros,
+                            brokerAckMs = brokerAckLatencyMs
+                        )
+                    )
+                }
+                auditLogger.log("EXECUTION_LATENCY", "ORDER_FILLED", mapOf(
+                    "symbol" to symbol,
+                    "transaction" to transaction,
+                    "total_execution_ms" to totalExecutionMs,
+                    "broker_ack_ms" to brokerAckLatencyMs
+                ))
                 return status.copy(growwOrderId = id, orderReferenceId = reference)
             }
             if (status.orderStatus.equals("REJECTED", true) || status.orderStatus.equals("FAILED", true) || status.orderStatus.equals("CANCELLED", true)) {
@@ -1238,6 +1286,7 @@ class TradingRepository @Inject constructor(
         private const val ARM_HOT_REFRESH_MS = 30_000L
         private const val ARM_HOT_STATE_MAX_AGE_MS = 120_000L
         private const val ONE_MINUTE_ATR_CACHE_MS = 60_000L
+        private const val EXECUTION_SAMPLE_LIMIT = 30
         private const val UPLOADED_THREE_MONTH_REALIZED_PCT = 0.49019417475728155
         private const val DEFAULT_LONG_REALIZED_PCT = 0.33
         const val ENGINE_MULTIFY_HOLDING = "MULTIFY_HOLDING"
