@@ -61,7 +61,7 @@ object MultifyReverseEngineering {
     val hypotheses = listOf(
         "No rigid valuation ceiling: numeric P/E spans roughly 8.5x to 503x, with some loss-making/NM cases.",
         "No minimum profitability floor: positive-close calls include both >30% ROE names and negative-ROE names.",
-        "The common denominator is more plausibly tradeability + fresh catalyst/theme + short-horizon price/volume confirmation than one fundamental style.",
+        "The common denominator is more plausibly tradeability + fresh catalyst/theme + near-term price/volume confirmation than one fundamental style.",
         "Fundamentals are best treated as universe, event-risk and confidence priors: growth, leverage, market cap/liquidity, capital efficiency and earnings/corporate-event context.",
         "Likely timing parameters to test are RVOL/volume acceleration, VWAP state/slope, EMA9/20 structure, opening-range/breakout behavior, relative strength, spread/liquidity and immediate post-alert trajectory.",
         "These 20 winners are hypothesis generation only. No fundamental factor is promoted into live weights until positive + negative examples pass walk-forward/out-of-sample validation."

@@ -208,7 +208,7 @@ object LocalStrategyEngine {
         f.greenVolumeShare?.let { votes += StrategyVote("Green/red volume balance", ((it - .5) * .70).coerceIn(-.35,.35), "green share ${fmt(it * 100)}%") }
         if (f.orb5High != null && px > f.orb5High && rv > 1.15) votes += StrategyVote("5-min opening range breakout", .55, "ORB5 + RVOL")
         if (f.orb15High != null && px > f.orb15High && rv > 1.10) votes += StrategyVote("15-min opening range breakout", .45, "ORB15 + RVOL")
-        if (f.donchianHigh != null && px > f.donchianHigh && rv > 1.10) votes += StrategyVote("Donchian breakout", .50, "short-window high")
+        if (f.donchianHigh != null && px > f.donchianHigh && rv > 1.10) votes += StrategyVote("Donchian breakout", .50, "recent-window high")
         if (f.prevHigh != null && f.lastHigh != null && f.lastClose != null && f.lastHigh > f.prevHigh && f.lastClose < f.prevHigh)
             votes += StrategyVote("Failed breakout / bull trap", -.65, "prior high swept then rejected")
         if (f.prevLow != null && f.lastLow != null && f.lastClose != null && f.lastLow < f.prevLow && f.lastClose > f.prevLow)
@@ -240,76 +240,13 @@ object LocalStrategyEngine {
         f.range52Position?.let { pos ->
             if (pos > .85) votes += StrategyVote("52-week strength context", .08, "near upper yearly range")
         }
-        if (includeEventPrior) votes += StrategyVote("Multify event prior", .30, "fresh equity intraday release")
+        if (includeEventPrior) votes += StrategyVote("Multify event prior", .30, "fresh equity release")
         when (regime) {
             "TREND" -> votes += StrategyVote("Regime switch", .20, "trend families enabled")
             "MEAN_REVERSION" -> votes += StrategyVote("Regime switch", -.05, "chase penalty")
             "COMPRESSION" -> votes += StrategyVote("Squeeze filter", if (rv > 1.1) .10 else -.05, "compression regime")
         }
         return finish("LONG", regime, votes, f)
-    }
-
-    fun evaluateShort(f: FeatureSnapshot, includeEventPrior: Boolean = true): StrategyEvaluation {
-        val votes = mutableListOf<StrategyVote>()
-        val regime = regime(f)
-        val px = f.ltp
-        val atr = max(f.atr14 ?: max(px * 0.004, 0.05), 1e-9)
-        val rv = f.rvol ?: 1.0
-        f.vwap?.let { vw ->
-            val dv = (vw - px) / atr
-            if (px < vw && (f.ema9 ?: px) <= (f.ema20 ?: px))
-                votes += StrategyVote("VWAP bearish continuation", min(1.0, .35 + .25 * rv), "${fmt(dv)} ATR below VWAP")
-            else if (px > vw) votes += StrategyVote("VWAP reclaim against short", -.40, "price above VWAP")
-        }
-        if (f.ema9 != null && f.ema20 != null) {
-            val sep = (f.ema20 - f.ema9) / atr
-            votes += StrategyVote("EMA 9/20 bear trend", (sep * .9).coerceIn(-.8, .8), "bear separation ${fmt(sep)} ATR")
-        }
-        f.ema9Slope?.let { votes += StrategyVote("EMA9 bear slope", (-it * 1.1).coerceIn(-.40,.40), "${fmt(it)} ATR/bar") }
-        f.ema20Slope?.let { votes += StrategyVote("EMA20 bear slope", (-it * .9).coerceIn(-.35,.35), "${fmt(it)} ATR/bar") }
-        f.vwapSlope?.let { votes += StrategyVote("VWAP bear slope", (-it * 1.0).coerceIn(-.35,.35), "${fmt(it)} ATR/bar") }
-        f.macdHistogramSlope?.let { votes += StrategyVote("MACD histogram downside acceleration", (-it * .8).coerceIn(-.30,.30), "${fmt(it)} ATR/bar") }
-        f.rsiSlope?.let { votes += StrategyVote("RSI bear slope", (-it / 20.0).coerceIn(-.25,.25), "delta RSI ${fmt(it)}") }
-        f.structureScore?.let { votes += StrategyVote("Lower-high / lower-low structure", (-it * .45).coerceIn(-.45,.45), "structure ${fmt(it)}") }
-        f.volumeAcceleration?.let { votes += StrategyVote("Volume acceleration", (it * .20).coerceIn(-.25,.30), "volume change ${fmt(it)}") }
-        f.greenVolumeShare?.let { votes += StrategyVote("Red/green volume balance", ((.5 - it) * .70).coerceIn(-.35,.35), "green share ${fmt(it * 100)}%") }
-        if (f.orb5Low != null && px < f.orb5Low && rv > 1.15) votes += StrategyVote("5-min opening range breakdown", .55, "ORB5 + RVOL")
-        if (f.orb15Low != null && px < f.orb15Low && rv > 1.10) votes += StrategyVote("15-min opening range breakdown", .45, "ORB15 + RVOL")
-        if (f.donchianLow != null && px < f.donchianLow && rv > 1.10) votes += StrategyVote("Donchian breakdown", .50, "short-window low")
-        if (f.prevHigh != null && f.lastHigh != null && f.lastClose != null && f.lastHigh > f.prevHigh && f.lastClose < f.prevHigh)
-            votes += StrategyVote("Failed breakout / bull trap", .70, "upside liquidity sweep failed")
-        if (f.prevLow != null && f.lastLow != null && f.lastClose != null && f.lastLow < f.prevLow && f.lastClose > f.prevLow)
-            votes += StrategyVote("Failed breakdown / bear trap", -.65, "downside sweep reclaimed")
-        f.rsi14?.let { rsi ->
-            if (regime == "TREND" && rsi < 45) votes += StrategyVote("RSI bear trend", .28, "RSI ${fmt(rsi)}")
-            else if (rsi < 25) votes += StrategyVote("Oversold short-chase filter", -.30, "RSI ${fmt(rsi)}")
-        }
-        f.macdHistogram?.let { h ->
-            votes += StrategyVote("MACD bear momentum", (-h / atr * .55).coerceIn(-.45, .45), "hist ${fmt(h)}")
-        }
-        f.trendSlopeAtr?.let { slope ->
-            votes += StrategyVote("Price structure slope", (-slope * .8).coerceIn(-.45, .45), "${fmt(slope)} ATR/bar")
-        }
-        if (f.ema20 != null && px < f.ema20 - atr * 1.45 && rv > 1.15)
-            votes += StrategyVote("Keltner-style breakdown", .34, "price expanded below EMA20 with RVOL")
-        if ((f.bollWidth ?: 1.0) < .010 && rv > 1.25 && (f.donchianLow?.let { px < it } == true))
-            votes += StrategyVote("Volatility squeeze breakdown", .48, "compression released on volume")
-        if (rv > 1.60 && f.lastClose != null && f.lastOpen != null && f.lastClose < f.lastOpen)
-            votes += StrategyVote("Volume-price downside impulse", .32, "RVOL ${fmt(rv)} with red impulse")
-        candleVotes(f).forEach { votes += it.copy(score = -it.score, note = "short-side conversion") }
-        f.orderBookImbalance?.let { im ->
-            votes += StrategyVote("Order-book imbalance", (-im * .55).coerceIn(-.45, .45), "imbalance ${fmt(im)}")
-        }
-        f.dayChangePct?.let { dc ->
-            votes += StrategyVote("Day momentum context", (-dc / 4.0).coerceIn(-.25, .25), "day ${fmt(dc)}%")
-        }
-        f.range52Position?.let { pos ->
-            if (pos < .15) votes += StrategyVote("52-week weakness context", .08, "near lower yearly range")
-        }
-        if (includeEventPrior) votes += StrategyVote("Multify sell event prior", .28, "fresh book-profit reaction")
-        if (regime == "TREND") votes += StrategyVote("Regime switch", .18, "bear-trend families enabled")
-        else if (regime == "MEAN_REVERSION") votes += StrategyVote("Short chase penalty", -.08, "balanced market")
-        return finish("SHORT", regime, votes, f)
     }
 
     private fun finish(side: String, regime: String, votes: List<StrategyVote>, f: FeatureSnapshot): StrategyEvaluation {
