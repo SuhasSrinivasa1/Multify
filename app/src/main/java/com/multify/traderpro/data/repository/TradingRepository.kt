@@ -308,9 +308,8 @@ class TradingRepository @Inject constructor(
             val learning = learningStats()
             val snapshot = managedSnapshot(token)
             val today = LocalDate.now(INDIA).toString()
-            val forecasts = learningDao.intradayForecastsForSide(today, "LONG").map { it.toForecastDto() }
+            val forecasts = learningDao.longForecastsForDate(today).map { it.toForecastDto() }
             val champions = learningDao.allForecastChampions()
-                .filter { it.side == "LONG" }
                 .map { ForecastChampionDto(it.marketRegime, it.regime, it.strategy, it.wins, it.losses, it.sampleCount, it.distinctDays, it.distinctSymbols, it.frozen) }
             val research = learningDao.latestResearchReport()?.let { ResearchDto(it.reportDate, it.title, it.summary) } ?: ResearchDto()
             val events = dao.recentNow(8).mapNotNull { e ->
@@ -483,8 +482,7 @@ class TradingRepository @Inject constructor(
         ensureHistoricalSeed()
         val now = ZonedDateTime.now(INDIA)
         val today = now.toLocalDate().toString()
-        disableLegacyForecastRows(today)
-        val existing = learningDao.intradayForecastsForSide(today, "LONG")
+        val existing = learningDao.longForecastsForDate(today)
         if (now.dayOfWeek.value >= 6 || now.toLocalTime() < LocalTime.of(9, 15) || now.toLocalTime() > LocalTime.of(15, 0)) return existing.map { it.toForecastDto() }
         val nowMs = System.currentTimeMillis()
         if (!force && nowMs - lastForecastScanAtMs < FORECAST_SCAN_INTERVAL_MS) return existing.map { it.toForecastDto() }
@@ -513,7 +511,7 @@ class TradingRepository @Inject constructor(
         }
         val breadth = evaluated.mapNotNull { it.second.features.dayChangePct }.takeIf { it.isNotEmpty() }?.average() ?: 0.0
         val marketRegime = when { breadth >= .50 -> "BREADTH_BULL"; breadth <= -.50 -> "BREADTH_WEAK"; else -> "BREADTH_NEUTRAL" }
-        val champions = learningDao.allForecastChampions().filter { it.side == "LONG" }.associateBy { it.key }
+        val champions = learningDao.allForecastChampions().associateBy { it.key }
         val learned = learningStats()
         val targetPct = learned.longAveragePct.coerceAtLeast(.20)
         val desired = when {
@@ -537,7 +535,7 @@ class TradingRepository @Inject constructor(
             val key = championKey(marketRegime, item.second.regime, item.second.strategy)
             learningDao.upsertLongForecast(
                 LongForecastEntity(
-                    forecastDate = today, side = "LONG", rank = existing.size + index + 1, symbol = item.first,
+                    forecastDate = today, rank = existing.size + index + 1, symbol = item.first,
                     entryPrice = price, targetPct = targetPct, targetPrice = price * (1.0 + targetPct / 100.0),
                     confidence = item.second.confidence, score = item.third, strategy = item.second.strategy,
                     regime = item.second.regime, marketRegime = marketRegime, championKey = key,
@@ -545,7 +543,7 @@ class TradingRepository @Inject constructor(
                 )
             )
         }
-        val all = learningDao.intradayForecastsForSide(today, "LONG")
+        val all = learningDao.longForecastsForDate(today)
         auditLogger.log("FORECAST", "LONG_SCAN", mapOf("date" to today, "evaluated" to evaluated.size, "count" to all.size, "target_pct" to targetPct))
         return all.map { it.toForecastDto() }
     }
@@ -570,7 +568,7 @@ class TradingRepository @Inject constructor(
         val settings = preferences.settings.first()
         preArmGuard(settings)
         val token = ensureToken() ?: error("Authenticate Groww first")
-        val row = learningDao.intradayForecastsForSide(now.toLocalDate().toString(), "LONG")
+        val row = learningDao.longForecastsForDate(now.toLocalDate().toString())
             .firstOrNull { it.symbol.equals(symbol, true) } ?: error("No active LONG recommendation for $symbol")
         require(row.status == "ACTIVE") { "$symbol forecast is no longer active" }
         if (managedDao.openPositions().any { it.symbol.equals(row.symbol, true) && it.side == "LONG" }) return "${row.symbol} is already app-owned; duplicate BUY blocked"
@@ -603,24 +601,19 @@ class TradingRepository @Inject constructor(
 
     suspend fun pendingLongForecastNotifications(): List<ForecastDto> {
         val today = LocalDate.now(INDIA).toString()
-        disableLegacyForecastRows(today)
-        val rows = learningDao.pendingLongForecastNotifications(today).filter { it.side == "LONG" }
+        val rows = learningDao.pendingLongForecastNotifications(today)
         rows.forEach { learningDao.markLongForecastNotified(it.id) }
         return rows.map { it.toForecastDto() }
     }
 
     suspend fun monitorForecastOutcomes(): Int {
         val nowMs = System.currentTimeMillis()
-        if (nowMs - lastForecastOutcomeMonitorAtMs < 45_000L) return learningDao.activeLongForecasts().count { it.side == "LONG" }
+        if (nowMs - lastForecastOutcomeMonitorAtMs < 45_000L) return learningDao.activeLongForecasts().size
         lastForecastOutcomeMonitorAtMs = nowMs
         val active = learningDao.activeLongForecasts()
-        val token = ensureToken() ?: return active.count { it.side == "LONG" }
+        val token = ensureToken() ?: return active.size
         val now = ZonedDateTime.now(INDIA)
         for (row in active) {
-            if (row.side != "LONG") {
-                learningDao.updateLongForecast(row.copy(status = "DISABLED_LONG_ONLY", lastObservedAtMs = nowMs))
-                continue
-            }
             runCatching {
                 val ltp = apiFactory.groww.quote(bearer(token), tradingSymbol = row.symbol)
                     .requirePayload("Forecast outcome quote ${row.symbol}").lastPrice ?: return@runCatching
@@ -638,19 +631,12 @@ class TradingRepository @Inject constructor(
                 if (status != "ACTIVE") refreshForecastChampion(updated)
             }
         }
-        return learningDao.activeLongForecasts().count { it.side == "LONG" }
-    }
-
-    private suspend fun disableLegacyForecastRows(today: String) {
-        learningDao.longForecastsForDate(today)
-            .filter { it.side != "LONG" && it.status == "ACTIVE" }
-            .forEach { learningDao.updateLongForecast(it.copy(status = "DISABLED_LONG_ONLY", lastObservedAtMs = System.currentTimeMillis())) }
+        return learningDao.activeLongForecasts().size
     }
 
     private suspend fun refreshForecastChampion(row: LongForecastEntity) {
-        if (row.side != "LONG") return
         val completed = learningDao.allLongForecasts().filter {
-            it.side == "LONG" && it.marketRegime == row.marketRegime && it.regime == row.regime &&
+            it.marketRegime == row.marketRegime && it.regime == row.regime &&
                 it.strategy == row.strategy && it.status in setOf("TARGET_HIT", "MISSED")
         }
         if (completed.isEmpty()) return
@@ -662,7 +648,7 @@ class TradingRepository @Inject constructor(
         val frozen = previous?.frozen == true || (wins >= 5 && days >= 3 && symbols >= 3)
         learningDao.upsertForecastChampion(
             ForecastChampionEntity(
-                key = row.championKey, side = "LONG", marketRegime = row.marketRegime, regime = row.regime,
+                key = row.championKey, marketRegime = row.marketRegime, regime = row.regime,
                 strategy = row.strategy, wins = wins, losses = losses, sampleCount = completed.size,
                 distinctDays = days, distinctSymbols = symbols, frozen = frozen,
                 firstSeenAtMs = previous?.firstSeenAtMs ?: completed.minOf { it.generatedAtMs },
@@ -677,10 +663,10 @@ class TradingRepository @Inject constructor(
         val existing = learningDao.latestResearchReport()
         if (!force && existing?.reportDate == today) return ResearchDto(existing.reportDate, existing.title, existing.summary)
         val stats = learningStats()
-        val forecasts = learningDao.intradayForecastsForSide(today, "LONG")
+        val forecasts = learningDao.longForecastsForDate(today)
         val wins = forecasts.count { it.status == "TARGET_HIT" }
         val matched = forecasts.count { it.multifyMatched }
-        val frozen = learningDao.allForecastChampions().count { it.side == "LONG" && it.frozen }
+        val frozen = learningDao.allForecastChampions().count { it.frozen }
         val report = buildString {
             append("Rolling 30-trading-day LONG target: ${fmt(stats.longAveragePct)}% (median ${fmt(stats.longMedianPct)}%). ")
             append("Today target hits: $wins/${forecasts.size}. ")
@@ -867,8 +853,8 @@ class TradingRepository @Inject constructor(
                 "exit_price" to it.multifyExitPrice, "long_return_pct" to it.longRealizedPct
             )
         }
-        val forecasts = learningDao.allLongForecasts().filter { it.side == "LONG" }
-        val champions = learningDao.allForecastChampions().filter { it.side == "LONG" }
+        val forecasts = learningDao.allLongForecasts()
+        val champions = learningDao.allForecastChampions()
         val research = learningDao.allResearchReports()
         val safeSettings = mapOf(
             "holding_budget_rupees" to settings.holdingBudgetRupees,
