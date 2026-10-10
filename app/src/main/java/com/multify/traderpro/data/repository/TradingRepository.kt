@@ -2272,8 +2272,8 @@ class TradingRepository @Inject constructor(
         val quote = apiFactory.groww.quote(bearer(token), tradingSymbol = position.symbol).requirePayload("Quote ${position.symbol}")
         val ltp = quote.lastPrice ?: return
         var updated = updateShadowMark(position, ltp)
-        val followLong = updated.side == "LONG" && updated.regime == "FOLLOW"
-        val followShort = updated.side == "SHORT" && updated.regime == "POST_SELL"
+        val followLong = updated.side == "LONG" && updated.regime in setOf("FOLLOW", "MULTIFY_AUTO_LONG")
+        val followShort = updated.side == "SHORT" && updated.regime in setOf("POST_SELL", "MULTIFY_AUTO_SHORT")
 
         if (followLong) {
             val learned = learningStats()
@@ -2335,12 +2335,49 @@ class TradingRepository @Inject constructor(
 
         if (followShort) {
             val forceFlat = now.dayOfWeek.value >= 6 || !now.toLocalTime().isBefore(LocalTime.of(15, 20))
-            val stopHit = ltp >= updated.stopPrice
-            val targetHit = ltp <= updated.targetPrice
-            when {
-                forceFlat -> closeShadow(updated, ltp, "POST_SELL_FORCE_FLAT")
-                stopHit -> closeShadow(updated, ltp, "POST_SELL_PROTECTIVE_STOP")
-                targetHit -> closeShadow(updated, ltp, "LEARNED_POST_SELL_TARGET")
+            if (forceFlat) {
+                closeShadow(updated, ltp, "POST_SELL_FORCE_FLAT")
+                return
+            }
+            val learned = learningStats()
+            val armPct = learned.shortAverageDownPct.coerceAtLeast(0.20)
+            val armTarget = max(.05, updated.entryPrice * (1.0 - armPct / 100.0))
+            if (kotlin.math.abs(updated.targetPrice - armTarget) > .01) {
+                updated = updated.copy(
+                    targetPrice = armTarget,
+                    strategy = "Multify Auto SHORT · rolling " + fmt(armPct) + "% trail arm"
+                )
+                shadowDao.updatePosition(updated)
+            }
+            val atr = max(ltp * .004, .05)
+            var trailArmed = LearnedTrailingPolicy.isArmed("SHORT", updated.stopPrice, updated.entryPrice)
+            if (!trailArmed && LearnedTrailingPolicy.shouldArm("SHORT", updated.entryPrice, ltp, armPct)) {
+                val candidateStop = LearnedTrailingPolicy.ratchetStop(
+                    side = "SHORT", entryPrice = updated.entryPrice, ltp = ltp, atr = atr, currentStop = updated.stopPrice
+                )
+                updated = updated.copy(stopPrice = candidateStop)
+                shadowDao.updatePosition(updated)
+                trailArmed = true
+                auditLogger.log("TRAILING_STOP", "SHORT_AVERAGE_ARMED", mapOf(
+                    "symbol" to updated.symbol, "rolling_average_pct" to armPct,
+                    "threshold_price" to armTarget, "ltp" to ltp, "new_stop" to candidateStop
+                ))
+            }
+            if (trailArmed) {
+                if (ltp >= updated.stopPrice) {
+                    closeShadow(updated, ltp, "SHORT_TRAILING_PROFIT_STOP")
+                    return
+                }
+                val candidateStop = LearnedTrailingPolicy.ratchetStop(
+                    side = "SHORT", entryPrice = updated.entryPrice, ltp = ltp, atr = atr, currentStop = updated.stopPrice
+                )
+                if (candidateStop < updated.stopPrice - .01) {
+                    updated = updated.copy(stopPrice = candidateStop)
+                    shadowDao.updatePosition(updated)
+                }
+            } else if (ltp >= updated.stopPrice) {
+                closeShadow(updated, ltp, "POST_SELL_PROTECTIVE_STOP")
+                return
             }
             if (System.currentTimeMillis() - updated.lastEvaluatedAtMs >= 75_000L) {
                 val synthetic = ParsedSignal(SignalType.BOOK_PROFIT, symbol = updated.symbol, rawText = "post-sell-shadow-monitor", confidence = 1.0)
@@ -2363,7 +2400,7 @@ class TradingRepository @Inject constructor(
         val opposite = analyze(updated.symbol, token, longSide = updated.side == "SHORT", signal = synthetic, includeEventPrior = false)
         val atr = same.features.atr14 ?: max(ltp * .004, .05)
         val targetHit = if (updated.side == "LONG") ltp >= updated.targetPrice else ltp <= updated.targetPrice
-        if (targetHit && !trailArmEngine) {
+        if (targetHit) {
             if (same.confidence >= RUNNER_CONFIDENCE && same.directionalScore >= .08) {
                 val newStop = if (updated.side == "LONG") max(updated.stopPrice, max(updated.entryPrice + atr * .20, ltp - atr * .85)) else min(updated.stopPrice, min(updated.entryPrice - atr * .20, ltp + atr * .85))
                 val newTarget = if (updated.side == "LONG") ltp + atr * 1.25 else max(.05, ltp - atr * 1.25)
