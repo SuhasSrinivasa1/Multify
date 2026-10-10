@@ -87,7 +87,7 @@ class MultifyNotificationListenerService : NotificationListenerService() {
                     if (now.dayOfWeek.value < 6 && now.toLocalTime() >= java.time.LocalTime.of(15, 35)) {
                         runCatching { repository.runAfterHoursResearch(false) }
                     }
-                    delay(if (managedCount + forecastOutcomeCount > 0) 2_000L else 10_000L)
+                    delay(if (managedCount > 0) 1_000L else if (forecastOutcomeCount > 0) 2_000L else 10_000L)
                 }
             }
         }
