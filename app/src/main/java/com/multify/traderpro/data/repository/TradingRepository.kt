@@ -6,7 +6,7 @@ import com.google.gson.GsonBuilder
 import com.google.gson.JsonParser
 import com.multify.traderpro.BuildConfig
 import com.multify.traderpro.data.local.ForecastChampionEntity
-import com.multify.traderpro.data.local.IntradayForecastEntity
+import com.multify.traderpro.data.local.LongForecastEntity
 import com.multify.traderpro.data.local.LearningCallEntity
 import com.multify.traderpro.data.local.LearningDao
 import com.multify.traderpro.data.local.ManagedPositionEntity
@@ -181,7 +181,7 @@ class TradingRepository @Inject constructor(
                 buyAtMs = System.currentTimeMillis(), updatedAtMs = System.currentTimeMillis()
             )
         )
-        learningDao.markIntradayForecastMatch(LocalDate.now(INDIA).toString(), symbol)
+        learningDao.markLongForecastMatch(LocalDate.now(INDIA).toString(), symbol)
     }
 
     private suspend fun recordLiveExit(eventId: Long, symbol: String, price: Double) {
@@ -535,8 +535,8 @@ class TradingRepository @Inject constructor(
         ranked.take((desired - existing.size).coerceAtLeast(0)).forEachIndexed { index, item ->
             val price = item.second.features.ltp
             val key = championKey(marketRegime, item.second.regime, item.second.strategy)
-            learningDao.upsertIntradayForecast(
-                IntradayForecastEntity(
+            learningDao.upsertLongForecast(
+                LongForecastEntity(
                     forecastDate = today, side = "LONG", rank = existing.size + index + 1, symbol = item.first,
                     entryPrice = price, targetPct = targetPct, targetPrice = price * (1.0 + targetPct / 100.0),
                     confidence = item.second.confidence, score = item.third, strategy = item.second.strategy,
@@ -601,24 +601,24 @@ class TradingRepository @Inject constructor(
         return "BUY ${row.symbol} opened as CNC holding · qty $filled @ ₹${fmt(entry)} · trailing arms at +${fmt(row.targetPct)}%"
     }
 
-    suspend fun pendingForecastNotifications(): List<ForecastDto> {
+    suspend fun pendingLongForecastNotifications(): List<ForecastDto> {
         val today = LocalDate.now(INDIA).toString()
         disableLegacyForecastRows(today)
-        val rows = learningDao.pendingForecastNotifications(today).filter { it.side == "LONG" }
-        rows.forEach { learningDao.markForecastNotified(it.id) }
+        val rows = learningDao.pendingLongForecastNotifications(today).filter { it.side == "LONG" }
+        rows.forEach { learningDao.markLongForecastNotified(it.id) }
         return rows.map { it.toForecastDto() }
     }
 
     suspend fun monitorForecastOutcomes(): Int {
         val nowMs = System.currentTimeMillis()
-        if (nowMs - lastForecastOutcomeMonitorAtMs < 45_000L) return learningDao.activeIntradayForecasts().count { it.side == "LONG" }
+        if (nowMs - lastForecastOutcomeMonitorAtMs < 45_000L) return learningDao.activeLongForecasts().count { it.side == "LONG" }
         lastForecastOutcomeMonitorAtMs = nowMs
-        val active = learningDao.activeIntradayForecasts()
+        val active = learningDao.activeLongForecasts()
         val token = ensureToken() ?: return active.count { it.side == "LONG" }
         val now = ZonedDateTime.now(INDIA)
         for (row in active) {
             if (row.side != "LONG") {
-                learningDao.updateIntradayForecast(row.copy(status = "DISABLED_LONG_ONLY", lastObservedAtMs = nowMs))
+                learningDao.updateLongForecast(row.copy(status = "DISABLED_LONG_ONLY", lastObservedAtMs = nowMs))
                 continue
             }
             runCatching {
@@ -634,22 +634,22 @@ class TradingRepository @Inject constructor(
                     lastPrice = ltp, maxFavourablePct = max(row.maxFavourablePct, max(0.0, movePct)),
                     maxAdversePct = max(row.maxAdversePct, adversePct), lastObservedAtMs = nowMs
                 )
-                learningDao.updateIntradayForecast(updated)
+                learningDao.updateLongForecast(updated)
                 if (status != "ACTIVE") refreshForecastChampion(updated)
             }
         }
-        return learningDao.activeIntradayForecasts().count { it.side == "LONG" }
+        return learningDao.activeLongForecasts().count { it.side == "LONG" }
     }
 
     private suspend fun disableLegacyForecastRows(today: String) {
-        learningDao.intradayForecastsForDate(today)
+        learningDao.longForecastsForDate(today)
             .filter { it.side != "LONG" && it.status == "ACTIVE" }
-            .forEach { learningDao.updateIntradayForecast(it.copy(status = "DISABLED_LONG_ONLY", lastObservedAtMs = System.currentTimeMillis())) }
+            .forEach { learningDao.updateLongForecast(it.copy(status = "DISABLED_LONG_ONLY", lastObservedAtMs = System.currentTimeMillis())) }
     }
 
-    private suspend fun refreshForecastChampion(row: IntradayForecastEntity) {
+    private suspend fun refreshForecastChampion(row: LongForecastEntity) {
         if (row.side != "LONG") return
-        val completed = learningDao.allIntradayForecasts().filter {
+        val completed = learningDao.allLongForecasts().filter {
             it.side == "LONG" && it.marketRegime == row.marketRegime && it.regime == row.regime &&
                 it.strategy == row.strategy && it.status in setOf("TARGET_HIT", "MISSED")
         }
@@ -867,7 +867,7 @@ class TradingRepository @Inject constructor(
                 "exit_price" to it.multifyExitPrice, "long_return_pct" to it.longRealizedPct
             )
         }
-        val forecasts = learningDao.allIntradayForecasts().filter { it.side == "LONG" }
+        val forecasts = learningDao.allLongForecasts().filter { it.side == "LONG" }
         val champions = learningDao.allForecastChampions().filter { it.side == "LONG" }
         val research = learningDao.allResearchReports()
         val safeSettings = mapOf(
@@ -945,7 +945,7 @@ class TradingRepository @Inject constructor(
         error("Groww order $id was not confirmed filled; no duplicate retry was attempted")
     }
 
-    private fun IntradayForecastEntity.toForecastDto() = ForecastDto(
+    private fun LongForecastEntity.toForecastDto() = ForecastDto(
         rank = rank, symbol = symbol, confidence = confidence, score = score, reason = reason,
         multifyMatched = multifyMatched, entryPrice = entryPrice, targetPrice = targetPrice, targetPct = targetPct,
         status = status, strategy = strategy, regime = regime, marketRegime = marketRegime,
