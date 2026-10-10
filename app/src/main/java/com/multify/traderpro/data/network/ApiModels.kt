@@ -18,6 +18,18 @@ data class DaySummaryDto(
     val openPositions: Int = 0
 )
 
+data class ExecutionAverageDto(
+    val averageFillMs: Double = 0.0,
+    val averageAppDispatchMs: Double = 0.0,
+    val sampleCount: Int = 0,
+    val dispatchSampleCount: Int = 0
+)
+
+data class ExecutionStatsDto(
+    val buyLong: ExecutionAverageDto = ExecutionAverageDto(),
+    val sellLong: ExecutionAverageDto = ExecutionAverageDto()
+)
+
 data class PositionDto(
     val symbol: String = "",
     val quantity: Int = 0,
@@ -48,6 +60,7 @@ data class DashboardDto(
     val broker: BrokerStatusDto = BrokerStatusDto(),
     val risk: RiskStatusDto = RiskStatusDto(),
     val summary: DaySummaryDto = DaySummaryDto(),
+    val execution: ExecutionStatsDto = ExecutionStatsDto(),
     val learning: LearningStatsDto = LearningStatsDto(),
     val forecastLearning: ForecastLearningStatsDto = ForecastLearningStatsDto(),
     val forecasts: List<ForecastDto> = emptyList(),
