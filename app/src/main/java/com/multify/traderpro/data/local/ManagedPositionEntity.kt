@@ -17,6 +17,7 @@ data class ManagedPositionEntity(
     val engine: String,
     val symbol: String,
     val product: String,
+    val side: String,
     val quantity: Int,
     val entryPrice: Double,
     val stopPrice: Double?,
@@ -27,10 +28,15 @@ data class ManagedPositionEntity(
     val sourceEventId: Long?,
     val openOrderId: String,
     val openReferenceId: String,
+    val smartOrderId: String? = null,
     val openedAtMs: Long,
     val lastPrice: Double,
     val maxFavourablePrice: Double,
     val maxAdversePrice: Double,
     val lastEvaluatedAtMs: Long,
+    val anchorPrice: Double = 0.0,
+    val capitalDeployed: Double = 0.0,
+    val campaignBudget: Double = 0.0,
+    val addCount: Int = 0,
     val status: String = "OPEN"
 )

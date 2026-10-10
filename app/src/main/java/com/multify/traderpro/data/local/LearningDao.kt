@@ -26,6 +26,9 @@ interface LearningDao {
     @Query("SELECT * FROM learning_calls WHERE source='LIVE' AND symbol=:symbol ORDER BY id DESC LIMIT 1")
     suspend fun latestLiveCall(symbol: String): LearningCallEntity?
 
+    @Query("SELECT * FROM learning_calls WHERE source='LIVE' AND sellAtMs IS NOT NULL AND shortObservationFinalized=0 ORDER BY sellAtMs ASC")
+    suspend fun activePostSellObservations(): List<LearningCallEntity>
+
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertObservation(item: PriceObservationEntity): Long
 
@@ -35,38 +38,66 @@ interface LearningDao {
     @Query("SELECT * FROM price_observations WHERE eventId=:eventId AND phase=:phase ORDER BY offsetSeconds ASC")
     suspend fun observationsForEventPhase(eventId: Long, phase: String): List<PriceObservationEntity>
 
+    @Insert(onConflict = OnConflictStrategy.ABORT)
+    suspend fun insertStrategySnapshot(item: StrategySnapshotEntity): Long
+
+    @Query("SELECT * FROM strategy_snapshots ORDER BY atMs DESC LIMIT :limit")
+    suspend fun recentStrategySnapshots(limit: Int = 500): List<StrategySnapshotEntity>
+
+    @Query("SELECT * FROM strategy_snapshots ORDER BY atMs ASC")
+    suspend fun allStrategySnapshots(): List<StrategySnapshotEntity>
+
+    @Query("DELETE FROM forecasts WHERE forecastDate=:date")
+    suspend fun deleteForecasts(date: String)
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun upsertLongForecast(item: LongForecastEntity): Long
+    suspend fun insertForecasts(items: List<ForecastEntity>)
+
+    @Query("SELECT * FROM forecasts WHERE forecastDate=:date ORDER BY rank ASC")
+    suspend fun forecastsForDate(date: String): List<ForecastEntity>
+
+    @Query("SELECT * FROM forecasts ORDER BY forecastDate ASC, rank ASC")
+    suspend fun allForecasts(): List<ForecastEntity>
+
+    @Query("UPDATE forecasts SET multifyMatched=1, multifyDirectionMatched=CASE WHEN bias=:bias THEN 1 ELSE multifyDirectionMatched END WHERE forecastDate=:date AND symbol=:symbol")
+    suspend fun markForecastMatch(date: String, symbol: String, bias: String)
+
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertIntradayForecast(item: IntradayForecastEntity): Long
 
     @Update
-    suspend fun updateLongForecast(item: LongForecastEntity)
+    suspend fun updateIntradayForecast(item: IntradayForecastEntity)
 
-    @Query("SELECT * FROM long_forecasts WHERE forecastDate=:date ORDER BY rank ASC")
-    suspend fun longForecastsForDate(date: String): List<LongForecastEntity>
+    @Query("SELECT * FROM intraday_forecasts WHERE forecastDate=:date ORDER BY side ASC, rank ASC")
+    suspend fun intradayForecastsForDate(date: String): List<IntradayForecastEntity>
 
-    @Query("SELECT * FROM long_forecasts WHERE status='ACTIVE' ORDER BY generatedAtMs ASC")
-    suspend fun activeLongForecasts(): List<LongForecastEntity>
+    @Query("SELECT * FROM intraday_forecasts WHERE forecastDate=:date AND side=:side ORDER BY rank ASC")
+    suspend fun intradayForecastsForSide(date: String, side: String): List<IntradayForecastEntity>
 
-    @Query("SELECT * FROM long_forecasts ORDER BY generatedAtMs ASC")
-    suspend fun allLongForecasts(): List<LongForecastEntity>
+    @Query("SELECT * FROM intraday_forecasts WHERE status='ACTIVE' ORDER BY generatedAtMs ASC")
+    suspend fun activeIntradayForecasts(): List<IntradayForecastEntity>
 
-    @Query("SELECT * FROM long_forecasts WHERE notified=0 AND forecastDate=:date ORDER BY generatedAtMs ASC")
-    suspend fun pendingLongForecastNotifications(date: String): List<LongForecastEntity>
+    @Query("SELECT * FROM intraday_forecasts ORDER BY generatedAtMs ASC")
+    suspend fun allIntradayForecasts(): List<IntradayForecastEntity>
 
-    @Query("UPDATE long_forecasts SET notified=1 WHERE id=:id")
-    suspend fun markLongForecastNotified(id: Long)
+    @Query("SELECT * FROM intraday_forecasts WHERE notified=0 AND forecastDate=:date ORDER BY generatedAtMs ASC")
+    suspend fun pendingForecastNotifications(date: String): List<IntradayForecastEntity>
 
-    @Query("UPDATE long_forecasts SET multifyMatched=1 WHERE forecastDate=:date AND symbol=:symbol")
-    suspend fun markLongForecastMatch(date: String, symbol: String)
+    @Query("UPDATE intraday_forecasts SET notified=1 WHERE id=:id")
+    suspend fun markForecastNotified(id: Long)
+
+    @Query("UPDATE intraday_forecasts SET multifyMatched=1 WHERE forecastDate=:date AND symbol=:symbol")
+    suspend fun markIntradayForecastMatch(date: String, symbol: String)
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun upsertLongChampion(item: LongChampionEntity)
+    suspend fun upsertForecastChampion(item: ForecastChampionEntity)
 
-    @Query("SELECT * FROM long_champions ORDER BY frozen DESC, wins DESC, sampleCount DESC")
-    suspend fun allLongChampions(): List<LongChampionEntity>
+    @Query("SELECT * FROM forecast_champions ORDER BY frozen DESC, side ASC, wins DESC, sampleCount DESC")
+    suspend fun allForecastChampions(): List<ForecastChampionEntity>
 
-    @Query("SELECT * FROM long_champions WHERE key=:key LIMIT 1")
-    suspend fun longChampion(key: String): LongChampionEntity?
+    @Query("SELECT * FROM forecast_champions WHERE key=:key LIMIT 1")
+    suspend fun forecastChampion(key: String): ForecastChampionEntity?
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertResearchReport(item: ResearchReportEntity): Long
@@ -76,4 +107,61 @@ interface LearningDao {
 
     @Query("SELECT * FROM research_reports ORDER BY reportDate DESC")
     suspend fun allResearchReports(): List<ResearchReportEntity>
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertWaveCampaign(item: WaveCampaignEntity): Long
+
+    @Update
+    suspend fun updateWaveCampaign(item: WaveCampaignEntity)
+
+    @Query("SELECT * FROM wave_campaigns WHERE eventId=:eventId LIMIT 1")
+    suspend fun waveCampaignForEvent(eventId: Long): WaveCampaignEntity?
+
+    @Query("SELECT * FROM wave_campaigns WHERE active=1 ORDER BY startAtMs ASC")
+    suspend fun activeWaveCampaigns(): List<WaveCampaignEntity>
+
+    @Query("SELECT * FROM wave_campaigns ORDER BY startAtMs ASC")
+    suspend fun allWaveCampaigns(): List<WaveCampaignEntity>
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertWaveObservation(item: WaveObservationEntity): Long
+
+    @Query("SELECT * FROM wave_observations WHERE campaignId=:campaignId ORDER BY wave ASC, confirmedAtMs ASC")
+    suspend fun waveObservationsForCampaign(campaignId: Long): List<WaveObservationEntity>
+
+    @Query("SELECT * FROM wave_observations ORDER BY confirmedAtMs ASC")
+    suspend fun allWaveObservations(): List<WaveObservationEntity>
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertWaveDecision(item: WaveDecisionEntity): Long
+
+    @Query("SELECT * FROM wave_decisions WHERE campaignId=:campaignId AND waveNumber=:waveNumber LIMIT 1")
+    suspend fun waveDecisionForCampaign(campaignId: Long, waveNumber: Int): WaveDecisionEntity?
+
+    @Query("SELECT * FROM wave_decisions ORDER BY triggerAtMs DESC LIMIT :limit")
+    suspend fun recentWaveDecisions(limit: Int = 50): List<WaveDecisionEntity>
+
+    @Query("SELECT * FROM wave_decisions WHERE campaignId=:campaignId ORDER BY waveNumber ASC")
+    suspend fun waveDecisionsForCampaign(campaignId: Long): List<WaveDecisionEntity>
+
+    @Query("SELECT * FROM wave_decisions WHERE id=:id LIMIT 1")
+    suspend fun waveDecisionById(id: Long): WaveDecisionEntity?
+
+    @Query("SELECT * FROM wave_decisions ORDER BY triggerAtMs ASC")
+    suspend fun allWaveDecisions(): List<WaveDecisionEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertWaveOutcome(item: WaveOutcomeEntity): Long
+
+    @Update
+    suspend fun updateWaveOutcome(item: WaveOutcomeEntity)
+
+    @Query("SELECT * FROM wave_outcomes WHERE decisionId=:decisionId LIMIT 1")
+    suspend fun waveOutcomeForDecision(decisionId: Long): WaveOutcomeEntity?
+
+    @Query("SELECT * FROM wave_outcomes WHERE finalizedAtMs IS NULL ORDER BY lastObservedAtMs ASC")
+    suspend fun activeWaveOutcomes(): List<WaveOutcomeEntity>
+
+    @Query("SELECT * FROM wave_outcomes ORDER BY lastObservedAtMs ASC")
+    suspend fun allWaveOutcomes(): List<WaveOutcomeEntity>
 }
