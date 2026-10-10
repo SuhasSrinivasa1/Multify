@@ -61,7 +61,7 @@ class MultifyNotificationListenerService : NotificationListenerService() {
         super.onListenerConnected()
         auditLogger.log("RUNTIME", "NOTIFICATION_LISTENER_CONNECTED")
         scope.launch { repository.recordListenerConnected() }
-        notifyStatus("Signal capture active", "Listening for paid Multify equity notifications · shadow + app-owned live monitors ready")
+        notifyStatus("Signal capture active", "Listening for Multify Auto + independent LONG / SHORT intraday forecasts")
         if (shadowMonitorJob?.isActive != true) {
             shadowMonitorJob = scope.launch {
                 runCatching { repository.ensureHistoricalSeed() }
@@ -70,17 +70,26 @@ class MultifyNotificationListenerService : NotificationListenerService() {
                     val shadowCount = runCatching { repository.monitorShadowPositions() }.getOrDefault(0)
                     val managedCount = runCatching { repository.monitorManagedPositions() }.getOrDefault(0)
                     val learningCount = runCatching { repository.monitorLearningObservations() }.getOrDefault(0)
-                    val pivotCount = runCatching { repository.monitorWaveCampaigns() }.getOrDefault(0)
-                    val adaptiveCount = runCatching { repository.monitorAdaptiveWaves() }.getOrDefault(0)
-                    val outcomeCount = runCatching { repository.monitorWaveOutcomes() }.getOrDefault(0)
+                    val forecastOutcomeCount = runCatching { repository.monitorForecastOutcomes() }.getOrDefault(0)
                     val now = java.time.ZonedDateTime.now(java.time.ZoneId.of("Asia/Kolkata"))
-                    if (now.dayOfWeek.value < 6 && now.toLocalTime() >= java.time.LocalTime.of(9, 16) && now.toLocalTime() <= java.time.LocalTime.of(10, 0)) {
+                    if (now.dayOfWeek.value < 6 &&
+                        now.toLocalTime() >= java.time.LocalTime.of(9, 15) &&
+                        now.toLocalTime() <= java.time.LocalTime.of(15, 0)
+                    ) {
                         runCatching { repository.generateDailyForecasts(false) }
+                        runCatching { repository.pendingForecastNotifications() }.getOrDefault(emptyList()).forEach { f ->
+                            val direction = if (f.bias == "LONG") "LONG opportunity" else "SHORT opportunity"
+                            val message = f.symbol + " · entry ₹" + String.format(java.util.Locale.US, "%.2f", f.entryPrice) +
+                                " · target " + (if (f.bias == "LONG") "+" else "-") +
+                                String.format(java.util.Locale.US, "%.2f", f.targetPct) + "% · " +
+                                String.format(java.util.Locale.US, "%.0f%% confidence", f.confidence * 100.0)
+                            notifyStatus(direction + " · " + f.symbol, message)
+                        }
                     }
                     if (now.dayOfWeek.value < 6 && now.toLocalTime() >= java.time.LocalTime.of(15, 35)) {
                         runCatching { repository.runAfterHoursResearch(false) }
                     }
-                    delay(if (shadowCount + managedCount + learningCount + pivotCount + adaptiveCount + outcomeCount > 0) 2_000L else 10_000L)
+                    delay(if (shadowCount + managedCount + learningCount + forecastOutcomeCount > 0) 2_000L else 10_000L)
                 }
             }
         }
