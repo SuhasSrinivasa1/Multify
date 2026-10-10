@@ -75,7 +75,7 @@ class MultifyNotificationListenerService : NotificationListenerService() {
                         now.toLocalTime() <= java.time.LocalTime.of(15, 0)
                     ) {
                         runCatching { repository.generateDailyForecasts(false) }
-                        runCatching { repository.pendingForecastNotifications() }.getOrDefault(emptyList()).forEach { f ->
+                        runCatching { repository.pendingLongForecastNotifications() }.getOrDefault(emptyList()).forEach { f ->
                             val message = f.symbol + " · entry ₹" + String.format(java.util.Locale.US, "%.2f", f.entryPrice) +
                                 " · target +" + String.format(java.util.Locale.US, "%.2f", f.targetPct) + "% · " +
                                 String.format(java.util.Locale.US, "%.0f%% confidence", f.confidence * 100.0)

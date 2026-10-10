@@ -56,9 +56,7 @@ data class MarginPayload(
 data class EquityMarginPayload(
     @SerializedName("net_equity_margin_used") val netEquityMarginUsed: Double = 0.0,
     @SerializedName("cnc_margin_used") val cncMarginUsed: Double = 0.0,
-    @SerializedName("mis_margin_used") val misMarginUsed: Double = 0.0,
     @SerializedName("cnc_balance_available") val cncBalanceAvailable: Double = 0.0,
-    @SerializedName("mis_balance_available") val misBalanceAvailable: Double = 0.0
 )
 
 data class PositionsPayload(val positions: List<GrowwPosition> = emptyList())
@@ -81,7 +79,6 @@ data class GrowwPosition(
     val product: String = "",
     val exchange: String = "NSE",
     @SerializedName("net_price") val netPrice: Double = 0.0,
-    @SerializedName("realised_pnl") val realisedPnl: Double = 0.0,
     @SerializedName("credit_quantity") val creditQuantity: Int = 0,
     @SerializedName("debit_quantity") val debitQuantity: Int = 0
 )

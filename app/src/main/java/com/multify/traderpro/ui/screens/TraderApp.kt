@@ -274,7 +274,7 @@ private fun ExecutionScreen(
             }
         }
         if (dashboard != null) {
-            item { SectionTitle("Holdings overview", "Realised P&L is intentionally not displayed. This screen focuses on current app-owned LONG holdings.") }
+            item { SectionTitle("Holdings overview", "Current app-owned LONG CNC holdings.") }
             item {
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
                     MetricCard(
