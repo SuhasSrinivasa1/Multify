@@ -631,46 +631,28 @@ class TradingRepository @Inject constructor(
         val existing = learningDao.latestResearchReport()
         if (!force && existing?.reportDate == today) return ResearchDto(existing.reportDate, existing.title, existing.summary)
         val stats = learningStats()
-        val since = startOfIndiaDayMs()
-        val shadowTrades = shadowDao.tradesSince(since)
-        val strategyRows = shadowTrades.groupBy { it.strategy }.map { (name, xs) -> name to xs.sumOf { it.netPnl } }.sortedByDescending { it.second }
-        val best = strategyRows.firstOrNull()
-        val forecasts = learningDao.forecastsForDate(today)
+        val forecasts = learningDao.intradayForecastsForDate(today)
+        val longs = forecasts.filter { it.side == "LONG" }
+        val shorts = forecasts.filter { it.side == "SHORT" }
+        val longWins = longs.count { it.status == "TARGET_HIT" }
+        val shortWins = shorts.count { it.status == "TARGET_HIT" }
         val matched = forecasts.count { it.multifyMatched }
-        val waveDecisions = learningDao.allWaveDecisions().filter { it.callDate == today }
-        val outcomes = learningDao.allWaveOutcomes().associateBy { it.decisionId }
-        val evaluated = waveDecisions.mapNotNull { d -> outcomes[d.id]?.let { d to it } }
-        val selectorNet = evaluated.sumOf { it.second.selectedNetRupees }
-        val autoAverageNet = evaluated.sumOf { it.second.oldAveragingNetRupees }
-        val correct = evaluated.count { (d, o) ->
-            val best = max(0.0, max(o.longNetRupees, o.shortNetRupees))
-            when (d.selectedDirection) {
-                "LONG" -> o.longNetRupees >= best - 0.01
-                "SHORT" -> o.shortNetRupees >= best - 0.01
-                else -> best <= 0.0
-            }
-        }
-        val selectorAccuracy = if (evaluated.isEmpty()) 0.0 else correct.toDouble() / evaluated.size * 100.0
-        val regimeSummary = evaluated.groupBy { it.first.regime }.entries
-            .sortedByDescending { it.value.size }
-            .take(5)
-            .joinToString("; ") { (regime, rows) ->
-                val net = rows.sumOf { it.second.selectedNetRupees }
-                "$regime n=${rows.size} net ₹${fmt(net)}"
-            }
+        val frozen = learningDao.allForecastChampions().filter { it.frozen }
         val report = buildString {
-            append("Rolling 30-trading-day long reference: ${fmt(stats.longAveragePct)}% (median ${fmt(stats.longMedianPct)}%). ")
-            append("Short retracement target: ${fmt(stats.shortRetracementPct)}% of preceding long move; ${stats.shortObservedCalls} learned observations. ")
-            append("Forecast match today: $matched/${forecasts.size}. ")
-            if (best != null) append("Best shadow strategy today: ${best.first} with net ₹${fmt(best.second)}. ")
-            if (shadowTrades.isEmpty()) append("No closed shadow trades yet; next session remains a data-collection priority. ")
-            append("Adaptive Wave selector: ${evaluated.size} evaluated checkpoints, net ₹${fmt(selectorNet)} vs old automatic-LONG counterfactual ₹${fmt(autoAverageNet)}, selector accuracy ${fmt(selectorAccuracy)}%. ")
-            if (regimeSummary.isNotBlank()) append("Regime results: $regimeSummary. ")
-            append("Champion remains unchanged intraday; challengers require repeated out-of-sample improvement before promotion.")
+            append("LONG target: " + fmt(stats.longAveragePct) + "% from the rolling 30 recommendation trading days. ")
+            append("SHORT direct-downside target: " + fmt(stats.shortAverageDownPct) + "% from " + stats.shortObservedCalls + " post-sell observations. ")
+            append("Today LONG target hits: " + longWins + "/" + longs.size + "; SHORT target hits: " + shortWins + "/" + shorts.size + ". ")
+            append("Multify later matched " + matched + "/" + forecasts.size + " forecast symbols; this is secondary research, not the success label. ")
+            append("Frozen champions: " + frozen.size + ". ")
+            append("Live champions remain frozen after qualification; challengers may continue collecting shadow evidence without changing the live version.")
         }
-        val entity = ResearchReportEntity(reportDate=today, generatedAtMs=System.currentTimeMillis(), title="After-market strategy review", summary=report)
+        val entity = ResearchReportEntity(reportDate=today, generatedAtMs=System.currentTimeMillis(), title="After-market forecast review", summary=report)
         learningDao.insertResearchReport(entity)
-        auditLogger.log("RESEARCH", "AFTER_HOURS_REPORT", mapOf("date" to today, "forecast_matches" to matched, "shadow_trades" to shadowTrades.size))
+        auditLogger.log("RESEARCH", "AFTER_HOURS_FORECAST_REPORT", mapOf(
+            "date" to today, "long_wins" to longWins, "long_total" to longs.size,
+            "short_wins" to shortWins, "short_total" to shorts.size, "multify_matches" to matched,
+            "frozen_champions" to frozen.size
+        ))
         return ResearchDto(today, entity.title, report)
     }
 
@@ -831,8 +813,6 @@ class TradingRepository @Inject constructor(
                     orderBookImbalance = x.orderBookImbalance, votes = x.votes
                 )
             }
-            val waveStats = waveStats()
-            val adaptiveWaves = recentAdaptiveWaves(settings)
             val main = if (settings.liveExecutionEffective) live else shadow
             if (settings.liveExecutionEffective) {
                 preferences.updateLivePeakPnl(main.totalPnl)
@@ -873,8 +853,6 @@ class TradingRepository @Inject constructor(
                 forecastChampions = forecastChampions,
                 research = latestResearch,
                 strategyInsights = strategyInsights,
-                waveStats = waveStats,
-                adaptiveWaves = adaptiveWaves,
                 health = run {
                     val nowMs = System.currentTimeMillis()
                     val heartbeatAge = if (settings.serviceHeartbeatAtMs > 0) nowMs - settings.serviceHeartbeatAtMs else Long.MAX_VALUE
@@ -2559,7 +2537,6 @@ class TradingRepository @Inject constructor(
             closeManaged(token, updated, ltp, "PROFIT_HIGH_WATER_PROTECT")
             return
         }
-        // Direction switching is checkpoint-gated by monitorAdaptiveWaves(); no intra-wave flip-flop orders.
 
     }
 
