@@ -2,6 +2,7 @@ package com.multify.traderpro.data.repository
 
 import android.content.Context
 import android.net.Uri
+import android.os.SystemClock
 import com.google.gson.GsonBuilder
 import com.google.gson.JsonParser
 import com.multify.traderpro.BuildConfig
@@ -92,8 +93,16 @@ class TradingRepository @Inject constructor(
     val recentEvents: Flow<List<SignalEventEntity>> = dao.observeRecent(100)
 
     @Volatile private var historicalSeedEnsured = false
+    @Volatile private var armHotState: ArmHotState? = null
     private var lastForecastScanAtMs = 0L
     private var lastForecastOutcomeMonitorAtMs = 0L
+
+    private data class ArmHotState(
+        val token: String,
+        val settings: AppSettings,
+        val cncBalance: Double,
+        val warmedAtMs: Long
+    )
 
     suspend fun ensureHistoricalSeed() {
         if (historicalSeedEnsured) return
@@ -216,6 +225,7 @@ class TradingRepository @Inject constructor(
 
     suspend fun setHoldingBudget(value: Long) {
         preferences.setHoldingBudget(value)
+        armHotState = null
         auditLogger.log("SETTINGS", "HOLDING_BUDGET", mapOf("rupees" to value))
     }
 
@@ -228,17 +238,29 @@ class TradingRepository @Inject constructor(
             require(!s.safetyHalt) { "Safety halt is active" }
         }
         preferences.setArm(enabled)
+        if (enabled) {
+            val ready = runCatching { prepareArmHotPath(force = true) }.getOrDefault(false)
+            if (!ready) {
+                preferences.setArm(false)
+                armHotState = null
+                error("ARM could not pre-warm Groww token and CNC buying power")
+            }
+        } else {
+            armHotState = null
+        }
         auditLogger.log("SETTINGS", if (enabled) "ARM_ENABLED" else "ARM_DISABLED")
     }
 
     suspend fun resetHalt() {
         preferences.setSafetyHalt(false)
         preferences.setArm(false)
+        armHotState = null
         auditLogger.log("SAFETY", "HALT_RESET_ARM_OFF")
     }
 
     suspend fun forceLocalDisarm() {
         preferences.setSafetyHalt(true)
+        armHotState = null
         auditLogger.log("SAFETY", "LOCAL_DISARM")
     }
 
@@ -280,6 +302,8 @@ class TradingRepository @Inject constructor(
             verifiedPublicIp = publicIp, staticIpMatched = staticMatched
         )
         val cnc = margin.equity?.cncBalanceAvailable ?: margin.clearCash
+        val refreshedSettings = preferences.settings.first()
+        armHotState = ArmHotState(token, refreshedSettings, cnc.coerceAtLeast(0.0), System.currentTimeMillis())
         auditLogger.log("AUTH", "AUTHENTICATION_SUCCESS", mapOf(
             "nse_cash_enabled" to cashEnabled, "ddpi_enabled" to profile.ddpiEnabled,
             "static_ip_matched" to staticMatched, "cnc_balance_available" to cnc
@@ -304,6 +328,8 @@ class TradingRepository @Inject constructor(
         if (!settings.brokerAuthenticated || token.isNullOrBlank()) return disconnectedDashboard(settings)
         return try {
             val margin = apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin")
+            val cnc = (margin.equity?.cncBalanceAvailable ?: margin.clearCash).coerceAtLeast(0.0)
+            armHotState = ArmHotState(token, settings, cnc, System.currentTimeMillis())
             ensureHistoricalSeed()
             val learning = learningStats()
             val snapshot = managedSnapshot(token)
@@ -342,6 +368,8 @@ class TradingRepository @Inject constructor(
                     reconnectCount = settings.listenerReconnectCount,
                     lastReconnectAtMs = settings.lastListenerReconnectAtMs,
                     lastEventProcessingLatencyMs = settings.lastEventProcessingLatencyMs,
+                    lastOrderDispatchPrepMicros = settings.lastOrderDispatchPrepMicros,
+                    lastBrokerAckLatencyMs = settings.lastBrokerAckLatencyMs,
                     marketDataAgeMs = dataAge
                 ),
                 positions = snapshot.positions,
@@ -355,11 +383,15 @@ class TradingRepository @Inject constructor(
         }
     }
 
-    suspend fun processEvent(eventId: Long) {
-        ensureHistoricalSeed()
-        val event = dao.byId(eventId) ?: return
-        dao.updateForwarding(eventId, "ANALYZING", null, null, null)
-        val parsed = parser.parse(event.title, event.text, event.bigText)
+    suspend fun processEvent(
+        eventId: Long,
+        parsedOverride: ParsedSignal? = null,
+        notificationStartedNs: Long? = null
+    ) {
+        val parsed = parsedOverride ?: run {
+            val event = dao.byId(eventId) ?: return
+            parser.parse(event.title, event.text, event.bigText)
+        }
         when (parsed.type) {
             SignalType.AUTO_PAUSED -> {
                 forceLocalDisarm()
@@ -367,8 +399,13 @@ class TradingRepository @Inject constructor(
                 return
             }
             SignalType.PRE_ALERT -> {
-                val ready = ensureToken() != null
-                dao.updateForwarding(eventId, "ANALYZED", "PRE_ALERT_READY", if (ready) "Broker session warmed for the next Multify call." else "Signal captured; authenticate Groww before ARM.", null)
+                val ready = runCatching { prepareArmHotPath(force = true) }.getOrDefault(false)
+                dao.updateForwarding(
+                    eventId, "ANALYZED", "PRE_ALERT_READY",
+                    if (ready) "Groww token, connection and CNC buying power warmed for the next Multify call."
+                    else "Signal captured; authenticate Groww before ARM.",
+                    null
+                )
                 return
             }
             SignalType.BUY_SUBMITTED -> {
@@ -381,48 +418,81 @@ class TradingRepository @Inject constructor(
             }
             else -> Unit
         }
+
         val symbol = parsed.symbol
         if (!symbol.isNullOrBlank() && !nseSymbols.isKnown(symbol) && !nseSymbols.isStale()) {
             dao.updateForwarding(eventId, "IGNORED", "SYMBOL_NOT_IN_NSE_MASTER", "$symbol is not in the current NSE equity master.", null)
             return
         }
-        val token = ensureToken()
+
+        val hot = armHotState?.takeIf { System.currentTimeMillis() - it.warmedAtMs <= ARM_HOT_STATE_MAX_AGE_MS }
+        val token = hot?.token ?: ensureToken()
         if (token == null) {
             dao.updateForwarding(eventId, "CAPTURED", "AUTH_REQUIRED", "Signal stored. Authenticate Groww to enable ARM.", null)
             return
         }
-        val settings = preferences.settings.first()
+        val settings = hot?.settings ?: preferences.settings.first()
         when (parsed.type) {
-            SignalType.TRADE_RELEASE -> handleMultifyBuy(eventId, parsed, token, settings)
-            SignalType.BOOK_PROFIT -> handleMultifyExit(eventId, parsed, token, settings)
+            SignalType.TRADE_RELEASE -> handleMultifyBuy(eventId, parsed, token, settings, notificationStartedNs)
+            SignalType.BOOK_PROFIT -> handleMultifyExit(eventId, parsed, token, settings, notificationStartedNs)
             else -> Unit
         }
     }
 
-    private suspend fun handleMultifyBuy(eventId: Long, signal: ParsedSignal, token: String, settings: AppSettings) {
+    private suspend fun handleMultifyBuy(
+        eventId: Long,
+        signal: ParsedSignal,
+        token: String,
+        settings: AppSettings,
+        notificationStartedNs: Long?
+    ) {
         val symbol = signal.symbol ?: error("Trade release has no symbol")
-        val quote = apiFactory.groww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Quote $symbol")
-        val ltp = quote.lastPrice ?: error("Groww quote does not contain LTP")
-        preferences.recordMarketData()
-        recordLiveBuy(eventId, signal, ltp)
+        val signalReference = listOfNotNull(signal.entryHigh, signal.entryLow).maxOrNull()
+
         if (!settings.armEffective) {
-            dao.updateForwarding(eventId, "ANALYZED", "LONG_CALL_CAPTURED", "Multify LONG call captured at ₹${fmt(ltp)}. ARM is off, so no order was placed.", null)
+            val observed = signalReference ?: runCatching {
+                apiFactory.groww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Quote $symbol").lastPrice
+            }.getOrNull()
+            if (observed != null) {
+                recordLiveBuy(eventId, signal, observed)
+                preferences.recordMarketData()
+            }
+            dao.updateForwarding(
+                eventId, "ANALYZED", "LONG_CALL_CAPTURED",
+                "Multify LONG call captured${observed?.let { " at ₹${fmt(it)}" }.orEmpty()}. ARM is off, so no order was placed.",
+                null
+            )
             return
         }
+
         preArmGuard(settings)
         if (managedDao.openPositions().any { it.symbol.equals(symbol, true) && it.side == "LONG" }) {
             dao.updateForwarding(eventId, "ANALYZED", "HOLDING_ALREADY_OPEN", "$symbol is already app-owned; duplicate BUY blocked.", null)
             return
         }
-        val margin = apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin")
-        val available = (margin.equity?.cncBalanceAvailable ?: margin.clearCash).coerceAtLeast(0.0)
+
+        val hot = armHotState?.takeIf {
+            it.token == token && System.currentTimeMillis() - it.warmedAtMs <= ARM_HOT_STATE_MAX_AGE_MS
+        }
+        val available = hot?.cncBalance ?: run {
+            val margin = apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin")
+            (margin.equity?.cncBalanceAvailable ?: margin.clearCash).coerceAtLeast(0.0)
+        }
+        val sizingPrice = signalReference?.let { it * FAST_SIZE_PRICE_BUFFER } ?: run {
+            val quote = apiFactory.groww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Quote $symbol")
+            preferences.recordMarketData()
+            (quote.lastPrice ?: error("Groww quote does not contain LTP")) * FAST_SIZE_PRICE_BUFFER
+        }
         val capital = min(settings.holdingBudgetRupees.toDouble(), available)
-        val qty = floor(capital / ltp).toInt()
+        val qty = floor(capital / sizingPrice).toInt()
         require(qty > 0) { "Available CNC balance cannot fund one share of $symbol" }
+
         val ref = stableRef("MLH", "$eventId-$symbol")
-        val order = placeCncBuy(token, symbol, qty, ref)
+        val order = placeCncBuy(token, symbol, qty, ref, notificationStartedNs)
         val filled = order.filledQuantity?.takeIf { it > 0 } ?: qty
-        val entry = order.averageFillPrice?.takeIf { it > 0.0 } ?: ltp
+        val entry = order.averageFillPrice?.takeIf { it > 0.0 } ?: (signalReference ?: sizingPrice / FAST_SIZE_PRICE_BUFFER)
+        recordLiveBuy(eventId, signal, entry)
+
         val learned = learningStats()
         val trailArmPct = learned.longAveragePct.coerceAtLeast(0.20)
         managedDao.insertPosition(
@@ -437,23 +507,33 @@ class TradingRepository @Inject constructor(
                 anchorPrice = entry, capitalDeployed = entry * filled, campaignBudget = capital
             )
         )
+        armHotState = hot?.copy(
+            cncBalance = max(0.0, hot.cncBalance - entry * filled),
+            warmedAtMs = System.currentTimeMillis()
+        )
         dao.updateForwarding(eventId, "DELIVERED", "CNC_LONG_BOUGHT", "ARM bought $filled $symbol into holdings @ ₹${fmt(entry)}. Long trailing arms at +${fmt(trailArmPct)}%.", null)
         auditLogger.log("HOLDING", "MULTIFY_LONG_OPENED", mapOf("symbol" to symbol, "qty" to filled, "entry" to entry, "trail_arm_pct" to trailArmPct))
     }
 
-    private suspend fun handleMultifyExit(eventId: Long, signal: ParsedSignal, token: String, settings: AppSettings) {
+    private suspend fun handleMultifyExit(
+        eventId: Long,
+        signal: ParsedSignal,
+        token: String,
+        settings: AppSettings,
+        notificationStartedNs: Long?
+    ) {
         val symbol = signal.symbol ?: error("Book-profit signal has no symbol")
-        val quote = apiFactory.groww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Quote $symbol")
-        val ltp = quote.lastPrice ?: signal.exitPrice ?: error("No exit quote")
-        preferences.recordMarketData()
-        recordLiveExit(eventId, symbol, ltp)
         val holding = managedDao.openPosition(ENGINE_MULTIFY_HOLDING, symbol)
         if (holding == null) {
+            signal.exitPrice?.let { recordLiveExit(eventId, symbol, it) }
             dao.updateForwarding(eventId, "ANALYZED", "MULTIFY_EXIT_CAPTURED", "Book Profit captured; no app-owned Multify holding was open.", null)
             return
         }
         require(settings.brokerDdpiEnabled) { "DDPI is required to sell the app-owned CNC holding" }
-        closeLongHolding(token, holding, ltp, "MULTIFY_BOOK_PROFIT")
+        val mark = signal.exitPrice ?: holding.lastPrice
+        val trade = closeLongHolding(token, holding, mark, "MULTIFY_BOOK_PROFIT", notificationStartedNs)
+        recordLiveExit(eventId, symbol, trade.exitPrice)
+        armHotState = null
         dao.updateForwarding(eventId, "DELIVERED", "CNC_LONG_SOLD", "Multify Book Profit sold the app-owned $symbol holding.", null)
     }
 
@@ -887,11 +967,33 @@ class TradingRepository @Inject constructor(
     }
 
     suspend fun shouldCapturePackage(packageName: String): Boolean {
-        val filter = preferences.settings.first().packageFilter.trim()
+        val filter = (armHotState?.settings ?: preferences.settings.first()).packageFilter.trim()
         return filter.isBlank() || packageName.contains(filter, ignoreCase = true)
     }
 
+    suspend fun prepareArmHotPath(force: Boolean = false): Boolean {
+        val current = armHotState
+        if (!force && current != null && System.currentTimeMillis() - current.warmedAtMs <= ARM_HOT_REFRESH_MS) return true
+        val token = ensureToken() ?: return false
+        val settings = preferences.settings.first()
+        if (!settings.brokerAuthenticated || settings.safetyHalt) return false
+        val margin = apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin")
+        val cnc = (margin.equity?.cncBalanceAvailable ?: margin.clearCash).coerceAtLeast(0.0)
+        armHotState = ArmHotState(token, settings, cnc, System.currentTimeMillis())
+        auditLogger.log("RUNTIME", "ARM_HOT_PATH_READY", mapOf("cnc_balance" to cnc, "armed" to settings.armEffective))
+        return true
+    }
+
+    suspend fun maintainArmHotPath() {
+        val settings = preferences.settings.first()
+        if (!settings.armEffective || settings.safetyHalt) return
+        if (armHotState == null || System.currentTimeMillis() - (armHotState?.warmedAtMs ?: 0L) > ARM_HOT_REFRESH_MS) {
+            runCatching { prepareArmHotPath(force = true) }
+        }
+    }
+
     private suspend fun ensureToken(): String? {
+        armHotState?.token?.takeIf { it.isNotBlank() }?.let { return it }
         var settings = preferences.settings.first()
         var token = secretStore.getAccessToken()
         if (!settings.brokerAuthenticated || token.isNullOrBlank()) {
@@ -912,13 +1014,23 @@ class TradingRepository @Inject constructor(
         require(marketSession() == "OPEN") { "NSE regular market session is not open" }
     }
 
-    private suspend fun placeCncBuy(token: String, symbol: String, qty: Int, reference: String): OrderPayload =
-        submitMarketOrder(token, symbol, "BUY", qty, "CNC", reference)
+    private suspend fun placeCncBuy(
+        token: String,
+        symbol: String,
+        qty: Int,
+        reference: String,
+        notificationStartedNs: Long? = null
+    ): OrderPayload = submitMarketOrder(token, symbol, "BUY", qty, "CNC", reference, notificationStartedNs)
 
-    private suspend fun placeOwnedCncSell(token: String, position: ManagedPositionEntity, reference: String): OrderPayload {
+    private suspend fun placeOwnedCncSell(
+        token: String,
+        position: ManagedPositionEntity,
+        reference: String,
+        notificationStartedNs: Long? = null
+    ): OrderPayload {
         require(position.side == "LONG") { "Only app-owned LONG holdings may be sold" }
         require(position.product == "CNC") { "Only CNC holdings may be sold by the long-only engine" }
-        return submitMarketOrder(token, position.symbol, "SELL", position.quantity, "CNC", reference)
+        return submitMarketOrder(token, position.symbol, "SELL", position.quantity, "CNC", reference, notificationStartedNs)
     }
 
     private suspend fun placeLegacyExposureFlatten(token: String, position: ManagedPositionEntity, reference: String): OrderPayload {
@@ -932,9 +1044,13 @@ class TradingRepository @Inject constructor(
         transaction: String,
         qty: Int,
         product: String,
-        reference: String
+        reference: String,
+        notificationStartedNs: Long? = null
     ): OrderPayload {
         require(qty > 0) { "Order quantity is zero" }
+        val dispatchStartedNs = SystemClock.elapsedRealtimeNanos()
+        val dispatchPrepMicros = notificationStartedNs?.let { ((dispatchStartedNs - it).coerceAtLeast(0L)) / 1_000L } ?: 0L
+        val brokerStartedNs = SystemClock.elapsedRealtimeNanos()
         val response = apiFactory.groww.placeOrder(
             bearer(token),
             OrderCreateRequest(
@@ -945,6 +1061,15 @@ class TradingRepository @Inject constructor(
                 orderReferenceId = reference
             )
         ).requirePayload("Place $transaction $symbol")
+        val brokerAckLatencyMs = ((SystemClock.elapsedRealtimeNanos() - brokerStartedNs).coerceAtLeast(0L)) / 1_000_000L
+        preferences.recordOrderLatency(dispatchPrepMicros, brokerAckLatencyMs)
+        auditLogger.log("EXECUTION_LATENCY", "ORDER_ACK", mapOf(
+            "symbol" to symbol,
+            "transaction" to transaction,
+            "dispatch_prep_micros" to dispatchPrepMicros,
+            "dispatch_target_met" to (notificationStartedNs == null || dispatchPrepMicros < 100_000L),
+            "broker_ack_ms" to brokerAckLatencyMs
+        ))
         val id = response.growwOrderId
         require(id.isNotBlank()) { "Groww did not return an order ID" }
         repeat(10) {
@@ -1018,6 +1143,9 @@ class TradingRepository @Inject constructor(
         private const val MANUAL_SOURCE = "com.multify.traderpro.manual"
         private const val FORECAST_SCAN_INTERVAL_MS = 10L * 60L * 1000L
         private const val HOLDING_FAILSAFE_STOP_PCT = 0.12
+        private const val FAST_SIZE_PRICE_BUFFER = 1.01
+        private const val ARM_HOT_REFRESH_MS = 30_000L
+        private const val ARM_HOT_STATE_MAX_AGE_MS = 120_000L
         private const val UPLOADED_THREE_MONTH_TARGET_PCT = 3.680970873786408
         private const val DEFAULT_LONG_TARGET_PCT = 2.983877551020408
         const val ENGINE_MULTIFY_HOLDING = "MULTIFY_HOLDING"
