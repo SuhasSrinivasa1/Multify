@@ -446,6 +446,7 @@ private fun HoldingCard(p: PositionDto) {
 @Composable
 private fun LongAveragesScreen(state: TraderUiState) {
     val learning = state.dashboard?.learning ?: com.multify.traderpro.data.network.LearningStatsDto()
+    val forecastLearning = state.dashboard?.forecastLearning ?: com.multify.traderpro.data.network.ForecastLearningStatsDto()
     val champions = state.dashboard?.forecastChampions.orEmpty()
 
     LazyColumn(
@@ -453,10 +454,10 @@ private fun LongAveragesScreen(state: TraderUiState) {
         contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp, 14.dp, 16.dp, 32.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        item { SectionTitle("LONG rolling averages", "Only LONG recommendation statistics are calculated and displayed.") }
+        item { SectionTitle("Multify LONG average", "Rolling 30 recommendation trading days; only LONG statistics are calculated.") }
         item {
             MetricCard(
-                label = "Current LONG trail arm",
+                label = "Multify Avg LONG %",
                 value = String.format(Locale.US, "%.2f%%", learning.longAveragePct),
                 supporting = "${learning.rollingCalls} calls across ${learning.rollingTradingDays} recommendation trading days",
                 modifier = Modifier.fillMaxWidth(),
@@ -484,6 +485,20 @@ private fun LongAveragesScreen(state: TraderUiState) {
                     )
                 }
             }
+        }
+        item { SectionTitle("Forecasted stocks", "A separate rolling 30-trading-day LONG average from completed forecast outcomes.") }
+        item {
+            MetricCard(
+                label = "Forecasted Stocks Avg LONG %",
+                value = if (forecastLearning.completedForecasts > 0)
+                    String.format(Locale.US, "%.2f%%", forecastLearning.longAveragePct)
+                else "Learning",
+                supporting = if (forecastLearning.completedForecasts > 0)
+                    "${forecastLearning.completedForecasts} completed forecasts across ${forecastLearning.rollingTradingDays} forecast trading days"
+                else "No completed LONG forecast outcomes yet",
+                modifier = Modifier.fillMaxWidth(),
+                accent = MaterialTheme.colorScheme.primary
+            )
         }
         item { SectionTitle("Frozen LONG champions", "A forecast setup freezes only after at least five target hits spanning three trading days and three different stocks.") }
         if (champions.none { it.frozen }) {
@@ -523,6 +538,7 @@ private fun ForecastScreen(
     val dashboard = state.dashboard
     val rows = dashboard?.forecasts.orEmpty().sortedBy { it.rank }
     val learning = dashboard?.learning ?: com.multify.traderpro.data.network.LearningStatsDto()
+    val forecastLearning = dashboard?.forecastLearning ?: com.multify.traderpro.data.network.ForecastLearningStatsDto()
     val report = dashboard?.research ?: com.multify.traderpro.data.network.ResearchDto()
 
     LazyColumn(
@@ -538,9 +554,13 @@ private fun ForecastScreen(
         }
         item {
             MetricCard(
-                label = "Success / trail-arm target",
-                value = String.format(Locale.US, "%.2f%%", learning.longAveragePct),
-                supporting = "rolling Multify LONG mean",
+                label = "Forecasted Stocks Avg LONG %",
+                value = if (forecastLearning.completedForecasts > 0)
+                    String.format(Locale.US, "%.2f%%", forecastLearning.longAveragePct)
+                else "Learning",
+                supporting = if (forecastLearning.completedForecasts > 0)
+                    "rolling 30 forecast trading days · ${forecastLearning.completedForecasts} completed"
+                else "Multify LONG mean bootstraps the first forecast target",
                 modifier = Modifier.fillMaxWidth(),
                 accent = MaterialTheme.colorScheme.primary
             )

@@ -23,6 +23,7 @@ import com.multify.traderpro.data.network.DaySummaryDto
 import com.multify.traderpro.data.network.EngineHealthDto
 import com.multify.traderpro.data.network.ForecastChampionDto
 import com.multify.traderpro.data.network.ForecastDto
+import com.multify.traderpro.data.network.ForecastLearningStatsDto
 import com.multify.traderpro.data.network.GrowwApiFactory
 import com.multify.traderpro.data.network.LearningStatsDto
 import com.multify.traderpro.data.network.OrderCreateRequest
@@ -179,6 +180,21 @@ class TradingRepository @Inject constructor(
         )
     }
 
+    suspend fun forecastLearningStats(): ForecastLearningStatsDto {
+        val completed = learningDao.allLongForecasts().filter { it.status in setOf("TARGET_HIT", "MISSED") }
+        val dates = completed.mapNotNull { runCatching { LocalDate.parse(it.forecastDate) }.getOrNull() }
+            .distinct().sortedDescending()
+        val keepDates = dates.take(30).map { it.toString() }.toSet()
+        val rolling = completed.filter { it.forecastDate in keepDates }
+        val values = rolling.map { it.maxFavourablePct }
+            .filter { it.isFinite() && it >= 0.0 && it < 25.0 }
+        return ForecastLearningStatsDto(
+            rollingTradingDays = keepDates.size,
+            completedForecasts = rolling.size,
+            longAveragePct = AdaptiveLearningMath.rollingMean(values, 0.0)
+        )
+    }
+
     private suspend fun recordLiveBuy(eventId: Long, signal: ParsedSignal, price: Double) {
         val symbol = signal.symbol ?: return
         ensureHistoricalSeed()
@@ -332,6 +348,7 @@ class TradingRepository @Inject constructor(
             armHotState = ArmHotState(token, settings, cnc, System.currentTimeMillis())
             ensureHistoricalSeed()
             val learning = learningStats()
+            val forecastLearning = forecastLearningStats()
             val snapshot = managedSnapshot(token)
             val today = LocalDate.now(INDIA).toString()
             val forecasts = learningDao.longForecastsForDate(today).map { it.toForecastDto() }
@@ -356,7 +373,8 @@ class TradingRepository @Inject constructor(
                     maxExposure = settings.holdingBudgetRupees.toDouble(),
                     riskMode = when { settings.safetyHalt -> "HALTED"; settings.armEffective -> "ARMED"; else -> "DISARMED" }
                 ),
-                summary = snapshot.summary, learning = learning, forecasts = forecasts, forecastChampions = champions,
+                summary = snapshot.summary, learning = learning, forecastLearning = forecastLearning,
+                forecasts = forecasts, forecastChampions = champions,
                 research = research,
                 health = EngineHealthDto(
                     listener = if (heartbeatAge <= 30_000L) "HEALTHY" else "UNHEALTHY",
@@ -593,7 +611,12 @@ class TradingRepository @Inject constructor(
         val marketRegime = when { breadth >= .50 -> "BREADTH_BULL"; breadth <= -.50 -> "BREADTH_WEAK"; else -> "BREADTH_NEUTRAL" }
         val champions = learningDao.allForecastChampions().associateBy { it.key }
         val learned = learningStats()
-        val targetPct = learned.longAveragePct.coerceAtLeast(.20)
+        val forecastLearning = forecastLearningStats()
+        val targetPct = if (forecastLearning.completedForecasts > 0) {
+            forecastLearning.longAveragePct.coerceAtLeast(.20)
+        } else {
+            learned.longAveragePct.coerceAtLeast(.20)
+        }
         val desired = when {
             now.toLocalTime() < LocalTime.of(10, 15) -> 1
             now.toLocalTime() < LocalTime.of(11, 15) -> 2
@@ -743,12 +766,19 @@ class TradingRepository @Inject constructor(
         val existing = learningDao.latestResearchReport()
         if (!force && existing?.reportDate == today) return ResearchDto(existing.reportDate, existing.title, existing.summary)
         val stats = learningStats()
+        val forecastLearning = forecastLearningStats()
         val forecasts = learningDao.longForecastsForDate(today)
         val wins = forecasts.count { it.status == "TARGET_HIT" }
         val matched = forecasts.count { it.multifyMatched }
         val frozen = learningDao.allForecastChampions().count { it.frozen }
         val report = buildString {
-            append("Rolling 30-trading-day LONG target: ${fmt(stats.longAveragePct)}% (median ${fmt(stats.longMedianPct)}%). ")
+            append("Rolling 30-trading-day Multify LONG target: ${fmt(stats.longAveragePct)}% (median ${fmt(stats.longMedianPct)}%). ")
+            append(
+                if (forecastLearning.completedForecasts > 0)
+                    "Rolling 30-trading-day forecast LONG average: ${fmt(forecastLearning.longAveragePct)}% across ${forecastLearning.completedForecasts} completed forecasts. "
+                else
+                    "Rolling forecast LONG average is still learning; Multify LONG mean is the bootstrap target. "
+            )
             append("Today target hits: $wins/${forecasts.size}. ")
             append("Multify later matched $matched/${forecasts.size} forecast symbols; matching is secondary research, not the success label. ")
             append("Frozen LONG champions: $frozen. ")

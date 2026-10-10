@@ -49,6 +49,7 @@ data class DashboardDto(
     val risk: RiskStatusDto = RiskStatusDto(),
     val summary: DaySummaryDto = DaySummaryDto(),
     val learning: LearningStatsDto = LearningStatsDto(),
+    val forecastLearning: ForecastLearningStatsDto = ForecastLearningStatsDto(),
     val forecasts: List<ForecastDto> = emptyList(),
     val forecastChampions: List<ForecastChampionDto> = emptyList(),
     val research: ResearchDto = ResearchDto(),
@@ -68,6 +69,12 @@ data class LearningStatsDto(
     val longP75Pct: Double = 0.0,
     val seededThreeMonthAveragePct: Double = 0.0,
     val liveCompletedCalls: Int = 0
+)
+
+data class ForecastLearningStatsDto(
+    val rollingTradingDays: Int = 0,
+    val completedForecasts: Int = 0,
+    val longAveragePct: Double = 0.0
 )
 
 data class ForecastDto(
