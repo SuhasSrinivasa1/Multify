@@ -47,6 +47,7 @@ import com.multify.traderpro.domain.NotificationParser
 import com.multify.traderpro.domain.ParsedSignal
 import com.multify.traderpro.domain.SignalType
 import com.multify.traderpro.engine.AdaptiveLearningMath
+import com.multify.traderpro.engine.CashAwareCncSizing
 import com.multify.traderpro.engine.ExecutionTelemetryMath
 import com.multify.traderpro.engine.LearnedTrailingPolicy
 import com.multify.traderpro.engine.LocalStrategyEngine
@@ -107,6 +108,9 @@ class TradingRepository @Inject constructor(
     private var lastForecastOutcomeMonitorAtMs = 0L
     private var brokerInventorySnapshot: BrokerInventorySnapshot? = null
     private var lastClosedSessionReconcileAtMs = 0L
+    private var lastArmHotAuditAtMs = 0L
+    private var lastArmHotAuditBalance = Double.NaN
+    private var lastArmHotAuditArmed: Boolean? = null
     private val oneMinuteAtrCache = mutableMapOf<String, AtrCacheEntry>()
 
     private data class AtrCacheEntry(val atr: Double, val atMs: Long)
@@ -167,6 +171,8 @@ class TradingRepository @Inject constructor(
                 }
             }
         }
+        runCatching { ensurePgIlRecoveryBenchmark() }
+            .onFailure { auditLogger.log("LEARNING", "PGIL_RECOVERY_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
         historicalSeedEnsured = true
         runCatching { repairLiveLearningFromSignals() }
             .onFailure { auditLogger.log("LEARNING", "LIVE_HISTORY_REPAIR_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
@@ -280,6 +286,46 @@ class TradingRepository @Inject constructor(
         auditLogger.log("LEARNING", "MULTIFY_RETURN_RECORDED", mapOf(
             "symbol" to symbol, "reported_return_pct" to reported, "exit_price" to price, "event_id" to eventId
         ))
+    }
+
+    private suspend fun ensurePgIlRecoveryBenchmark() {
+        val callDate = "2026-10-12"
+        val symbol = "PGIL"
+        val entry = 1297.20
+        val target = 1355.0
+        val exit = 1321.0
+        val reportedReturnPct = 1.83
+        val targetPct = (target - entry) / entry * 100.0
+        val buyAtMs = ZonedDateTime.of(2026, 10, 12, 9, 26, 6, 139_000_000, INDIA).toInstant().toEpochMilli()
+        val sellAtMs = ZonedDateTime.of(2026, 10, 12, 9, 46, 42, 381_000_000, INDIA).toInstant().toEpochMilli()
+        val existing = learningDao.callForDateSymbolAction(callDate, symbol, "BUY")
+        val now = System.currentTimeMillis()
+        if (existing == null) {
+            learningDao.insertCall(
+                LearningCallEntity(
+                    callDate = callDate, symbol = symbol, source = "RECOVERY_V660", action = "BUY",
+                    entryPrice = entry, targetPrice = target, targetPct = targetPct,
+                    multifyExitPrice = exit, longRealizedPct = reportedReturnPct,
+                    buyAtMs = buyAtMs, sellAtMs = sellAtMs, updatedAtMs = now
+                )
+            )
+            auditLogger.log("LEARNING", "PGIL_20261012_RECOVERED", mapOf("mode" to "insert", "return_pct" to reportedReturnPct))
+            return
+        }
+        val needsRepair = abs(existing.entryPrice - entry) > .0001 || existing.targetPrice != target ||
+            existing.multifyExitPrice != exit || existing.longRealizedPct == null ||
+            abs(existing.longRealizedPct - reportedReturnPct) > .0001
+        if (needsRepair) {
+            learningDao.updateCall(
+                existing.copy(
+                    entryPrice = entry, targetPrice = target, targetPct = targetPct,
+                    multifyExitPrice = exit, longRealizedPct = reportedReturnPct,
+                    buyAtMs = existing.buyAtMs.takeIf { it > 0L } ?: buyAtMs,
+                    sellAtMs = existing.sellAtMs ?: sellAtMs, updatedAtMs = now
+                )
+            )
+            auditLogger.log("LEARNING", "PGIL_20261012_RECOVERED", mapOf("mode" to "repair", "return_pct" to reportedReturnPct))
+        }
     }
 
     private suspend fun repairLiveLearningFromSignals() {
@@ -598,19 +644,25 @@ class TradingRepository @Inject constructor(
             val margin = apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin")
             (margin.equity?.cncBalanceAvailable ?: margin.clearCash).coerceAtLeast(0.0)
         }
-        val sizingPrice = signalReference?.let { it * FAST_SIZE_PRICE_BUFFER } ?: run {
+        val referencePrice = signalReference ?: run {
             val quote = apiFactory.groww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Quote $symbol")
             preferences.recordMarketData()
-            (quote.lastPrice ?: error("Groww quote does not contain LTP")) * FAST_SIZE_PRICE_BUFFER
+            quote.lastPrice ?: error("Groww quote does not contain LTP")
         }
-        val capital = min(settings.holdingBudgetRupees.toDouble(), available)
-        val qty = floor(capital / sizingPrice).toInt()
-        require(qty > 0) { "Available CNC balance cannot fund one share of $symbol" }
+        val sizing = CashAwareCncSizing.size(settings.holdingBudgetRupees.toDouble(), available, referencePrice)
+        val capital = sizing.deployableCash
+        val qty = sizing.quantity
+        auditLogger.log("EXECUTION", "CNC_BUY_SIZED", mapOf(
+            "symbol" to symbol, "available_cnc" to available, "configured_budget" to settings.holdingBudgetRupees,
+            "cash_reserve" to sizing.cashReserve, "reference_price" to referencePrice,
+            "buffered_price" to sizing.bufferedPrice, "deployable_cash" to capital, "quantity" to qty
+        ))
+        require(qty > 0) { "Safe CNC buying power cannot fund one share of $symbol after RMS reserve" }
 
         val ref = stableRef("MLH", "$eventId-$symbol")
         val order = placeCncBuy(token, symbol, qty, ref, notificationStartedNs)
         val filled = order.filledQuantity?.takeIf { it > 0 } ?: qty
-        val entry = order.averageFillPrice?.takeIf { it > 0.0 } ?: (signalReference ?: sizingPrice / FAST_SIZE_PRICE_BUFFER)
+        val entry = order.averageFillPrice?.takeIf { it > 0.0 } ?: referencePrice
         val learned = learningStats()
         val trailArmPct = learned.longAveragePct.takeIf { it.isFinite() && it > 0.0 } ?: DEFAULT_LONG_REALIZED_PCT
         managedDao.insertPosition(
@@ -796,9 +848,15 @@ class TradingRepository @Inject constructor(
         val ltp = quote.lastPrice ?: error("Groww quote has no LTP")
         val margin = apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin")
         val available = (margin.equity?.cncBalanceAvailable ?: margin.clearCash).coerceAtLeast(0.0)
-        val capital = min(settings.holdingBudgetRupees.toDouble(), available)
-        val qty = floor(capital / ltp).toInt()
-        require(qty > 0) { "Available CNC balance cannot fund one share of ${row.symbol}" }
+        val sizing = CashAwareCncSizing.size(settings.holdingBudgetRupees.toDouble(), available, ltp)
+        val capital = sizing.deployableCash
+        val qty = sizing.quantity
+        auditLogger.log("EXECUTION", "CNC_BUY_SIZED", mapOf(
+            "symbol" to row.symbol, "available_cnc" to available, "configured_budget" to settings.holdingBudgetRupees,
+            "cash_reserve" to sizing.cashReserve, "reference_price" to ltp,
+            "buffered_price" to sizing.bufferedPrice, "deployable_cash" to capital, "quantity" to qty
+        ))
+        require(qty > 0) { "Safe CNC buying power cannot fund one share of ${row.symbol} after RMS reserve" }
         val ref = stableRef("FLH", "${row.id}-${row.symbol}")
         val order = placeCncBuy(token, row.symbol, qty, ref)
         val filled = order.filledQuantity?.takeIf { it > 0 } ?: qty
@@ -1013,6 +1071,7 @@ class TradingRepository @Inject constructor(
         val quote = apiFactory.groww.quote(bearer(token), tradingSymbol = position.symbol).requirePayload("Quote ${position.symbol}")
         val ltp = quote.lastPrice ?: return
         preferences.recordMarketData()
+        val previousHighWater = position.maxFavourablePrice
         var updated = position.copy(
             lastPrice = ltp, maxFavourablePrice = max(position.maxFavourablePrice, ltp),
             maxAdversePrice = min(position.maxAdversePrice, ltp), lastEvaluatedAtMs = System.currentTimeMillis()
@@ -1037,27 +1096,32 @@ class TradingRepository @Inject constructor(
 
         if (thresholdReached && LearnedTrailingPolicy.shouldRatchet(alreadyArmed, updated.trailingLastRatchetPrice, highWater)) {
             val currentStop = updated.stopPrice
+            val previousRatchetHigh = updated.trailingLastRatchetPrice
             val candidateStop = LearnedTrailingPolicy.ratchetStop(
-                updated.entryPrice, highWater, atr, currentStop, updated.trailingLastRatchetPrice
+                updated.entryPrice, highWater, atr, currentStop, previousRatchetHigh
             )
             val stopRaised = !alreadyArmed || candidateStop > (currentStop ?: updated.entryPrice) + .01
+            val effectiveStop = if (stopRaised) candidateStop else currentStop
             updated = updated.copy(
-                stopPrice = if (stopRaised) candidateStop else updated.stopPrice,
+                stopPrice = effectiveStop,
                 trailingLastRatchetPrice = highWater,
                 lastEvaluatedAtMs = System.currentTimeMillis()
             )
             managedDao.updatePosition(updated)
-            if (stopRaised) {
-                auditLogger.log("TRAILING_STOP", if (alreadyArmed) "LONG_RATCHET" else "LONG_ARMED", mapOf(
-                    "symbol" to updated.symbol,
-                    "ltp" to ltp,
-                    "high_water" to highWater,
-                    "new_stop" to candidateStop,
-                    "arm_pct" to thresholdPct,
-                    "atr_1m" to atr,
-                    "trail_distance" to LearnedTrailingPolicy.trailDistance(highWater, atr, updated.entryPrice)
-                ))
-            }
+            auditLogger.log("TRAILING_STOP", if (alreadyArmed) "LONG_RATCHET" else "LONG_ARMED", mapOf(
+                "symbol" to updated.symbol,
+                "ltp" to ltp,
+                "old_high_water" to previousHighWater,
+                "new_high_water" to highWater,
+                "previous_ratchet_high" to previousRatchetHigh,
+                "ratchet_advance" to if (previousRatchetHigh > 0.0) highWater - previousRatchetHigh else highWater - updated.entryPrice,
+                "old_stop" to currentStop,
+                "new_stop" to effectiveStop,
+                "stop_raised" to stopRaised,
+                "arm_pct" to thresholdPct,
+                "atr_1m" to atr,
+                "trail_distance" to LearnedTrailingPolicy.trailDistance(highWater, atr, updated.entryPrice)
+            ))
         }
 
         val activeStop = updated.stopPrice
@@ -1283,8 +1347,17 @@ class TradingRepository @Inject constructor(
         if (!settings.brokerAuthenticated || settings.safetyHalt) return false
         val margin = apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin")
         val cnc = (margin.equity?.cncBalanceAvailable ?: margin.clearCash).coerceAtLeast(0.0)
-        armHotState = ArmHotState(token, settings, cnc, System.currentTimeMillis())
-        auditLogger.log("RUNTIME", "ARM_HOT_PATH_READY", mapOf("cnc_balance" to cnc, "armed" to settings.armEffective))
+        val now = System.currentTimeMillis()
+        armHotState = ArmHotState(token, settings, cnc, now)
+        val auditDue = now - lastArmHotAuditAtMs >= ARM_HOT_AUDIT_INTERVAL_MS
+        val balanceChanged = !lastArmHotAuditBalance.isFinite() || abs(cnc - lastArmHotAuditBalance) >= 1.0
+        val armedChanged = lastArmHotAuditArmed == null || lastArmHotAuditArmed != settings.armEffective
+        if (auditDue || balanceChanged || armedChanged) {
+            auditLogger.log("RUNTIME", "ARM_HOT_PATH_READY", mapOf("cnc_balance" to cnc, "armed" to settings.armEffective))
+            lastArmHotAuditAtMs = now
+            lastArmHotAuditBalance = cnc
+            lastArmHotAuditArmed = settings.armEffective
+        }
         return true
     }
 
@@ -1473,8 +1546,8 @@ class TradingRepository @Inject constructor(
         private const val MANUAL_SOURCE = "com.multify.traderpro.manual"
         private const val FORECAST_SCAN_INTERVAL_MS = 10L * 60L * 1000L
         private const val HOLDING_FAILSAFE_STOP_PCT = 0.12
-        private const val FAST_SIZE_PRICE_BUFFER = 1.01
         private const val ARM_HOT_REFRESH_MS = 30_000L
+        private const val ARM_HOT_AUDIT_INTERVAL_MS = 15L * 60L * 1000L
         private const val ARM_HOT_STATE_MAX_AGE_MS = 120_000L
         private const val ONE_MINUTE_ATR_CACHE_MS = 60_000L
         private const val EXECUTION_SAMPLE_LIMIT = 30
