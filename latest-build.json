@@ -1,7 +1,7 @@
 {
-  "run_id": "38450670116",
-  "commit_sha": "8f9004e65f1bbc6db245cd947a7517991ade367a",
+  "run_id": "38450803272",
+  "commit_sha": "fbd54feea61e348ba5bd500ab940bccb16d4ea55",
   "artifact_name": "Multify-TraderPro-v6.6.0-verified",
   "release_tag": "v6.6.0-live-hardening",
-  "job_status": "failure"
+  "job_status": "success"
 }
