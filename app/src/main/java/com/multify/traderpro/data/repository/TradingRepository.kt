@@ -910,6 +910,82 @@ class TradingRepository @Inject constructor(
         return ResearchDto(today, entity.title, report)
     }
 
+    private suspend fun brokerInventory(token: String, force: Boolean): BrokerInventorySnapshot {
+        val now = System.currentTimeMillis()
+        brokerInventorySnapshot?.takeIf { !force && now - it.atMs <= BROKER_INVENTORY_REFRESH_MS }?.let { return it }
+        val holdings = apiFactory.groww.holdings(bearer(token)).requirePayload("Groww holdings").holdings
+            .associateBy { it.tradingSymbol.uppercase(Locale.US) }
+        val positions = apiFactory.groww.positions(bearer(token)).requirePayload("Groww positions").positions
+            .filter { it.product.equals("CNC", true) }
+            .associateBy { it.tradingSymbol.uppercase(Locale.US) }
+        return BrokerInventorySnapshot(holdings, positions, now).also { brokerInventorySnapshot = it }
+    }
+
+    private suspend fun reconcilePositionWithBroker(
+        token: String,
+        position: ManagedPositionEntity,
+        preferredMark: Double?,
+        force: Boolean
+    ): ManagedPositionEntity? {
+        if (position.side != "LONG" || position.product != "CNC") return position
+        val inventory = brokerInventory(token, force)
+        val symbol = position.symbol.uppercase(Locale.US)
+        val holdingQty = inventory.holdings[symbol]?.quantity?.coerceAtLeast(0) ?: 0
+        val brokerPosition = inventory.positions[symbol]
+        val intradayQty = brokerPosition?.quantity?.coerceAtLeast(0) ?: 0
+        val visibleQty = max(holdingQty, intradayQty)
+        if (visibleQty >= position.quantity) return position
+
+        val removedQty = (position.quantity - visibleQty).coerceAtLeast(0)
+        if (removedQty <= 0) return position
+        val signalExit = preferredMark ?: latestMultifyExitPrice(position.symbol, position.openedAtMs)
+        val exit = brokerPosition?.debitPrice?.takeIf { it.isFinite() && it > 0.0 }
+            ?: signalExit
+            ?: runCatching {
+                apiFactory.groww.quote(bearer(token), tradingSymbol = position.symbol).requirePayload("Quote ${position.symbol}").lastPrice
+            }.getOrNull()
+            ?: position.lastPrice
+        recordExternalClose(position, removedQty, exit, if (visibleQty == 0) "MANUAL_BROKER_EXIT" else "MANUAL_BROKER_PARTIAL_EXIT")
+        brokerInventorySnapshot = null
+        if (visibleQty <= 0) {
+            managedDao.deletePosition(position.id)
+            auditLogger.log("HOLDING", "EXTERNAL_LONG_CLOSED", mapOf("symbol" to position.symbol, "qty" to removedQty, "exit" to exit))
+            return null
+        }
+        val updated = position.copy(
+            quantity = visibleQty,
+            capitalDeployed = position.entryPrice * visibleQty,
+            lastEvaluatedAtMs = System.currentTimeMillis()
+        )
+        managedDao.updatePosition(updated)
+        auditLogger.log("HOLDING", "EXTERNAL_LONG_REDUCED", mapOf(
+            "symbol" to position.symbol, "removed_qty" to removedQty, "remaining_qty" to visibleQty, "exit" to exit
+        ))
+        return updated
+    }
+
+    private suspend fun latestMultifyExitPrice(symbol: String, openedAtMs: Long): Double? =
+        dao.allNow().asReversed().firstNotNullOfOrNull { event ->
+            if (event.receivedAtMs < openedAtMs || !event.symbol.equals(symbol, true) || event.signalType != SignalType.BOOK_PROFIT.name) null
+            else parser.parse(event.title, event.text, event.bigText).exitPrice
+        }
+
+    private suspend fun recordExternalClose(position: ManagedPositionEntity, quantity: Int, exit: Double, reason: String) {
+        val gross = (exit - position.entryPrice) * quantity
+        val costs = estimatedCashCosts(position.entryPrice, exit, quantity)
+        managedDao.insertTrade(
+            ManagedTradeEntity(
+                engine = position.engine, symbol = position.symbol, product = "CNC", side = "LONG",
+                quantity = quantity, entryPrice = position.entryPrice, exitPrice = exit,
+                grossPnl = gross, estimatedCosts = costs, netPnl = gross - costs, exitReason = reason,
+                strategy = position.strategy, regime = position.regime, confidence = position.confidence,
+                mfeRupees = max(0.0, position.maxFavourablePrice - position.entryPrice) * quantity,
+                maeRupees = max(0.0, position.entryPrice - position.maxAdversePrice) * quantity,
+                sourceEventId = position.sourceEventId, openOrderId = position.openOrderId, closeOrderId = "EXTERNAL",
+                openedAtMs = position.openedAtMs, closedAtMs = System.currentTimeMillis()
+            )
+        )
+    }
     suspend fun monitorManagedPositions(): Int {
         val open = managedDao.openPositions()
         if (open.isEmpty()) return 0
@@ -921,14 +997,14 @@ class TradingRepository @Inject constructor(
                     closeLegacyNonLong(token, position)
                     return@runCatching
                 }
-                monitorLongHolding(position, token)
+                val reconciled = reconcilePositionWithBroker(token, position, preferredMark = null, force = false)
+                if (reconciled != null) monitorLongHolding(reconciled, token)
             }.onFailure {
                 auditLogger.log("HOLDING", "MONITOR_ERROR", mapOf("symbol" to position.symbol, "message" to (it.message ?: it.javaClass.simpleName)))
             }
         }
         return managedDao.openPositions().size
     }
-
     private suspend fun monitorLongHolding(position: ManagedPositionEntity, token: String) {
         val quote = apiFactory.groww.quote(bearer(token), tradingSymbol = position.symbol).requirePayload("Quote ${position.symbol}")
         val ltp = quote.lastPrice ?: return
@@ -957,7 +1033,9 @@ class TradingRepository @Inject constructor(
 
         if (thresholdReached && LearnedTrailingPolicy.shouldRatchet(alreadyArmed, updated.trailingLastRatchetPrice, highWater)) {
             val currentStop = updated.stopPrice
-            val candidateStop = LearnedTrailingPolicy.ratchetStop(updated.entryPrice, highWater, atr, currentStop)
+            val candidateStop = LearnedTrailingPolicy.ratchetStop(
+                updated.entryPrice, highWater, atr, currentStop, updated.trailingLastRatchetPrice
+            )
             val stopRaised = !alreadyArmed || candidateStop > (currentStop ?: updated.entryPrice) + .01
             updated = updated.copy(
                 stopPrice = if (stopRaised) candidateStop else updated.stopPrice,
@@ -973,7 +1051,7 @@ class TradingRepository @Inject constructor(
                     "new_stop" to candidateStop,
                     "arm_pct" to thresholdPct,
                     "atr_1m" to atr,
-                    "trail_distance" to LearnedTrailingPolicy.trailDistance(highWater, atr)
+                    "trail_distance" to LearnedTrailingPolicy.trailDistance(highWater, atr, updated.entryPrice)
                 ))
             }
         }
@@ -1087,7 +1165,12 @@ class TradingRepository @Inject constructor(
             val pnl = (ltp - p.entryPrice) * p.quantity
             PositionDto(
                 symbol = p.symbol, quantity = p.quantity, averagePrice = p.entryPrice, ltp = ltp, pnl = pnl,
-                stopPrice = p.stopPrice, targetPrice = p.targetPrice, strategy = p.strategy, product = "CNC"
+                stopPrice = p.stopPrice, targetPrice = p.targetPrice, highWaterPrice = p.maxFavourablePrice,
+                trailingLastRatchetPrice = p.trailingLastRatchetPrice.takeIf { it > 0.0 },
+                trailDistance = if (LearnedTrailingPolicy.isArmed(p.stopPrice, p.entryPrice) && p.stopPrice != null)
+                    (p.maxFavourablePrice - p.stopPrice).coerceAtLeast(0.0) else null,
+                trailArmed = LearnedTrailingPolicy.isArmed(p.stopPrice, p.entryPrice),
+                strategy = p.strategy, product = "CNC"
             )
         }
         val recent = managedDao.tradesSince(startOfIndiaDayMs()).filter { it.side == "LONG" }.take(6).map { t ->
@@ -1162,6 +1245,11 @@ class TradingRepository @Inject constructor(
                     zip.write(gson.toJson(value).toByteArray(Charsets.UTF_8))
                     zip.closeEntry()
                 }
+                fun addText(name: String, value: String) {
+                    zip.putNextEntry(ZipEntry(name))
+                    zip.write(value.toByteArray(Charsets.UTF_8))
+                    zip.closeEntry()
+                }
                 add("settings.json", safeSettings)
                 add("signals.json", signals)
                 add("holdings.json", positions)
@@ -1171,14 +1259,16 @@ class TradingRepository @Inject constructor(
                 add("long_forecasts.json", forecasts)
                 add("long_champions.json", champions)
                 add("research.json", research)
+                addText("system_audit.jsonl", auditLogger.readAll())
             }
         } ?: error("Unable to open export destination")
-        return LogExportResult(9, signals.size, trades.size)
+        return LogExportResult(10, signals.size, trades.size)
     }
 
     suspend fun shouldCapturePackage(packageName: String): Boolean {
         val filter = (armHotState?.settings ?: preferences.settings.first()).packageFilter.trim()
-        return filter.isBlank() || packageName.contains(filter, ignoreCase = true)
+        return if (filter.isBlank()) packageName.equals(MULTIFY_PACKAGE, ignoreCase = true)
+        else packageName.contains(filter, ignoreCase = true)
     }
 
     suspend fun prepareArmHotPath(force: Boolean = false): Boolean {
@@ -1305,6 +1395,7 @@ class TradingRepository @Inject constructor(
                         )
                     )
                 }
+                brokerInventorySnapshot = null
                 auditLogger.log("EXECUTION_LATENCY", "ORDER_FILLED", mapOf(
                     "symbol" to symbol,
                     "transaction" to transaction,
@@ -1342,7 +1433,7 @@ class TradingRepository @Inject constructor(
         val now = ZonedDateTime.now(INDIA)
         if (now.dayOfWeek.value >= 6) return "CLOSED"
         val t = now.toLocalTime()
-        return if (!t.isBefore(LocalTime.of(9, 15)) && t.isBefore(LocalTime.of(15, 25))) "OPEN" else "CLOSED"
+        return if (!t.isBefore(LocalTime.of(9, 15)) && t.isBefore(LocalTime.of(15, 30))) "OPEN" else "CLOSED"
     }
 
     private fun growwAuthError(e: HttpException): String {
@@ -1383,6 +1474,8 @@ class TradingRepository @Inject constructor(
         private const val ARM_HOT_STATE_MAX_AGE_MS = 120_000L
         private const val ONE_MINUTE_ATR_CACHE_MS = 60_000L
         private const val EXECUTION_SAMPLE_LIMIT = 30
+        private const val BROKER_INVENTORY_REFRESH_MS = 5_000L
+        private const val MULTIFY_PACKAGE = "com.multyfi.invest"
         private const val UPLOADED_THREE_MONTH_REALIZED_PCT = 0.49019417475728155
         private const val DEFAULT_LONG_REALIZED_PCT = 0.33
         const val ENGINE_MULTIFY_HOLDING = "MULTIFY_HOLDING"
