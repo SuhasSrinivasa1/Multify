@@ -68,7 +68,7 @@ class MultifyNotificationListenerService : NotificationListenerService() {
             auditLogger.log("RUNTIME", "NOTIFICATION_LISTENER_CONNECTED")
             lastConnectedAuditAtMs = now
         }
-        scope.launch { repository.recordListenerConnected(now) }
+        scope.launch { repository.recordListenerConnected() }
         notifyStatus("Signal capture active", "Listening for Multify ARM + LONG-only holding forecasts")
         if (shadowMonitorJob?.isActive != true) {
             shadowMonitorJob = scope.launch {
@@ -107,7 +107,7 @@ class MultifyNotificationListenerService : NotificationListenerService() {
             auditLogger.log("RUNTIME", "NOTIFICATION_LISTENER_DISCONNECTED")
             lastDisconnectedAuditAtMs = now
         }
-        scope.launch { repository.recordListenerReconnect(now) }
+        scope.launch { repository.recordListenerReconnect() }
         // Collapse disconnect storms instead of calling requestRebind repeatedly.
         if (now - lastRebindRequestAtMs >= LISTENER_REBIND_MIN_INTERVAL_MS) {
             runCatching { requestRebind(android.content.ComponentName(this, MultifyNotificationListenerService::class.java)) }
