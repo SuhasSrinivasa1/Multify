@@ -143,8 +143,8 @@ jobs:
           else
             gh release create "$TAG"               --target "$GITHUB_SHA"               --title "$TITLE"               --notes-file RELEASE_NOTES_v6.6.0.md               dist/Multify-TraderPro-v6.6.0-live-hardening-debug.apk               dist/Multify-TraderPro-v6.6.0-source.zip               dist/SHA256SUMS.txt               dist/signature.txt               dist/package-verification.txt
 
-      - name: Publish successful build pointer
-        if: github.ref == 'refs/heads/main'
+      - name: Publish build pointer
+        if: always() && github.ref == 'refs/heads/main'
         shell: bash
         run: |
           set -euo pipefail
@@ -158,10 +158,11 @@ jobs:
             "run_id": "$GITHUB_RUN_ID",
             "commit_sha": "$GITHUB_SHA",
             "artifact_name": "Multify-TraderPro-v6.6.0-verified",
-            "release_tag": "v6.6.0-live-hardening"
+            "release_tag": "v6.6.0-live-hardening",
+            "job_status": "${{ job.status }}"
           }
           EOF
           git add latest-build.json
-          git commit -m "Record successful v6.6.0 build $GITHUB_RUN_ID"
+          git commit -m "Record v6.6.0 build $GITHUB_RUN_ID (${{ job.status }})"
           git push origin HEAD:build-metadata
           fi
