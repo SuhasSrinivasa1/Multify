@@ -30,8 +30,8 @@ android {
         applicationId = "com.multify.traderpro.vivoy73final"
         minSdk = 26
         targetSdk = 35
-        versionCode = 640
-        versionName = "6.4.0-execution-telemetry-ui"
+        versionCode = 650
+        versionName = "6.5.0-trailing-reconciliation"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
     }
