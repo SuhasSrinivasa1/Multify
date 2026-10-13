@@ -23,6 +23,9 @@ interface LearningDao {
     @Query("SELECT * FROM learning_calls WHERE source!='LIVE' AND callDate=:callDate AND symbol=:symbol AND action=:action ORDER BY id ASC LIMIT 1")
     suspend fun historicalCallForKey(callDate: String, symbol: String, action: String): LearningCallEntity?
 
+    @Query("SELECT * FROM learning_calls WHERE callDate=:callDate AND symbol=:symbol AND action=:action ORDER BY CASE WHEN source='LIVE' THEN 0 ELSE 1 END, id ASC LIMIT 1")
+    suspend fun callForDateSymbolAction(callDate: String, symbol: String, action: String): LearningCallEntity?
+
     @Query("SELECT * FROM learning_calls WHERE source='LIVE' AND symbol=:symbol ORDER BY id DESC LIMIT 1")
     suspend fun latestLiveCall(symbol: String): LearningCallEntity?
 
