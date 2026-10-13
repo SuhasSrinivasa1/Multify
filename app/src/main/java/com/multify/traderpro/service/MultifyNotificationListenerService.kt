@@ -46,6 +46,9 @@ class MultifyNotificationListenerService : NotificationListenerService() {
     // cannot queue behind forecast scans or research work.
     private val priorityScope = CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(1))
     private var shadowMonitorJob: Job? = null
+    private var lastRebindRequestAtMs = 0L
+    private var lastConnectedAuditAtMs = 0L
+    private var lastDisconnectedAuditAtMs = 0L
 
     override fun onCreate() {
         super.onCreate()
@@ -60,8 +63,12 @@ class MultifyNotificationListenerService : NotificationListenerService() {
 
     override fun onListenerConnected() {
         super.onListenerConnected()
-        auditLogger.log("RUNTIME", "NOTIFICATION_LISTENER_CONNECTED")
-        scope.launch { repository.recordListenerConnected() }
+        val now = System.currentTimeMillis()
+        if (now - lastConnectedAuditAtMs >= LISTENER_AUDIT_THROTTLE_MS) {
+            auditLogger.log("RUNTIME", "NOTIFICATION_LISTENER_CONNECTED")
+            lastConnectedAuditAtMs = now
+        }
+        scope.launch { repository.recordListenerConnected(now) }
         notifyStatus("Signal capture active", "Listening for Multify ARM + LONG-only holding forecasts")
         if (shadowMonitorJob?.isActive != true) {
             shadowMonitorJob = scope.launch {
@@ -95,11 +102,17 @@ class MultifyNotificationListenerService : NotificationListenerService() {
 
     override fun onListenerDisconnected() {
         super.onListenerDisconnected()
-        auditLogger.log("RUNTIME", "NOTIFICATION_LISTENER_DISCONNECTED")
-        scope.launch { repository.recordListenerReconnect() }
-        // Vivo/Funtouch OS can aggressively reclaim background components. Ask Android to
-        // re-bind the notification listener instead of waiting for the app to be reopened.
-        runCatching { requestRebind(android.content.ComponentName(this, MultifyNotificationListenerService::class.java)) }
+        val now = System.currentTimeMillis()
+        if (now - lastDisconnectedAuditAtMs >= LISTENER_AUDIT_THROTTLE_MS) {
+            auditLogger.log("RUNTIME", "NOTIFICATION_LISTENER_DISCONNECTED")
+            lastDisconnectedAuditAtMs = now
+        }
+        scope.launch { repository.recordListenerReconnect(now) }
+        // Collapse disconnect storms instead of calling requestRebind repeatedly.
+        if (now - lastRebindRequestAtMs >= LISTENER_REBIND_MIN_INTERVAL_MS) {
+            runCatching { requestRebind(android.content.ComponentName(this, MultifyNotificationListenerService::class.java)) }
+            lastRebindRequestAtMs = now
+        }
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
@@ -227,5 +240,9 @@ class MultifyNotificationListenerService : NotificationListenerService() {
 
     private fun String?.ifNullOrBlank(fallback: String): String = if (this.isNullOrBlank()) fallback else this
 
-    companion object { private const val CHANNEL_ID = "trading_engine_status" }
+    companion object {
+        private const val CHANNEL_ID = "trading_engine_status"
+        private const val LISTENER_AUDIT_THROTTLE_MS = 60_000L
+        private const val LISTENER_REBIND_MIN_INTERVAL_MS = 15_000L
+    }
 }
