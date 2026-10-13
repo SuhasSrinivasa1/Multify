@@ -462,7 +462,14 @@ private fun HoldingCard(p: PositionDto) {
                     } else money(target)
                 } ?: "Learning"
             )
-            KeyValueRow("Protective / trail stop", p.stopPrice?.let(::money) ?: "—")
+            if (p.trailArmed) {
+                KeyValueRow("High water", p.highWaterPrice?.let(::money) ?: "—")
+                KeyValueRow("Current trail stop", p.stopPrice?.let(::money) ?: "—")
+                KeyValueRow("Trail gap", p.trailDistance?.let(::money) ?: "—")
+                KeyValueRow("Last ratchet", p.trailingLastRatchetPrice?.let(::money) ?: "—")
+            } else {
+                KeyValueRow("Protective stop", p.stopPrice?.let(::money) ?: "—")
+            }
             if (!p.strategy.isNullOrBlank()) {
                 Text(p.strategy, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
@@ -680,7 +687,7 @@ private fun SettingsScreen(
                     OutlinedTextField(apiKey, { apiKey = it }, Modifier.fillMaxWidth(), label = { Text("Groww TOTP token") }, visualTransformation = PasswordVisualTransformation(), singleLine = true)
                     OutlinedTextField(totpSecret, { totpSecret = it }, Modifier.fillMaxWidth(), label = { Text("Groww TOTP secret") }, visualTransformation = PasswordVisualTransformation(), singleLine = true)
                     OutlinedTextField(staticIp, { staticIp = it.trim() }, Modifier.fillMaxWidth(), label = { Text("Groww-whitelisted static IP") }, singleLine = true)
-                    OutlinedTextField(packageFilter, { packageFilter = it }, Modifier.fillMaxWidth(), label = { Text("Multify package filter (optional)") }, singleLine = true)
+                    OutlinedTextField(packageFilter, { packageFilter = it }, Modifier.fillMaxWidth(), label = { Text("Multify package filter (blank = official app only)") }, singleLine = true)
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         OutlinedButton(
                             onClick = { onSave(apiKey, totpSecret, staticIp, packageFilter, budget.toLong().toString()) },
