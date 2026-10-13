@@ -13,7 +13,7 @@ on:
       - '.github/workflows/multify-v450-build.yml'
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   verify-and-build:
@@ -102,9 +102,12 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          find app/build/outputs/apk -type f -name '*.apk' -print0 | while IFS= read -r -d '' apk; do
-            cp "$apk" "dist/$(basename "$apk")"
-          done
+          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v6.6.0-live-hardening-debug.apk
+          if [ -f app/build/outputs/apk/release/app-release.apk ]; then
+            cp app/build/outputs/apk/release/app-release.apk dist/Multify-TraderPro-v6.6.0-live-hardening-release.apk
+          elif [ -f app/build/outputs/apk/release/app-release-unsigned.apk ]; then
+            cp app/build/outputs/apk/release/app-release-unsigned.apk dist/Multify-TraderPro-v6.6.0-live-hardening-release-unsigned.apk
+          fi
           (cd dist && sha256sum *.apk > SHA256SUMS.txt)
           : > dist/signature.txt
           : > dist/package-verification.txt
@@ -125,3 +128,18 @@ jobs:
           name: Multify-TraderPro-v6.6.0-verified
           path: dist/
           if-no-files-found: error
+
+      - name: Publish verified v6.6.0 assets
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="v6.6.0-live-hardening"
+          TITLE="Multify Trader Pro v6.6.0 Live Hardening"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG"               dist/Multify-TraderPro-v6.6.0-live-hardening-debug.apk               dist/Multify-TraderPro-v6.6.0-source.zip               dist/SHA256SUMS.txt               dist/signature.txt               dist/package-verification.txt               --clobber
+          else
+            gh release create "$TAG"               --target "$GITHUB_SHA"               --title "$TITLE"               --notes-file RELEASE_NOTES_v6.6.0.md               dist/Multify-TraderPro-v6.6.0-live-hardening-debug.apk               dist/Multify-TraderPro-v6.6.0-source.zip               dist/SHA256SUMS.txt               dist/signature.txt               dist/package-verification.txt
+          fi
