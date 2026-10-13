@@ -147,7 +147,21 @@ class MultifyNotificationListenerService : NotificationListenerService() {
                     notificationStartedNs = if (critical) notificationStartedNs else null
                 )
             }
-            if (processed.isFailure) enqueueForward(id)
+            if (processed.isFailure) {
+                val error = processed.exceptionOrNull()
+                val message = error?.message ?: error?.javaClass?.simpleName ?: "Unknown processing failure"
+                dao.updateForwarding(
+                    id, "ERROR", "PROCESSING_FAILED",
+                    "Signal processing failed; review Groww and the exported audit log.",
+                    message.take(500)
+                )
+                auditLogger.log("SIGNAL", "PROCESSING_FAILED", mapOf(
+                    "event_id" to id, "signal_type" to parsed.type.name, "symbol" to parsed.symbol, "message" to message.take(500)
+                ))
+                // Do not blindly replay a live BUY/SELL after an ambiguous broker failure.
+                // Broker reconciliation handles state without risking a duplicate live order.
+                if (!critical) enqueueForward(id)
+            }
 
             scope.launch {
                 runCatching { repository.recordNotificationReceived() }
