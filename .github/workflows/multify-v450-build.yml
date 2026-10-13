@@ -142,6 +142,7 @@ jobs:
             gh release upload "$TAG"               dist/Multify-TraderPro-v6.6.0-live-hardening-debug.apk               dist/Multify-TraderPro-v6.6.0-source.zip               dist/SHA256SUMS.txt               dist/signature.txt               dist/package-verification.txt               --clobber
           else
             gh release create "$TAG"               --target "$GITHUB_SHA"               --title "$TITLE"               --notes-file RELEASE_NOTES_v6.6.0.md               dist/Multify-TraderPro-v6.6.0-live-hardening-debug.apk               dist/Multify-TraderPro-v6.6.0-source.zip               dist/SHA256SUMS.txt               dist/signature.txt               dist/package-verification.txt
+          fi
 
       - name: Publish build pointer
         if: always() && github.ref == 'refs/heads/main'
@@ -165,4 +166,3 @@ jobs:
           git add latest-build.json
           git commit -m "Record v6.6.0 build $GITHUB_RUN_ID (${{ job.status }})"
           git push origin HEAD:build-metadata
-          fi
