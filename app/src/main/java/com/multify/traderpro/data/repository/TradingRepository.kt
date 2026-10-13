@@ -28,6 +28,8 @@ import com.multify.traderpro.data.network.ForecastChampionDto
 import com.multify.traderpro.data.network.ForecastDto
 import com.multify.traderpro.data.network.ForecastLearningStatsDto
 import com.multify.traderpro.data.network.GrowwApiFactory
+import com.multify.traderpro.data.network.GrowwHolding
+import com.multify.traderpro.data.network.GrowwPosition
 import com.multify.traderpro.data.network.LearningStatsDto
 import com.multify.traderpro.data.network.OrderCreateRequest
 import com.multify.traderpro.data.network.OrderPayload
@@ -103,9 +105,16 @@ class TradingRepository @Inject constructor(
     @Volatile private var armHotState: ArmHotState? = null
     private var lastForecastScanAtMs = 0L
     private var lastForecastOutcomeMonitorAtMs = 0L
+    private var brokerInventorySnapshot: BrokerInventorySnapshot? = null
     private val oneMinuteAtrCache = mutableMapOf<String, AtrCacheEntry>()
 
     private data class AtrCacheEntry(val atr: Double, val atMs: Long)
+
+    private data class BrokerInventorySnapshot(
+        val holdings: Map<String, GrowwHolding>,
+        val positions: Map<String, GrowwPosition>,
+        val atMs: Long
+    )
 
     private data class ArmHotState(
         val token: String,
@@ -158,6 +167,8 @@ class TradingRepository @Inject constructor(
             }
         }
         historicalSeedEnsured = true
+        runCatching { repairLiveLearningFromSignals() }
+            .onFailure { auditLogger.log("LEARNING", "LIVE_HISTORY_REPAIR_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
         if (inserted > 0) auditLogger.log("LEARNING", "LONG_HISTORY_SEEDED", mapOf("inserted" to inserted, "rows" to learningDao.callCount()))
     }
 
@@ -213,32 +224,99 @@ class TradingRepository @Inject constructor(
         )
     }
 
-    private suspend fun recordLiveBuy(eventId: Long, signal: ParsedSignal, price: Double) {
+    private fun multifyReferenceEntry(signal: ParsedSignal, fallback: Double? = null): Double? {
+        val low = signal.entryLow?.takeIf { it.isFinite() && it > 0.0 }
+        val high = signal.entryHigh?.takeIf { it.isFinite() && it > 0.0 }
+        return when {
+            low != null && high != null -> (low + high) / 2.0
+            high != null -> high
+            low != null -> low
+            else -> fallback?.takeIf { it.isFinite() && it > 0.0 }
+        }
+    }
+
+    private suspend fun recordLiveBuy(eventId: Long, signal: ParsedSignal, fallbackPrice: Double? = null) {
         val symbol = signal.symbol ?: return
-        ensureHistoricalSeed()
+        val price = multifyReferenceEntry(signal, fallbackPrice) ?: return
         val targetPct = signal.target?.let { ((it - price) / price * 100.0).coerceAtLeast(0.0) }
-        learningDao.insertCall(
-            LearningCallEntity(
-                callDate = LocalDate.now(INDIA).toString(), symbol = symbol, source = "LIVE", action = "BUY",
-                entryPrice = price, targetPrice = signal.target, targetPct = targetPct, buyEventId = eventId,
-                buyAtMs = System.currentTimeMillis(), updatedAtMs = System.currentTimeMillis()
+        val now = System.currentTimeMillis()
+        val existing = learningDao.liveCallForBuyEvent(eventId)
+        if (existing == null) {
+            learningDao.insertCall(
+                LearningCallEntity(
+                    callDate = LocalDate.now(INDIA).toString(), symbol = symbol, source = "LIVE", action = "BUY",
+                    entryPrice = price, targetPrice = signal.target, targetPct = targetPct, buyEventId = eventId,
+                    buyAtMs = now, updatedAtMs = now
+                )
             )
-        )
+        } else {
+            learningDao.updateCall(existing.copy(
+                entryPrice = price, targetPrice = signal.target ?: existing.targetPrice,
+                targetPct = targetPct ?: existing.targetPct, updatedAtMs = now
+            ))
+        }
         learningDao.markLongForecastMatch(LocalDate.now(INDIA).toString(), symbol)
     }
 
-    private suspend fun recordLiveExit(eventId: Long, symbol: String, price: Double) {
-        val call = learningDao.latestLiveCall(symbol) ?: return
-        if (call.sellAtMs != null) return
-        val pct = if (call.entryPrice > 0.0) (price - call.entryPrice) / call.entryPrice * 100.0 else null
+    private suspend fun recordLiveExit(
+        eventId: Long,
+        symbol: String,
+        price: Double?,
+        reportedReturnPct: Double?,
+        eventAtMs: Long = System.currentTimeMillis()
+    ) {
+        val call = learningDao.latestLiveCallBefore(symbol, eventAtMs) ?: learningDao.latestLiveCall(symbol) ?: return
+        val reported = reportedReturnPct?.takeIf { it.isFinite() && abs(it) < 25.0 }
+        val pct = reported ?: AdaptiveLearningMath.realizedReturnPct(null, call.entryPrice, price)
+        if (pct == null && price == null) return
         learningDao.updateCall(
             call.copy(
-                multifyExitPrice = price, longRealizedPct = pct, sellEventId = eventId,
-                sellAtMs = System.currentTimeMillis(), updatedAtMs = System.currentTimeMillis()
+                multifyExitPrice = price ?: call.multifyExitPrice,
+                longRealizedPct = pct ?: call.longRealizedPct,
+                sellEventId = eventId, sellAtMs = eventAtMs, updatedAtMs = System.currentTimeMillis()
             )
         )
+        auditLogger.log("LEARNING", "MULTIFY_RETURN_RECORDED", mapOf(
+            "symbol" to symbol, "reported_return_pct" to reported, "exit_price" to price, "event_id" to eventId
+        ))
     }
 
+    private suspend fun repairLiveLearningFromSignals() {
+        var repairedBuys = 0
+        var repairedExits = 0
+        dao.allNow().forEach { event ->
+            if (!event.sourcePackage.equals(MULTIFY_PACKAGE, true) && event.sourcePackage != MANUAL_SOURCE) return@forEach
+            val parsed = parser.parse(event.title, event.text, event.bigText)
+            when (parsed.type) {
+                SignalType.TRADE_RELEASE -> {
+                    val before = learningDao.liveCallForBuyEvent(event.id) ?: return@forEach
+                    val reference = multifyReferenceEntry(parsed) ?: return@forEach
+                    val targetPct = parsed.target?.let { ((it - reference) / reference * 100.0).coerceAtLeast(0.0) }
+                    if (abs(before.entryPrice - reference) > .0001 || before.targetPrice != parsed.target || before.targetPct != targetPct) {
+                        learningDao.updateCall(before.copy(
+                            entryPrice = reference, targetPrice = parsed.target ?: before.targetPrice,
+                            targetPct = targetPct ?: before.targetPct, updatedAtMs = System.currentTimeMillis()
+                        ))
+                        repairedBuys++
+                    }
+                }
+                SignalType.BOOK_PROFIT -> {
+                    val symbol = parsed.symbol ?: return@forEach
+                    val before = learningDao.latestLiveCallBefore(symbol, event.receivedAtMs) ?: return@forEach
+                    val desired = parsed.returnsPct?.takeIf { it.isFinite() && abs(it) < 25.0 }
+                        ?: AdaptiveLearningMath.realizedReturnPct(null, before.entryPrice, parsed.exitPrice)
+                    if (desired != null && (before.longRealizedPct == null || abs(before.longRealizedPct - desired) > .0001 || before.sellEventId != event.id)) {
+                        recordLiveExit(event.id, symbol, parsed.exitPrice, parsed.returnsPct, event.receivedAtMs)
+                        repairedExits++
+                    }
+                }
+                else -> Unit
+            }
+        }
+        if (repairedBuys > 0 || repairedExits > 0) {
+            auditLogger.log("LEARNING", "LIVE_HISTORY_REPAIRED", mapOf("buys" to repairedBuys, "exits" to repairedExits))
+        }
+    }
     suspend fun saveBrokerSettings(
         apiKeyOrToken: String,
         totpSecret: String,
