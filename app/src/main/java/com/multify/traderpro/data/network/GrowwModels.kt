@@ -80,7 +80,9 @@ data class GrowwPosition(
     val exchange: String = "NSE",
     @SerializedName("net_price") val netPrice: Double = 0.0,
     @SerializedName("credit_quantity") val creditQuantity: Int = 0,
-    @SerializedName("debit_quantity") val debitQuantity: Int = 0
+    @SerializedName("credit_price") val creditPrice: Double = 0.0,
+    @SerializedName("debit_quantity") val debitQuantity: Int = 0,
+    @SerializedName("debit_price") val debitPrice: Double = 0.0
 )
 
 data class QuotePayload(
