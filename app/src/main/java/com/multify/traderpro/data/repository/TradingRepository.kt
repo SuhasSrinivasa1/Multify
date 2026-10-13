@@ -540,10 +540,21 @@ class TradingRepository @Inject constructor(
             return
         }
 
+        // Recommendation learning is independent of Groww execution/reconciliation.
+        // A manual broker exit or a failed SELL must not erase Multify's reported result.
+        when (parsed.type) {
+            SignalType.TRADE_RELEASE -> recordLiveBuy(eventId, parsed)
+            SignalType.BOOK_PROFIT -> if (!symbol.isNullOrBlank()) {
+                val eventAtMs = dao.byId(eventId)?.receivedAtMs ?: System.currentTimeMillis()
+                recordLiveExit(eventId, symbol, parsed.exitPrice, parsed.returnsPct, eventAtMs)
+            }
+            else -> Unit
+        }
+
         val hot = armHotState?.takeIf { System.currentTimeMillis() - it.warmedAtMs <= ARM_HOT_STATE_MAX_AGE_MS }
         val token = hot?.token ?: ensureToken()
         if (token == null) {
-            dao.updateForwarding(eventId, "CAPTURED", "AUTH_REQUIRED", "Signal stored. Authenticate Groww to enable ARM.", null)
+            dao.updateForwarding(eventId, "CAPTURED", "AUTH_REQUIRED", "Signal and Multify learning stored. Authenticate Groww to enable ARM.", null)
             return
         }
         val settings = hot?.settings ?: preferences.settings.first()
@@ -565,21 +576,14 @@ class TradingRepository @Inject constructor(
         val signalReference = listOfNotNull(signal.entryHigh, signal.entryLow).maxOrNull()
 
         if (!settings.armEffective) {
-            val observed = signalReference ?: runCatching {
-                apiFactory.groww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Quote $symbol").lastPrice
-            }.getOrNull()
-            if (observed != null) {
-                recordLiveBuy(eventId, signal, observed)
-                preferences.recordMarketData()
-            }
+            val observed = multifyReferenceEntry(signal)
             dao.updateForwarding(
                 eventId, "ANALYZED", "LONG_CALL_CAPTURED",
-                "Multify LONG call captured${observed?.let { " at ₹${fmt(it)}" }.orEmpty()}. ARM is off, so no order was placed.",
+                "Multify LONG call captured${observed?.let { " at reference ₹${fmt(it)}" }.orEmpty()}. ARM is off, so no order was placed.",
                 null
             )
             return
         }
-
         preArmGuard(settings)
         if (managedDao.openPositionForSymbol(symbol) != null) {
             dao.updateForwarding(eventId, "ANALYZED", "HOLDING_ALREADY_OPEN", "$symbol is already app-owned; duplicate BUY blocked.", null)
@@ -606,8 +610,6 @@ class TradingRepository @Inject constructor(
         val order = placeCncBuy(token, symbol, qty, ref, notificationStartedNs)
         val filled = order.filledQuantity?.takeIf { it > 0 } ?: qty
         val entry = order.averageFillPrice?.takeIf { it > 0.0 } ?: (signalReference ?: sizingPrice / FAST_SIZE_PRICE_BUFFER)
-        recordLiveBuy(eventId, signal, entry)
-
         val learned = learningStats()
         val trailArmPct = learned.longAveragePct.takeIf { it.isFinite() && it > 0.0 } ?: DEFAULT_LONG_REALIZED_PCT
         managedDao.insertPosition(
@@ -641,18 +643,25 @@ class TradingRepository @Inject constructor(
         val symbol = signal.symbol ?: error("Book-profit signal has no symbol")
         val holding = managedDao.openPosition(ENGINE_MULTIFY_HOLDING, symbol)
         if (holding == null) {
-            signal.exitPrice?.let { recordLiveExit(eventId, symbol, it) }
-            dao.updateForwarding(eventId, "ANALYZED", "MULTIFY_EXIT_CAPTURED", "Book Profit captured; no app-owned Multify holding was open.", null)
+            dao.updateForwarding(eventId, "ANALYZED", "MULTIFY_EXIT_RECORDED", "Book Profit recorded in Multify learning; no app-owned Multify holding was open.", null)
+            return
+        }
+        val reconciled = reconcilePositionWithBroker(token, holding, signal.exitPrice, force = true)
+        if (reconciled == null) {
+            armHotState = null
+            dao.updateForwarding(
+                eventId, "DELIVERED", "MULTIFY_EXIT_RECORDED_MANUAL_CLOSE",
+                "Multify Book Profit recorded. Groww already showed the app-owned $symbol quantity as manually/external closed, so no duplicate SELL was sent.", null
+            )
             return
         }
         require(settings.brokerDdpiEnabled) { "DDPI is required to sell the app-owned CNC holding" }
-        val mark = signal.exitPrice ?: holding.lastPrice
-        val trade = closeLongHolding(token, holding, mark, "MULTIFY_BOOK_PROFIT", notificationStartedNs)
-        recordLiveExit(eventId, symbol, trade.exitPrice)
+        val mark = signal.exitPrice ?: reconciled.lastPrice
+        closeLongHolding(token, reconciled, mark, "MULTIFY_BOOK_PROFIT", notificationStartedNs)
         armHotState = null
-        dao.updateForwarding(eventId, "DELIVERED", "CNC_LONG_SOLD", "Multify Book Profit sold the app-owned $symbol holding.", null)
+        brokerInventorySnapshot = null
+        dao.updateForwarding(eventId, "DELIVERED", "CNC_LONG_SOLD", "Multify Book Profit sold the remaining app-owned $symbol holding.", null)
     }
-
     suspend fun submitManualSignal(symbol: String, action: String, observedPrice: Double?): Long {
         val normalizedSymbol = symbol.trim().uppercase(Locale.US)
         require(normalizedSymbol.matches(Regex("[A-Z0-9&._-]{1,32}"))) { "Enter a valid NSE symbol" }
@@ -670,7 +679,16 @@ class TradingRepository @Inject constructor(
             )
         )
         require(id > 0L) { "Manual signal was not stored" }
-        processEvent(id)
+        processEvent(
+            id,
+            parsedOverride = ParsedSignal(
+                type = signalType, symbol = normalizedSymbol,
+                entryLow = if (signalType == SignalType.TRADE_RELEASE) observedPrice else null,
+                entryHigh = if (signalType == SignalType.TRADE_RELEASE) observedPrice else null,
+                exitPrice = if (signalType == SignalType.BOOK_PROFIT) observedPrice else null,
+                rawText = "Manual $normalizedAction $normalizedSymbol", confidence = 1.0
+            )
+        )
         return id
     }
 
