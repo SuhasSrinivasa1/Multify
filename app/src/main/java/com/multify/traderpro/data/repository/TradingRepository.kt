@@ -106,6 +106,7 @@ class TradingRepository @Inject constructor(
     private var lastForecastScanAtMs = 0L
     private var lastForecastOutcomeMonitorAtMs = 0L
     private var brokerInventorySnapshot: BrokerInventorySnapshot? = null
+    private var lastClosedSessionReconcileAtMs = 0L
     private val oneMinuteAtrCache = mutableMapOf<String, AtrCacheEntry>()
 
     private data class AtrCacheEntry(val atr: Double, val atMs: Long)
@@ -990,15 +991,18 @@ class TradingRepository @Inject constructor(
         val open = managedDao.openPositions()
         if (open.isEmpty()) return 0
         val token = ensureToken() ?: return open.size
-        if (marketSession() != "OPEN") return open.size
+        val marketOpen = marketSession() == "OPEN"
+        val now = System.currentTimeMillis()
+        if (!marketOpen && now - lastClosedSessionReconcileAtMs < CLOSED_SESSION_RECONCILE_MS) return open.size
+        if (!marketOpen) lastClosedSessionReconcileAtMs = now
         for (position in open) {
             runCatching {
                 if (position.side != "LONG") {
-                    closeLegacyNonLong(token, position)
+                    if (marketOpen) closeLegacyNonLong(token, position)
                     return@runCatching
                 }
-                val reconciled = reconcilePositionWithBroker(token, position, preferredMark = null, force = false)
-                if (reconciled != null) monitorLongHolding(reconciled, token)
+                val reconciled = reconcilePositionWithBroker(token, position, preferredMark = null, force = !marketOpen)
+                if (marketOpen && reconciled != null) monitorLongHolding(reconciled, token)
             }.onFailure {
                 auditLogger.log("HOLDING", "MONITOR_ERROR", mapOf("symbol" to position.symbol, "message" to (it.message ?: it.javaClass.simpleName)))
             }
@@ -1475,6 +1479,7 @@ class TradingRepository @Inject constructor(
         private const val ONE_MINUTE_ATR_CACHE_MS = 60_000L
         private const val EXECUTION_SAMPLE_LIMIT = 30
         private const val BROKER_INVENTORY_REFRESH_MS = 5_000L
+        private const val CLOSED_SESSION_RECONCILE_MS = 60_000L
         private const val MULTIFY_PACKAGE = "com.multyfi.invest"
         private const val UPLOADED_THREE_MONTH_REALIZED_PCT = 0.49019417475728155
         private const val DEFAULT_LONG_REALIZED_PCT = 0.33
