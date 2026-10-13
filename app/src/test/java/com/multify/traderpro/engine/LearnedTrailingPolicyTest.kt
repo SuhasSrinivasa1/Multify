@@ -12,10 +12,10 @@ class LearnedTrailingPolicyTest {
         assertTrue(LearnedTrailingPolicy.shouldArm(100.0, 100.33, 0.33))
     }
 
-    @Test fun oneRupeeHighWaterStepControlsRatchets() {
+    @Test fun quarterRupeeHighWaterStepControlsContinuousRatchets() {
         assertTrue(LearnedTrailingPolicy.shouldRatchet(false, 0.0, 100.33))
-        assertFalse(LearnedTrailingPolicy.shouldRatchet(true, 100.33, 101.32))
-        assertTrue(LearnedTrailingPolicy.shouldRatchet(true, 100.33, 101.33))
+        assertFalse(LearnedTrailingPolicy.shouldRatchet(true, 100.33, 100.57))
+        assertTrue(LearnedTrailingPolicy.shouldRatchet(true, 100.33, 100.58))
     }
 
     @Test fun adaptiveDistanceUsesLargestProtectionDistance() {
@@ -31,6 +31,18 @@ class LearnedTrailingPolicyTest {
         assertTrue(first > 100.0)
         assertTrue(second >= first)
         assertEquals(second, third, 0.0001)
+    }
+
+    @Test fun profitableMovesTightenAndProtectAtLeastHalfTheGain() {
+        val stop = LearnedTrailingPolicy.ratchetStop(100.0, 102.0, 0.20, null)
+        assertTrue(stop >= 101.0)
+        assertTrue(LearnedTrailingPolicy.trailDistance(102.0, 0.20, 100.0) <= 1.0)
+    }
+
+    @Test fun twoRupeeHighWaterAdvanceRaisesStopByAtLeastOneRupee() {
+        val priorStop = 101.50
+        val next = LearnedTrailingPolicy.ratchetStop(100.0, 104.0, 10.0, priorStop, 102.0)
+        assertTrue(next >= 102.50)
     }
 
     @Test fun protectedFloorCoversEstimatedCostsPlusBuffer() {
