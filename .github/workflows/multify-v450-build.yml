@@ -142,4 +142,26 @@ jobs:
             gh release upload "$TAG"               dist/Multify-TraderPro-v6.6.0-live-hardening-debug.apk               dist/Multify-TraderPro-v6.6.0-source.zip               dist/SHA256SUMS.txt               dist/signature.txt               dist/package-verification.txt               --clobber
           else
             gh release create "$TAG"               --target "$GITHUB_SHA"               --title "$TITLE"               --notes-file RELEASE_NOTES_v6.6.0.md               dist/Multify-TraderPro-v6.6.0-live-hardening-debug.apk               dist/Multify-TraderPro-v6.6.0-source.zip               dist/SHA256SUMS.txt               dist/signature.txt               dist/package-verification.txt
+
+      - name: Publish successful build pointer
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin build-metadata
+          git worktree add /tmp/multify-build-metadata origin/build-metadata
+          cd /tmp/multify-build-metadata
+          cat > latest-build.json <<EOF
+          {
+            "run_id": "$GITHUB_RUN_ID",
+            "commit_sha": "$GITHUB_SHA",
+            "artifact_name": "Multify-TraderPro-v6.6.0-verified",
+            "release_tag": "v6.6.0-live-hardening"
+          }
+          EOF
+          git add latest-build.json
+          git commit -m "Record successful v6.6.0 build $GITHUB_RUN_ID"
+          git push origin HEAD:build-metadata
           fi
