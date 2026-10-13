@@ -26,6 +26,12 @@ interface LearningDao {
     @Query("SELECT * FROM learning_calls WHERE source='LIVE' AND symbol=:symbol ORDER BY id DESC LIMIT 1")
     suspend fun latestLiveCall(symbol: String): LearningCallEntity?
 
+    @Query("SELECT * FROM learning_calls WHERE source='LIVE' AND buyEventId=:eventId LIMIT 1")
+    suspend fun liveCallForBuyEvent(eventId: Long): LearningCallEntity?
+
+    @Query("SELECT * FROM learning_calls WHERE source='LIVE' AND symbol=:symbol AND buyAtMs <= :atMs ORDER BY buyAtMs DESC, id DESC LIMIT 1")
+    suspend fun latestLiveCallBefore(symbol: String, atMs: Long): LearningCallEntity?
+
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertObservation(item: PriceObservationEntity): Long
 
