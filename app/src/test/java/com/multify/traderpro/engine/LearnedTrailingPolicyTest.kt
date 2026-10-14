@@ -49,6 +49,42 @@ class LearnedTrailingPolicyTest {
         assertTrue(LearnedTrailingPolicy.netBreakEvenFloor(100.0) > 100.12)
     }
 
+    @Test fun autonomousProfitGateIsOnePercentOfActualInvestedAmount() {
+        val entry = 1859.63
+        val qty = 26
+        val invested = entry * qty
+        assertEquals(invested * 0.01, LearnedTrailingPolicy.minimumNetProfitRupees(entry, qty), 0.0001)
+    }
+
+    @Test fun tatvaTinyGainDoesNotReachAutonomousProfitGate() {
+        val entry = 1859.63
+        val qty = 26
+        assertFalse(LearnedTrailingPolicy.profitGateReached(entry, 1869.90, qty))
+        assertFalse(LearnedTrailingPolicy.profitGateReached(entry, 1861.71, qty))
+    }
+
+    @Test fun minimumProfitExitPriceCoversOnePercentNetAfterEstimatedCosts() {
+        val entry = 1859.63
+        val qty = 26
+        val floor = LearnedTrailingPolicy.minimumExitPriceForNetProfitPct(entry)
+        val minimum = LearnedTrailingPolicy.minimumNetProfitRupees(entry, qty)
+        assertTrue(LearnedTrailingPolicy.estimatedNetProfit(entry, floor, qty) + 0.01 >= minimum)
+        assertTrue(floor > entry * 1.01)
+    }
+
+    @Test fun ratchetCanBeFlooredAtOnePercentNetProfitPrice() {
+        val entry = 100.0
+        val floor = LearnedTrailingPolicy.minimumExitPriceForNetProfitPct(entry)
+        val stop = LearnedTrailingPolicy.ratchetStop(
+            entryPrice = entry,
+            highWaterPrice = 103.0,
+            atr = 0.20,
+            currentStop = null,
+            minimumProtectedStop = floor
+        )
+        assertTrue(stop >= floor)
+    }
+
     @Test fun noLearnedAverageUsesConservativeFallback() {
         assertTrue(LearnedTrailingPolicy.thresholdPct(null, 100.0, 1.0) >= 0.60)
     }
