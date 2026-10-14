@@ -1,4 +1,5 @@
 name: Multify Trader Pro v6.7.0 Profit-Gated Trailing Build
+# CI trigger for verified v6.7.0 artifact publication
 
 on:
   workflow_dispatch:
