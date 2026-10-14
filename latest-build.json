@@ -1,7 +1,7 @@
 {
-  "run_id": "38450803272",
-  "commit_sha": "fbd54feea61e348ba5bd500ab940bccb16d4ea55",
-  "artifact_name": "Multify-TraderPro-v6.6.0-verified",
-  "release_tag": "v6.6.0-live-hardening",
+  "run_id": "38515552161",
+  "commit_sha": "6911cc8b0343be30d89e4fdf5090a5e1a0b84a43",
+  "artifact_name": "Multify-TraderPro-v6.7.0-verified",
+  "release_tag": "v6.7.0-profit-gated-trailing",
   "job_status": "success"
 }
