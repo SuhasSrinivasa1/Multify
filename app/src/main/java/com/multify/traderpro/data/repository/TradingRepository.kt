@@ -663,27 +663,38 @@ class TradingRepository @Inject constructor(
         val order = placeCncBuy(token, symbol, qty, ref, notificationStartedNs)
         val filled = order.filledQuantity?.takeIf { it > 0 } ?: qty
         val entry = order.averageFillPrice?.takeIf { it > 0.0 } ?: referencePrice
-        val learned = learningStats()
-        val trailArmPct = learned.longAveragePct.takeIf { it.isFinite() && it > 0.0 } ?: DEFAULT_LONG_REALIZED_PCT
+        val investedAmount = entry * filled
+        val minimumNetProfit = LearnedTrailingPolicy.minimumNetProfitRupees(entry, filled)
+        val minimumProfitExit = LearnedTrailingPolicy.minimumExitPriceForNetProfitPct(entry)
         managedDao.insertPosition(
             ManagedPositionEntity(
                 engine = ENGINE_MULTIFY_HOLDING, symbol = symbol, product = "CNC", side = "LONG", quantity = filled,
                 entryPrice = entry, stopPrice = entry * (1.0 - HOLDING_FAILSAFE_STOP_PCT),
-                targetPrice = entry * (1.0 + trailArmPct / 100.0),
-                strategy = "Multify ARM holding · long trail arm ${fmt(trailArmPct)}%",
+                targetPrice = minimumProfitExit,
+                strategy = "Multify ARM holding · autonomous trail after 1.00% net of invested capital",
                 regime = "HOLDING_LONG", confidence = 1.0, sourceEventId = eventId,
                 openOrderId = order.growwOrderId, openReferenceId = ref, openedAtMs = System.currentTimeMillis(),
                 lastPrice = entry, maxFavourablePrice = entry, maxAdversePrice = entry, lastEvaluatedAtMs = System.currentTimeMillis(),
-                anchorPrice = entry, capitalDeployed = entry * filled, campaignBudget = capital,
-                trailingArmPct = trailArmPct, trailingLastRatchetPrice = 0.0
+                anchorPrice = entry, capitalDeployed = investedAmount, campaignBudget = capital,
+                trailingArmPct = LearnedTrailingPolicy.AUTONOMOUS_NET_PROFIT_PCT_OF_INVESTED, trailingLastRatchetPrice = 0.0
             )
         )
         armHotState = hot?.copy(
             cncBalance = max(0.0, hot.cncBalance - entry * filled),
             warmedAtMs = System.currentTimeMillis()
         )
-        dao.updateForwarding(eventId, "DELIVERED", "CNC_LONG_BOUGHT", "ARM bought $filled $symbol into holdings @ ₹${fmt(entry)}. Long trailing arms at +${fmt(trailArmPct)}%.", null)
-        auditLogger.log("HOLDING", "MULTIFY_LONG_OPENED", mapOf("symbol" to symbol, "qty" to filled, "entry" to entry, "trail_arm_pct" to trailArmPct))
+        dao.updateForwarding(
+            eventId, "DELIVERED", "CNC_LONG_BOUGHT",
+            "ARM bought $filled $symbol into holdings @ ₹${fmt(entry)}. Autonomous trailing starts only after estimated net profit reaches 1.00% of invested capital (₹${fmt(minimumNetProfit)}).",
+            null
+        )
+        auditLogger.log("HOLDING", "MULTIFY_LONG_OPENED", mapOf(
+            "symbol" to symbol, "qty" to filled, "entry" to entry,
+            "invested_amount" to investedAmount,
+            "autonomous_profit_gate_pct" to LearnedTrailingPolicy.AUTONOMOUS_NET_PROFIT_PCT_OF_INVESTED,
+            "minimum_net_profit" to minimumNetProfit,
+            "minimum_profit_exit_price" to minimumProfitExit
+        ))
     }
 
     private suspend fun handleMultifyExit(
@@ -861,21 +872,32 @@ class TradingRepository @Inject constructor(
         val order = placeCncBuy(token, row.symbol, qty, ref)
         val filled = order.filledQuantity?.takeIf { it > 0 } ?: qty
         val entry = order.averageFillPrice?.takeIf { it > 0.0 } ?: ltp
+        val investedAmount = entry * filled
+        val minimumNetProfit = LearnedTrailingPolicy.minimumNetProfitRupees(entry, filled)
+        val minimumProfitExit = LearnedTrailingPolicy.minimumExitPriceForNetProfitPct(entry)
         managedDao.insertPosition(
             ManagedPositionEntity(
                 engine = ENGINE_FORECAST_HOLDING, symbol = row.symbol, product = "CNC", side = "LONG", quantity = filled,
                 entryPrice = entry, stopPrice = entry * (1.0 - HOLDING_FAILSAFE_STOP_PCT),
                 targetPrice = entry * (1.0 + row.targetPct / 100.0),
-                strategy = "Forecast holding · ${row.strategy}", regime = row.regime, confidence = row.confidence,
+                strategy = "Forecast holding · ${row.strategy} · autonomous trail after 1.00% net invested",
+                regime = row.regime, confidence = row.confidence,
                 sourceEventId = null, openOrderId = order.growwOrderId, openReferenceId = ref,
                 openedAtMs = System.currentTimeMillis(), lastPrice = entry,
                 maxFavourablePrice = entry, maxAdversePrice = entry, lastEvaluatedAtMs = System.currentTimeMillis(),
-                anchorPrice = entry, capitalDeployed = entry * filled, campaignBudget = capital,
-                trailingArmPct = row.targetPct, trailingLastRatchetPrice = 0.0
+                anchorPrice = entry, capitalDeployed = investedAmount, campaignBudget = capital,
+                trailingArmPct = LearnedTrailingPolicy.AUTONOMOUS_NET_PROFIT_PCT_OF_INVESTED, trailingLastRatchetPrice = 0.0
             )
         )
-        auditLogger.log("FORECAST", "LONG_HOLDING_OPENED", mapOf("symbol" to row.symbol, "qty" to filled, "entry" to entry, "trail_arm_pct" to row.targetPct))
-        return "BUY ${row.symbol} opened as CNC holding · qty $filled @ ₹${fmt(entry)} · trailing arms at +${fmt(row.targetPct)}%"
+        auditLogger.log("FORECAST", "LONG_HOLDING_OPENED", mapOf(
+            "symbol" to row.symbol, "qty" to filled, "entry" to entry,
+            "forecast_target_pct" to row.targetPct,
+            "invested_amount" to investedAmount,
+            "autonomous_profit_gate_pct" to LearnedTrailingPolicy.AUTONOMOUS_NET_PROFIT_PCT_OF_INVESTED,
+            "minimum_net_profit" to minimumNetProfit,
+            "minimum_profit_exit_price" to minimumProfitExit
+        ))
+        return "BUY ${row.symbol} opened as CNC holding · qty $filled @ ₹${fmt(entry)} · autonomous trailing starts after 1.00% net profit on invested capital (₹${fmt(minimumNetProfit)})"
     }
 
     suspend fun pendingLongForecastNotifications(): List<ForecastDto> {
@@ -1078,27 +1100,57 @@ class TradingRepository @Inject constructor(
         )
         managedDao.updatePosition(updated)
 
+        val minimumNetProfit = LearnedTrailingPolicy.minimumNetProfitRupees(updated.entryPrice, updated.quantity)
+        val minimumProfitStop = LearnedTrailingPolicy.minimumExitPriceForNetProfitPct(updated.entryPrice)
+        val rawStop = updated.stopPrice
+        val rawArmed = LearnedTrailingPolicy.isArmed(rawStop, updated.entryPrice)
+        val rawStopProtectsGate = rawStop != null &&
+            LearnedTrailingPolicy.estimatedNetProfit(updated.entryPrice, rawStop, updated.quantity) + 0.01 >= minimumNetProfit
+
+        // v6.6 could leave a profit stop armed below the new 1%-of-invested net-profit gate.
+        // Reset only those legacy low-profit stops back to the emergency failsafe.
+        if (rawArmed && !rawStopProtectsGate) {
+            val migratedStop = updated.entryPrice * (1.0 - HOLDING_FAILSAFE_STOP_PCT)
+            updated = updated.copy(
+                stopPrice = migratedStop,
+                trailingLastRatchetPrice = 0.0,
+                lastEvaluatedAtMs = System.currentTimeMillis()
+            )
+            managedDao.updatePosition(updated)
+            auditLogger.log("TRAILING_STOP", "LEGACY_LOW_PROFIT_TRAIL_RESET", mapOf(
+                "symbol" to updated.symbol,
+                "old_stop" to rawStop,
+                "new_failsafe_stop" to migratedStop,
+                "minimum_net_profit" to minimumNetProfit,
+                "minimum_profit_exit_price" to minimumProfitStop
+            ))
+        }
+
         val hardStop = updated.stopPrice
         if (hardStop != null && !LearnedTrailingPolicy.isArmed(hardStop, updated.entryPrice) && ltp <= hardStop) {
             closeLongHolding(token, updated, ltp, "HOLDING_FAILSAFE_STOP")
             return
         }
 
-        val legacyFrozenPct = updated.targetPrice?.let {
-            if (updated.entryPrice > 0.0 && it > updated.entryPrice) (it / updated.entryPrice - 1.0) * 100.0 else null
-        }
-        val frozenPct = updated.trailingArmPct.takeIf { it.isFinite() && it > 0.0 } ?: legacyFrozenPct
         val atr = currentOneMinuteAtr(updated.symbol, token, ltp)
-        val thresholdPct = LearnedTrailingPolicy.thresholdPct(frozenPct, updated.entryPrice, atr)
-        val alreadyArmed = LearnedTrailingPolicy.isArmed(updated.stopPrice, updated.entryPrice)
         val highWater = updated.maxFavourablePrice
-        val thresholdReached = alreadyArmed || LearnedTrailingPolicy.shouldArm(updated.entryPrice, ltp, thresholdPct)
+        val currentStop = updated.stopPrice
+        val alreadyArmed = currentStop != null &&
+            LearnedTrailingPolicy.isArmed(currentStop, updated.entryPrice) &&
+            LearnedTrailingPolicy.estimatedNetProfit(updated.entryPrice, currentStop, updated.quantity) + 0.01 >= minimumNetProfit
+        val profitGateReached = LearnedTrailingPolicy.profitGateReached(updated.entryPrice, highWater, updated.quantity)
+        val canProtectProfitGate = highWater + 1e-9 >= minimumProfitStop + 0.01
+        val thresholdReached = alreadyArmed || (profitGateReached && canProtectProfitGate)
 
         if (thresholdReached && LearnedTrailingPolicy.shouldRatchet(alreadyArmed, updated.trailingLastRatchetPrice, highWater)) {
-            val currentStop = updated.stopPrice
             val previousRatchetHigh = updated.trailingLastRatchetPrice
             val candidateStop = LearnedTrailingPolicy.ratchetStop(
-                updated.entryPrice, highWater, atr, currentStop, previousRatchetHigh
+                entryPrice = updated.entryPrice,
+                highWaterPrice = highWater,
+                atr = atr,
+                currentStop = currentStop,
+                lastRatchetPrice = previousRatchetHigh,
+                minimumProtectedStop = minimumProfitStop
             )
             val stopRaised = !alreadyArmed || candidateStop > (currentStop ?: updated.entryPrice) + .01
             val effectiveStop = if (stopRaised) candidateStop else currentStop
@@ -1108,7 +1160,10 @@ class TradingRepository @Inject constructor(
                 lastEvaluatedAtMs = System.currentTimeMillis()
             )
             managedDao.updatePosition(updated)
-            auditLogger.log("TRAILING_STOP", if (alreadyArmed) "LONG_RATCHET" else "LONG_ARMED", mapOf(
+            val projectedNetAtStop = effectiveStop?.let {
+                LearnedTrailingPolicy.estimatedNetProfit(updated.entryPrice, it, updated.quantity)
+            }
+            auditLogger.log("TRAILING_STOP", if (alreadyArmed) "LONG_RATCHET" else "LONG_ARMED_1PCT_NET", mapOf(
                 "symbol" to updated.symbol,
                 "ltp" to ltp,
                 "old_high_water" to previousHighWater,
@@ -1118,7 +1173,10 @@ class TradingRepository @Inject constructor(
                 "old_stop" to currentStop,
                 "new_stop" to effectiveStop,
                 "stop_raised" to stopRaised,
-                "arm_pct" to thresholdPct,
+                "invested_amount" to LearnedTrailingPolicy.investedAmount(updated.entryPrice, updated.quantity),
+                "minimum_net_profit" to minimumNetProfit,
+                "projected_net_at_stop" to projectedNetAtStop,
+                "minimum_profit_exit_price" to minimumProfitStop,
                 "atr_1m" to atr,
                 "trail_distance" to LearnedTrailingPolicy.trailDistance(highWater, atr, updated.entryPrice)
             ))
@@ -1126,7 +1184,28 @@ class TradingRepository @Inject constructor(
 
         val activeStop = updated.stopPrice
         if (LearnedTrailingPolicy.isArmed(activeStop, updated.entryPrice) && activeStop != null && ltp <= activeStop) {
-            closeLongHolding(token, updated, ltp, "LONG_TRAILING_PROFIT_STOP")
+            val protectedNetAtStop = LearnedTrailingPolicy.estimatedNetProfit(
+                updated.entryPrice, activeStop, updated.quantity
+            )
+            if (protectedNetAtStop + 0.01 >= minimumNetProfit) {
+                auditLogger.log("TRAILING_STOP", "LONG_TRAILING_EXIT_TRIGGERED", mapOf(
+                    "symbol" to updated.symbol,
+                    "ltp" to ltp,
+                    "active_stop" to activeStop,
+                    "protected_net_at_stop" to protectedNetAtStop,
+                    "minimum_net_profit" to minimumNetProfit,
+                    "minimum_profit_pct_of_invested" to LearnedTrailingPolicy.AUTONOMOUS_NET_PROFIT_PCT_OF_INVESTED
+                ))
+                closeLongHolding(token, updated, ltp, "LONG_TRAILING_PROFIT_STOP_1PCT_NET")
+            } else {
+                auditLogger.log("TRAILING_STOP", "LONG_TRAILING_EXIT_BLOCKED_BELOW_1PCT_NET", mapOf(
+                    "symbol" to updated.symbol,
+                    "ltp" to ltp,
+                    "active_stop" to activeStop,
+                    "protected_net_at_stop" to protectedNetAtStop,
+                    "minimum_net_profit" to minimumNetProfit
+                ))
+            }
         }
     }
 
