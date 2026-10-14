@@ -4,6 +4,8 @@ import kotlin.math.max
 import kotlin.math.min
 
 object LearnedTrailingPolicy {
+    const val AUTONOMOUS_NET_PROFIT_PCT_OF_INVESTED = 1.0
+
     private const val FALLBACK_ARM_ATR = 0.60
     private const val MIN_TRAIL_RUPEES = 1.0
     private const val BASE_PRICE_TRAIL_PCT = 0.35
@@ -51,6 +53,43 @@ object LearnedTrailingPolicy {
         return max(MIN_TRAIL_RUPEES, max(priceDistance, atrDistance))
     }
 
+    fun investedAmount(entryPrice: Double, quantity: Int): Double =
+        if (entryPrice > 0.0 && quantity > 0) entryPrice * quantity else 0.0
+
+    fun minimumNetProfitRupees(
+        entryPrice: Double,
+        quantity: Int,
+        pctOfInvested: Double = AUTONOMOUS_NET_PROFIT_PCT_OF_INVESTED
+    ): Double = investedAmount(entryPrice, quantity) * max(0.0, pctOfInvested) / 100.0
+
+    fun estimatedNetProfit(entryPrice: Double, exitPrice: Double, quantity: Int): Double {
+        if (entryPrice <= 0.0 || exitPrice <= 0.0 || quantity <= 0) return Double.NEGATIVE_INFINITY
+        val gross = (exitPrice - entryPrice) * quantity
+        val estimatedCosts = (entryPrice + exitPrice) * quantity * ESTIMATED_COST_RATE_PER_SIDE
+        return gross - estimatedCosts
+    }
+
+    fun minimumExitPriceForNetProfitPct(
+        entryPrice: Double,
+        pctOfInvested: Double = AUTONOMOUS_NET_PROFIT_PCT_OF_INVESTED
+    ): Double {
+        if (entryPrice <= 0.0) return entryPrice
+        val pct = max(0.0, pctOfInvested) / 100.0
+        return entryPrice * (1.0 + ESTIMATED_COST_RATE_PER_SIDE + pct) /
+            (1.0 - ESTIMATED_COST_RATE_PER_SIDE)
+    }
+
+    fun profitGateReached(
+        entryPrice: Double,
+        highWaterPrice: Double,
+        quantity: Int,
+        pctOfInvested: Double = AUTONOMOUS_NET_PROFIT_PCT_OF_INVESTED
+    ): Boolean {
+        val minimum = minimumNetProfitRupees(entryPrice, quantity, pctOfInvested)
+        return minimum > 0.0 &&
+            estimatedNetProfit(entryPrice, highWaterPrice, quantity) + 1e-9 >= minimum
+    }
+
     fun netBreakEvenFloor(entryPrice: Double): Double {
         if (entryPrice <= 0.0) return entryPrice
         val costBreakEven = entryPrice * (1.0 + ESTIMATED_COST_RATE_PER_SIDE) /
@@ -63,10 +102,14 @@ object LearnedTrailingPolicy {
         highWaterPrice: Double,
         atr: Double,
         currentStop: Double?,
-        lastRatchetPrice: Double = 0.0
+        lastRatchetPrice: Double = 0.0,
+        minimumProtectedStop: Double? = null
     ): Double {
         val distanceStop = highWaterPrice - trailDistance(highWaterPrice, atr, entryPrice)
-        val protectedFloor = netBreakEvenFloor(entryPrice)
+        val protectedFloor = max(
+            netBreakEvenFloor(entryPrice),
+            minimumProtectedStop?.takeIf { it.isFinite() && it > 0.0 } ?: entryPrice
+        )
         val participationStop = entryPrice + max(0.0, highWaterPrice - entryPrice) * MIN_GAIN_PARTICIPATION
         val incrementalStop = if (currentStop != null && lastRatchetPrice > 0.0 && highWaterPrice > lastRatchetPrice) {
             currentStop + (highWaterPrice - lastRatchetPrice) * MIN_GAIN_PARTICIPATION
