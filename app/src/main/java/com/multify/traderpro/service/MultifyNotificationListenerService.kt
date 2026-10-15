@@ -240,7 +240,7 @@ class MultifyNotificationListenerService : NotificationListenerService() {
 
     companion object {
         private const val CHANNEL_ID = "trading_engine_status"
-        private const val LISTENER_AUDIT_THROTTLE_MS = 5L * 60L * 1000L
+        private const val LISTENER_AUDIT_THROTTLE_MS = 30L * 60L * 1000L
         private const val LISTENER_REBIND_MIN_INTERVAL_MS = 60_000L
         private const val LISTENER_HEARTBEAT_MS = 20_000L
         private val LAST_CONNECTED_AUDIT_MS = AtomicLong(0L)
