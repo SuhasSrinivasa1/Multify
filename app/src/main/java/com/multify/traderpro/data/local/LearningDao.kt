@@ -35,6 +35,9 @@ interface LearningDao {
     @Query("SELECT * FROM learning_calls WHERE source='LIVE' AND symbol=:symbol AND buyAtMs <= :atMs ORDER BY buyAtMs DESC, id DESC LIMIT 1")
     suspend fun latestLiveCallBefore(symbol: String, atMs: Long): LearningCallEntity?
 
+    @Query("SELECT * FROM learning_calls WHERE action='BUY' AND multifyMfePct IS NULL AND buyAtMs > 0 AND sellAtMs IS NOT NULL AND sellAtMs > buyAtMs ORDER BY callDate DESC, buyAtMs DESC LIMIT :limit")
+    suspend fun closedCallsMissingMfe(limit: Int): List<LearningCallEntity>
+
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertObservation(item: PriceObservationEntity): Long
 
