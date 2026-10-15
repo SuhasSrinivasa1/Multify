@@ -9,6 +9,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.core.content.ContextCompat
+import com.multify.traderpro.service.TradingEngineService
 import com.multify.traderpro.ui.screens.TraderApp
 import com.multify.traderpro.ui.theme.MultifyTraderTheme
 import dagger.hilt.android.AndroidEntryPoint
@@ -23,6 +24,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         requestPostNotificationsIfNeeded()
+        TradingEngineService.start(this)
         setContent {
             MultifyTraderTheme(darkTheme = isSystemInDarkTheme()) {
                 TraderApp()
