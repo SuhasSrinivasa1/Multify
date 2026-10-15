@@ -1,4 +1,5 @@
 name: Multify Trader Pro v6.8.0 Final Adaptive Forecast Build
+# CI trigger for verified v6.8.0 final artifact
 
 on:
   workflow_dispatch:
