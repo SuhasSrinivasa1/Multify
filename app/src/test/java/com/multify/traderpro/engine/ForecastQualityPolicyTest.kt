@@ -66,7 +66,7 @@ class ForecastQualityPolicyTest {
         assertEquals(1.35, ForecastQualityPolicy.adaptiveTargetPct(1.35, listOf(0.8, 1.0, 1.1)), 0.0001)
     }
 
-    @Test fun strongTrendCandidatePassesOnePercentGate() {
+    @Test fun strongTrendCandidateIsPrimaryAndExecutable() {
         val e = StrategyEvaluation(
             regime = "TREND",
             directionalScore = 0.92,
@@ -76,23 +76,45 @@ class ForecastQualityPolicyTest {
             votes = emptyList(),
             features = features(atr = 0.40)
         )
-        assertTrue(ForecastQualityPolicy.evaluate(e, 1.0).eligible)
+        val q = ForecastQualityPolicy.evaluate(e, 1.0, "BREADTH_BULL")
+        assertEquals("PRIMARY", q.tier)
+        assertTrue(q.publishEligible)
+        assertTrue(q.executionEligible)
     }
 
-    @Test fun mixedRegimeIsRejectedEvenWithHighConfidence() {
+    @Test fun mixedRegimeCanBeObservedButCannotExecute() {
         val e = StrategyEvaluation(
             regime = "MIXED",
-            directionalScore = 0.95,
-            confidence = 0.95,
+            directionalScore = 0.55,
+            confidence = 0.78,
             strategy = "VWAP trend continuation",
             reason = "test",
             votes = emptyList(),
             features = features()
         )
-        assertFalse(ForecastQualityPolicy.evaluate(e, 1.0).eligible)
+        val q = ForecastQualityPolicy.evaluate(e, 1.0, "BREADTH_NEUTRAL")
+        assertEquals("SECONDARY", q.tier)
+        assertTrue(q.publishEligible)
+        assertFalse(q.executionEligible)
     }
 
-    @Test fun lowVolatilityCannotPretendToSupportOnePercentTarget() {
+    @Test fun weakBreadthDemotesOtherwisePrimarySetupToObservationOnly() {
+        val e = StrategyEvaluation(
+            regime = "TREND",
+            directionalScore = 0.92,
+            confidence = 0.92,
+            strategy = "VWAP trend continuation",
+            reason = "test",
+            votes = emptyList(),
+            features = features()
+        )
+        val q = ForecastQualityPolicy.evaluate(e, 1.0, "BREADTH_WEAK")
+        assertEquals("SECONDARY", q.tier)
+        assertTrue(q.publishEligible)
+        assertFalse(q.executionEligible)
+    }
+
+    @Test fun lowVolatilityRemainsResearchOnly() {
         val e = StrategyEvaluation(
             regime = "TREND",
             directionalScore = 0.92,
@@ -102,6 +124,24 @@ class ForecastQualityPolicyTest {
             votes = emptyList(),
             features = features(atr = 0.10)
         )
-        assertFalse(ForecastQualityPolicy.evaluate(e, 1.0).eligible)
+        val q = ForecastQualityPolicy.evaluate(e, 1.0, "BREADTH_NEUTRAL")
+        assertEquals("RESEARCH", q.tier)
+        assertFalse(q.publishEligible)
+        assertFalse(q.executionEligible)
+    }
+
+    @Test fun rankingKeepsPrimaryAboveSecondaryEverythingElseEqual() {
+        val e = StrategyEvaluation(
+            regime = "TREND",
+            directionalScore = 0.80,
+            confidence = 0.80,
+            strategy = "VWAP trend continuation",
+            reason = "test",
+            votes = emptyList(),
+            features = features()
+        )
+        val primary = ForecastQualityPolicy.rankingBonus(e, 1.6, 1.0, "PRIMARY")
+        val secondary = ForecastQualityPolicy.rankingBonus(e, 1.6, 1.0, "SECONDARY")
+        assertTrue(primary > secondary)
     }
 }
