@@ -72,6 +72,24 @@ interface LearningDao {
     suspend fun markLongForecastMatch(date: String, symbol: String)
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertForecastResearch(item: ForecastResearchEntity): Long
+
+    @Update
+    suspend fun updateForecastResearch(item: ForecastResearchEntity)
+
+    @Query("SELECT * FROM forecast_research_snapshots WHERE researchDate=:date ORDER BY scanAtMs ASC, rank ASC")
+    suspend fun forecastResearchForDate(date: String): List<ForecastResearchEntity>
+
+    @Query("SELECT * FROM forecast_research_snapshots ORDER BY scanAtMs ASC, rank ASC")
+    suspend fun allForecastResearch(): List<ForecastResearchEntity>
+
+    @Query("SELECT DISTINCT researchDate FROM forecast_research_snapshots ORDER BY researchDate DESC")
+    suspend fun forecastResearchDates(): List<String>
+
+    @Query("SELECT * FROM forecast_research_snapshots WHERE researchDate=:date AND outcomeUpdatedAtMs IS NULL ORDER BY scanAtMs ASC, rank ASC")
+    suspend fun pendingForecastResearchOutcomes(date: String): List<ForecastResearchEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertForecastChampion(item: ForecastChampionEntity)
 
     @Query("SELECT * FROM forecast_champions ORDER BY frozen DESC, wins DESC, sampleCount DESC")
