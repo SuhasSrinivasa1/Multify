@@ -145,8 +145,12 @@ class TradingEngineService : Service() {
                     }
 
                     updateForegroundNotification(managedCount, forecastOutcomeCount)
+                    val regularSession = now.dayOfWeek.value < 6 &&
+                        now.toLocalTime() >= LocalTime.of(9, 15) &&
+                        now.toLocalTime() < LocalTime.of(15, 30)
                     delay(
                         when {
+                            !regularSession -> CLOSED_SESSION_LOOP_INTERVAL_MS
                             managedCount > 0 -> POSITION_LOOP_INTERVAL_MS
                             forecastOutcomeCount > 0 -> FORECAST_LOOP_INTERVAL_MS
                             else -> IDLE_LOOP_INTERVAL_MS
@@ -231,6 +235,7 @@ class TradingEngineService : Service() {
         private const val POSITION_LOOP_INTERVAL_MS = 5_000L
         private const val FORECAST_LOOP_INTERVAL_MS = 5_000L
         private const val IDLE_LOOP_INTERVAL_MS = 10_000L
+        private const val CLOSED_SESSION_LOOP_INTERVAL_MS = 60_000L
         private const val ERROR_BACKOFF_MS = 10_000L
         private const val AFTER_HOURS_RESEARCH_INTERVAL_MS = 15L * 60L * 1000L
         private const val ACTION_SAMPLE_SIGNAL = "com.multify.traderpro.action.SAMPLE_SIGNAL"
