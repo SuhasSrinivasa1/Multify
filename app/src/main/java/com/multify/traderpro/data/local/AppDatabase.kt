@@ -14,10 +14,11 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         LearningCallEntity::class,
         PriceObservationEntity::class,
         LongForecastEntity::class,
+        ForecastResearchEntity::class,
         ForecastChampionEntity::class,
         ResearchReportEntity::class
     ],
-    version = 12,
+    version = 13,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -190,6 +191,42 @@ abstract class AppDatabase : RoomDatabase() {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE learning_calls ADD COLUMN multifyMaxPrice REAL")
                 db.execSQL("ALTER TABLE learning_calls ADD COLUMN multifyMfePct REAL")
+            }
+        }
+
+
+        val MIGRATION_12_13 = object : Migration(12, 13) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE long_forecasts ADD COLUMN qualityTier TEXT NOT NULL DEFAULT 'LEGACY'")
+                db.execSQL("ALTER TABLE long_forecasts ADD COLUMN executionEligible INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("""CREATE TABLE forecast_research_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    researchDate TEXT NOT NULL,
+                    scanAtMs INTEGER NOT NULL,
+                    symbol TEXT NOT NULL,
+                    rank INTEGER NOT NULL,
+                    qualityTier TEXT NOT NULL,
+                    publishEligible INTEGER NOT NULL,
+                    executionEligible INTEGER NOT NULL,
+                    targetPct REAL NOT NULL,
+                    entryPrice REAL NOT NULL,
+                    regime TEXT NOT NULL,
+                    marketRegime TEXT NOT NULL,
+                    strategy TEXT NOT NULL,
+                    directionalScore REAL NOT NULL,
+                    confidence REAL NOT NULL,
+                    rejectionReason TEXT NOT NULL,
+                    featureJson TEXT NOT NULL,
+                    voteJson TEXT NOT NULL,
+                    outcomeMfePct REAL,
+                    outcomeMaePct REAL,
+                    outcomeClosePct REAL,
+                    outcomeTargetHit INTEGER,
+                    outcomeUpdatedAtMs INTEGER
+                )""")
+                db.execSQL("CREATE INDEX index_forecast_research_snapshots_researchDate_scanAtMs ON forecast_research_snapshots(researchDate, scanAtMs)")
+                db.execSQL("CREATE INDEX index_forecast_research_snapshots_researchDate_symbol ON forecast_research_snapshots(researchDate, symbol)")
+                db.execSQL("CREATE INDEX index_forecast_research_snapshots_qualityTier ON forecast_research_snapshots(qualityTier)")
             }
         }
 
