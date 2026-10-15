@@ -17,7 +17,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         ForecastChampionEntity::class,
         ResearchReportEntity::class
     ],
-    version = 11,
+    version = 12,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -182,6 +182,14 @@ abstract class AppDatabase : RoomDatabase() {
                 )""")
                 db.execSQL("CREATE INDEX index_execution_samples_transactionType_filledAtMs ON execution_samples(transactionType, filledAtMs)")
                 db.execSQL("CREATE INDEX index_execution_samples_filledAtMs ON execution_samples(filledAtMs)")
+            }
+        }
+
+
+        val MIGRATION_11_12 = object : Migration(11, 12) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE learning_calls ADD COLUMN multifyMaxPrice REAL")
+                db.execSQL("ALTER TABLE learning_calls ADD COLUMN multifyMfePct REAL")
             }
         }
 
