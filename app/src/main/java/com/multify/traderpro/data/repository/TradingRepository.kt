@@ -606,6 +606,7 @@ class TradingRepository @Inject constructor(
             val symbolStatus = nseSymbols.status()
             val nowMs = System.currentTimeMillis()
             val heartbeatAge = if (settings.serviceHeartbeatAtMs > 0L) nowMs - settings.serviceHeartbeatAtMs else Long.MAX_VALUE
+            val listenerAge = if (settings.listenerHeartbeatAtMs > 0L) nowMs - settings.listenerHeartbeatAtMs else Long.MAX_VALUE
             val dataAge = if (settings.lastMarketDataAtMs > 0L) nowMs - settings.lastMarketDataAtMs else Long.MAX_VALUE
             DashboardDto(
                 armed = settings.armEffective, halted = settings.safetyHalt, marketSession = marketSession(),
@@ -622,7 +623,7 @@ class TradingRepository @Inject constructor(
                 forecasts = forecasts, forecastChampions = champions,
                 research = research,
                 health = EngineHealthDto(
-                    listener = if (heartbeatAge <= 30_000L) "HEALTHY" else "UNHEALTHY",
+                    listener = if (listenerAge <= 60_000L) "HEALTHY" else "UNHEALTHY",
                     broker = "CONNECTED",
                     marketData = if (dataAge <= 15_000L) "FRESH" else "STALE",
                     symbolMaster = if (nseSymbols.isStale()) "STALE" else "FRESH",
