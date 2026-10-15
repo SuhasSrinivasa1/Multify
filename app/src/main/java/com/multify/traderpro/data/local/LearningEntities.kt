@@ -81,7 +81,43 @@ data class LongForecastEntity(
     val maxAdversePct: Double = 0.0,
     val lastObservedAtMs: Long,
     val notified: Boolean = false,
-    val multifyMatched: Boolean = false
+    val multifyMatched: Boolean = false,
+    val qualityTier: String = "LEGACY",
+    val executionEligible: Boolean = false
+)
+
+@Entity(
+    tableName = "forecast_research_snapshots",
+    indices = [
+        Index(value = ["researchDate", "scanAtMs"]),
+        Index(value = ["researchDate", "symbol"]),
+        Index(value = ["qualityTier"])
+    ]
+)
+data class ForecastResearchEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val researchDate: String,
+    val scanAtMs: Long,
+    val symbol: String,
+    val rank: Int,
+    val qualityTier: String,
+    val publishEligible: Boolean,
+    val executionEligible: Boolean,
+    val targetPct: Double,
+    val entryPrice: Double,
+    val regime: String,
+    val marketRegime: String,
+    val strategy: String,
+    val directionalScore: Double,
+    val confidence: Double,
+    val rejectionReason: String,
+    val featureJson: String,
+    val voteJson: String,
+    val outcomeMfePct: Double? = null,
+    val outcomeMaePct: Double? = null,
+    val outcomeClosePct: Double? = null,
+    val outcomeTargetHit: Boolean? = null,
+    val outcomeUpdatedAtMs: Long? = null
 )
 
 @Entity(
