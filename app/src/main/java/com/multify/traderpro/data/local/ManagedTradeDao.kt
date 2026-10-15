@@ -29,6 +29,9 @@ interface ManagedTradeDao {
     @Query("SELECT * FROM managed_positions WHERE status='OPEN' AND symbol=:symbol LIMIT 1")
     suspend fun openPositionForSymbol(symbol: String): ManagedPositionEntity?
 
+    @Query("SELECT * FROM managed_positions WHERE id=:id AND status='OPEN' LIMIT 1")
+    suspend fun openPositionById(id: Long): ManagedPositionEntity?
+
     @Query("SELECT * FROM managed_positions WHERE status='OPEN' AND symbol=:symbol AND product=:product ORDER BY openedAtMs ASC")
     suspend fun openPositionsForProduct(symbol: String, product: String): List<ManagedPositionEntity>
 
