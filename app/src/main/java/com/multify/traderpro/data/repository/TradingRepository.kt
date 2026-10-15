@@ -929,6 +929,31 @@ class TradingRepository @Inject constructor(
         val targetPct = ForecastQualityPolicy.adaptiveTargetPct(learned.longAveragePct, priorMfe)
 
         val have = existing.map { it.symbol }.toSet()
+        val priorResearchDates = learningDao.forecastResearchDates()
+            .filter { it < today }
+            .take(RESEARCH_SESSION_GOAL)
+            .toSet()
+        val priorResearch = if (priorResearchDates.isEmpty()) emptyList() else {
+            learningDao.allForecastResearch()
+                .filter { it.researchDate in priorResearchDates && it.outcomeUpdatedAtMs != null }
+                .groupBy { it.researchDate + "|" + it.symbol }
+                .mapNotNull { (_, rows) -> rows.minByOrNull { it.scanAtMs } }
+        }
+
+        fun researchEvidenceBonus(evaluation: StrategyEvaluation): Double {
+            val xs = priorResearch.filter {
+                it.regime == evaluation.regime && it.strategy == evaluation.strategy
+            }
+            if (xs.size < MIN_RESEARCH_EVIDENCE_ROWS) return 0.0
+            val hitRate = xs.count { it.outcomeTargetHit == true }.toDouble() / xs.size
+            val avgMfe = xs.mapNotNull { it.outcomeMfePct }.takeIf { it.isNotEmpty() }?.average() ?: 0.0
+            val hitComponent = (hitRate - 0.50) * 0.14
+            val mfeComponent = if (targetPct > 0.0)
+                (((avgMfe - targetPct) / targetPct).coerceIn(-1.0, 1.0)) * 0.04
+            else 0.0
+            return (hitComponent + mfeComponent).coerceIn(-0.08, 0.10)
+        }
+
         val ranked = evaluated.map { row ->
             val quality = ForecastQualityPolicy.evaluate(row.second, targetPct, marketRegime)
             val key = championKey(marketRegime, row.second.regime, row.second.strategy)
@@ -942,6 +967,7 @@ class TradingRepository @Inject constructor(
             val frequencyBonus = min(.04, (frequency[row.first] ?: 0) * .004)
             val dnaBonus = if (row.first in dnaSymbols) .08 else 0.0
             val qualityBonus = ForecastQualityPolicy.rankingBonus(row.second, quality.volatilityCapacityPct, targetPct, quality.tier)
+            val researchBonus = researchEvidenceBonus(row.second)
             ForecastCandidate(
                 symbol = row.first,
                 evaluation = row.second,
@@ -949,8 +975,8 @@ class TradingRepository @Inject constructor(
                 score = (
                     row.second.confidence +
                     row.second.directionalScore.coerceAtLeast(0.0) * 0.10 +
-                    championBonus + frequencyBonus + dnaBonus + qualityBonus
-                ).coerceAtMost(.99),
+                    championBonus + frequencyBonus + dnaBonus + qualityBonus + researchBonus
+                ).coerceIn(0.01, .99),
                 championKey = key
             )
         }.sortedWith(
@@ -1021,6 +1047,8 @@ class TradingRepository @Inject constructor(
             "multify_mfe_avg_pct" to learned.longAveragePct,
             "breadth_pct" to breadth,
             "market_regime" to marketRegime,
+            "prior_research_sessions" to priorResearchDates.size,
+            "prior_research_rows" to priorResearch.size,
             "top_candidates" to ranked.take(5).map {
                 mapOf("symbol" to it.symbol, "tier" to it.quality.tier, "score" to it.score,
                     "confidence" to it.evaluation.confidence, "directional_score" to it.evaluation.directionalScore,
@@ -1411,7 +1439,8 @@ class TradingRepository @Inject constructor(
             val hitRate = xs.count { it.outcomeTargetHit == true }.toDouble() / xs.size * 100.0
             val mfe = xs.mapNotNull { it.outcomeMfePct }.takeIf { it.isNotEmpty() }?.average() ?: 0.0
             val mae = xs.mapNotNull { it.outcomeMaePct }.takeIf { it.isNotEmpty() }?.average() ?: 0.0
-            return "$tier: ${xs.size} rows · target hit ${fmt(hitRate)}% · avg MFE ${fmt(mfe)}% · avg MAE ${fmt(mae)}%"
+            val multifyMatches = xs.count { it.multifyMatched }
+            return "$tier: ${xs.size} rows · target hit ${fmt(hitRate)}% · avg MFE ${fmt(mfe)}% · avg MAE ${fmt(mae)}% · Multify matches $multifyMatches"
         }
 
         val report = buildString {
@@ -1946,6 +1975,7 @@ class TradingRepository @Inject constructor(
         private const val RESEARCH_BACKFILL_SYMBOL_PACING_MS = 300L
         private const val RESEARCH_BACKFILL_SYMBOL_BATCH = 10
         private const val RESEARCH_SESSION_GOAL = 5
+        private const val MIN_RESEARCH_EVIDENCE_ROWS = 4
         private const val MFE_BACKFILL_INTERVAL_MS = 5L * 60L * 1000L
         private const val MFE_BACKFILL_BATCH_SIZE = 4
         private const val MFE_AFTER_HOURS_BACKFILL_BATCH_SIZE = 16
