@@ -50,6 +50,7 @@ import com.multify.traderpro.domain.SignalType
 import com.multify.traderpro.engine.AdaptiveLearningMath
 import com.multify.traderpro.engine.CashAwareCncSizing
 import com.multify.traderpro.engine.ExecutionTelemetryMath
+import com.multify.traderpro.engine.ForecastQualityDecision
 import com.multify.traderpro.engine.ForecastQualityPolicy
 import com.multify.traderpro.engine.LearnedTrailingPolicy
 import com.multify.traderpro.engine.LocalStrategyEngine
@@ -119,6 +120,23 @@ class TradingRepository @Inject constructor(
     private val oneMinuteAtrCache = mutableMapOf<String, AtrCacheEntry>()
 
     private data class AtrCacheEntry(val atr: Double, val atMs: Long)
+
+    private data class ForecastCandidate(
+        val symbol: String,
+        val evaluation: StrategyEvaluation,
+        val quality: ForecastQualityDecision,
+        val score: Double,
+        val championKey: String
+    )
+
+    private data class ResearchCandle(
+        val atMs: Long,
+        val high: Double,
+        val low: Double,
+        val close: Double
+    )
+
+    private val researchGson = GsonBuilder().disableHtmlEscaping().create()
 
     private data class BrokerInventorySnapshot(
         val holdings: Map<String, GrowwHolding>,
@@ -863,20 +881,28 @@ class TradingRepository @Inject constructor(
         val recentDates = calls.map { it.callDate }.distinct().sortedDescending().take(30).toSet()
         val rolling = calls.filter { it.callDate in recentDates }
         val frequency = rolling.groupingBy { it.symbol }.eachCount()
-        val recentSymbols = frequency.entries.sortedByDescending { it.value }.take(12).map { it.key }
+        val recentSymbols = frequency.entries.sortedByDescending { it.value }.take(14).map { it.key }
         val dnaSymbols = MultifyReverseEngineering.positiveCases.map { it.symbol }
         val master = nseSymbols.symbols()
-        val slot = (now.hour * 60 + now.minute) / 20
+        val slot = (now.hour * 60 + now.minute) / 30
         val rotating = if (master.isEmpty()) emptyList() else {
             val seed = kotlin.math.abs(today.hashCode() + slot * 977)
-            (0 until min(24, master.size)).map { i -> master[Math.floorMod(seed + i * 131, master.size)] }
+            (0 until min(28, master.size)).map { i -> master[Math.floorMod(seed + i * 131, master.size)] }
         }
-        val universe = (dnaSymbols + recentSymbols + rotating).distinct().take(42)
+        val universe = (dnaSymbols + recentSymbols + rotating).distinct().take(48)
         val evaluated = mutableListOf<Pair<String, StrategyEvaluation>>()
         for (symbol in universe) {
-            val evaluation = runCatching { forecastEvaluation(symbol, token) }.getOrNull() ?: continue
+            val evaluation = runCatching { forecastEvaluation(symbol, token) }
+                .onFailure {
+                    auditLogger.log("FORECAST_RESEARCH", "EVALUATION_ERROR", mapOf(
+                        "symbol" to symbol,
+                        "message" to (it.message ?: it.javaClass.simpleName)
+                    ))
+                }
+                .getOrNull() ?: continue
             if (evaluation.features.ltp < 10.0) continue
             evaluated += symbol to evaluation
+            delay(FORECAST_SYMBOL_PACING_MS)
         }
 
         val breadth = evaluated.mapNotNull { it.second.features.dayChangePct }
@@ -895,21 +921,9 @@ class TradingRepository @Inject constructor(
             .filter { it.isFinite() && it >= 0.0 && it < 25.0 }
         val targetPct = ForecastQualityPolicy.adaptiveTargetPct(learned.longAveragePct, priorMfe)
 
-        val desired = when {
-            now.toLocalTime() < LocalTime.of(10, 15) -> 1
-            now.toLocalTime() < LocalTime.of(11, 15) -> 2
-            now.toLocalTime() < LocalTime.of(12, 15) -> 3
-            now.toLocalTime() < LocalTime.of(13, 15) -> 4
-            else -> 5
-        }
         val have = existing.map { it.symbol }.toSet()
-        var eligibleCount = 0
-        val ranked = evaluated.mapNotNull { row ->
-            if (row.first in have) return@mapNotNull null
-            if (marketRegime == "BREADTH_WEAK") return@mapNotNull null
-            val quality = ForecastQualityPolicy.evaluate(row.second, targetPct)
-            if (!quality.eligible) return@mapNotNull null
-            eligibleCount++
+        val ranked = evaluated.map { row ->
+            val quality = ForecastQualityPolicy.evaluate(row.second, targetPct, marketRegime)
             val key = championKey(marketRegime, row.second.regime, row.second.strategy)
             val champion = champions[key]
             val championWinRate = champion?.takeIf { it.sampleCount > 0 }?.let { it.wins.toDouble() / it.sampleCount } ?: 0.0
@@ -920,53 +934,202 @@ class TradingRepository @Inject constructor(
             }
             val frequencyBonus = min(.04, (frequency[row.first] ?: 0) * .004)
             val dnaBonus = if (row.first in dnaSymbols) .08 else 0.0
-            val qualityBonus = ForecastQualityPolicy.rankingBonus(row.second, quality.volatilityCapacityPct, targetPct)
-            Triple(
-                row.first,
-                row.second,
-                (row.second.confidence + championBonus + frequencyBonus + dnaBonus + qualityBonus).coerceAtMost(.99)
+            val qualityBonus = ForecastQualityPolicy.rankingBonus(row.second, quality.volatilityCapacityPct, targetPct, quality.tier)
+            ForecastCandidate(
+                symbol = row.first,
+                evaluation = row.second,
+                quality = quality,
+                score = (
+                    row.second.confidence +
+                    row.second.directionalScore.coerceAtLeast(0.0) * 0.10 +
+                    championBonus + frequencyBonus + dnaBonus + qualityBonus
+                ).coerceAtMost(.99),
+                championKey = key
             )
-        }.sortedByDescending { it.third }
+        }.sortedWith(
+            compareByDescending<ForecastCandidate> {
+                when (it.quality.tier) { "PRIMARY" -> 3; "SECONDARY" -> 2; else -> 1 }
+            }.thenByDescending { it.score }
+        )
 
+        captureForecastResearchScan(today, nowMs, marketRegime, targetPct, ranked.take(RESEARCH_CAPTURE_TOP_N))
+
+        val desired = when {
+            now.toLocalTime() < LocalTime.of(10, 15) -> 1
+            now.toLocalTime() < LocalTime.of(11, 15) -> 2
+            now.toLocalTime() < LocalTime.of(12, 15) -> 3
+            now.toLocalTime() < LocalTime.of(13, 15) -> 4
+            else -> 5
+        }
         val slots = (desired - existing.size).coerceAtLeast(0)
-        ranked.take(slots).forEachIndexed { index, item ->
-            val price = item.second.features.ltp
-            val key = championKey(marketRegime, item.second.regime, item.second.strategy)
-            val quality = ForecastQualityPolicy.evaluate(item.second, targetPct)
+        val unseen = ranked.filter { it.symbol !in have }
+        val publishable = unseen.filter { it.quality.publishEligible }.toMutableList()
+
+        // Production must never become blind again. If a scan has no publishable setup,
+        // expose the single best RESEARCH candidate for observation only; it cannot be bought.
+        if (publishable.isEmpty() && unseen.isNotEmpty() && slots > 0) {
+            publishable += unseen.first()
+        }
+
+        publishable.take(slots).forEachIndexed { index, item ->
+            val price = item.evaluation.features.ltp
+            val quality = item.quality
             learningDao.upsertLongForecast(
                 LongForecastEntity(
                     forecastDate = today,
                     rank = existing.size + index + 1,
-                    symbol = item.first,
+                    symbol = item.symbol,
                     entryPrice = price,
                     targetPct = targetPct,
                     targetPrice = price * (1.0 + targetPct / 100.0),
-                    confidence = item.second.confidence,
-                    score = item.third,
-                    strategy = item.second.strategy,
-                    regime = item.second.regime,
+                    confidence = item.evaluation.confidence,
+                    score = item.score,
+                    strategy = item.evaluation.strategy,
+                    regime = item.evaluation.regime,
                     marketRegime = marketRegime,
-                    championKey = key,
-                    reason = item.second.reason + " · capacity " + fmt(quality.volatilityCapacityPct) + "% for " + fmt(targetPct) + "% target",
+                    championKey = item.championKey,
+                    reason = quality.reason + " · " + item.evaluation.reason +
+                        " · capacity " + fmt(quality.volatilityCapacityPct) + "% for " + fmt(targetPct) + "% target",
                     generatedAtMs = nowMs,
                     lastPrice = price,
-                    lastObservedAtMs = nowMs
+                    lastObservedAtMs = nowMs,
+                    qualityTier = quality.tier,
+                    executionEligible = quality.executionEligible
                 )
             )
         }
+
         val all = learningDao.longForecastsForDate(today)
-        auditLogger.log("FORECAST", "LONG_SCAN_QUALITY_GATED", mapOf(
+        val tierCounts = ranked.groupingBy { it.quality.tier }.eachCount()
+        auditLogger.log("FORECAST", "LONG_SCAN_TIERED", mapOf(
             "date" to today,
             "evaluated" to evaluated.size,
-            "eligible" to eligibleCount,
-            "count" to all.size,
+            "primary" to (tierCounts["PRIMARY"] ?: 0),
+            "secondary" to (tierCounts["SECONDARY"] ?: 0),
+            "research" to (tierCounts["RESEARCH"] ?: 0),
+            "published_count" to all.size,
             "max_slots_by_time" to desired,
             "target_pct" to targetPct,
             "target_floor_pct" to ForecastQualityPolicy.MIN_TARGET_PCT,
             "multify_mfe_avg_pct" to learned.longAveragePct,
-            "prior_forecast_mfe_samples" to priorMfe.size
+            "breadth_pct" to breadth,
+            "market_regime" to marketRegime,
+            "top_candidates" to ranked.take(5).map {
+                mapOf("symbol" to it.symbol, "tier" to it.quality.tier, "score" to it.score,
+                    "confidence" to it.evaluation.confidence, "directional_score" to it.evaluation.directionalScore,
+                    "reason" to it.quality.reason)
+            }
         ))
         return all.map { it.toForecastDto() }
+    }
+
+    private suspend fun captureForecastResearchScan(
+        date: String,
+        scanAtMs: Long,
+        marketRegime: String,
+        targetPct: Double,
+        candidates: List<ForecastCandidate>
+    ) {
+        candidates.forEachIndexed { index, item ->
+            val featureMap = researchFeatureMap(item.evaluation)
+            val votes = item.evaluation.votes.map {
+                mapOf("name" to it.name, "score" to it.score, "note" to it.note)
+            }
+            learningDao.insertForecastResearch(
+                ForecastResearchEntity(
+                    researchDate = date,
+                    scanAtMs = scanAtMs,
+                    symbol = item.symbol,
+                    rank = index + 1,
+                    qualityTier = item.quality.tier,
+                    publishEligible = item.quality.publishEligible,
+                    executionEligible = item.quality.executionEligible,
+                    targetPct = targetPct,
+                    entryPrice = item.evaluation.features.ltp,
+                    regime = item.evaluation.regime,
+                    marketRegime = marketRegime,
+                    strategy = item.evaluation.strategy,
+                    directionalScore = item.evaluation.directionalScore,
+                    confidence = item.evaluation.confidence,
+                    rejectionReason = item.quality.failedRules.joinToString("; ").ifBlank { item.quality.reason },
+                    featureJson = researchGson.toJson(featureMap),
+                    voteJson = researchGson.toJson(votes)
+                )
+            )
+        }
+        auditLogger.log("FORECAST_RESEARCH", "SCAN_CAPTURED", mapOf(
+            "date" to date, "scan_at_ms" to scanAtMs, "count" to candidates.size, "target_pct" to targetPct,
+            "market_regime" to marketRegime
+        ))
+    }
+
+    private fun researchFeatureMap(evaluation: StrategyEvaluation): Map<String, Any?> {
+        val f = evaluation.features
+        return linkedMapOf(
+            "ltp" to f.ltp,
+            "bid" to f.bid,
+            "ask" to f.ask,
+            "spread_bps" to f.spreadBps,
+            "order_book_imbalance" to f.orderBookImbalance,
+            "day_change_pct" to f.dayChangePct,
+            "market_cap" to f.marketCap,
+            "range52_position" to f.range52Position,
+            "vwap" to f.vwap,
+            "ema9" to f.ema9,
+            "ema20" to f.ema20,
+            "ema50" to f.ema50,
+            "ema9_slope_atr" to f.ema9Slope,
+            "ema20_slope_atr" to f.ema20Slope,
+            "vwap_slope_atr" to f.vwapSlope,
+            "macd_histogram_slope" to f.macdHistogramSlope,
+            "rsi_slope" to f.rsiSlope,
+            "volume_acceleration" to f.volumeAcceleration,
+            "green_volume_share" to f.greenVolumeShare,
+            "structure_score" to f.structureScore,
+            "session_high_distance_pct" to f.sessionHighDistancePct,
+            "session_low_distance_pct" to f.sessionLowDistancePct,
+            "atr14" to f.atr14,
+            "atr_pct" to f.atr14?.let { if (f.ltp > 0.0) it / f.ltp * 100.0 else null },
+            "rsi14" to f.rsi14,
+            "boll_width" to f.bollWidth,
+            "macd_histogram" to f.macdHistogram,
+            "trend_slope_atr" to f.trendSlopeAtr,
+            "rvol" to f.rvol,
+            "donchian_high" to f.donchianHigh,
+            "donchian_low" to f.donchianLow,
+            "orb5_high" to f.orb5High,
+            "orb5_low" to f.orb5Low,
+            "orb15_high" to f.orb15High,
+            "orb15_low" to f.orb15Low,
+            "last_open" to f.lastOpen,
+            "last_high" to f.lastHigh,
+            "last_low" to f.lastLow,
+            "last_close" to f.lastClose,
+            "prev_open" to f.prevOpen,
+            "prev_high" to f.prevHigh,
+            "prev_low" to f.prevLow,
+            "prev_close" to f.prevClose
+        )
+    }
+
+    suspend fun captureMultifyResearchSnapshot(eventId: Long, symbol: String) {
+        val token = ensureToken() ?: return
+        val evaluation = runCatching { forecastEvaluation(symbol, token) }
+            .onFailure {
+                auditLogger.log("MULTIFY_RESEARCH", "FEATURE_CAPTURE_ERROR", mapOf(
+                    "event_id" to eventId, "symbol" to symbol, "message" to (it.message ?: it.javaClass.simpleName)
+                ))
+            }.getOrNull() ?: return
+        auditLogger.log("MULTIFY_RESEARCH", "FEATURE_SNAPSHOT", mapOf(
+            "event_id" to eventId,
+            "symbol" to symbol,
+            "regime" to evaluation.regime,
+            "directional_score" to evaluation.directionalScore,
+            "confidence" to evaluation.confidence,
+            "strategy" to evaluation.strategy,
+            "features" to researchFeatureMap(evaluation),
+            "votes" to evaluation.votes.map { mapOf("name" to it.name, "score" to it.score, "note" to it.note) }
+        ))
     }
 
     private suspend fun forecastEvaluation(symbol: String, token: String): StrategyEvaluation {
