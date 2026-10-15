@@ -61,6 +61,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import retrofit2.HttpException
 import java.security.MessageDigest
 import java.time.Instant
@@ -119,6 +121,7 @@ class TradingRepository @Inject constructor(
     private var lastArmHotAuditBalance = Double.NaN
     private var lastArmHotAuditArmed: Boolean? = null
     private val oneMinuteAtrCache = mutableMapOf<String, AtrCacheEntry>()
+    private val closePositionMutex = Mutex()
 
     private data class AtrCacheEntry(val atr: Double, val atMs: Long)
 
@@ -1736,231 +1739,60 @@ class TradingRepository @Inject constructor(
         mark: Double,
         reason: String,
         notificationStartedNs: Long? = null
-    ): ManagedTradeEntity {
+    ): ManagedTradeEntity? = closePositionMutex.withLock {
         require(position.side == "LONG") { "Only LONG holdings are supported" }
-        val ref = stableRef("CLS", "${position.id}-${position.symbol}-$reason")
-        val order = placeOwnedCncSell(token, position, ref, notificationStartedNs)
+
+        val local = managedDao.openPositionById(position.id)
+        if (local == null) {
+            auditLogger.log("SAFETY", "DUPLICATE_CLOSE_BLOCKED", mapOf(
+                "symbol" to position.symbol,
+                "position_id" to position.id,
+                "reason" to reason,
+                "stage" to "local_position_already_closed"
+            ))
+            return@withLock null
+        }
+
+        // Force broker truth immediately before every SELL. If a previous network-ambiguous
+        // order actually filled, reconciliation closes the local record and blocks a duplicate.
+        val reconciled = reconcilePositionWithBroker(token, local, preferredMark = mark, force = true)
+        if (reconciled == null || reconciled.quantity <= 0) {
+            auditLogger.log("SAFETY", "DUPLICATE_CLOSE_BLOCKED", mapOf(
+                "symbol" to position.symbol,
+                "position_id" to position.id,
+                "reason" to reason,
+                "stage" to "broker_quantity_already_closed"
+            ))
+            return@withLock null
+        }
+
+        val ref = stableRef("CLS", "${reconciled.id}-${reconciled.symbol}-$reason")
+        val order = placeOwnedCncSell(token, reconciled, ref, notificationStartedNs)
         val exit = order.averageFillPrice?.takeIf { it > 0.0 } ?: mark
-        val gross = (exit - position.entryPrice) * position.quantity
-        val costs = estimatedCashCosts(position.entryPrice, exit, position.quantity)
+        val gross = (exit - reconciled.entryPrice) * reconciled.quantity
+        val costs = estimatedCashCosts(reconciled.entryPrice, exit, reconciled.quantity)
         val trade = ManagedTradeEntity(
-            engine = position.engine, symbol = position.symbol, product = "CNC", side = "LONG",
-            quantity = position.quantity, entryPrice = position.entryPrice, exitPrice = exit,
+            engine = reconciled.engine, symbol = reconciled.symbol, product = "CNC", side = "LONG",
+            quantity = reconciled.quantity, entryPrice = reconciled.entryPrice, exitPrice = exit,
             grossPnl = gross, estimatedCosts = costs, netPnl = gross - costs, exitReason = reason,
-            strategy = position.strategy, regime = position.regime, confidence = position.confidence,
-            mfeRupees = max(0.0, position.maxFavourablePrice - position.entryPrice) * position.quantity,
-            maeRupees = max(0.0, position.entryPrice - position.maxAdversePrice) * position.quantity,
-            sourceEventId = position.sourceEventId, openOrderId = position.openOrderId, closeOrderId = order.growwOrderId,
-            openedAtMs = position.openedAtMs, closedAtMs = System.currentTimeMillis()
+            strategy = reconciled.strategy, regime = reconciled.regime, confidence = reconciled.confidence,
+            mfeRupees = max(0.0, reconciled.maxFavourablePrice - reconciled.entryPrice) * reconciled.quantity,
+            maeRupees = max(0.0, reconciled.entryPrice - reconciled.maxAdversePrice) * reconciled.quantity,
+            sourceEventId = reconciled.sourceEventId, openOrderId = reconciled.openOrderId, closeOrderId = order.growwOrderId,
+            openedAtMs = reconciled.openedAtMs, closedAtMs = System.currentTimeMillis()
         )
         managedDao.insertTrade(trade)
-        managedDao.deletePosition(position.id)
-        auditLogger.log("HOLDING", "LONG_CLOSED", mapOf("symbol" to position.symbol, "reason" to reason, "exit" to exit))
-        return trade
+        managedDao.deletePosition(reconciled.id)
+        brokerInventorySnapshot = null
+        auditLogger.log("HOLDING", "LONG_CLOSED", mapOf(
+            "symbol" to reconciled.symbol,
+            "qty" to reconciled.quantity,
+            "exit" to exit,
+            "reason" to reason,
+            "net_pnl" to trade.netPnl
+        ))
+        trade
     }
-
-    private data class Snapshot(
-        val summary: DaySummaryDto,
-        val positions: List<PositionDto>,
-        val recentDecisions: List<RecentDecisionDto>
-    )
-
-    private suspend fun executionStats(): ExecutionStatsDto {
-        fun aggregate(rows: List<ExecutionSampleEntity>): ExecutionAverageDto {
-            val dispatchRows = rows.filter { it.appDispatchMicros > 0L }
-            return ExecutionAverageDto(
-                averageFillMs = ExecutionTelemetryMath.averageMillis(rows.map { it.totalExecutionMs }),
-                averageAppDispatchMs = ExecutionTelemetryMath.averageDispatchMillis(rows.map { it.appDispatchMicros }),
-                sampleCount = rows.size,
-                dispatchSampleCount = dispatchRows.size
-            )
-        }
-        return ExecutionStatsDto(
-            buyLong = aggregate(managedDao.recentExecutionSamples("BUY", EXECUTION_SAMPLE_LIMIT)),
-            sellLong = aggregate(managedDao.recentExecutionSamples("SELL", EXECUTION_SAMPLE_LIMIT))
-        )
-    }
-
-    private suspend fun managedSnapshot(token: String): Snapshot {
-        val open = managedDao.openPositions().filter { it.side == "LONG" }
-        val positions = open.map { p ->
-            val ltp = runCatching {
-                apiFactory.groww.quote(bearer(token), tradingSymbol = p.symbol).requirePayload("Quote ${p.symbol}").lastPrice
-            }.getOrNull() ?: p.lastPrice
-            val pnl = (ltp - p.entryPrice) * p.quantity
-            PositionDto(
-                symbol = p.symbol, quantity = p.quantity, averagePrice = p.entryPrice, ltp = ltp, pnl = pnl,
-                stopPrice = p.stopPrice, targetPrice = p.targetPrice, highWaterPrice = p.maxFavourablePrice,
-                trailingLastRatchetPrice = p.trailingLastRatchetPrice.takeIf { it > 0.0 },
-                trailDistance = if (LearnedTrailingPolicy.isArmed(p.stopPrice, p.entryPrice) && p.stopPrice != null)
-                    (p.maxFavourablePrice - p.stopPrice).coerceAtLeast(0.0) else null,
-                trailArmPct = p.trailingArmPct.takeIf { it.isFinite() && it > 0.0 },
-                trailArmed = LearnedTrailingPolicy.isArmed(p.stopPrice, p.entryPrice),
-                strategy = p.strategy, product = "CNC"
-            )
-        }
-        val recent = managedDao.tradesSince(startOfIndiaDayMs()).filter { it.side == "LONG" }.take(6).map { t ->
-            RecentDecisionDto(formatEventTime(t.closedAtMs), t.symbol, "LONG_CLOSED", t.exitReason, t.strategy, t.quantity)
-        }
-        return Snapshot(
-            summary = DaySummaryDto(
-                unrealisedPnl = positions.sumOf { it.pnl },
-                grossExposure = positions.sumOf { it.quantity * (it.ltp ?: it.averagePrice) },
-                openPositions = positions.size
-            ),
-            positions = positions,
-            recentDecisions = recent
-        )
-    }
-
-    suspend fun sampleSignal(eventId: Long) {
-        val event = dao.byId(eventId) ?: return
-        val symbol = event.symbol ?: return
-        val token = ensureToken() ?: return
-        val offsets = listOf(1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900)
-        var elapsed = 0
-        for (offset in offsets) {
-            delay((offset - elapsed) * 1000L)
-            elapsed = offset
-            val price = runCatching {
-                apiFactory.groww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Signal sample $symbol").lastPrice
-            }.getOrNull() ?: continue
-            learningDao.insertObservation(
-                PriceObservationEntity(
-                    eventId = eventId, symbol = symbol,
-                    phase = if (event.signalType == SignalType.TRADE_RELEASE.name) "POST_LONG_CALL" else "POST_LONG_EXIT",
-                    offsetSeconds = offset, observedAtMs = System.currentTimeMillis(), price = price
-                )
-            )
-        }
-    }
-
-    data class LogExportResult(val entries: Int, val signalCount: Int, val tradeCount: Int)
-
-    suspend fun exportCompleteLogs(uri: Uri): LogExportResult {
-        val gson = GsonBuilder().setPrettyPrinting().create()
-        val settings = preferences.settings.first()
-        val signals = dao.allNow()
-        val positions = managedDao.allPositions().filter { it.side == "LONG" }
-        val trades = managedDao.allTrades().filter { it.side == "LONG" }
-        val executionSamples = managedDao.allExecutionSamples()
-        val priceObservations = learningDao.allObservations()
-        val forecastResearch = learningDao.allForecastResearch()
-        val calls = learningDao.allCalls().filter { it.action.equals("BUY", true) }.map {
-            mapOf(
-                "date" to it.callDate, "symbol" to it.symbol, "source" to it.source,
-                "entry_price" to it.entryPrice, "target_price" to it.targetPrice, "target_pct" to it.targetPct,
-                "exit_price" to it.multifyExitPrice, "long_return_pct" to it.longRealizedPct,
-                "multify_max_price" to it.multifyMaxPrice, "multify_mfe_pct" to it.multifyMfePct
-            )
-        }
-        val forecasts = learningDao.allLongForecasts()
-        val champions = learningDao.allForecastChampions()
-        val research = learningDao.allResearchReports()
-        val safeSettings = mapOf(
-            "holding_budget_rupees" to settings.holdingBudgetRupees,
-            "arm_effective" to settings.armEffective,
-            "package_filter" to settings.packageFilter,
-            "broker_authenticated" to settings.brokerAuthenticated,
-            "ddpi_enabled" to settings.brokerDdpiEnabled,
-            "static_ip_matched" to settings.staticIpMatched,
-            "safety_halt" to settings.safetyHalt,
-            "version" to BuildConfig.VERSION_NAME
-        )
-        appContext.contentResolver.openOutputStream(uri)?.use { raw ->
-            ZipOutputStream(raw).use { zip ->
-                fun add(name: String, value: Any) {
-                    zip.putNextEntry(ZipEntry(name))
-                    zip.write(gson.toJson(value).toByteArray(Charsets.UTF_8))
-                    zip.closeEntry()
-                }
-                fun addText(name: String, value: String) {
-                    zip.putNextEntry(ZipEntry(name))
-                    zip.write(value.toByteArray(Charsets.UTF_8))
-                    zip.closeEntry()
-                }
-                add("settings.json", safeSettings)
-                add("signals.json", signals)
-                add("holdings.json", positions)
-                add("closed_long_trades.json", trades)
-                add("execution_samples.json", executionSamples)
-                add("signal_price_observations.json", priceObservations)
-                add("forecast_research_snapshots.json", forecastResearch)
-                add("long_learning.json", calls)
-                add("long_forecasts.json", forecasts)
-                add("long_champions.json", champions)
-                add("research.json", research)
-                addText("system_audit.jsonl", auditLogger.readAll())
-            }
-        } ?: error("Unable to open export destination")
-        return LogExportResult(12, signals.size, trades.size)
-    }
-
-    suspend fun shouldCapturePackage(packageName: String): Boolean {
-        val filter = (armHotState?.settings ?: preferences.settings.first()).packageFilter.trim()
-        return if (filter.isBlank()) packageName.equals(MULTIFY_PACKAGE, ignoreCase = true)
-        else packageName.contains(filter, ignoreCase = true)
-    }
-
-    suspend fun prepareArmHotPath(force: Boolean = false): Boolean {
-        val current = armHotState
-        if (!force && current != null && System.currentTimeMillis() - current.warmedAtMs <= ARM_HOT_REFRESH_MS) return true
-        val token = ensureToken() ?: return false
-        val settings = preferences.settings.first()
-        if (!settings.brokerAuthenticated || settings.safetyHalt) return false
-        val margin = apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin")
-        val cnc = (margin.equity?.cncBalanceAvailable ?: margin.clearCash).coerceAtLeast(0.0)
-        val now = System.currentTimeMillis()
-        armHotState = ArmHotState(token, settings, cnc, now)
-        val auditDue = now - lastArmHotAuditAtMs >= ARM_HOT_AUDIT_INTERVAL_MS
-        val balanceChanged = !lastArmHotAuditBalance.isFinite() || abs(cnc - lastArmHotAuditBalance) >= 1.0
-        val armedChanged = lastArmHotAuditArmed == null || lastArmHotAuditArmed != settings.armEffective
-        if (auditDue || balanceChanged || armedChanged) {
-            auditLogger.log("RUNTIME", "ARM_HOT_PATH_READY", mapOf("cnc_balance" to cnc, "armed" to settings.armEffective))
-            lastArmHotAuditAtMs = now
-            lastArmHotAuditBalance = cnc
-            lastArmHotAuditArmed = settings.armEffective
-        }
-        return true
-    }
-
-    suspend fun maintainArmHotPath() {
-        val settings = preferences.settings.first()
-        if (!settings.armEffective || settings.safetyHalt) return
-        if (armHotState == null || System.currentTimeMillis() - (armHotState?.warmedAtMs ?: 0L) > ARM_HOT_REFRESH_MS) {
-            runCatching { prepareArmHotPath(force = true) }
-        }
-    }
-
-    private suspend fun ensureToken(): String? {
-        armHotState?.token?.takeIf { it.isNotBlank() }?.let { return it }
-        var settings = preferences.settings.first()
-        var token = secretStore.getAccessToken()
-        if (!settings.brokerAuthenticated || token.isNullOrBlank()) {
-            if (!hasBrokerCredentials()) return null
-            runCatching { authenticate() }.getOrElse { return null }
-            settings = preferences.settings.first()
-            token = secretStore.getAccessToken()
-        }
-        return token
-    }
-
-    private fun preArmGuard(settings: AppSettings) {
-        require(settings.armEffective) { "ARM is OFF" }
-        require(settings.brokerAuthenticated) { "Groww is not authenticated" }
-        require(settings.staticIpMatched) { "Static IP verification failed" }
-        require(settings.brokerDdpiEnabled) { "DDPI is required for CNC holdings" }
-        require(!settings.safetyHalt) { "Safety halt is active" }
-        require(marketSession() == "OPEN") { "NSE regular market session is not open" }
-    }
-
-    private suspend fun placeCncBuy(
-        token: String,
-        symbol: String,
-        qty: Int,
-        reference: String,
-        notificationStartedNs: Long? = null
-    ): OrderPayload = submitMarketOrder(token, symbol, "BUY", qty, "CNC", reference, notificationStartedNs)
 
     private suspend fun placeOwnedCncSell(
         token: String,
