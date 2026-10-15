@@ -16,15 +16,15 @@ data class ForecastQualityDecision(
 object ForecastQualityPolicy {
     const val MIN_TARGET_PCT = 1.0
 
-    const val PRIMARY_MIN_CONFIDENCE = 0.72
-    const val PRIMARY_MIN_DIRECTIONAL_SCORE = 0.48
-    const val PRIMARY_MAX_SPREAD_BPS = 35.0
-    const val PRIMARY_MIN_RVOL = 0.95
+    const val PRIMARY_MIN_CONFIDENCE = 0.63
+    const val PRIMARY_MIN_DIRECTIONAL_SCORE = 0.28
+    const val PRIMARY_MAX_SPREAD_BPS = 40.0
+    const val PRIMARY_MIN_RVOL = 0.85
 
-    const val SECONDARY_MIN_CONFIDENCE = 0.62
-    const val SECONDARY_MIN_DIRECTIONAL_SCORE = 0.25
+    const val SECONDARY_MIN_CONFIDENCE = 0.58
+    const val SECONDARY_MIN_DIRECTIONAL_SCORE = 0.15
     const val SECONDARY_MAX_SPREAD_BPS = 45.0
-    const val SECONDARY_MIN_RVOL = 0.80
+    const val SECONDARY_MIN_RVOL = 0.70
 
     fun adaptiveTargetPct(multifyMfeAveragePct: Double, priorForecastMfePct: List<Double>): Double {
         val prior = priorForecastMfePct.filter { it.isFinite() && it >= 0.0 && it < 25.0 }
@@ -65,7 +65,7 @@ object ForecastQualityPolicy {
         if (!trendSlopePositive) primaryFails += "trend slope non-positive"
         if (!structureHealthy) primaryFails += "structure weak"
         if (!dayHealthy) primaryFails += "day momentum weak"
-        if (capacityPct + 1e-9 < targetPct * 0.90) primaryFails += "volatility capacity below 90% of target"
+        if (capacityPct + 1e-9 < targetPct * 0.75) primaryFails += "volatility capacity below 75% of target"
 
         if (primaryFails.isEmpty()) {
             return ForecastQualityDecision(
@@ -83,9 +83,9 @@ object ForecastQualityPolicy {
         if (evaluation.directionalScore < SECONDARY_MIN_DIRECTIONAL_SCORE) secondaryFails += "directional score below SECONDARY floor"
         if ((f.spreadBps ?: 0.0) > SECONDARY_MAX_SPREAD_BPS) secondaryFails += "spread too wide for SECONDARY"
         if ((f.rvol ?: 0.0) < SECONDARY_MIN_RVOL) secondaryFails += "RVOL below SECONDARY floor"
-        if (momentumVotes < 3) secondaryFails += "fewer than 3/5 momentum confirmations"
+        if (momentumVotes < 2) secondaryFails += "fewer than 2/5 momentum confirmations"
         if (!dayHealthy) secondaryFails += "day momentum weak"
-        if (capacityPct + 1e-9 < targetPct * 0.75) secondaryFails += "volatility capacity below 75% of target"
+        if (capacityPct + 1e-9 < targetPct * 0.55) secondaryFails += "volatility capacity below 55% of target"
 
         if (secondaryFails.isEmpty()) {
             return ForecastQualityDecision(
