@@ -1424,7 +1424,12 @@ class TradingRepository @Inject constructor(
             runCatching { backfillRecentMultifyMfe(token, MFE_AFTER_HOURS_BACKFILL_BATCH_SIZE, force = true) }
         }
         val researchUpdated = if (token != null) {
-            runCatching { backfillForecastResearchOutcomes(today, token) }.getOrDefault(0)
+            val incompleteDate = learningDao.forecastResearchDates()
+                .take(RESEARCH_SESSION_GOAL)
+                .firstOrNull { learningDao.pendingForecastResearchOutcomes(it).isNotEmpty() }
+            if (incompleteDate != null) {
+                runCatching { backfillForecastResearchOutcomes(incompleteDate, token) }.getOrDefault(0)
+            } else 0
         } else 0
         val existing = learningDao.latestResearchReport()
         if (!force && existing?.reportDate == today && researchUpdated == 0) {
