@@ -2102,8 +2102,12 @@ class TradingRepository @Inject constructor(
         private const val MIN_BUDGET = 10_000L
         private const val MAX_BUDGET = 200_000L
         private const val MANUAL_SOURCE = "com.multify.traderpro.manual"
-        private const val FORECAST_SCAN_INTERVAL_MS = 10L * 60L * 1000L
-        private const val FORECAST_OUTCOME_INTERVAL_MS = 30_000L
+        private const val FORECAST_SCAN_INTERVAL_MS = 15L * 60L * 1000L
+        private const val FORECAST_OUTCOME_INTERVAL_MS = 60_000L
+        private const val FORECAST_SYMBOL_PACING_MS = 75L
+        private const val RESEARCH_CAPTURE_TOP_N = 12
+        private const val RESEARCH_BACKFILL_SYMBOL_PACING_MS = 300L
+        private const val RESEARCH_SESSION_GOAL = 5
         private const val MFE_BACKFILL_INTERVAL_MS = 5L * 60L * 1000L
         private const val MFE_BACKFILL_BATCH_SIZE = 4
         private const val MFE_AFTER_HOURS_BACKFILL_BATCH_SIZE = 16
