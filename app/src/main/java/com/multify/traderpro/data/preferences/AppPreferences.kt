@@ -32,6 +32,7 @@ data class AppSettings(
     val safetyHalt: Boolean = false,
     val armedDate: String = "",
     val lastNotificationAtMs: Long = 0L,
+    val listenerHeartbeatAtMs: Long = 0L,
     val listenerReconnectCount: Long = 0L,
     val lastListenerReconnectAtMs: Long = 0L,
     val lastEventProcessingLatencyMs: Long = 0L,
@@ -64,6 +65,7 @@ class AppPreferences @Inject constructor(
         val safetyHalt = booleanPreferencesKey("safety_halt")
         val armedDate = stringPreferencesKey("live_enabled_date")
         val lastNotificationAtMs = longPreferencesKey("last_notification_at_ms")
+        val listenerHeartbeatAtMs = longPreferencesKey("listener_heartbeat_at_ms")
         val listenerReconnectCount = longPreferencesKey("listener_reconnect_count")
         val lastListenerReconnectAtMs = longPreferencesKey("last_listener_reconnect_at_ms")
         val lastEventProcessingLatencyMs = longPreferencesKey("last_event_processing_latency_ms")
@@ -130,7 +132,7 @@ class AppPreferences @Inject constructor(
     }
 
     suspend fun recordListenerConnected(nowMs: Long = System.currentTimeMillis()) {
-        context.dataStore.edit { it[Keys.serviceHeartbeatAtMs] = nowMs }
+        context.dataStore.edit { it[Keys.listenerHeartbeatAtMs] = nowMs }
     }
 
     suspend fun recordListenerReconnect(nowMs: Long = System.currentTimeMillis()) {
@@ -179,6 +181,7 @@ class AppPreferences @Inject constructor(
         safetyHalt = this[Keys.safetyHalt] ?: false,
         armedDate = this[Keys.armedDate].orEmpty(),
         lastNotificationAtMs = this[Keys.lastNotificationAtMs] ?: 0L,
+        listenerHeartbeatAtMs = this[Keys.listenerHeartbeatAtMs] ?: 0L,
         listenerReconnectCount = this[Keys.listenerReconnectCount] ?: 0L,
         lastListenerReconnectAtMs = this[Keys.lastListenerReconnectAtMs] ?: 0L,
         lastEventProcessingLatencyMs = this[Keys.lastEventProcessingLatencyMs] ?: 0L,
