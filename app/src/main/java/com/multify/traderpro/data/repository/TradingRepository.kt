@@ -985,7 +985,11 @@ class TradingRepository @Inject constructor(
             }.thenByDescending { it.score }
         )
 
-        captureForecastResearchScan(today, nowMs, marketRegime, targetPct, ranked.take(RESEARCH_CAPTURE_TOP_N))
+        val capturedResearchDates = learningDao.forecastResearchDates()
+        val researchCaptureAllowed = today in capturedResearchDates || capturedResearchDates.size < RESEARCH_SESSION_GOAL
+        if (researchCaptureAllowed) {
+            captureForecastResearchScan(today, nowMs, marketRegime, targetPct, ranked.take(RESEARCH_CAPTURE_TOP_N))
+        }
 
         val desired = when {
             now.toLocalTime() < LocalTime.of(10, 15) -> 1
@@ -1049,6 +1053,9 @@ class TradingRepository @Inject constructor(
             "market_regime" to marketRegime,
             "prior_research_sessions" to priorResearchDates.size,
             "prior_research_rows" to priorResearch.size,
+            "research_capture_allowed" to researchCaptureAllowed,
+            "research_sessions_captured" to capturedResearchDates.size,
+            "research_session_goal" to RESEARCH_SESSION_GOAL,
             "top_candidates" to ranked.take(5).map {
                 mapOf("symbol" to it.symbol, "tier" to it.quality.tier, "score" to it.score,
                     "confidence" to it.evaluation.confidence, "directional_score" to it.evaluation.directionalScore,
