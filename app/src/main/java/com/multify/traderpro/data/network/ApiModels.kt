@@ -85,13 +85,16 @@ data class LearningStatsDto(
     val longP25Pct: Double = 0.0,
     val longP75Pct: Double = 0.0,
     val seededThreeMonthAveragePct: Double = 0.0,
-    val liveCompletedCalls: Int = 0
+    val liveCompletedCalls: Int = 0,
+    val mfeBackfillPendingCalls: Int = 0
 )
 
 data class ForecastLearningStatsDto(
     val rollingTradingDays: Int = 0,
     val completedForecasts: Int = 0,
-    val longAveragePct: Double = 0.0
+    val longAveragePct: Double = 0.0,
+    val todayTargetAveragePct: Double = 0.0,
+    val targetFloorPct: Double = 1.0
 )
 
 data class ForecastDto(
