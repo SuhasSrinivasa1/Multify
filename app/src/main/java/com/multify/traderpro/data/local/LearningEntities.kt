@@ -23,6 +23,8 @@ data class LearningCallEntity(
     val targetPct: Double? = null,
     val multifyExitPrice: Double? = null,
     val longRealizedPct: Double? = null,
+    val multifyMaxPrice: Double? = null,
+    val multifyMfePct: Double? = null,
     val buyEventId: Long? = null,
     val sellEventId: Long? = null,
     val buyAtMs: Long = 0L,
