@@ -833,7 +833,9 @@ class TradingRepository @Inject constructor(
         val now = ZonedDateTime.now(INDIA)
         val today = now.toLocalDate().toString()
         val existing = learningDao.longForecastsForDate(today)
-        if (now.dayOfWeek.value >= 6 || now.toLocalTime() < LocalTime.of(9, 15) || now.toLocalTime() > LocalTime.of(15, 0)) return existing.map { it.toForecastDto() }
+        if (now.dayOfWeek.value >= 6 || now.toLocalTime() < LocalTime.of(9, 15) || now.toLocalTime() > LocalTime.of(15, 0)) {
+            return existing.map { it.toForecastDto() }
+        }
         val nowMs = System.currentTimeMillis()
         if (!force && nowMs - lastForecastScanAtMs < FORECAST_SCAN_INTERVAL_MS) return existing.map { it.toForecastDto() }
         val token = ensureToken() ?: return existing.map { it.toForecastDto() }
@@ -855,20 +857,26 @@ class TradingRepository @Inject constructor(
         val evaluated = mutableListOf<Pair<String, StrategyEvaluation>>()
         for (symbol in universe) {
             val evaluation = runCatching { forecastEvaluation(symbol, token) }.getOrNull() ?: continue
-            val f = evaluation.features
-            if (f.ltp < 10.0 || (f.spreadBps ?: 0.0) > 45.0) continue
+            if (evaluation.features.ltp < 10.0) continue
             evaluated += symbol to evaluation
         }
-        val breadth = evaluated.mapNotNull { it.second.features.dayChangePct }.takeIf { it.isNotEmpty() }?.average() ?: 0.0
-        val marketRegime = when { breadth >= .50 -> "BREADTH_BULL"; breadth <= -.50 -> "BREADTH_WEAK"; else -> "BREADTH_NEUTRAL" }
+
+        val breadth = evaluated.mapNotNull { it.second.features.dayChangePct }
+            .takeIf { it.isNotEmpty() }?.average() ?: 0.0
+        val marketRegime = when {
+            breadth >= .50 -> "BREADTH_BULL"
+            breadth <= -.50 -> "BREADTH_WEAK"
+            else -> "BREADTH_NEUTRAL"
+        }
         val champions = learningDao.allForecastChampions().associateBy { it.key }
         val learned = learningStats()
-        val forecastLearning = forecastLearningStats()
-        val targetPct = if (forecastLearning.completedForecasts > 0) {
-            forecastLearning.longAveragePct.coerceAtLeast(.20)
-        } else {
-            learned.longAveragePct.coerceAtLeast(.20)
+        val priorForecasts = learningDao.allLongForecasts().filter {
+            it.forecastDate < today && it.status in setOf("TARGET_HIT", "MISSED")
         }
+        val priorMfe = priorForecasts.map { it.maxFavourablePct }
+            .filter { it.isFinite() && it >= 0.0 && it < 25.0 }
+        val targetPct = ForecastQualityPolicy.adaptiveTargetPct(learned.longAveragePct, priorMfe)
+
         val desired = when {
             now.toLocalTime() < LocalTime.of(10, 15) -> 1
             now.toLocalTime() < LocalTime.of(11, 15) -> 2
@@ -877,29 +885,68 @@ class TradingRepository @Inject constructor(
             else -> 5
         }
         val have = existing.map { it.symbol }.toSet()
-        val ranked = evaluated.map { row ->
+        var eligibleCount = 0
+        val ranked = evaluated.mapNotNull { row ->
+            if (row.first in have) return@mapNotNull null
+            val quality = ForecastQualityPolicy.evaluate(row.second, targetPct)
+            if (!quality.eligible) return@mapNotNull null
+            eligibleCount++
             val key = championKey(marketRegime, row.second.regime, row.second.strategy)
-            val championBonus = if (champions[key]?.frozen == true) .06 else 0.0
-            val frequencyBonus = min(.06, (frequency[row.first] ?: 0) * .006)
-            val dnaBonus = if (row.first in dnaSymbols) .04 else 0.0
-            Triple(row.first, row.second, (row.second.confidence + championBonus + frequencyBonus + dnaBonus).coerceAtMost(.99))
-        }.filter { it.first !in have }.sortedByDescending { it.third }
+            val champion = champions[key]
+            val championWinRate = champion?.takeIf { it.sampleCount > 0 }?.let { it.wins.toDouble() / it.sampleCount } ?: 0.0
+            val championBonus = when {
+                champion?.frozen == true && championWinRate >= .75 -> .08
+                champion != null && champion.sampleCount >= 3 && championWinRate >= .75 -> .04
+                else -> 0.0
+            }
+            val frequencyBonus = min(.04, (frequency[row.first] ?: 0) * .004)
+            val dnaBonus = if (row.first in dnaSymbols) .08 else 0.0
+            val qualityBonus = ForecastQualityPolicy.rankingBonus(row.second, quality.volatilityCapacityPct, targetPct)
+            Triple(
+                row.first,
+                row.second,
+                (row.second.confidence + championBonus + frequencyBonus + dnaBonus + qualityBonus).coerceAtMost(.99)
+            )
+        }.sortedByDescending { it.third }
 
-        ranked.take((desired - existing.size).coerceAtLeast(0)).forEachIndexed { index, item ->
+        val slots = (desired - existing.size).coerceAtLeast(0)
+        ranked.take(slots).forEachIndexed { index, item ->
             val price = item.second.features.ltp
             val key = championKey(marketRegime, item.second.regime, item.second.strategy)
+            val quality = ForecastQualityPolicy.evaluate(item.second, targetPct)
             learningDao.upsertLongForecast(
                 LongForecastEntity(
-                    forecastDate = today, rank = existing.size + index + 1, symbol = item.first,
-                    entryPrice = price, targetPct = targetPct, targetPrice = price * (1.0 + targetPct / 100.0),
-                    confidence = item.second.confidence, score = item.third, strategy = item.second.strategy,
-                    regime = item.second.regime, marketRegime = marketRegime, championKey = key,
-                    reason = item.second.reason, generatedAtMs = nowMs, lastPrice = price, lastObservedAtMs = nowMs
+                    forecastDate = today,
+                    rank = existing.size + index + 1,
+                    symbol = item.first,
+                    entryPrice = price,
+                    targetPct = targetPct,
+                    targetPrice = price * (1.0 + targetPct / 100.0),
+                    confidence = item.second.confidence,
+                    score = item.third,
+                    strategy = item.second.strategy,
+                    regime = item.second.regime,
+                    marketRegime = marketRegime,
+                    championKey = key,
+                    reason = item.second.reason + " · capacity " + fmt(quality.volatilityCapacityPct) + "% for " + fmt(targetPct) + "% target",
+                    generatedAtMs = nowMs,
+                    lastPrice = price,
+                    lastObservedAtMs = nowMs
                 )
             )
         }
         val all = learningDao.longForecastsForDate(today)
-        auditLogger.log("FORECAST", "LONG_SCAN", mapOf("date" to today, "evaluated" to evaluated.size, "count" to all.size, "target_pct" to targetPct))
+        auditLogger.log("FORECAST", "LONG_SCAN_QUALITY_GATED", mapOf(
+            "date" to today,
+            "evaluated" to evaluated.size,
+            "eligible" to eligibleCount,
+            "count" to all.size,
+            "max_slots_by_time" to desired,
+            "target_pct" to targetPct,
+            "target_floor_pct" to ForecastQualityPolicy.MIN_TARGET_PCT,
+            "multify_mfe_avg_pct" to learned.longAveragePct,
+            "prior_forecast_mfe_samples" to priorMfe.size
+        ))
         return all.map { it.toForecastDto() }
     }
 
@@ -926,7 +973,10 @@ class TradingRepository @Inject constructor(
         val row = learningDao.longForecastsForDate(now.toLocalDate().toString())
             .firstOrNull { it.symbol.equals(symbol, true) } ?: error("No active LONG recommendation for $symbol")
         require(row.status == "ACTIVE") { "$symbol forecast is no longer active" }
-        if (managedDao.openPositions().any { it.symbol.equals(row.symbol, true) && it.side == "LONG" }) return "${row.symbol} is already app-owned; duplicate BUY blocked"
+        require(row.targetPct + 1e-9 >= ForecastQualityPolicy.MIN_TARGET_PCT) { "Forecast target is below the 1% quality floor" }
+        if (managedDao.openPositions().any { it.symbol.equals(row.symbol, true) && it.side == "LONG" }) {
+            return "${row.symbol} is already app-owned; duplicate BUY blocked"
+        }
         val quote = apiFactory.groww.quote(bearer(token), tradingSymbol = row.symbol).requirePayload("Quote ${row.symbol}")
         val ltp = quote.lastPrice ?: error("Groww quote has no LTP")
         val margin = apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin")
@@ -945,31 +995,34 @@ class TradingRepository @Inject constructor(
         val filled = order.filledQuantity?.takeIf { it > 0 } ?: qty
         val entry = order.averageFillPrice?.takeIf { it > 0.0 } ?: ltp
         val investedAmount = entry * filled
-        val minimumNetProfit = LearnedTrailingPolicy.minimumNetProfitRupees(entry, filled)
-        val minimumProfitExit = LearnedTrailingPolicy.minimumExitPriceForNetProfitPct(entry)
+        val multifyStats = learningStats()
+        val trailArmPct = LearnedTrailingPolicy.dynamicArmPct(multifyStats.longAveragePct)
+        val minimumNetProfit = LearnedTrailingPolicy.minimumNetProfitRupees(entry, filled, trailArmPct)
+        val minimumProfitExit = LearnedTrailingPolicy.minimumExitPriceForNetProfitPct(entry, trailArmPct)
         managedDao.insertPosition(
             ManagedPositionEntity(
                 engine = ENGINE_FORECAST_HOLDING, symbol = row.symbol, product = "CNC", side = "LONG", quantity = filled,
                 entryPrice = entry, stopPrice = entry * (1.0 - HOLDING_FAILSAFE_STOP_PCT),
                 targetPrice = entry * (1.0 + row.targetPct / 100.0),
-                strategy = "Forecast holding · ${row.strategy} · autonomous trail after 1.00% net invested",
+                strategy = "Forecast holding · ${row.strategy} · dynamic Multify-MFE trail",
                 regime = row.regime, confidence = row.confidence,
                 sourceEventId = null, openOrderId = order.growwOrderId, openReferenceId = ref,
                 openedAtMs = System.currentTimeMillis(), lastPrice = entry,
                 maxFavourablePrice = entry, maxAdversePrice = entry, lastEvaluatedAtMs = System.currentTimeMillis(),
                 anchorPrice = entry, capitalDeployed = investedAmount, campaignBudget = capital,
-                trailingArmPct = LearnedTrailingPolicy.AUTONOMOUS_NET_PROFIT_PCT_OF_INVESTED, trailingLastRatchetPrice = 0.0
+                trailingArmPct = trailArmPct, trailingLastRatchetPrice = 0.0
             )
         )
         auditLogger.log("FORECAST", "LONG_HOLDING_OPENED", mapOf(
             "symbol" to row.symbol, "qty" to filled, "entry" to entry,
             "forecast_target_pct" to row.targetPct,
             "invested_amount" to investedAmount,
-            "autonomous_profit_gate_pct" to LearnedTrailingPolicy.AUTONOMOUS_NET_PROFIT_PCT_OF_INVESTED,
+            "multify_mfe_avg_pct" to multifyStats.longAveragePct,
+            "trail_arm_pct" to trailArmPct,
             "minimum_net_profit" to minimumNetProfit,
             "minimum_profit_exit_price" to minimumProfitExit
         ))
-        return "BUY ${row.symbol} opened as CNC holding · qty $filled @ ₹${fmt(entry)} · autonomous trailing starts after 1.00% net profit on invested capital (₹${fmt(minimumNetProfit)})"
+        return "BUY ${row.symbol} opened as CNC holding · qty $filled @ ₹${fmt(entry)} · forecast target +${fmt(row.targetPct)}% · trailing arms at +${fmt(trailArmPct)}% estimated net"
     }
 
     suspend fun pendingLongForecastNotifications(): List<ForecastDto> {
@@ -981,30 +1034,54 @@ class TradingRepository @Inject constructor(
 
     suspend fun monitorForecastOutcomes(): Int {
         val nowMs = System.currentTimeMillis()
-        if (nowMs - lastForecastOutcomeMonitorAtMs < 45_000L) return learningDao.activeLongForecasts().size
+        if (nowMs - lastForecastOutcomeMonitorAtMs < FORECAST_OUTCOME_INTERVAL_MS) {
+            return learningDao.activeLongForecasts().size
+        }
         lastForecastOutcomeMonitorAtMs = nowMs
-        val active = learningDao.activeLongForecasts()
-        val token = ensureToken() ?: return active.size
         val now = ZonedDateTime.now(INDIA)
-        for (row in active) {
+        val today = now.toLocalDate().toString()
+        val rows = learningDao.longForecastsForDate(today)
+        if (rows.isEmpty()) return 0
+        val token = ensureToken() ?: return rows.count { it.status == "ACTIVE" }
+
+        for (row in rows) {
             runCatching {
                 val ltp = apiFactory.groww.quote(bearer(token), tradingSymbol = row.symbol)
                     .requirePayload("Forecast outcome quote ${row.symbol}").lastPrice ?: return@runCatching
+                preferences.recordMarketData()
                 val movePct = (ltp / row.entryPrice - 1.0) * 100.0
                 val adversePct = max(0.0, (row.entryPrice - ltp) / row.entryPrice * 100.0)
-                val hit = ltp >= row.targetPrice
-                val expired = now.toLocalDate().toString() != row.forecastDate || now.toLocalTime() >= LocalTime.of(15, 0)
-                val status = when { hit -> "TARGET_HIT"; expired -> "MISSED"; else -> "ACTIVE" }
+                val hitNow = ltp >= row.targetPrice
+                val expired = now.toLocalTime() >= LocalTime.of(15, 0)
+                val status = when {
+                    row.status == "TARGET_HIT" -> "TARGET_HIT"
+                    hitNow -> "TARGET_HIT"
+                    expired -> "MISSED"
+                    else -> "ACTIVE"
+                }
+                val statusChanged = status != row.status
                 val updated = row.copy(
-                    status = status, targetHitAtMs = if (hit) nowMs else row.targetHitAtMs,
-                    lastPrice = ltp, maxFavourablePct = max(row.maxFavourablePct, max(0.0, movePct)),
-                    maxAdversePct = max(row.maxAdversePct, adversePct), lastObservedAtMs = nowMs
+                    status = status,
+                    targetHitAtMs = when {
+                        row.targetHitAtMs != null -> row.targetHitAtMs
+                        hitNow -> nowMs
+                        else -> null
+                    },
+                    lastPrice = ltp,
+                    maxFavourablePct = max(row.maxFavourablePct, max(0.0, movePct)),
+                    maxAdversePct = max(row.maxAdversePct, adversePct),
+                    lastObservedAtMs = nowMs
                 )
                 learningDao.updateLongForecast(updated)
-                if (status != "ACTIVE") refreshForecastChampion(updated)
+                if (statusChanged && status != "ACTIVE") refreshForecastChampion(updated)
+            }.onFailure {
+                auditLogger.log("FORECAST", "OUTCOME_MONITOR_ERROR", mapOf(
+                    "symbol" to row.symbol,
+                    "message" to (it.message ?: it.javaClass.simpleName)
+                ))
             }
         }
-        return learningDao.activeLongForecasts().size
+        return learningDao.longForecastsForDate(today).count { it.status == "ACTIVE" }
     }
 
     private suspend fun refreshForecastChampion(row: LongForecastEntity) {
