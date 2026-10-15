@@ -65,6 +65,7 @@ import retrofit2.HttpException
 import java.security.MessageDigest
 import java.time.Instant
 import java.time.LocalDate
+import java.time.LocalDateTime
 import java.time.LocalTime
 import java.time.ZoneId
 import java.time.ZonedDateTime
@@ -1155,6 +1156,7 @@ class TradingRepository @Inject constructor(
         val row = learningDao.longForecastsForDate(now.toLocalDate().toString())
             .firstOrNull { it.symbol.equals(symbol, true) } ?: error("No active LONG recommendation for $symbol")
         require(row.status == "ACTIVE") { "$symbol forecast is no longer active" }
+        require(row.executionEligible) { "$symbol is ${row.qualityTier}; only PRIMARY forecast setups can place a real forecast BUY" }
         require(row.targetPct + 1e-9 >= ForecastQualityPolicy.MIN_TARGET_PCT) { "Forecast target is below the 1% quality floor" }
         if (managedDao.openPositions().any { it.symbol.equals(row.symbol, true) && it.side == "LONG" }) {
             return "${row.symbol} is already app-owned; duplicate BUY blocked"
@@ -1418,15 +1420,21 @@ class TradingRepository @Inject constructor(
         val multifyStats = learningStats()
         val dynamicTrailArmPct = LearnedTrailingPolicy.dynamicArmPct(multifyStats.longAveragePct)
         for (position in open) {
-            runCatching {
+            try {
                 if (position.side != "LONG") {
                     if (marketOpen) closeLegacyNonLong(token, position)
-                    return@runCatching
+                    continue
                 }
                 val reconciled = reconcilePositionWithBroker(token, position, preferredMark = null, force = !marketOpen)
                 if (marketOpen && reconciled != null) monitorLongHolding(reconciled, token, dynamicTrailArmPct)
-            }.onFailure {
-                auditLogger.log("HOLDING", "MONITOR_ERROR", mapOf("symbol" to position.symbol, "message" to (it.message ?: it.javaClass.simpleName)))
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (t: Throwable) {
+                auditLogger.log("HOLDING", "MONITOR_ERROR", mapOf(
+                    "symbol" to position.symbol,
+                    "type" to t.javaClass.simpleName,
+                    "message" to (t.message ?: t.javaClass.simpleName)
+                ))
             }
         }
         return managedDao.openPositions().size
@@ -1698,7 +1706,7 @@ class TradingRepository @Inject constructor(
         val event = dao.byId(eventId) ?: return
         val symbol = event.symbol ?: return
         val token = ensureToken() ?: return
-        val offsets = listOf(1, 5, 30, 60, 120, 300)
+        val offsets = listOf(1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900)
         var elapsed = 0
         for (offset in offsets) {
             delay((offset - elapsed) * 1000L)
@@ -1725,6 +1733,8 @@ class TradingRepository @Inject constructor(
         val positions = managedDao.allPositions().filter { it.side == "LONG" }
         val trades = managedDao.allTrades().filter { it.side == "LONG" }
         val executionSamples = managedDao.allExecutionSamples()
+        val priceObservations = learningDao.allObservations()
+        val forecastResearch = learningDao.allForecastResearch()
         val calls = learningDao.allCalls().filter { it.action.equals("BUY", true) }.map {
             mapOf(
                 "date" to it.callDate, "symbol" to it.symbol, "source" to it.source,
@@ -1763,6 +1773,8 @@ class TradingRepository @Inject constructor(
                 add("holdings.json", positions)
                 add("closed_long_trades.json", trades)
                 add("execution_samples.json", executionSamples)
+                add("signal_price_observations.json", priceObservations)
+                add("forecast_research_snapshots.json", forecastResearch)
                 add("long_learning.json", calls)
                 add("long_forecasts.json", forecasts)
                 add("long_champions.json", champions)
@@ -1770,7 +1782,7 @@ class TradingRepository @Inject constructor(
                 addText("system_audit.jsonl", auditLogger.readAll())
             }
         } ?: error("Unable to open export destination")
-        return LogExportResult(10, signals.size, trades.size)
+        return LogExportResult(12, signals.size, trades.size)
     }
 
     suspend fun shouldCapturePackage(packageName: String): Boolean {
@@ -1933,7 +1945,7 @@ class TradingRepository @Inject constructor(
         multifyMatched = multifyMatched, entryPrice = entryPrice, targetPrice = targetPrice, targetPct = targetPct,
         status = status, strategy = strategy, regime = regime, marketRegime = marketRegime,
         championTag = championKey, maxFavourablePct = maxFavourablePct, maxAdversePct = maxAdversePct,
-        generatedAtMs = generatedAtMs
+        generatedAtMs = generatedAtMs, qualityTier = qualityTier, executionEligible = executionEligible
     )
 
     private fun championKey(marketRegime: String, regime: String, strategy: String): String =
