@@ -36,6 +36,7 @@ class TradingEngineService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var engineJob: Job? = null
+    private var lastAfterHoursResearchAtMs = 0L
 
     override fun onCreate() {
         super.onCreate()
@@ -134,7 +135,11 @@ class TradingEngineService : Service() {
                             .forEach(::notifyForecast)
                     }
 
-                    if (now.dayOfWeek.value < 6 && now.toLocalTime() >= LocalTime.of(15, 35)) {
+                    if (now.dayOfWeek.value < 6 &&
+                        now.toLocalTime() >= LocalTime.of(15, 35) &&
+                        nowMs - lastAfterHoursResearchAtMs >= AFTER_HOURS_RESEARCH_INTERVAL_MS
+                    ) {
+                        lastAfterHoursResearchAtMs = nowMs
                         runCatching { repository.runAfterHoursResearch(false) }
                             .onFailure { auditLogger.log("RUNTIME", "AFTER_HOURS_RESEARCH_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
                     }
@@ -227,6 +232,7 @@ class TradingEngineService : Service() {
         private const val FORECAST_LOOP_INTERVAL_MS = 5_000L
         private const val IDLE_LOOP_INTERVAL_MS = 10_000L
         private const val ERROR_BACKOFF_MS = 10_000L
+        private const val AFTER_HOURS_RESEARCH_INTERVAL_MS = 15L * 60L * 1000L
         private const val ACTION_SAMPLE_SIGNAL = "com.multify.traderpro.action.SAMPLE_SIGNAL"
         private const val EXTRA_EVENT_ID = "event_id"
         private const val EXTRA_SYMBOL = "symbol"
