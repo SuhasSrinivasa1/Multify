@@ -41,6 +41,7 @@ data class PositionDto(
     val highWaterPrice: Double? = null,
     val trailingLastRatchetPrice: Double? = null,
     val trailDistance: Double? = null,
+    val trailArmPct: Double? = null,
     val trailArmed: Boolean = false,
     val strategy: String? = null,
     val product: String = "CNC"
