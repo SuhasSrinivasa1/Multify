@@ -94,7 +94,7 @@ import java.util.Locale
 private enum class Destination(val label: String, val subtitle: String, val icon: ImageVector) {
     Execution("Execution", "ARM status and app-owned CNC holdings", Icons.Default.Dashboard),
     Averages("Averages", "30-day LONG averages", Icons.Default.Analytics),
-    Forecast("Forecast", "Up to five LONG holding candidates", Icons.Default.Science),
+    Forecast("Forecast", "Quality-gated LONG candidates · ≥1% target", Icons.Default.Science),
     Settings("Settings", "Broker, ARM, holding budget and device controls", Icons.Default.Settings)
 }
 
@@ -454,14 +454,18 @@ private fun HoldingCard(p: PositionDto) {
             KeyValueRow("LTP", p.ltp?.let(::money) ?: "—")
             KeyValueRow("Unrealised", money(p.pnl), pnlColor(p.pnl))
             KeyValueRow(
-                "Trail arm",
-                p.targetPrice?.let { target ->
+                "Dynamic trail arm",
+                p.trailArmPct?.let { "+${String.format(Locale.US, "%.2f", it)}% net" } ?: "Learning"
+            )
+            p.targetPrice?.let { target ->
+                KeyValueRow(
+                    "Target / reference",
                     if (p.averagePrice > 0.0) {
                         val pct = (target / p.averagePrice - 1.0) * 100.0
                         "+${String.format(Locale.US, "%.2f", pct)}% · ${money(target)}"
                     } else money(target)
-                } ?: "Learning"
-            )
+                )
+            }
             if (p.trailArmed) {
                 KeyValueRow("High water", p.highWaterPrice?.let(::money) ?: "—")
                 KeyValueRow("Current trail stop", p.stopPrice?.let(::money) ?: "—")
@@ -487,29 +491,52 @@ private fun LongAveragesScreen(state: TraderUiState) {
         contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp, 14.dp, 16.dp, 32.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        item { SectionTitle("Multify LONG average", "Rolling 30 completed recommendation trading days using actual Multify exit returns, including losses.") }
+        item {
+            SectionTitle(
+                "Multify forecasted upside",
+                "Rolling 30 recommendation trading days using the maximum price reached from Multify entry until its Book Profit/close signal."
+            )
+        }
         item {
             MetricCard(
-                label = "Multify Avg LONG %",
+                label = "Multify MFE Avg Upside %",
                 value = String.format(Locale.US, "%.2f%%", learning.longAveragePct),
-                supporting = "${learning.rollingCalls} completed calls across ${learning.rollingTradingDays} recommendation trading days",
+                supporting = buildString {
+                    append("${learning.rollingCalls} MFE-observed calls across ${learning.rollingTradingDays} trading days")
+                    if (learning.mfeBackfillPendingCalls > 0) append(" · ${learning.mfeBackfillPendingCalls} historical calls backfilling")
+                },
                 modifier = Modifier.fillMaxWidth(),
                 accent = MaterialTheme.colorScheme.primary
             )
         }
-        item { SectionTitle("Forecasted stocks", "A separate rolling 30-trading-day LONG average from completed forecast outcomes.") }
         item {
-            MetricCard(
-                label = "Forecasted Stocks Avg LONG %",
-                value = if (forecastLearning.completedForecasts > 0)
-                    String.format(Locale.US, "%.2f%%", forecastLearning.longAveragePct)
-                else "Learning",
-                supporting = if (forecastLearning.completedForecasts > 0)
-                    "${forecastLearning.completedForecasts} completed forecasts across ${forecastLearning.rollingTradingDays} forecast trading days"
-                else "No completed LONG forecast outcomes yet",
-                modifier = Modifier.fillMaxWidth(),
-                accent = MaterialTheme.colorScheme.primary
+            SectionTitle(
+                "Forecast engine",
+                "Targets have a hard 1.00% minimum and can rise with Multify MFE or stronger prior full-session forecast MFE."
             )
+        }
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                MetricCard(
+                    label = "Today's Avg Target",
+                    value = if (forecastLearning.todayTargetAveragePct > 0.0)
+                        String.format(Locale.US, "%.2f%%", forecastLearning.todayTargetAveragePct)
+                    else "≥1.00%",
+                    supporting = "hard floor ${String.format(Locale.US, "%.2f%%", forecastLearning.targetFloorPct)}",
+                    modifier = Modifier.weight(1f),
+                    accent = MaterialTheme.colorScheme.primary
+                )
+                MetricCard(
+                    label = "Observed Forecast MFE",
+                    value = if (forecastLearning.completedForecasts > 0)
+                        String.format(Locale.US, "%.2f%%", forecastLearning.longAveragePct)
+                    else "Learning",
+                    supporting = if (forecastLearning.completedForecasts > 0)
+                        "${forecastLearning.completedForecasts} completed forecasts"
+                    else "full-session tracking",
+                    modifier = Modifier.weight(1f)
+                )
+            }
         }
     }
 }
@@ -535,18 +562,16 @@ private fun ForecastScreen(
         item {
             SectionTitle(
                 "LONG holding forecast",
-                "Up to five candidates are released progressively during the NSE session. Recommendations are LONG-only and BUY as CNC holdings."
+                "Up to five candidates may be released, but only strict high-quality TREND setups qualify. Weak calls are never forced to fill a slot."
             )
         }
         item {
             MetricCard(
-                label = "Forecasted Stocks Avg LONG %",
-                value = if (forecastLearning.completedForecasts > 0)
-                    String.format(Locale.US, "%.2f%%", forecastLearning.longAveragePct)
-                else "Learning",
-                supporting = if (forecastLearning.completedForecasts > 0)
-                    "rolling 30 forecast trading days · ${forecastLearning.completedForecasts} completed"
-                else "Multify realized LONG mean bootstraps the first forecast target",
+                label = "Today's Forecast Avg Upside",
+                value = if (forecastLearning.todayTargetAveragePct > 0.0)
+                    String.format(Locale.US, "%.2f%%", forecastLearning.todayTargetAveragePct)
+                else "≥1.00%",
+                supporting = "quality-gated TREND only · Multify MFE benchmark ${String.format(Locale.US, "%.2f%%", learning.longAveragePct)} · rolling forecast MFE ${String.format(Locale.US, "%.2f%%", forecastLearning.longAveragePct)}",
                 modifier = Modifier.fillMaxWidth(),
                 accent = MaterialTheme.colorScheme.primary
             )
@@ -566,7 +591,7 @@ private fun ForecastScreen(
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
                     Text("Multify DNA", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                     Text(
-                        "The LONG scanner prioritises tradeability, recurring Multify symbols, positive historical examples, price/volume structure, VWAP, EMA, RVOL, opening-range behaviour and current breadth. It does not assume the proprietary Multify algorithm is known.",
+                        "The LONG scanner reverse-engineers observable Multify behaviour using recurring symbols plus price/volume structure, VWAP, EMA, RVOL, opening-range behaviour and breadth. Final calls are restricted to TREND setups that also have enough measured volatility capacity for the adaptive ≥1% target.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
