@@ -46,6 +46,38 @@ class TradingEngineService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startEngineLoop()
+        if (intent?.action == ACTION_SAMPLE_SIGNAL) {
+            val eventId = intent.getLongExtra(EXTRA_EVENT_ID, -1L)
+            val symbol = intent.getStringExtra(EXTRA_SYMBOL).orEmpty()
+            if (eventId > 0L) {
+                scope.launch {
+                    runCatching { repository.sampleSignal(eventId) }
+                        .onFailure {
+                            if (it !is CancellationException) {
+                                auditLogger.log("MULTIFY_RESEARCH", "POST_SIGNAL_SAMPLE_ERROR", mapOf(
+                                    "event_id" to eventId,
+                                    "symbol" to symbol,
+                                    "message" to (it.message ?: it.javaClass.simpleName)
+                                ))
+                            }
+                        }
+                }
+            }
+            if (eventId > 0L && symbol.isNotBlank()) {
+                scope.launch {
+                    runCatching { repository.captureMultifyResearchSnapshot(eventId, symbol) }
+                        .onFailure {
+                            if (it !is CancellationException) {
+                                auditLogger.log("MULTIFY_RESEARCH", "FEATURE_CAPTURE_ERROR", mapOf(
+                                    "event_id" to eventId,
+                                    "symbol" to symbol,
+                                    "message" to (it.message ?: it.javaClass.simpleName)
+                                ))
+                            }
+                        }
+                }
+            }
+        }
         return START_STICKY
     }
 
@@ -195,9 +227,21 @@ class TradingEngineService : Service() {
         private const val FORECAST_LOOP_INTERVAL_MS = 5_000L
         private const val IDLE_LOOP_INTERVAL_MS = 10_000L
         private const val ERROR_BACKOFF_MS = 10_000L
+        private const val ACTION_SAMPLE_SIGNAL = "com.multify.traderpro.action.SAMPLE_SIGNAL"
+        private const val EXTRA_EVENT_ID = "event_id"
+        private const val EXTRA_SYMBOL = "symbol"
 
         fun start(context: Context): Boolean = runCatching {
             val intent = Intent(context, TradingEngineService::class.java)
+            ContextCompat.startForegroundService(context, intent)
+            true
+        }.getOrDefault(false)
+
+        fun sampleSignal(context: Context, eventId: Long, symbol: String?): Boolean = runCatching {
+            val intent = Intent(context, TradingEngineService::class.java)
+                .setAction(ACTION_SAMPLE_SIGNAL)
+                .putExtra(EXTRA_EVENT_ID, eventId)
+                .putExtra(EXTRA_SYMBOL, symbol.orEmpty())
             ContextCompat.startForegroundService(context, intent)
             true
         }.getOrDefault(false)
