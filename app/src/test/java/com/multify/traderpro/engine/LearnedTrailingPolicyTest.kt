@@ -6,16 +6,16 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class LearnedTrailingPolicyTest {
-    @Test fun realizedAverageIsTheLongArmThreshold() {
-        assertEquals(0.33, LearnedTrailingPolicy.thresholdPct(0.33, 100.0, 1.0), 0.0001)
-        assertFalse(LearnedTrailingPolicy.shouldArm(100.0, 100.32, 0.33))
-        assertTrue(LearnedTrailingPolicy.shouldArm(100.0, 100.33, 0.33))
+    @Test fun multifyMfeAverageUsesPointFivePercentMinimum() {
+        assertEquals(0.50, LearnedTrailingPolicy.dynamicArmPct(0.33), 0.0001)
+        assertEquals(0.82, LearnedTrailingPolicy.dynamicArmPct(0.82), 0.0001)
+        assertEquals(0.50, LearnedTrailingPolicy.thresholdPct(0.33, 100.0, 1.0), 0.0001)
     }
 
     @Test fun quarterRupeeHighWaterStepControlsContinuousRatchets() {
-        assertTrue(LearnedTrailingPolicy.shouldRatchet(false, 0.0, 100.33))
-        assertFalse(LearnedTrailingPolicy.shouldRatchet(true, 100.33, 100.57))
-        assertTrue(LearnedTrailingPolicy.shouldRatchet(true, 100.33, 100.58))
+        assertTrue(LearnedTrailingPolicy.shouldRatchet(false, 0.0, 100.50))
+        assertFalse(LearnedTrailingPolicy.shouldRatchet(true, 100.50, 100.74))
+        assertTrue(LearnedTrailingPolicy.shouldRatchet(true, 100.50, 100.75))
     }
 
     @Test fun adaptiveDistanceUsesLargestProtectionDistance() {
@@ -49,32 +49,33 @@ class LearnedTrailingPolicyTest {
         assertTrue(LearnedTrailingPolicy.netBreakEvenFloor(100.0) > 100.12)
     }
 
-    @Test fun autonomousProfitGateIsOnePercentOfActualInvestedAmount() {
+    @Test fun dynamicGateUsesRequestedMultifyMfePercentOfInvestedAmount() {
         val entry = 1859.63
         val qty = 26
         val invested = entry * qty
-        assertEquals(invested * 0.01, LearnedTrailingPolicy.minimumNetProfitRupees(entry, qty), 0.0001)
+        assertEquals(invested * 0.005, LearnedTrailingPolicy.minimumNetProfitRupees(entry, qty, 0.50), 0.0001)
+        assertEquals(invested * 0.012, LearnedTrailingPolicy.minimumNetProfitRupees(entry, qty, 1.20), 0.0001)
     }
 
-    @Test fun tatvaTinyGainDoesNotReachAutonomousProfitGate() {
+    @Test fun tatvaOldTinyGainStillDoesNotReachHalfPercentNetGate() {
         val entry = 1859.63
         val qty = 26
-        assertFalse(LearnedTrailingPolicy.profitGateReached(entry, 1869.90, qty))
-        assertFalse(LearnedTrailingPolicy.profitGateReached(entry, 1861.71, qty))
+        assertFalse(LearnedTrailingPolicy.profitGateReached(entry, 1869.90, qty, 0.50))
+        assertFalse(LearnedTrailingPolicy.profitGateReached(entry, 1861.71, qty, 0.50))
     }
 
-    @Test fun minimumProfitExitPriceCoversOnePercentNetAfterEstimatedCosts() {
+    @Test fun minimumProfitExitPriceCoversDynamicNetThresholdAfterEstimatedCosts() {
         val entry = 1859.63
         val qty = 26
-        val floor = LearnedTrailingPolicy.minimumExitPriceForNetProfitPct(entry)
-        val minimum = LearnedTrailingPolicy.minimumNetProfitRupees(entry, qty)
+        val floor = LearnedTrailingPolicy.minimumExitPriceForNetProfitPct(entry, 0.75)
+        val minimum = LearnedTrailingPolicy.minimumNetProfitRupees(entry, qty, 0.75)
         assertTrue(LearnedTrailingPolicy.estimatedNetProfit(entry, floor, qty) + 0.01 >= minimum)
-        assertTrue(floor > entry * 1.01)
+        assertTrue(floor > entry * 1.0075)
     }
 
-    @Test fun ratchetCanBeFlooredAtOnePercentNetProfitPrice() {
+    @Test fun ratchetCanBeFlooredAtDynamicMultifyMfePrice() {
         val entry = 100.0
-        val floor = LearnedTrailingPolicy.minimumExitPriceForNetProfitPct(entry)
+        val floor = LearnedTrailingPolicy.minimumExitPriceForNetProfitPct(entry, 0.80)
         val stop = LearnedTrailingPolicy.ratchetStop(
             entryPrice = entry,
             highWaterPrice = 103.0,
