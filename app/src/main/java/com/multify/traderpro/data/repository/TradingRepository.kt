@@ -888,7 +888,7 @@ class TradingRepository @Inject constructor(
         val recentDates = calls.map { it.callDate }.distinct().sortedDescending().take(30).toSet()
         val rolling = calls.filter { it.callDate in recentDates }
         val frequency = rolling.groupingBy { it.symbol }.eachCount()
-        val recentSymbols = frequency.entries.sortedByDescending { it.value }.take(14).map { it.key }
+        val recentSymbols = frequency.entries.sortedByDescending { it.value }.take(20).map { it.key }
         val dnaSymbols = MultifyReverseEngineering.positiveCases.map { it.symbol }
         val master = nseSymbols.symbols()
         val slot = (now.hour * 60 + now.minute) / 30
@@ -1977,7 +1977,7 @@ class TradingRepository @Inject constructor(
         private const val MANUAL_SOURCE = "com.multify.traderpro.manual"
         private const val FORECAST_SCAN_INTERVAL_MS = 15L * 60L * 1000L
         private const val FORECAST_OUTCOME_INTERVAL_MS = 60_000L
-        private const val FORECAST_SYMBOL_PACING_MS = 75L
+        private const val FORECAST_SYMBOL_PACING_MS = 150L
         private const val RESEARCH_CAPTURE_TOP_N = 48
         private const val RESEARCH_BACKFILL_SYMBOL_PACING_MS = 300L
         private const val RESEARCH_BACKFILL_SYMBOL_BATCH = 10
@@ -1987,12 +1987,12 @@ class TradingRepository @Inject constructor(
         private const val MFE_BACKFILL_BATCH_SIZE = 4
         private const val MFE_AFTER_HOURS_BACKFILL_BATCH_SIZE = 16
         private const val HOLDING_FAILSAFE_STOP_PCT = 0.12
-        private const val ARM_HOT_REFRESH_MS = 30_000L
+        private const val ARM_HOT_REFRESH_MS = 60_000L
         private const val ARM_HOT_AUDIT_INTERVAL_MS = 15L * 60L * 1000L
         private const val ARM_HOT_STATE_MAX_AGE_MS = 120_000L
         private const val ONE_MINUTE_ATR_CACHE_MS = 60_000L
         private const val EXECUTION_SAMPLE_LIMIT = 30
-        private const val BROKER_INVENTORY_REFRESH_MS = 5_000L
+        private const val BROKER_INVENTORY_REFRESH_MS = 30_000L
         private const val CLOSED_SESSION_RECONCILE_MS = 60_000L
         private const val MULTIFY_PACKAGE = "com.multyfi.invest"
         private const val UPLOADED_THREE_MONTH_REALIZED_PCT = 0.49019417475728155
