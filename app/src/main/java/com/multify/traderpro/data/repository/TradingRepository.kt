@@ -301,13 +301,23 @@ class TradingRepository @Inject constructor(
         if (call.buyAtMs <= 0L || closeAtMs <= call.buyAtMs || call.entryPrice <= 0.0) return null
         val start = Instant.ofEpochMilli(call.buyAtMs).atZone(INDIA).toLocalDateTime().format(HIST_FORMAT)
         val end = Instant.ofEpochMilli(closeAtMs).atZone(INDIA).toLocalDateTime().format(HIST_FORMAT)
-        val historical = apiFactory.groww.historicalCandles(
-            bearer(token),
-            growwSymbol = "NSE-${call.symbol}",
-            startTime = start,
-            endTime = end,
-            candleInterval = "1minute"
-        ).requirePayload("Multify MFE candles ${call.symbol}")
+        val historical = runCatching {
+            apiFactory.groww.historicalCandles(
+                bearer(token),
+                growwSymbol = "NSE-${call.symbol}",
+                startTime = start,
+                endTime = end,
+                candleInterval = "1minute"
+            ).requirePayload("Multify 1-minute MFE candles ${call.symbol}")
+        }.getOrElse {
+            apiFactory.groww.historicalCandles(
+                bearer(token),
+                growwSymbol = "NSE-${call.symbol}",
+                startTime = start,
+                endTime = end,
+                candleInterval = "5minute"
+            ).requirePayload("Multify 5-minute MFE candles ${call.symbol}")
+        }
         preferences.recordMarketData()
         val candleHigh = historical.candles.mapNotNull {
             runCatching { it[2].asDouble }.getOrNull()?.takeIf { px -> px.isFinite() && px > 0.0 }
@@ -891,6 +901,7 @@ class TradingRepository @Inject constructor(
         var eligibleCount = 0
         val ranked = evaluated.mapNotNull { row ->
             if (row.first in have) return@mapNotNull null
+            if (marketRegime == "BREADTH_WEAK") return@mapNotNull null
             val quality = ForecastQualityPolicy.evaluate(row.second, targetPct)
             if (!quality.eligible) return@mapNotNull null
             eligibleCount++
