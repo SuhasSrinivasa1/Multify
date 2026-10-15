@@ -1924,6 +1924,78 @@ class TradingRepository @Inject constructor(
         error("Groww order $id was not confirmed filled; no duplicate retry was attempted")
     }
 
+    private data class Snapshot(
+        val summary: DaySummaryDto,
+        val positions: List<PositionDto>,
+        val recentDecisions: List<RecentDecisionDto>
+    )
+
+    private suspend fun executionStats(): ExecutionStatsDto {
+        fun aggregate(rows: List<ExecutionSampleEntity>): ExecutionAverageDto {
+            val dispatchRows = rows.filter { it.appDispatchMicros > 0L }
+            return ExecutionAverageDto(
+                averageFillMs = ExecutionTelemetryMath.averageMillis(rows.map { it.totalExecutionMs }),
+                averageAppDispatchMs = ExecutionTelemetryMath.averageDispatchMillis(rows.map { it.appDispatchMicros }),
+                sampleCount = rows.size,
+                dispatchSampleCount = dispatchRows.size
+            )
+        }
+        return ExecutionStatsDto(
+            buyLong = aggregate(managedDao.recentExecutionSamples("BUY", EXECUTION_SAMPLE_LIMIT)),
+            sellLong = aggregate(managedDao.recentExecutionSamples("SELL", EXECUTION_SAMPLE_LIMIT))
+        )
+    }
+
+    private suspend fun managedSnapshot(token: String): Snapshot {
+        val open = managedDao.openPositions().filter { it.side == "LONG" }
+        val positions = open.map { p ->
+            val ltp = runCatching {
+                apiFactory.groww.quote(bearer(token), tradingSymbol = p.symbol)
+                    .requirePayload("Quote ${p.symbol}").lastPrice
+            }.getOrNull() ?: p.lastPrice
+            val pnl = (ltp - p.entryPrice) * p.quantity
+            PositionDto(
+                symbol = p.symbol,
+                quantity = p.quantity,
+                averagePrice = p.entryPrice,
+                ltp = ltp,
+                pnl = pnl,
+                stopPrice = p.stopPrice,
+                targetPrice = p.targetPrice,
+                highWaterPrice = p.maxFavourablePrice,
+                trailingLastRatchetPrice = p.trailingLastRatchetPrice.takeIf { it > 0.0 },
+                trailDistance = if (LearnedTrailingPolicy.isArmed(p.stopPrice, p.entryPrice) && p.stopPrice != null)
+                    (p.maxFavourablePrice - p.stopPrice).coerceAtLeast(0.0) else null,
+                trailArmPct = p.trailingArmPct.takeIf { it.isFinite() && it > 0.0 },
+                trailArmed = LearnedTrailingPolicy.isArmed(p.stopPrice, p.entryPrice),
+                strategy = p.strategy,
+                product = "CNC"
+            )
+        }
+        val recent = managedDao.tradesSince(startOfIndiaDayMs())
+            .filter { it.side == "LONG" }
+            .take(6)
+            .map { t ->
+                RecentDecisionDto(
+                    formatEventTime(t.closedAtMs),
+                    t.symbol,
+                    "LONG_CLOSED",
+                    t.exitReason,
+                    t.strategy,
+                    t.quantity
+                )
+            }
+        return Snapshot(
+            summary = DaySummaryDto(
+                unrealisedPnl = positions.sumOf { it.pnl },
+                grossExposure = positions.sumOf { it.quantity * (it.ltp ?: it.averagePrice) },
+                openPositions = positions.size
+            ),
+            positions = positions,
+            recentDecisions = recent
+        )
+    }
+
     suspend fun sampleSignal(eventId: Long) {
         val event = dao.byId(eventId) ?: return
         val symbol = event.symbol ?: return
