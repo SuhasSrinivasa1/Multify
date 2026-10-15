@@ -1,7 +1,7 @@
 {
-  "run_id": "38515713114",
-  "commit_sha": "5b7b30530fb29bd69408d6df5c0c5ed8f0dd6a9e",
-  "artifact_name": "Multify-TraderPro-v6.7.0-verified",
-  "release_tag": "v6.7.0-profit-gated-trailing",
+  "run_id": "38672527758",
+  "commit_sha": "8bcc6b9f1f4f0417b8c70973708f6b1b3e881316",
+  "artifact_name": "Multify-TraderPro-v6.8.0-verified",
+  "release_tag": "v6.8.0-final-adaptive-forecast",
   "job_status": "success"
 }
