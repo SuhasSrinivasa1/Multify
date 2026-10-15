@@ -94,7 +94,7 @@ import java.util.Locale
 private enum class Destination(val label: String, val subtitle: String, val icon: ImageVector) {
     Execution("Execution", "ARM status and app-owned CNC holdings", Icons.Default.Dashboard),
     Averages("Averages", "30-day LONG averages", Icons.Default.Analytics),
-    Forecast("Forecast", "Quality-gated LONG candidates · ≥1% target", Icons.Default.Science),
+    Forecast("Forecast", "Production + analyst LONG candidates · ≥1% target", Icons.Default.Science),
     Settings("Settings", "Broker, ARM, holding budget and device controls", Icons.Default.Settings)
 }
 
@@ -346,7 +346,8 @@ private fun ExecutionScreen(
                         KeyValueRow("ARM", if (dashboard.armed) "ON" else "OFF")
                         KeyValueRow("DDPI", if (state.settings.brokerDdpiEnabled) "Enabled" else "Required")
                         KeyValueRow("Static IP", if (state.settings.staticIpMatched) "Verified" else "Not verified")
-                        KeyValueRow("Listener", dashboard.health.listener)
+                        KeyValueRow("Foreground engine", dashboard.health.foregroundService)
+                        KeyValueRow("Notification listener", dashboard.health.listener)
                         KeyValueRow("Broker", dashboard.health.broker)
                         KeyValueRow(
                             "App order dispatch",
@@ -562,7 +563,7 @@ private fun ForecastScreen(
         item {
             SectionTitle(
                 "LONG holding forecast",
-                "Up to five candidates may be released, but only strict high-quality TREND setups qualify. Weak calls are never forced to fill a slot."
+                "PRIMARY = production-qualified and buyable. SECONDARY = analyst observation only. If no setup qualifies, the best RESEARCH candidate stays visible so the engine never goes blind."
             )
         }
         item {
@@ -571,7 +572,7 @@ private fun ForecastScreen(
                 value = if (forecastLearning.todayTargetAveragePct > 0.0)
                     String.format(Locale.US, "%.2f%%", forecastLearning.todayTargetAveragePct)
                 else "≥1.00%",
-                supporting = "quality-gated TREND only · Multify MFE benchmark ${String.format(Locale.US, "%.2f%%", learning.longAveragePct)} · rolling forecast MFE ${String.format(Locale.US, "%.2f%%", forecastLearning.longAveragePct)}",
+                supporting = "hard ≥1% target · Multify MFE benchmark ${String.format(Locale.US, "%.2f%%", learning.longAveragePct)} · reverse-engineering sessions ${forecastLearning.researchSessionsCaptured}/${forecastLearning.researchSessionGoal}",
                 modifier = Modifier.fillMaxWidth(),
                 accent = MaterialTheme.colorScheme.primary
             )
@@ -591,7 +592,7 @@ private fun ForecastScreen(
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
                     Text("Multify DNA", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                     Text(
-                        "The LONG scanner reverse-engineers observable Multify behaviour using recurring symbols plus price/volume structure, VWAP, EMA, RVOL, opening-range behaviour and breadth. Final calls are restricted to TREND setups that also have enough measured volatility capacity for the adaptive ≥1% target.",
+                        "The scanner records every ranked candidate's technical state, strategy votes, rejection reasons and later MFE/MAE for five trading sessions. PRIMARY execution stays conservative; SECONDARY and RESEARCH candidates collect evidence so thresholds can be calibrated from outcomes instead of guesswork.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -627,16 +628,16 @@ private fun ForecastTable(rows: List<ForecastDto>, onBuy: (String) -> Unit, arme
     ) {
         Column(Modifier.fillMaxWidth().padding(12.dp)) {
             Row(Modifier.fillMaxWidth().padding(bottom = 7.dp)) {
-                Text("#", Modifier.weight(.3f), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                Text("#", Modifier.weight(.28f), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
                 Text("Stock", Modifier.weight(1f), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
-                Text("Entry", Modifier.weight(.85f), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
-                Text("Target", Modifier.weight(.85f), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
-                Text("State", Modifier.weight(.8f), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                Text("Entry", Modifier.weight(.82f), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                Text("Target", Modifier.weight(.82f), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                Text("Tier", Modifier.weight(.85f), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
             }
             HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha=.18f))
             if (rows.isEmpty()) {
                 Text(
-                    "Waiting for the next LONG scan window.",
+                    "Scanner is active. No candidate has been published in the current release window yet.",
                     modifier = Modifier.padding(vertical = 16.dp),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -644,24 +645,43 @@ private fun ForecastTable(rows: List<ForecastDto>, onBuy: (String) -> Unit, arme
             } else {
                 rows.forEachIndexed { index, f ->
                     Row(Modifier.fillMaxWidth().padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text(f.rank.toString(), Modifier.weight(.3f), style = MaterialTheme.typography.bodySmall)
+                        Text(f.rank.toString(), Modifier.weight(.28f), style = MaterialTheme.typography.bodySmall)
                         Text(f.symbol, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
-                        Text(money(f.entryPrice), Modifier.weight(.85f), style = MaterialTheme.typography.bodySmall)
-                        Text(money(f.targetPrice), Modifier.weight(.85f), style = MaterialTheme.typography.bodySmall)
-                        Text(f.status.replace('_', ' '), Modifier.weight(.8f), style = MaterialTheme.typography.labelSmall)
+                        Text(money(f.entryPrice), Modifier.weight(.82f), style = MaterialTheme.typography.bodySmall)
+                        Text(money(f.targetPrice), Modifier.weight(.82f), style = MaterialTheme.typography.bodySmall)
+                        Text(f.qualityTier, Modifier.weight(.85f), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold)
                     }
                     Text(
-                        String.format(Locale.US, "%.0f%% confidence · %s · %s", f.confidence * 100.0, f.strategy, f.marketRegime),
+                        String.format(
+                            Locale.US,
+                            "%.0f%% confidence · score %.2f · %s · %s",
+                            f.confidence * 100.0, f.score, f.strategy, f.marketRegime
+                        ),
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis
                     )
+                    Text(
+                        f.reason,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis
+                    )
                     Button(
                         onClick = { onBuy(f.symbol) },
-                        enabled = armed && f.status == "ACTIVE",
+                        enabled = armed && f.status == "ACTIVE" && f.executionEligible,
                         modifier = Modifier.fillMaxWidth().padding(top = 7.dp)
-                    ) { Text(if (armed) "BUY ${f.symbol} · CNC" else "ARM to BUY ${f.symbol}") }
+                    ) {
+                        Text(
+                            when {
+                                !f.executionEligible -> f.qualityTier + " · observation only"
+                                !armed -> "ARM to BUY " + f.symbol
+                                else -> "BUY " + f.symbol + " · CNC"
+                            }
+                        )
+                    }
                     if (index != rows.lastIndex) HorizontalDivider(
                         modifier = Modifier.padding(top = 10.dp),
                         color = MaterialTheme.colorScheme.outline.copy(alpha=.10f)
