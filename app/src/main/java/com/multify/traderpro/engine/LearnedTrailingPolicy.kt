@@ -4,7 +4,7 @@ import kotlin.math.max
 import kotlin.math.min
 
 object LearnedTrailingPolicy {
-    const val AUTONOMOUS_NET_PROFIT_PCT_OF_INVESTED = 1.0
+    const val MIN_DYNAMIC_TRAIL_ARM_PCT = 0.50
 
     private const val FALLBACK_ARM_ATR = 0.60
     private const val MIN_TRAIL_RUPEES = 1.0
@@ -15,11 +15,16 @@ object LearnedTrailingPolicy {
     private const val ESTIMATED_COST_RATE_PER_SIDE = 0.0006
     private const val PROFIT_BUFFER_RATE = 0.0005
 
+    fun dynamicArmPct(multifyMfeAveragePct: Double?): Double {
+        val learned = multifyMfeAveragePct?.takeIf { it.isFinite() && it > 0.0 } ?: 0.0
+        return max(MIN_DYNAMIC_TRAIL_ARM_PCT, learned)
+    }
+
     fun thresholdPct(learnedPct: Double?, entryPrice: Double, atr: Double): Double {
         val learned = learnedPct?.takeIf { it.isFinite() && it > 0.0 }
-        if (learned != null) return learned
-        if (entryPrice <= 0.0 || atr <= 0.0) return 0.40
-        return max(0.40, FALLBACK_ARM_ATR * atr / entryPrice * 100.0)
+        if (learned != null) return dynamicArmPct(learned)
+        if (entryPrice <= 0.0 || atr <= 0.0) return MIN_DYNAMIC_TRAIL_ARM_PCT
+        return max(MIN_DYNAMIC_TRAIL_ARM_PCT, FALLBACK_ARM_ATR * atr / entryPrice * 100.0)
     }
 
     fun shouldArm(entryPrice: Double, ltp: Double, thresholdPct: Double): Boolean {
@@ -59,7 +64,7 @@ object LearnedTrailingPolicy {
     fun minimumNetProfitRupees(
         entryPrice: Double,
         quantity: Int,
-        pctOfInvested: Double = AUTONOMOUS_NET_PROFIT_PCT_OF_INVESTED
+        pctOfInvested: Double = MIN_DYNAMIC_TRAIL_ARM_PCT
     ): Double = investedAmount(entryPrice, quantity) * max(0.0, pctOfInvested) / 100.0
 
     fun estimatedNetProfit(entryPrice: Double, exitPrice: Double, quantity: Int): Double {
@@ -71,7 +76,7 @@ object LearnedTrailingPolicy {
 
     fun minimumExitPriceForNetProfitPct(
         entryPrice: Double,
-        pctOfInvested: Double = AUTONOMOUS_NET_PROFIT_PCT_OF_INVESTED
+        pctOfInvested: Double = MIN_DYNAMIC_TRAIL_ARM_PCT
     ): Double {
         if (entryPrice <= 0.0) return entryPrice
         val pct = max(0.0, pctOfInvested) / 100.0
@@ -83,7 +88,7 @@ object LearnedTrailingPolicy {
         entryPrice: Double,
         highWaterPrice: Double,
         quantity: Int,
-        pctOfInvested: Double = AUTONOMOUS_NET_PROFIT_PCT_OF_INVESTED
+        pctOfInvested: Double = MIN_DYNAMIC_TRAIL_ARM_PCT
     ): Boolean {
         val minimum = minimumNetProfitRupees(entryPrice, quantity, pctOfInvested)
         return minimum > 0.0 &&
