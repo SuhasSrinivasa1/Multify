@@ -49,6 +49,7 @@ import com.multify.traderpro.domain.SignalType
 import com.multify.traderpro.engine.AdaptiveLearningMath
 import com.multify.traderpro.engine.CashAwareCncSizing
 import com.multify.traderpro.engine.ExecutionTelemetryMath
+import com.multify.traderpro.engine.ForecastQualityPolicy
 import com.multify.traderpro.engine.LearnedTrailingPolicy
 import com.multify.traderpro.engine.LocalStrategyEngine
 import com.multify.traderpro.engine.MultifyReverseEngineering
@@ -59,6 +60,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import retrofit2.HttpException
 import java.security.MessageDigest
+import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalTime
 import java.time.ZoneId
@@ -109,6 +111,7 @@ class TradingRepository @Inject constructor(
     private var brokerInventorySnapshot: BrokerInventorySnapshot? = null
     private var lastClosedSessionReconcileAtMs = 0L
     private var lastArmHotAuditAtMs = 0L
+    private var lastMfeBackfillAtMs = 0L
     private var lastArmHotAuditBalance = Double.NaN
     private var lastArmHotAuditArmed: Boolean? = null
     private val oneMinuteAtrCache = mutableMapOf<String, AtrCacheEntry>()
@@ -181,53 +184,57 @@ class TradingRepository @Inject constructor(
 
     suspend fun learningStats(): LearningStatsDto {
         ensureHistoricalSeed()
-        val completedCalls = learningDao.allCalls().filter {
-            it.action.equals("BUY", true) && (it.longRealizedPct != null || it.multifyExitPrice != null)
+        val mfeCalls = learningDao.allCalls().filter {
+            it.action.equals("BUY", true) && it.multifyMfePct != null
         }
-        val dates = completedCalls.mapNotNull { runCatching { LocalDate.parse(it.callDate) }.getOrNull() }
+        val dates = mfeCalls.mapNotNull { runCatching { LocalDate.parse(it.callDate) }.getOrNull() }
             .distinct().sortedDescending()
         val keepDates = dates.take(30).map { it.toString() }.toSet()
-        val rolling = completedCalls.filter { it.callDate in keepDates }
-
-        fun realizedPct(c: LearningCallEntity): Double? =
-            AdaptiveLearningMath.realizedReturnPct(c.longRealizedPct, c.entryPrice, c.multifyExitPrice)
-
-        val values = rolling.mapNotNull(::realizedPct).filter { it.isFinite() && abs(it) < 25.0 }
+        val rolling = mfeCalls.filter { it.callDate in keepDates }
+        val values = rolling.mapNotNull { it.multifyMfePct }
+            .filter { it.isFinite() && it >= 0.0 && it < 25.0 }
         val dated = rolling
             .sortedWith(compareBy<LearningCallEntity>({ it.callDate }, { it.sellAtMs ?: Long.MAX_VALUE }))
-            .mapNotNull(::realizedPct)
-            .filter { it.isFinite() && abs(it) < 25.0 }
-        val seedValues = completedCalls.filter { it.source == "SEED" }
-            .mapNotNull(::realizedPct)
-            .filter { it.isFinite() && abs(it) < 25.0 }
-        val seed = seedValues.takeIf { it.isNotEmpty() }?.average() ?: UPLOADED_THREE_MONTH_REALIZED_PCT
+            .mapNotNull { it.multifyMfePct }
+            .filter { it.isFinite() && it >= 0.0 && it < 25.0 }
+        val seedValues = mfeCalls.filter { it.source == "SEED" }
+            .mapNotNull { it.multifyMfePct }
+            .filter { it.isFinite() && it >= 0.0 && it < 25.0 }
+        val fallback = LearnedTrailingPolicy.MIN_DYNAMIC_TRAIL_ARM_PCT
+        val pending = learningDao.closedCallsMissingMfe(1000).size
 
         return LearningStatsDto(
             rollingTradingDays = keepDates.size,
             rollingCalls = values.size,
-            longAveragePct = AdaptiveLearningMath.rollingMean(values, DEFAULT_LONG_REALIZED_PCT),
-            longMedianPct = AdaptiveLearningMath.median(values, DEFAULT_LONG_REALIZED_PCT),
-            longTrimmedMeanPct = AdaptiveLearningMath.trimmedMean(values, DEFAULT_LONG_REALIZED_PCT),
-            longEwmaPct = AdaptiveLearningMath.ewma(dated, DEFAULT_LONG_REALIZED_PCT),
-            longP25Pct = AdaptiveLearningMath.quantile(values, .25, DEFAULT_LONG_REALIZED_PCT),
-            longP75Pct = AdaptiveLearningMath.quantile(values, .75, DEFAULT_LONG_REALIZED_PCT),
-            seededThreeMonthAveragePct = seed,
-            liveCompletedCalls = completedCalls.count { it.source == "LIVE" }
+            longAveragePct = AdaptiveLearningMath.rollingMean(values, fallback),
+            longMedianPct = AdaptiveLearningMath.median(values, fallback),
+            longTrimmedMeanPct = AdaptiveLearningMath.trimmedMean(values, fallback),
+            longEwmaPct = AdaptiveLearningMath.ewma(dated, fallback),
+            longP25Pct = AdaptiveLearningMath.quantile(values, .25, fallback),
+            longP75Pct = AdaptiveLearningMath.quantile(values, .75, fallback),
+            seededThreeMonthAveragePct = seedValues.takeIf { it.isNotEmpty() }?.average() ?: fallback,
+            liveCompletedCalls = mfeCalls.count { it.source == "LIVE" },
+            mfeBackfillPendingCalls = pending
         )
     }
 
     suspend fun forecastLearningStats(): ForecastLearningStatsDto {
-        val completed = learningDao.allLongForecasts().filter { it.status in setOf("TARGET_HIT", "MISSED") }
+        val all = learningDao.allLongForecasts()
+        val completed = all.filter { it.status in setOf("TARGET_HIT", "MISSED") }
         val dates = completed.mapNotNull { runCatching { LocalDate.parse(it.forecastDate) }.getOrNull() }
             .distinct().sortedDescending()
         val keepDates = dates.take(30).map { it.toString() }.toSet()
         val rolling = completed.filter { it.forecastDate in keepDates }
         val values = rolling.map { it.maxFavourablePct }
             .filter { it.isFinite() && it >= 0.0 && it < 25.0 }
+        val today = LocalDate.now(INDIA).toString()
+        val todayRows = all.filter { it.forecastDate == today }
         return ForecastLearningStatsDto(
             rollingTradingDays = keepDates.size,
             completedForecasts = rolling.size,
-            longAveragePct = AdaptiveLearningMath.rollingMean(values, 0.0)
+            longAveragePct = AdaptiveLearningMath.rollingMean(values, 0.0),
+            todayTargetAveragePct = todayRows.map { it.targetPct }.takeIf { it.isNotEmpty() }?.average() ?: 0.0,
+            targetFloorPct = ForecastQualityPolicy.MIN_TARGET_PCT
         )
     }
 
@@ -252,7 +259,8 @@ class TradingRepository @Inject constructor(
             learningDao.insertCall(
                 LearningCallEntity(
                     callDate = LocalDate.now(INDIA).toString(), symbol = symbol, source = "LIVE", action = "BUY",
-                    entryPrice = price, targetPrice = signal.target, targetPct = targetPct, buyEventId = eventId,
+                    entryPrice = price, targetPrice = signal.target, targetPct = targetPct,
+                    multifyMaxPrice = null, multifyMfePct = null, buyEventId = eventId,
                     buyAtMs = now, updatedAtMs = now
                 )
             )
@@ -271,21 +279,79 @@ class TradingRepository @Inject constructor(
         price: Double?,
         reportedReturnPct: Double?,
         eventAtMs: Long = System.currentTimeMillis()
-    ) {
-        val call = learningDao.latestLiveCallBefore(symbol, eventAtMs) ?: learningDao.latestLiveCall(symbol) ?: return
+    ): LearningCallEntity? {
+        val call = learningDao.latestLiveCallBefore(symbol, eventAtMs) ?: learningDao.latestLiveCall(symbol) ?: return null
         val reported = reportedReturnPct?.takeIf { it.isFinite() && abs(it) < 25.0 }
         val pct = reported ?: AdaptiveLearningMath.realizedReturnPct(null, call.entryPrice, price)
-        if (pct == null && price == null) return
-        learningDao.updateCall(
-            call.copy(
-                multifyExitPrice = price ?: call.multifyExitPrice,
-                longRealizedPct = pct ?: call.longRealizedPct,
-                sellEventId = eventId, sellAtMs = eventAtMs, updatedAtMs = System.currentTimeMillis()
-            )
+        if (pct == null && price == null) return null
+        val updated = call.copy(
+            multifyExitPrice = price ?: call.multifyExitPrice,
+            longRealizedPct = pct ?: call.longRealizedPct,
+            sellEventId = eventId, sellAtMs = eventAtMs, updatedAtMs = System.currentTimeMillis()
         )
+        learningDao.updateCall(updated)
         auditLogger.log("LEARNING", "MULTIFY_RETURN_RECORDED", mapOf(
             "symbol" to symbol, "reported_return_pct" to reported, "exit_price" to price, "event_id" to eventId
         ))
+        return updated
+    }
+
+    private suspend fun captureMultifyMfe(call: LearningCallEntity, token: String): LearningCallEntity? {
+        val closeAtMs = call.sellAtMs ?: return null
+        if (call.buyAtMs <= 0L || closeAtMs <= call.buyAtMs || call.entryPrice <= 0.0) return null
+        val start = Instant.ofEpochMilli(call.buyAtMs).atZone(INDIA).toLocalDateTime().format(HIST_FORMAT)
+        val end = Instant.ofEpochMilli(closeAtMs).atZone(INDIA).toLocalDateTime().format(HIST_FORMAT)
+        val historical = apiFactory.groww.historicalCandles(
+            bearer(token),
+            growwSymbol = "NSE-${call.symbol}",
+            startTime = start,
+            endTime = end,
+            candleInterval = "1minute"
+        ).requirePayload("Multify MFE candles ${call.symbol}")
+        preferences.recordMarketData()
+        val candleHigh = historical.candles.mapNotNull {
+            runCatching { it[2].asDouble }.getOrNull()?.takeIf { px -> px.isFinite() && px > 0.0 }
+        }.maxOrNull() ?: return null
+        val maxPrice = max(call.entryPrice, max(candleHigh, call.multifyExitPrice ?: call.entryPrice))
+        val mfePct = ((maxPrice / call.entryPrice) - 1.0) * 100.0
+        if (!mfePct.isFinite() || mfePct < 0.0 || mfePct >= 25.0) return null
+        val updated = call.copy(
+            multifyMaxPrice = max(call.multifyMaxPrice ?: call.entryPrice, maxPrice),
+            multifyMfePct = max(call.multifyMfePct ?: 0.0, mfePct),
+            updatedAtMs = System.currentTimeMillis()
+        )
+        learningDao.updateCall(updated)
+        auditLogger.log("LEARNING", "MULTIFY_MFE_RECORDED", mapOf(
+            "date" to call.callDate,
+            "symbol" to call.symbol,
+            "entry" to call.entryPrice,
+            "max_price" to updated.multifyMaxPrice,
+            "mfe_pct" to updated.multifyMfePct,
+            "buy_at_ms" to call.buyAtMs,
+            "sell_at_ms" to closeAtMs
+        ))
+        return updated
+    }
+
+    private suspend fun backfillRecentMultifyMfe(token: String, limit: Int, force: Boolean = false): Int {
+        val now = System.currentTimeMillis()
+        if (!force && now - lastMfeBackfillAtMs < MFE_BACKFILL_INTERVAL_MS) return 0
+        lastMfeBackfillAtMs = now
+        var repaired = 0
+        learningDao.closedCallsMissingMfe(limit.coerceIn(1, 20)).forEach { call ->
+            runCatching { captureMultifyMfe(call, token) }
+                .onSuccess { if (it != null) repaired++ }
+                .onFailure {
+                    auditLogger.log("LEARNING", "MULTIFY_MFE_BACKFILL_ERROR", mapOf(
+                        "symbol" to call.symbol, "date" to call.callDate,
+                        "message" to (it.message ?: it.javaClass.simpleName)
+                    ))
+                }
+        }
+        if (repaired > 0) {
+            auditLogger.log("LEARNING", "MULTIFY_MFE_BACKFILLED", mapOf("count" to repaired))
+        }
+        return repaired
     }
 
     private suspend fun ensurePgIlRecoveryBenchmark() {
@@ -490,6 +556,7 @@ class TradingRepository @Inject constructor(
             val cnc = (margin.equity?.cncBalanceAvailable ?: margin.clearCash).coerceAtLeast(0.0)
             armHotState = ArmHotState(token, settings, cnc, System.currentTimeMillis())
             ensureHistoricalSeed()
+            runCatching { backfillRecentMultifyMfe(token, MFE_BACKFILL_BATCH_SIZE) }
             val learning = learningStats()
             val forecastLearning = forecastLearningStats()
             val snapshot = managedSnapshot(token)
@@ -589,11 +656,12 @@ class TradingRepository @Inject constructor(
 
         // Recommendation learning is independent of Groww execution/reconciliation.
         // A manual broker exit or a failed SELL must not erase Multify's reported result.
+        var closedLearningCall: LearningCallEntity? = null
         when (parsed.type) {
             SignalType.TRADE_RELEASE -> recordLiveBuy(eventId, parsed)
             SignalType.BOOK_PROFIT -> if (!symbol.isNullOrBlank()) {
                 val eventAtMs = dao.byId(eventId)?.receivedAtMs ?: System.currentTimeMillis()
-                recordLiveExit(eventId, symbol, parsed.exitPrice, parsed.returnsPct, eventAtMs)
+                closedLearningCall = recordLiveExit(eventId, symbol, parsed.exitPrice, parsed.returnsPct, eventAtMs)
             }
             else -> Unit
         }
@@ -603,6 +671,10 @@ class TradingRepository @Inject constructor(
         if (token == null) {
             dao.updateForwarding(eventId, "CAPTURED", "AUTH_REQUIRED", "Signal and Multify learning stored. Authenticate Groww to enable ARM.", null)
             return
+        }
+        if (parsed.type == SignalType.BOOK_PROFIT && closedLearningCall != null) {
+            runCatching { captureMultifyMfe(closedLearningCall!!, token) }
+                .onFailure { auditLogger.log("LEARNING", "MULTIFY_MFE_LIVE_ERROR", mapOf("symbol" to (symbol ?: ""), "message" to (it.message ?: it.javaClass.simpleName))) }
         }
         val settings = hot?.settings ?: preferences.settings.first()
         when (parsed.type) {
