@@ -17,6 +17,11 @@ class NseSymbolSyncWorker @AssistedInject constructor(
     private val auditLogger: AuditLogger
 ) : CoroutineWorker(appContext, params) {
     override suspend fun doWork(): Result = runCatching {
+        val current = symbols.status()
+        if (current.count > 500 && !symbols.isStale()) {
+            auditLogger.log("NSE_MASTER", "SYNC_SKIPPED_FRESH", mapOf("count" to current.count, "updated_at_ms" to current.updatedAtMs))
+            return@runCatching Result.success()
+        }
         val status = symbols.refresh()
         auditLogger.log("NSE_MASTER", "SYNC_SUCCESS", mapOf("count" to status.count, "updated_at_ms" to status.updatedAtMs))
         Result.success()
