@@ -736,19 +736,21 @@ class TradingRepository @Inject constructor(
         val filled = order.filledQuantity?.takeIf { it > 0 } ?: qty
         val entry = order.averageFillPrice?.takeIf { it > 0.0 } ?: referencePrice
         val investedAmount = entry * filled
-        val minimumNetProfit = LearnedTrailingPolicy.minimumNetProfitRupees(entry, filled)
-        val minimumProfitExit = LearnedTrailingPolicy.minimumExitPriceForNetProfitPct(entry)
+        val multifyStats = learningStats()
+        val trailArmPct = LearnedTrailingPolicy.dynamicArmPct(multifyStats.longAveragePct)
+        val minimumNetProfit = LearnedTrailingPolicy.minimumNetProfitRupees(entry, filled, trailArmPct)
+        val minimumProfitExit = LearnedTrailingPolicy.minimumExitPriceForNetProfitPct(entry, trailArmPct)
         managedDao.insertPosition(
             ManagedPositionEntity(
                 engine = ENGINE_MULTIFY_HOLDING, symbol = symbol, product = "CNC", side = "LONG", quantity = filled,
                 entryPrice = entry, stopPrice = entry * (1.0 - HOLDING_FAILSAFE_STOP_PCT),
                 targetPrice = minimumProfitExit,
-                strategy = "Multify ARM holding · autonomous trail after 1.00% net of invested capital",
+                strategy = "Multify ARM holding · dynamic Multify-MFE trail",
                 regime = "HOLDING_LONG", confidence = 1.0, sourceEventId = eventId,
                 openOrderId = order.growwOrderId, openReferenceId = ref, openedAtMs = System.currentTimeMillis(),
                 lastPrice = entry, maxFavourablePrice = entry, maxAdversePrice = entry, lastEvaluatedAtMs = System.currentTimeMillis(),
                 anchorPrice = entry, capitalDeployed = investedAmount, campaignBudget = capital,
-                trailingArmPct = LearnedTrailingPolicy.AUTONOMOUS_NET_PROFIT_PCT_OF_INVESTED, trailingLastRatchetPrice = 0.0
+                trailingArmPct = trailArmPct, trailingLastRatchetPrice = 0.0
             )
         )
         armHotState = hot?.copy(
@@ -757,13 +759,14 @@ class TradingRepository @Inject constructor(
         )
         dao.updateForwarding(
             eventId, "DELIVERED", "CNC_LONG_BOUGHT",
-            "ARM bought $filled $symbol into holdings @ ₹${fmt(entry)}. Autonomous trailing starts only after estimated net profit reaches 1.00% of invested capital (₹${fmt(minimumNetProfit)}).",
+            "ARM bought $filled $symbol into holdings @ ₹${fmt(entry)}. Dynamic trailing arms at +${fmt(trailArmPct)}% estimated net (Multify MFE average, minimum 0.50%).",
             null
         )
         auditLogger.log("HOLDING", "MULTIFY_LONG_OPENED", mapOf(
             "symbol" to symbol, "qty" to filled, "entry" to entry,
             "invested_amount" to investedAmount,
-            "autonomous_profit_gate_pct" to LearnedTrailingPolicy.AUTONOMOUS_NET_PROFIT_PCT_OF_INVESTED,
+            "multify_mfe_avg_pct" to multifyStats.longAveragePct,
+            "trail_arm_pct" to trailArmPct,
             "minimum_net_profit" to minimumNetProfit,
             "minimum_profit_exit_price" to minimumProfitExit
         ))
@@ -1109,6 +1112,9 @@ class TradingRepository @Inject constructor(
 
     suspend fun runAfterHoursResearch(force: Boolean = false): ResearchDto {
         ensureHistoricalSeed()
+        ensureToken()?.let { token ->
+            runCatching { backfillRecentMultifyMfe(token, MFE_AFTER_HOURS_BACKFILL_BATCH_SIZE, force = true) }
+        }
         val today = LocalDate.now(INDIA).toString()
         val existing = learningDao.latestResearchReport()
         if (!force && existing?.reportDate == today) return ResearchDto(existing.reportDate, existing.title, existing.summary)
@@ -1118,25 +1124,31 @@ class TradingRepository @Inject constructor(
         val wins = forecasts.count { it.status == "TARGET_HIT" }
         val matched = forecasts.count { it.multifyMatched }
         val frozen = learningDao.allForecastChampions().count { it.frozen }
+        val avgTarget = forecasts.map { it.targetPct }.takeIf { it.isNotEmpty() }?.average() ?: 0.0
         val report = buildString {
-            append("Rolling 30-trading-day Multify realized LONG return: ${fmt(stats.longAveragePct)}% (median ${fmt(stats.longMedianPct)}%). ")
+            append("Rolling 30-trading-day Multify MFE average: ${fmt(stats.longAveragePct)}% (median ${fmt(stats.longMedianPct)}%) from ${stats.rollingCalls} MFE-observed calls. ")
+            append("Pending historical MFE backfill: ${stats.mfeBackfillPendingCalls}. ")
             append(
                 if (forecastLearning.completedForecasts > 0)
-                    "Rolling 30-trading-day forecast LONG average: ${fmt(forecastLearning.longAveragePct)}% across ${forecastLearning.completedForecasts} completed forecasts. "
+                    "Rolling forecast full-session MFE average: ${fmt(forecastLearning.longAveragePct)}% across ${forecastLearning.completedForecasts} completed forecasts. "
                 else
-                    "Rolling forecast LONG average is still learning; Multify LONG mean is the bootstrap target. "
+                    "Rolling forecast MFE is still learning. "
             )
+            append("Today's average forecast target: ${fmt(avgTarget)}% with a hard 1.00% floor. ")
             append("Today target hits: $wins/${forecasts.size}. ")
             append("Multify later matched $matched/${forecasts.size} forecast symbols; matching is secondary research, not the success label. ")
             append("Frozen LONG champions: $frozen. ")
-            append("Live champions remain frozen after qualification while challengers continue collecting evidence.")
+            append("Only quality-gated TREND candidates are admitted; no weak call is forced to fill a slot.")
         }
         val entity = com.multify.traderpro.data.local.ResearchReportEntity(
             reportDate = today, generatedAtMs = System.currentTimeMillis(),
             title = "After-market LONG forecast review", summary = report
         )
         learningDao.insertResearchReport(entity)
-        auditLogger.log("RESEARCH", "AFTER_HOURS_LONG_REPORT", mapOf("date" to today, "wins" to wins, "total" to forecasts.size, "matches" to matched))
+        auditLogger.log("RESEARCH", "AFTER_HOURS_LONG_REPORT", mapOf(
+            "date" to today, "wins" to wins, "total" to forecasts.size, "matches" to matched,
+            "multify_mfe_avg_pct" to stats.longAveragePct, "forecast_avg_target_pct" to avgTarget
+        ))
         return ResearchDto(today, entity.title, report)
     }
 
@@ -1224,6 +1236,8 @@ class TradingRepository @Inject constructor(
         val now = System.currentTimeMillis()
         if (!marketOpen && now - lastClosedSessionReconcileAtMs < CLOSED_SESSION_RECONCILE_MS) return open.size
         if (!marketOpen) lastClosedSessionReconcileAtMs = now
+        val multifyStats = learningStats()
+        val dynamicTrailArmPct = LearnedTrailingPolicy.dynamicArmPct(multifyStats.longAveragePct)
         for (position in open) {
             runCatching {
                 if (position.side != "LONG") {
@@ -1231,33 +1245,44 @@ class TradingRepository @Inject constructor(
                     return@runCatching
                 }
                 val reconciled = reconcilePositionWithBroker(token, position, preferredMark = null, force = !marketOpen)
-                if (marketOpen && reconciled != null) monitorLongHolding(reconciled, token)
+                if (marketOpen && reconciled != null) monitorLongHolding(reconciled, token, dynamicTrailArmPct)
             }.onFailure {
                 auditLogger.log("HOLDING", "MONITOR_ERROR", mapOf("symbol" to position.symbol, "message" to (it.message ?: it.javaClass.simpleName)))
             }
         }
         return managedDao.openPositions().size
     }
-    private suspend fun monitorLongHolding(position: ManagedPositionEntity, token: String) {
+
+    private suspend fun monitorLongHolding(position: ManagedPositionEntity, token: String, dynamicTrailArmPct: Double) {
         val quote = apiFactory.groww.quote(bearer(token), tradingSymbol = position.symbol).requirePayload("Quote ${position.symbol}")
         val ltp = quote.lastPrice ?: return
         preferences.recordMarketData()
         val previousHighWater = position.maxFavourablePrice
         var updated = position.copy(
-            lastPrice = ltp, maxFavourablePrice = max(position.maxFavourablePrice, ltp),
-            maxAdversePrice = min(position.maxAdversePrice, ltp), lastEvaluatedAtMs = System.currentTimeMillis()
+            lastPrice = ltp,
+            maxFavourablePrice = max(position.maxFavourablePrice, ltp),
+            maxAdversePrice = min(position.maxAdversePrice, ltp),
+            trailingArmPct = dynamicTrailArmPct,
+            targetPrice = if (position.engine == ENGINE_MULTIFY_HOLDING)
+                LearnedTrailingPolicy.minimumExitPriceForNetProfitPct(position.entryPrice, dynamicTrailArmPct)
+            else position.targetPrice,
+            lastEvaluatedAtMs = System.currentTimeMillis()
         )
         managedDao.updatePosition(updated)
 
-        val minimumNetProfit = LearnedTrailingPolicy.minimumNetProfitRupees(updated.entryPrice, updated.quantity)
-        val minimumProfitStop = LearnedTrailingPolicy.minimumExitPriceForNetProfitPct(updated.entryPrice)
+        val minimumNetProfit = LearnedTrailingPolicy.minimumNetProfitRupees(
+            updated.entryPrice, updated.quantity, dynamicTrailArmPct
+        )
+        val minimumProfitStop = LearnedTrailingPolicy.minimumExitPriceForNetProfitPct(
+            updated.entryPrice, dynamicTrailArmPct
+        )
         val rawStop = updated.stopPrice
         val rawArmed = LearnedTrailingPolicy.isArmed(rawStop, updated.entryPrice)
         val rawStopProtectsGate = rawStop != null &&
             LearnedTrailingPolicy.estimatedNetProfit(updated.entryPrice, rawStop, updated.quantity) + 0.01 >= minimumNetProfit
 
-        // v6.6 could leave a profit stop armed below the new 1%-of-invested net-profit gate.
-        // Reset only those legacy low-profit stops back to the emergency failsafe.
+        // Any old armed stop that no longer protects the current Multify-MFE threshold
+        // is reset to the emergency failsafe. This keeps upgrades and rising MFE averages safe.
         if (rawArmed && !rawStopProtectsGate) {
             val migratedStop = updated.entryPrice * (1.0 - HOLDING_FAILSAFE_STOP_PCT)
             updated = updated.copy(
@@ -1266,10 +1291,11 @@ class TradingRepository @Inject constructor(
                 lastEvaluatedAtMs = System.currentTimeMillis()
             )
             managedDao.updatePosition(updated)
-            auditLogger.log("TRAILING_STOP", "LEGACY_LOW_PROFIT_TRAIL_RESET", mapOf(
+            auditLogger.log("TRAILING_STOP", "TRAIL_RESET_BELOW_DYNAMIC_MFE_GATE", mapOf(
                 "symbol" to updated.symbol,
                 "old_stop" to rawStop,
                 "new_failsafe_stop" to migratedStop,
+                "multify_mfe_arm_pct" to dynamicTrailArmPct,
                 "minimum_net_profit" to minimumNetProfit,
                 "minimum_profit_exit_price" to minimumProfitStop
             ))
@@ -1287,7 +1313,9 @@ class TradingRepository @Inject constructor(
         val alreadyArmed = currentStop != null &&
             LearnedTrailingPolicy.isArmed(currentStop, updated.entryPrice) &&
             LearnedTrailingPolicy.estimatedNetProfit(updated.entryPrice, currentStop, updated.quantity) + 0.01 >= minimumNetProfit
-        val profitGateReached = LearnedTrailingPolicy.profitGateReached(updated.entryPrice, highWater, updated.quantity)
+        val profitGateReached = LearnedTrailingPolicy.profitGateReached(
+            updated.entryPrice, highWater, updated.quantity, dynamicTrailArmPct
+        )
         val canProtectProfitGate = highWater + 1e-9 >= minimumProfitStop + 0.01
         val thresholdReached = alreadyArmed || (profitGateReached && canProtectProfitGate)
 
@@ -1306,13 +1334,14 @@ class TradingRepository @Inject constructor(
             updated = updated.copy(
                 stopPrice = effectiveStop,
                 trailingLastRatchetPrice = highWater,
+                trailingArmPct = dynamicTrailArmPct,
                 lastEvaluatedAtMs = System.currentTimeMillis()
             )
             managedDao.updatePosition(updated)
             val projectedNetAtStop = effectiveStop?.let {
                 LearnedTrailingPolicy.estimatedNetProfit(updated.entryPrice, it, updated.quantity)
             }
-            auditLogger.log("TRAILING_STOP", if (alreadyArmed) "LONG_RATCHET" else "LONG_ARMED_1PCT_NET", mapOf(
+            auditLogger.log("TRAILING_STOP", if (alreadyArmed) "LONG_RATCHET" else "LONG_ARMED_DYNAMIC_MFE", mapOf(
                 "symbol" to updated.symbol,
                 "ltp" to ltp,
                 "old_high_water" to previousHighWater,
@@ -1322,6 +1351,7 @@ class TradingRepository @Inject constructor(
                 "old_stop" to currentStop,
                 "new_stop" to effectiveStop,
                 "stop_raised" to stopRaised,
+                "multify_mfe_arm_pct" to dynamicTrailArmPct,
                 "invested_amount" to LearnedTrailingPolicy.investedAmount(updated.entryPrice, updated.quantity),
                 "minimum_net_profit" to minimumNetProfit,
                 "projected_net_at_stop" to projectedNetAtStop,
@@ -1337,22 +1367,23 @@ class TradingRepository @Inject constructor(
                 updated.entryPrice, activeStop, updated.quantity
             )
             if (protectedNetAtStop + 0.01 >= minimumNetProfit) {
-                auditLogger.log("TRAILING_STOP", "LONG_TRAILING_EXIT_TRIGGERED", mapOf(
+                auditLogger.log("TRAILING_STOP", "LONG_TRAILING_EXIT_TRIGGERED_DYNAMIC_MFE", mapOf(
                     "symbol" to updated.symbol,
                     "ltp" to ltp,
                     "active_stop" to activeStop,
                     "protected_net_at_stop" to protectedNetAtStop,
                     "minimum_net_profit" to minimumNetProfit,
-                    "minimum_profit_pct_of_invested" to LearnedTrailingPolicy.AUTONOMOUS_NET_PROFIT_PCT_OF_INVESTED
+                    "multify_mfe_arm_pct" to dynamicTrailArmPct
                 ))
-                closeLongHolding(token, updated, ltp, "LONG_TRAILING_PROFIT_STOP_1PCT_NET")
+                closeLongHolding(token, updated, ltp, "LONG_TRAILING_PROFIT_STOP_DYNAMIC_MFE")
             } else {
-                auditLogger.log("TRAILING_STOP", "LONG_TRAILING_EXIT_BLOCKED_BELOW_1PCT_NET", mapOf(
+                auditLogger.log("TRAILING_STOP", "LONG_TRAILING_EXIT_BLOCKED_BELOW_DYNAMIC_MFE", mapOf(
                     "symbol" to updated.symbol,
                     "ltp" to ltp,
                     "active_stop" to activeStop,
                     "protected_net_at_stop" to protectedNetAtStop,
-                    "minimum_net_profit" to minimumNetProfit
+                    "minimum_net_profit" to minimumNetProfit,
+                    "multify_mfe_arm_pct" to dynamicTrailArmPct
                 ))
             }
         }
@@ -1518,7 +1549,8 @@ class TradingRepository @Inject constructor(
             mapOf(
                 "date" to it.callDate, "symbol" to it.symbol, "source" to it.source,
                 "entry_price" to it.entryPrice, "target_price" to it.targetPrice, "target_pct" to it.targetPct,
-                "exit_price" to it.multifyExitPrice, "long_return_pct" to it.longRealizedPct
+                "exit_price" to it.multifyExitPrice, "long_return_pct" to it.longRealizedPct,
+                "multify_max_price" to it.multifyMaxPrice, "multify_mfe_pct" to it.multifyMfePct
             )
         }
         val forecasts = learningDao.allLongForecasts()
@@ -1773,6 +1805,10 @@ class TradingRepository @Inject constructor(
         private const val MAX_BUDGET = 200_000L
         private const val MANUAL_SOURCE = "com.multify.traderpro.manual"
         private const val FORECAST_SCAN_INTERVAL_MS = 10L * 60L * 1000L
+        private const val FORECAST_OUTCOME_INTERVAL_MS = 30_000L
+        private const val MFE_BACKFILL_INTERVAL_MS = 5L * 60L * 1000L
+        private const val MFE_BACKFILL_BATCH_SIZE = 4
+        private const val MFE_AFTER_HOURS_BACKFILL_BATCH_SIZE = 16
         private const val HOLDING_FAILSAFE_STOP_PCT = 0.12
         private const val ARM_HOT_REFRESH_MS = 30_000L
         private const val ARM_HOT_AUDIT_INTERVAL_MS = 15L * 60L * 1000L
