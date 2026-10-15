@@ -7,7 +7,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.os.IBinder
-import androidx.core.app.ContextCompat
+import androidx.core.content.ContextCompat
 import androidx.core.app.NotificationCompat
 import com.multify.traderpro.R
 import com.multify.traderpro.data.logging.AuditLogger
