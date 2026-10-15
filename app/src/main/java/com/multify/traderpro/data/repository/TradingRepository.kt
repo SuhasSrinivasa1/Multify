@@ -1291,44 +1291,150 @@ class TradingRepository @Inject constructor(
         )
     }
 
+    private fun researchCandleTimestampMs(value: com.google.gson.JsonElement): Long? {
+        val primitive = value.takeIf { it.isJsonPrimitive }?.asJsonPrimitive ?: return null
+        if (primitive.isNumber) {
+            val raw = runCatching { primitive.asLong }.getOrNull() ?: return null
+            return if (raw in 1_000_000_000L..9_999_999_999L) raw * 1000L else raw
+        }
+        val text = runCatching { primitive.asString.trim() }.getOrNull().orEmpty()
+        text.toLongOrNull()?.let { raw ->
+            return if (raw in 1_000_000_000L..9_999_999_999L) raw * 1000L else raw
+        }
+        runCatching { LocalDateTime.parse(text, HIST_FORMAT).atZone(INDIA).toInstant().toEpochMilli() }
+            .getOrNull()?.let { return it }
+        runCatching { ZonedDateTime.parse(text).toInstant().toEpochMilli() }
+            .getOrNull()?.let { return it }
+        return runCatching { Instant.parse(text).toEpochMilli() }.getOrNull()
+    }
+
+    private suspend fun backfillForecastResearchOutcomes(date: String, token: String): Int {
+        val pending = learningDao.pendingForecastResearchOutcomes(date)
+        if (pending.isEmpty()) return 0
+        val sessionDate = runCatching { LocalDate.parse(date) }.getOrNull() ?: return 0
+        val sessionEndMs = sessionDate.atTime(15, 30).atZone(INDIA).toInstant().toEpochMilli()
+        var updatedCount = 0
+        pending.groupBy { it.symbol }.forEach { (symbol, rows) ->
+            val earliest = rows.minOf { it.scanAtMs }
+            val startTime = Instant.ofEpochMilli(earliest)
+                .atZone(INDIA).toLocalDateTime().format(HIST_FORMAT)
+            val endTime = sessionDate.atTime(15, 30).format(HIST_FORMAT)
+            val historical = runCatching {
+                apiFactory.groww.historicalCandles(
+                    bearer(token),
+                    growwSymbol = "NSE-$symbol",
+                    startTime = startTime,
+                    endTime = endTime,
+                    candleInterval = "5minute"
+                ).requirePayload("Forecast research outcome $symbol")
+            }.onFailure {
+                auditLogger.log("FORECAST_RESEARCH", "OUTCOME_BACKFILL_ERROR", mapOf(
+                    "date" to date, "symbol" to symbol, "message" to (it.message ?: it.javaClass.simpleName)
+                ))
+            }.getOrNull()
+            if (historical != null) {
+                preferences.recordMarketData()
+                val candles = historical.candles.mapNotNull { x ->
+                    if (x.size < 5) return@mapNotNull null
+                    val atMs = researchCandleTimestampMs(x[0]) ?: return@mapNotNull null
+                    val high = runCatching { x[2].asDouble }.getOrNull() ?: return@mapNotNull null
+                    val low = runCatching { x[3].asDouble }.getOrNull() ?: return@mapNotNull null
+                    val close = runCatching { x[4].asDouble }.getOrNull() ?: return@mapNotNull null
+                    ResearchCandle(atMs, high, low, close)
+                }.sortedBy { it.atMs }
+                rows.forEach { row ->
+                    val xs = candles.filter { it.atMs >= row.scanAtMs && it.atMs <= sessionEndMs }
+                    if (xs.isEmpty() || row.entryPrice <= 0.0) return@forEach
+                    val high = xs.maxOf { it.high }
+                    val low = xs.minOf { it.low }
+                    val close = xs.last().close
+                    val mfe = max(0.0, (high / row.entryPrice - 1.0) * 100.0)
+                    val mae = max(0.0, (row.entryPrice - low) / row.entryPrice * 100.0)
+                    val closePct = (close / row.entryPrice - 1.0) * 100.0
+                    learningDao.updateForecastResearch(
+                        row.copy(
+                            outcomeMfePct = mfe,
+                            outcomeMaePct = mae,
+                            outcomeClosePct = closePct,
+                            outcomeTargetHit = high + 1e-9 >= row.entryPrice * (1.0 + row.targetPct / 100.0),
+                            outcomeUpdatedAtMs = System.currentTimeMillis()
+                        )
+                    )
+                    updatedCount++
+                }
+            }
+            delay(RESEARCH_BACKFILL_SYMBOL_PACING_MS)
+        }
+        if (updatedCount > 0) {
+            auditLogger.log("FORECAST_RESEARCH", "OUTCOMES_BACKFILLED", mapOf(
+                "date" to date, "count" to updatedCount
+            ))
+        }
+        return updatedCount
+    }
+
     suspend fun runAfterHoursResearch(force: Boolean = false): ResearchDto {
         ensureHistoricalSeed()
-        ensureToken()?.let { token ->
+        val today = LocalDate.now(INDIA).toString()
+        val token = ensureToken()
+        if (token != null) {
             runCatching { backfillRecentMultifyMfe(token, MFE_AFTER_HOURS_BACKFILL_BATCH_SIZE, force = true) }
         }
-        val today = LocalDate.now(INDIA).toString()
+        val researchUpdated = if (token != null) {
+            runCatching { backfillForecastResearchOutcomes(today, token) }.getOrDefault(0)
+        } else 0
         val existing = learningDao.latestResearchReport()
-        if (!force && existing?.reportDate == today) return ResearchDto(existing.reportDate, existing.title, existing.summary)
+        if (!force && existing?.reportDate == today && researchUpdated == 0) {
+            return ResearchDto(existing.reportDate, existing.title, existing.summary)
+        }
+
         val stats = learningStats()
         val forecastLearning = forecastLearningStats()
         val forecasts = learningDao.longForecastsForDate(today)
+        val snapshots = learningDao.forecastResearchForDate(today).filter { it.outcomeUpdatedAtMs != null }
         val wins = forecasts.count { it.status == "TARGET_HIT" }
         val matched = forecasts.count { it.multifyMatched }
         val frozen = learningDao.allForecastChampions().count { it.frozen }
         val avgTarget = forecasts.map { it.targetPct }.takeIf { it.isNotEmpty() }?.average() ?: 0.0
+
+        fun tierSummary(tier: String): String {
+            val xs = snapshots.filter { it.qualityTier == tier }
+            if (xs.isEmpty()) return "$tier: no completed research rows"
+            val hitRate = xs.count { it.outcomeTargetHit == true }.toDouble() / xs.size * 100.0
+            val mfe = xs.mapNotNull { it.outcomeMfePct }.takeIf { it.isNotEmpty() }?.average() ?: 0.0
+            val mae = xs.mapNotNull { it.outcomeMaePct }.takeIf { it.isNotEmpty() }?.average() ?: 0.0
+            return "$tier: ${xs.size} rows · target hit ${fmt(hitRate)}% · avg MFE ${fmt(mfe)}% · avg MAE ${fmt(mae)}%"
+        }
+
         val report = buildString {
             append("Rolling 30-trading-day Multify MFE average: ${fmt(stats.longAveragePct)}% (median ${fmt(stats.longMedianPct)}%) from ${stats.rollingCalls} MFE-observed calls. ")
             append("Pending historical MFE backfill: ${stats.mfeBackfillPendingCalls}. ")
             append(
                 if (forecastLearning.completedForecasts > 0)
-                    "Rolling forecast full-session MFE average: ${fmt(forecastLearning.longAveragePct)}% across ${forecastLearning.completedForecasts} completed forecasts. "
+                    "Rolling published-forecast full-session MFE average: ${fmt(forecastLearning.longAveragePct)}% across ${forecastLearning.completedForecasts} completed forecasts. "
                 else
-                    "Rolling forecast MFE is still learning. "
+                    "Published-forecast MFE is still learning. "
             )
-            append("Today's average forecast target: ${fmt(avgTarget)}% with a hard 1.00% floor. ")
-            append("Today target hits: $wins/${forecasts.size}. ")
-            append("Multify later matched $matched/${forecasts.size} forecast symbols; matching is secondary research, not the success label. ")
+            append("Today's average target: ${fmt(avgTarget)}% with a hard 1.00% floor. ")
+            append("Published target hits: $wins/${forecasts.size}. ")
+            append("Five-session reverse-engineering capture: ${forecastLearning.researchSessionsCaptured}/${forecastLearning.researchSessionGoal}. ")
+            append(tierSummary("PRIMARY")).append(". ")
+            append(tierSummary("SECONDARY")).append(". ")
+            append(tierSummary("RESEARCH")).append(". ")
+            append("Multify later matched $matched/${forecasts.size} published symbols. ")
             append("Frozen LONG champions: $frozen. ")
-            append("Only quality-gated TREND candidates are admitted; no weak call is forced to fill a slot.")
+            append("Production execution remains PRIMARY-only while SECONDARY/RESEARCH rows collect evidence.")
         }
         val entity = com.multify.traderpro.data.local.ResearchReportEntity(
             reportDate = today, generatedAtMs = System.currentTimeMillis(),
-            title = "After-market LONG forecast review", summary = report
+            title = "After-market production forecast review", summary = report
         )
         learningDao.insertResearchReport(entity)
-        auditLogger.log("RESEARCH", "AFTER_HOURS_LONG_REPORT", mapOf(
+        auditLogger.log("RESEARCH", "AFTER_HOURS_PRODUCTION_REPORT", mapOf(
             "date" to today, "wins" to wins, "total" to forecasts.size, "matches" to matched,
-            "multify_mfe_avg_pct" to stats.longAveragePct, "forecast_avg_target_pct" to avgTarget
+            "multify_mfe_avg_pct" to stats.longAveragePct, "forecast_avg_target_pct" to avgTarget,
+            "research_rows_completed" to snapshots.size,
+            "research_sessions" to forecastLearning.researchSessionsCaptured
         ))
         return ResearchDto(today, entity.title, report)
     }
