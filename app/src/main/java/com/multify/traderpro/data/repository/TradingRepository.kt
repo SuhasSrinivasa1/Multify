@@ -1795,7 +1795,7 @@ class TradingRepository @Inject constructor(
             return@withLock null
         }
 
-        val ref = stableRef("CLS", "${reconciled.id}-${reconciled.symbol}-$reason")
+        val ref = stableRef("CLS", "${reconciled.id}-${reconciled.symbol}")
         val order = placeOwnedCncSell(token, reconciled, ref, notificationStartedNs)
         val exit = order.averageFillPrice?.takeIf { it > 0.0 } ?: mark
         val gross = (exit - reconciled.entryPrice) * reconciled.quantity
