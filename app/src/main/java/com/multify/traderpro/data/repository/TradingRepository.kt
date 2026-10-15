@@ -1924,6 +1924,171 @@ class TradingRepository @Inject constructor(
         error("Groww order $id was not confirmed filled; no duplicate retry was attempted")
     }
 
+    suspend fun sampleSignal(eventId: Long) {
+        val event = dao.byId(eventId) ?: return
+        val symbol = event.symbol ?: return
+        val token = ensureToken() ?: return
+        val offsets = listOf(1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900)
+        var elapsed = 0
+        for (offset in offsets) {
+            delay((offset - elapsed) * 1000L)
+            elapsed = offset
+            val price = runCatching {
+                apiFactory.groww.quote(bearer(token), tradingSymbol = symbol)
+                    .requirePayload("Signal sample $symbol").lastPrice
+            }.getOrNull() ?: continue
+            preferences.recordMarketData()
+            learningDao.insertObservation(
+                PriceObservationEntity(
+                    eventId = eventId,
+                    symbol = symbol,
+                    phase = if (event.signalType == SignalType.TRADE_RELEASE.name) "POST_LONG_CALL" else "POST_LONG_EXIT",
+                    offsetSeconds = offset,
+                    observedAtMs = System.currentTimeMillis(),
+                    price = price
+                )
+            )
+        }
+    }
+
+    data class LogExportResult(val entries: Int, val signalCount: Int, val tradeCount: Int)
+
+    suspend fun exportCompleteLogs(uri: Uri): LogExportResult {
+        val gson = GsonBuilder().setPrettyPrinting().create()
+        val settings = preferences.settings.first()
+        val signals = dao.allNow()
+        val positions = managedDao.allPositions().filter { it.side == "LONG" }
+        val trades = managedDao.allTrades().filter { it.side == "LONG" }
+        val executionSamples = managedDao.allExecutionSamples()
+        val priceObservations = learningDao.allObservations()
+        val forecastResearch = learningDao.allForecastResearch()
+        val calls = learningDao.allCalls().filter { it.action.equals("BUY", true) }.map {
+            mapOf(
+                "date" to it.callDate,
+                "symbol" to it.symbol,
+                "source" to it.source,
+                "entry_price" to it.entryPrice,
+                "target_price" to it.targetPrice,
+                "target_pct" to it.targetPct,
+                "exit_price" to it.multifyExitPrice,
+                "long_return_pct" to it.longRealizedPct,
+                "multify_max_price" to it.multifyMaxPrice,
+                "multify_mfe_pct" to it.multifyMfePct
+            )
+        }
+        val forecasts = learningDao.allLongForecasts()
+        val champions = learningDao.allForecastChampions()
+        val research = learningDao.allResearchReports()
+        val safeSettings = mapOf(
+            "holding_budget_rupees" to settings.holdingBudgetRupees,
+            "arm_effective" to settings.armEffective,
+            "package_filter" to settings.packageFilter,
+            "broker_authenticated" to settings.brokerAuthenticated,
+            "ddpi_enabled" to settings.brokerDdpiEnabled,
+            "static_ip_matched" to settings.staticIpMatched,
+            "safety_halt" to settings.safetyHalt,
+            "version" to BuildConfig.VERSION_NAME
+        )
+        appContext.contentResolver.openOutputStream(uri)?.use { raw ->
+            ZipOutputStream(raw).use { zip ->
+                fun add(name: String, value: Any) {
+                    zip.putNextEntry(ZipEntry(name))
+                    zip.write(gson.toJson(value).toByteArray(Charsets.UTF_8))
+                    zip.closeEntry()
+                }
+                fun addText(name: String, value: String) {
+                    zip.putNextEntry(ZipEntry(name))
+                    zip.write(value.toByteArray(Charsets.UTF_8))
+                    zip.closeEntry()
+                }
+                add("settings.json", safeSettings)
+                add("signals.json", signals)
+                add("holdings.json", positions)
+                add("closed_long_trades.json", trades)
+                add("execution_samples.json", executionSamples)
+                add("signal_price_observations.json", priceObservations)
+                add("forecast_research_snapshots.json", forecastResearch)
+                add("long_learning.json", calls)
+                add("long_forecasts.json", forecasts)
+                add("long_champions.json", champions)
+                add("research.json", research)
+                addText("system_audit.jsonl", auditLogger.readAll())
+            }
+        } ?: error("Unable to open export destination")
+        return LogExportResult(12, signals.size, trades.size)
+    }
+
+    suspend fun shouldCapturePackage(packageName: String): Boolean {
+        val filter = (armHotState?.settings ?: preferences.settings.first()).packageFilter.trim()
+        return if (filter.isBlank()) packageName.equals(MULTIFY_PACKAGE, ignoreCase = true)
+        else packageName.contains(filter, ignoreCase = true)
+    }
+
+    suspend fun prepareArmHotPath(force: Boolean = false): Boolean {
+        val current = armHotState
+        if (!force && current != null && System.currentTimeMillis() - current.warmedAtMs <= ARM_HOT_REFRESH_MS) return true
+        val token = ensureToken() ?: return false
+        val settings = preferences.settings.first()
+        if (!settings.brokerAuthenticated || settings.safetyHalt) return false
+        val margin = apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin")
+        val cnc = (margin.equity?.cncBalanceAvailable ?: margin.clearCash).coerceAtLeast(0.0)
+        val now = System.currentTimeMillis()
+        armHotState = ArmHotState(token, settings, cnc, now)
+        val auditDue = now - lastArmHotAuditAtMs >= ARM_HOT_AUDIT_INTERVAL_MS
+        val balanceChanged = !lastArmHotAuditBalance.isFinite() || abs(cnc - lastArmHotAuditBalance) >= 1.0
+        val armedChanged = lastArmHotAuditArmed == null || lastArmHotAuditArmed != settings.armEffective
+        if (auditDue || balanceChanged || armedChanged) {
+            auditLogger.log("RUNTIME", "ARM_HOT_PATH_READY", mapOf(
+                "cnc_balance" to cnc,
+                "armed" to settings.armEffective
+            ))
+            lastArmHotAuditAtMs = now
+            lastArmHotAuditBalance = cnc
+            lastArmHotAuditArmed = settings.armEffective
+        }
+        return true
+    }
+
+    suspend fun maintainArmHotPath() {
+        val settings = preferences.settings.first()
+        if (!settings.armEffective || settings.safetyHalt) return
+        if (armHotState == null ||
+            System.currentTimeMillis() - (armHotState?.warmedAtMs ?: 0L) > ARM_HOT_REFRESH_MS
+        ) {
+            runCatching { prepareArmHotPath(force = true) }
+        }
+    }
+
+    private suspend fun ensureToken(): String? {
+        armHotState?.token?.takeIf { it.isNotBlank() }?.let { return it }
+        var settings = preferences.settings.first()
+        var token = secretStore.getAccessToken()
+        if (!settings.brokerAuthenticated || token.isNullOrBlank()) {
+            if (!hasBrokerCredentials()) return null
+            runCatching { authenticate() }.getOrElse { return null }
+            settings = preferences.settings.first()
+            token = secretStore.getAccessToken()
+        }
+        return token
+    }
+
+    private fun preArmGuard(settings: AppSettings) {
+        require(settings.armEffective) { "ARM is OFF" }
+        require(settings.brokerAuthenticated) { "Groww is not authenticated" }
+        require(settings.staticIpMatched) { "Static IP verification failed" }
+        require(settings.brokerDdpiEnabled) { "DDPI is required for CNC holdings" }
+        require(!settings.safetyHalt) { "Safety halt is active" }
+        require(marketSession() == "OPEN") { "NSE regular market session is not open" }
+    }
+
+    private suspend fun placeCncBuy(
+        token: String,
+        symbol: String,
+        qty: Int,
+        reference: String,
+        notificationStartedNs: Long? = null
+    ): OrderPayload = submitMarketOrder(token, symbol, "BUY", qty, "CNC", reference, notificationStartedNs)
+
     private fun LongForecastEntity.toForecastDto() = ForecastDto(
         rank = rank, symbol = symbol, confidence = confidence, score = score, reason = reason,
         multifyMatched = multifyMatched, entryPrice = entryPrice, targetPrice = targetPrice, targetPct = targetPct,
