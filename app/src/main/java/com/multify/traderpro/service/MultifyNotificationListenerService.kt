@@ -25,13 +25,14 @@ import com.multify.traderpro.worker.SignalForwardWorker
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import java.security.MessageDigest
+import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 
 @AndroidEntryPoint
@@ -42,20 +43,19 @@ class MultifyNotificationListenerService : NotificationListenerService() {
     @Inject lateinit var auditLogger: AuditLogger
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    // Multify buy and book-profit events use a dedicated serialized lane so holdings actions
-    // cannot queue behind forecast scans or research work.
+    // Critical Multify BUY/Book Profit events remain serialized and are never queued behind research.
     private val priorityScope = CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(1))
-    private var shadowMonitorJob: Job? = null
-    private var lastRebindRequestAtMs = 0L
-    private var lastConnectedAuditAtMs = 0L
-    private var lastDisconnectedAuditAtMs = 0L
+    private var listenerHeartbeatJob: Job? = null
 
     override fun onCreate() {
         super.onCreate()
         createStatusChannel()
+        val engineStarted = TradingEngineService.start(this)
+        auditLogger.log("RUNTIME", "LISTENER_CREATED", mapOf("foreground_engine_start_requested" to engineStarted))
     }
 
     override fun onDestroy() {
+        listenerHeartbeatJob?.cancel()
         priorityScope.cancel()
         scope.cancel()
         super.onDestroy()
@@ -64,55 +64,35 @@ class MultifyNotificationListenerService : NotificationListenerService() {
     override fun onListenerConnected() {
         super.onListenerConnected()
         val now = System.currentTimeMillis()
-        if (now - lastConnectedAuditAtMs >= LISTENER_AUDIT_THROTTLE_MS) {
+        if (claimThrottle(LAST_CONNECTED_AUDIT_MS, now, LISTENER_AUDIT_THROTTLE_MS)) {
             auditLogger.log("RUNTIME", "NOTIFICATION_LISTENER_CONNECTED")
-            lastConnectedAuditAtMs = now
         }
-        scope.launch { repository.recordListenerConnected() }
-        notifyStatus("Signal capture active", "Listening for Multify ARM + LONG-only holding forecasts")
-        if (shadowMonitorJob?.isActive != true) {
-            shadowMonitorJob = scope.launch {
-                runCatching { repository.ensureHistoricalSeed() }
-                while (isActive) {
-                    runCatching { repository.recordServiceHeartbeat() }
-                    runCatching { repository.maintainArmHotPath() }
-                    val managedCount = runCatching { repository.monitorManagedPositions() }.getOrDefault(0)
-                    val forecastOutcomeCount = runCatching { repository.monitorForecastOutcomes() }.getOrDefault(0)
-                    val now = java.time.ZonedDateTime.now(java.time.ZoneId.of("Asia/Kolkata"))
-                    if (now.dayOfWeek.value < 6 &&
-                        now.toLocalTime() >= java.time.LocalTime.of(9, 15) &&
-                        now.toLocalTime() <= java.time.LocalTime.of(15, 0)
-                    ) {
-                        runCatching { repository.generateDailyForecasts(false) }
-                        runCatching { repository.pendingLongForecastNotifications() }.getOrDefault(emptyList()).forEach { f ->
-                            val message = f.symbol + " · entry ₹" + String.format(java.util.Locale.US, "%.2f", f.entryPrice) +
-                                " · target +" + String.format(java.util.Locale.US, "%.2f", f.targetPct) + "% · " +
-                                String.format(java.util.Locale.US, "%.0f%% confidence", f.confidence * 100.0)
-                            notifyStatus("LONG holding opportunity · " + f.symbol, message)
-                        }
-                    }
-                    if (now.dayOfWeek.value < 6 && now.toLocalTime() >= java.time.LocalTime.of(15, 35)) {
-                        runCatching { repository.runAfterHoursResearch(false) }
-                    }
-                    delay(if (managedCount > 0) 1_000L else if (forecastOutcomeCount > 0) 2_000L else 10_000L)
-                }
+        TradingEngineService.start(this)
+        listenerHeartbeatJob?.cancel()
+        listenerHeartbeatJob = scope.launch {
+            while (isActive) {
+                runCatching { repository.recordListenerConnected() }
+                delay(LISTENER_HEARTBEAT_MS)
             }
         }
+        notifyStatus("Signal capture active", "Multify listener active · production engine runs independently")
     }
 
     override fun onListenerDisconnected() {
         super.onListenerDisconnected()
+        listenerHeartbeatJob?.cancel()
+        listenerHeartbeatJob = null
         val now = System.currentTimeMillis()
-        if (now - lastDisconnectedAuditAtMs >= LISTENER_AUDIT_THROTTLE_MS) {
+        if (claimThrottle(LAST_DISCONNECTED_AUDIT_MS, now, LISTENER_AUDIT_THROTTLE_MS)) {
             auditLogger.log("RUNTIME", "NOTIFICATION_LISTENER_DISCONNECTED")
-            lastDisconnectedAuditAtMs = now
         }
         scope.launch { repository.recordListenerReconnect() }
-        // Collapse disconnect storms instead of calling requestRebind repeatedly.
-        if (now - lastRebindRequestAtMs >= LISTENER_REBIND_MIN_INTERVAL_MS) {
-            runCatching { requestRebind(android.content.ComponentName(this, MultifyNotificationListenerService::class.java)) }
-            lastRebindRequestAtMs = now
+        if (claimThrottle(LAST_REBIND_REQUEST_MS, now, LISTENER_REBIND_MIN_INTERVAL_MS)) {
+            runCatching {
+                requestRebind(android.content.ComponentName(this, MultifyNotificationListenerService::class.java))
+            }
         }
+        // The foreground TradingEngineService deliberately remains alive during listener churn.
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
@@ -169,10 +149,12 @@ class MultifyNotificationListenerService : NotificationListenerService() {
                     message.take(500)
                 )
                 auditLogger.log("SIGNAL", "PROCESSING_FAILED", mapOf(
-                    "event_id" to id, "signal_type" to parsed.type.name, "symbol" to parsed.symbol, "message" to message.take(500)
+                    "event_id" to id,
+                    "signal_type" to parsed.type.name,
+                    "symbol" to parsed.symbol,
+                    "message" to message.take(500)
                 ))
-                // Do not blindly replay a live BUY/SELL after an ambiguous broker failure.
-                // Broker reconciliation handles state without risking a duplicate live order.
+                // Critical broker operations are never blindly replayed after ambiguous failure.
                 if (!critical) enqueueForward(id)
             }
 
@@ -184,12 +166,20 @@ class MultifyNotificationListenerService : NotificationListenerService() {
                     "signal_type" to parsed.type.name,
                     "symbol" to parsed.symbol,
                     "source_package" to sbn.packageName,
-                    "parser_confidence" to parsed.confidence
+                    "parser_confidence" to parsed.confidence,
+                    "processed_ok" to processed.isSuccess
                 ))
                 if (parsed.type == SignalType.AUTO_PAUSED) {
                     notifyStatus("ARM disabled", "Multify reported a safety pause. Review broker state before resetting the halt.")
                 }
-                if (critical) runCatching { repository.sampleSignal(id) }
+                if (critical && processed.isSuccess) {
+                    val handedOff = TradingEngineService.sampleSignal(this@MultifyNotificationListenerService, id, parsed.symbol)
+                    auditLogger.log("MULTIFY_RESEARCH", "POST_SIGNAL_RESEARCH_HANDED_OFF", mapOf(
+                        "event_id" to id,
+                        "symbol" to parsed.symbol,
+                        "foreground_handoff" to handedOff
+                    ))
+                }
             }
         }
     }
@@ -216,7 +206,7 @@ class MultifyNotificationListenerService : NotificationListenerService() {
                 CHANNEL_ID,
                 "Trading engine status",
                 NotificationManager.IMPORTANCE_DEFAULT
-            ).apply { description = "Safety and execution status from Multify Trader Pro" }
+            ).apply { description = "Safety and signal-capture status from Multify Trader Pro" }
         )
     }
 
@@ -238,11 +228,23 @@ class MultifyNotificationListenerService : NotificationListenerService() {
         return MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
     }
 
+    private fun claimThrottle(clock: AtomicLong, now: Long, interval: Long): Boolean {
+        while (true) {
+            val previous = clock.get()
+            if (now - previous < interval) return false
+            if (clock.compareAndSet(previous, now)) return true
+        }
+    }
+
     private fun String?.ifNullOrBlank(fallback: String): String = if (this.isNullOrBlank()) fallback else this
 
     companion object {
         private const val CHANNEL_ID = "trading_engine_status"
-        private const val LISTENER_AUDIT_THROTTLE_MS = 60_000L
-        private const val LISTENER_REBIND_MIN_INTERVAL_MS = 15_000L
+        private const val LISTENER_AUDIT_THROTTLE_MS = 5L * 60L * 1000L
+        private const val LISTENER_REBIND_MIN_INTERVAL_MS = 60_000L
+        private const val LISTENER_HEARTBEAT_MS = 20_000L
+        private val LAST_CONNECTED_AUDIT_MS = AtomicLong(0L)
+        private val LAST_DISCONNECTED_AUDIT_MS = AtomicLong(0L)
+        private val LAST_REBIND_REQUEST_MS = AtomicLong(0L)
     }
 }
