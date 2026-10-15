@@ -294,7 +294,9 @@ class TradingRepository @Inject constructor(
                 targetPct = targetPct ?: existing.targetPct, updatedAtMs = now
             ))
         }
-        learningDao.markLongForecastMatch(LocalDate.now(INDIA).toString(), symbol)
+        val today = LocalDate.now(INDIA).toString()
+        learningDao.markLongForecastMatch(today, symbol)
+        learningDao.markForecastResearchMultifyMatch(today, symbol, eventId, now)
     }
 
     private suspend fun recordLiveExit(
