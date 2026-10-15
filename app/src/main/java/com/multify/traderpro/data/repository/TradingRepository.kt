@@ -1317,7 +1317,9 @@ class TradingRepository @Inject constructor(
         val sessionDate = runCatching { LocalDate.parse(date) }.getOrNull() ?: return 0
         val sessionEndMs = sessionDate.atTime(15, 30).atZone(INDIA).toInstant().toEpochMilli()
         var updatedCount = 0
-        pending.groupBy { it.symbol }.forEach { (symbol, rows) ->
+        pending.groupBy { it.symbol }.entries
+            .take(RESEARCH_BACKFILL_SYMBOL_BATCH)
+            .forEach { (symbol, rows) ->
             val earliest = rows.minOf { it.scanAtMs }
             val startTime = Instant.ofEpochMilli(earliest)
                 .atZone(INDIA).toLocalDateTime().format(HIST_FORMAT)
@@ -2108,8 +2110,9 @@ class TradingRepository @Inject constructor(
         private const val FORECAST_SCAN_INTERVAL_MS = 15L * 60L * 1000L
         private const val FORECAST_OUTCOME_INTERVAL_MS = 60_000L
         private const val FORECAST_SYMBOL_PACING_MS = 75L
-        private const val RESEARCH_CAPTURE_TOP_N = 12
+        private const val RESEARCH_CAPTURE_TOP_N = 48
         private const val RESEARCH_BACKFILL_SYMBOL_PACING_MS = 300L
+        private const val RESEARCH_BACKFILL_SYMBOL_BATCH = 10
         private const val RESEARCH_SESSION_GOAL = 5
         private const val MFE_BACKFILL_INTERVAL_MS = 5L * 60L * 1000L
         private const val MFE_BACKFILL_BATCH_SIZE = 4
