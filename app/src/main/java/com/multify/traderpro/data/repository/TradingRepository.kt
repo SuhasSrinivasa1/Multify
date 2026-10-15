@@ -1496,6 +1496,7 @@ class TradingRepository @Inject constructor(
                 trailingLastRatchetPrice = p.trailingLastRatchetPrice.takeIf { it > 0.0 },
                 trailDistance = if (LearnedTrailingPolicy.isArmed(p.stopPrice, p.entryPrice) && p.stopPrice != null)
                     (p.maxFavourablePrice - p.stopPrice).coerceAtLeast(0.0) else null,
+                trailArmPct = p.trailingArmPct.takeIf { it.isFinite() && it > 0.0 },
                 trailArmed = LearnedTrailingPolicy.isArmed(p.stopPrice, p.entryPrice),
                 strategy = p.strategy, product = "CNC"
             )
