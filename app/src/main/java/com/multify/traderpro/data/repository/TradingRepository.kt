@@ -8,6 +8,7 @@ import com.google.gson.JsonParser
 import com.multify.traderpro.BuildConfig
 import com.multify.traderpro.data.local.ExecutionSampleEntity
 import com.multify.traderpro.data.local.ForecastChampionEntity
+import com.multify.traderpro.data.local.ForecastResearchEntity
 import com.multify.traderpro.data.local.LongForecastEntity
 import com.multify.traderpro.data.local.LearningCallEntity
 import com.multify.traderpro.data.local.LearningDao
@@ -55,6 +56,7 @@ import com.multify.traderpro.engine.LocalStrategyEngine
 import com.multify.traderpro.engine.MultifyReverseEngineering
 import com.multify.traderpro.engine.StrategyEvaluation
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
@@ -229,12 +231,15 @@ class TradingRepository @Inject constructor(
             .filter { it.isFinite() && it >= 0.0 && it < 25.0 }
         val today = LocalDate.now(INDIA).toString()
         val todayRows = all.filter { it.forecastDate == today }
+        val researchSessions = learningDao.forecastResearchDates().take(RESEARCH_SESSION_GOAL).size
         return ForecastLearningStatsDto(
             rollingTradingDays = keepDates.size,
             completedForecasts = rolling.size,
             longAveragePct = AdaptiveLearningMath.rollingMean(values, 0.0),
             todayTargetAveragePct = todayRows.map { it.targetPct }.takeIf { it.isNotEmpty() }?.average() ?: 0.0,
-            targetFloorPct = ForecastQualityPolicy.MIN_TARGET_PCT
+            targetFloorPct = ForecastQualityPolicy.MIN_TARGET_PCT,
+            researchSessionsCaptured = researchSessions,
+            researchSessionGoal = RESEARCH_SESSION_GOAL
         )
     }
 
