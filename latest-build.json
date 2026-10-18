@@ -1,7 +1,7 @@
 {
-  "run_id": "38771638661",
-  "commit_sha": "d8547aee4d51f3a1390905997da476b7482fa384",
-  "artifact_name": "Multify-TraderPro-v6.9.0-verified",
-  "release_tag": "v6.9.0-production-learning",
+  "run_id": "39108068077",
+  "commit_sha": "aaf4b571adede90d371ff1d9036d5ecd10f04780",
+  "artifact_name": "Multify-TraderPro-v7.0.0-verified",
+  "release_tag": "v7.0.0-major-long-engine",
   "job_status": "success"
 }
