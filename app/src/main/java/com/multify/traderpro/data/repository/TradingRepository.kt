@@ -60,6 +60,9 @@ import com.multify.traderpro.engine.MultifyReverseEngineering
 import com.multify.traderpro.engine.StrategyEvaluation
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
@@ -75,6 +78,7 @@ import java.time.ZoneId
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import javax.inject.Inject
@@ -124,7 +128,7 @@ class TradingRepository @Inject constructor(
     private var lastArmHotAuditBalance = Double.NaN
     private var lastArmHotAuditArmed: Boolean? = null
     private val oneMinuteAtrCache = mutableMapOf<String, AtrCacheEntry>()
-    private val closePositionMutex = Mutex()
+    private val closePositionMutexes = ConcurrentHashMap<Long, Mutex>()
 
     private data class AtrCacheEntry(val atr: Double, val atMs: Long)
 
@@ -1704,22 +1708,26 @@ class TradingRepository @Inject constructor(
             }
         }
 
-        for (position in longPositions) {
-            try {
-                val key = "NSE_${position.symbol}".uppercase(Locale.US)
-                val ltp = ltpBySymbol[key]
-                    ?: ltpBySymbol[position.symbol.uppercase(Locale.US)]
-                    ?: position.lastPrice
-                monitorLongHolding(position, token, ltp)
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (t: Throwable) {
-                auditLogger.log("HOLDING", "MONITOR_ERROR", mapOf(
-                    "symbol" to position.symbol,
-                    "type" to t.javaClass.simpleName,
-                    "message" to (t.message ?: t.javaClass.simpleName)
-                ))
-            }
+        coroutineScope {
+            longPositions.map { position ->
+                async {
+                    try {
+                        val key = "NSE_${position.symbol}".uppercase(Locale.US)
+                        val ltp = ltpBySymbol[key]
+                            ?: ltpBySymbol[position.symbol.uppercase(Locale.US)]
+                            ?: position.lastPrice
+                        monitorLongHolding(position, token, ltp)
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (t: Throwable) {
+                        auditLogger.log("HOLDING", "MONITOR_ERROR", mapOf(
+                            "symbol" to position.symbol,
+                            "type" to t.javaClass.simpleName,
+                            "message" to (t.message ?: t.javaClass.simpleName)
+                        ))
+                    }
+                }
+            }.awaitAll()
         }
 
         // Refresh broker inventory after the latency-critical trail checks. The next trigger can
@@ -1890,7 +1898,9 @@ class TradingRepository @Inject constructor(
         reason: String,
         notificationStartedNs: Long? = null,
         fastDispatch: Boolean = false
-    ): ManagedTradeEntity? = closePositionMutex.withLock {
+    ): ManagedTradeEntity? {
+        val positionMutex = closePositionMutexes.getOrPut(position.id) { Mutex() }
+        return positionMutex.withLock {
         require(position.side == "LONG") { "Only LONG holdings are supported" }
 
         val local = managedDao.openPositionById(position.id)
@@ -1958,7 +1968,9 @@ class TradingRepository @Inject constructor(
             "net_pnl" to trade.netPnl,
             "fast_dispatch" to fastDispatch
         ))
+        closePositionMutexes.remove(sellPosition.id, positionMutex)
         trade
+        }
     }
 
     private suspend fun placeOwnedCncSell(
