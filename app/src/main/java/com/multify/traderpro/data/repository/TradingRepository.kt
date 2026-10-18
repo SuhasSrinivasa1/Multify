@@ -1012,27 +1012,17 @@ class TradingRepository @Inject constructor(
             }.thenByDescending { it.score }
         )
 
-        val capturedResearchDates = learningDao.forecastResearchDates()
+        val capturedResearchDates = learningDao.forecastResearchDatesForCohort(RESEARCH_COHORT_V7)
         val researchCaptureAllowed = today in capturedResearchDates || capturedResearchDates.size < RESEARCH_SESSION_GOAL
         if (researchCaptureAllowed) {
             captureForecastResearchScan(today, nowMs, marketRegime, targetPct, ranked.take(RESEARCH_CAPTURE_TOP_N))
         }
 
-        val desired = when {
-            now.toLocalTime() < LocalTime.of(10, 15) -> 1
-            now.toLocalTime() < LocalTime.of(11, 15) -> 2
-            now.toLocalTime() < LocalTime.of(12, 15) -> 3
-            now.toLocalTime() < LocalTime.of(13, 15) -> 4
-            else -> 5
-        }
-        val slots = (desired - existing.size).coerceAtLeast(0)
-        val unseen = ranked.filter { it.symbol !in have }
-        val publishable = unseen.filter { it.quality.publishEligible }.toMutableList()
-
-        // Production must never become blind again. If a scan has no publishable setup,
-        // expose the single best RESEARCH candidate for observation only; it cannot be bought.
-        if (publishable.isEmpty() && unseen.isNotEmpty() && slots > 0) {
-            publishable += unseen.first()
+        // v7: five is a hard maximum, never a time-based quota. Every production-qualified
+        // PRIMARY candidate can be published immediately until the five daily slots are full.
+        val slots = (MAX_DAILY_RECOMMENDATIONS - existing.size).coerceAtLeast(0)
+        val publishable = ranked.filter {
+            it.symbol !in have && it.quality.tier == "PRIMARY" && it.quality.executionEligible
         }
 
         publishable.take(slots).forEachIndexed { index, item ->
@@ -1052,13 +1042,14 @@ class TradingRepository @Inject constructor(
                     regime = item.evaluation.regime,
                     marketRegime = marketRegime,
                     championKey = item.championKey,
-                    reason = quality.reason + " · " + item.evaluation.reason +
+                    reason = quality.reason + " · family " + item.family.family + " · " + item.evaluation.reason +
                         " · capacity " + fmt(quality.volatilityCapacityPct) + "% for " + fmt(targetPct) + "% target",
                     generatedAtMs = nowMs,
                     lastPrice = price,
                     lastObservedAtMs = nowMs,
-                    qualityTier = quality.tier,
-                    executionEligible = quality.executionEligible
+                    qualityTier = "PRIMARY",
+                    executionEligible = true,
+                    strategyFamily = item.family.family
                 )
             )
         }
@@ -1072,7 +1063,8 @@ class TradingRepository @Inject constructor(
             "secondary" to (tierCounts["SECONDARY"] ?: 0),
             "research" to (tierCounts["RESEARCH"] ?: 0),
             "published_count" to all.size,
-            "max_slots_by_time" to desired,
+            "max_daily_recommendations" to MAX_DAILY_RECOMMENDATIONS,
+            "slots_remaining" to (MAX_DAILY_RECOMMENDATIONS - all.size).coerceAtLeast(0),
             "target_pct" to targetPct,
             "target_floor_pct" to ForecastQualityPolicy.MIN_TARGET_PCT,
             "multify_mfe_avg_pct" to learned.longAveragePct,
@@ -1083,10 +1075,20 @@ class TradingRepository @Inject constructor(
             "research_capture_allowed" to researchCaptureAllowed,
             "research_sessions_captured" to capturedResearchDates.size,
             "research_session_goal" to RESEARCH_SESSION_GOAL,
+            "family_counts" to ranked.groupingBy { it.family.family }.eachCount(),
+            "research_pointer_count" to MultifyFamilyPolicy.pointerNames.size,
+            "research_family_count" to MultifyFamilyPolicy.families.size,
             "top_candidates" to ranked.take(5).map {
-                mapOf("symbol" to it.symbol, "tier" to it.quality.tier, "score" to it.score,
-                    "confidence" to it.evaluation.confidence, "directional_score" to it.evaluation.directionalScore,
-                    "reason" to it.quality.reason)
+                mapOf(
+                    "symbol" to it.symbol,
+                    "tier" to it.quality.tier,
+                    "family" to it.family.family,
+                    "family_score" to it.family.scores[it.family.family],
+                    "score" to it.score,
+                    "confidence" to it.evaluation.confidence,
+                    "directional_score" to it.evaluation.directionalScore,
+                    "reason" to it.quality.reason
+                )
             }
         ))
         return all.map { it.toForecastDto() }
