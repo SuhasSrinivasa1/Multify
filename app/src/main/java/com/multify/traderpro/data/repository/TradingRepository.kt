@@ -2372,7 +2372,7 @@ class TradingRepository @Inject constructor(
         private const val RESEARCH_COHORT_V7 = "V7_FIVE_SESSION_40X3"
         private const val FORECAST_SCAN_INTERVAL_MS = 5L * 60L * 1000L
         private const val FORECAST_OUTCOME_INTERVAL_MS = 60_000L
-        private const val FORECAST_SYMBOL_PACING_MS = 300L
+        private const val FORECAST_SYMBOL_PACING_MS = 500L
         private const val RESEARCH_CAPTURE_TOP_N = 48
         private const val RESEARCH_BACKFILL_SYMBOL_PACING_MS = 300L
         private const val RESEARCH_BACKFILL_SYMBOL_BATCH = 10
