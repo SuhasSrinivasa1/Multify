@@ -790,15 +790,26 @@ class TradingRepository @Inject constructor(
         val sizing = CashAwareCncSizing.size(settings.holdingBudgetRupees.toDouble(), available, referencePrice)
         val capital = sizing.deployableCash
         val qty = sizing.quantity
-        auditLogger.log("EXECUTION", "CNC_BUY_SIZED", mapOf(
-            "symbol" to symbol, "available_cnc" to available, "configured_budget" to settings.holdingBudgetRupees,
-            "cash_reserve" to sizing.cashReserve, "reference_price" to referencePrice,
-            "buffered_price" to sizing.bufferedPrice, "deployable_cash" to capital, "quantity" to qty
-        ))
         require(qty > 0) { "Safe CNC buying power cannot fund one share of $symbol after RMS reserve" }
 
         val ref = stableRef("MLH", "$eventId-$symbol")
-        val order = placeCncBuy(token, symbol, qty, ref, notificationStartedNs)
+        val order = try {
+            placeCncBuy(token, symbol, qty, ref, notificationStartedNs)
+        } catch (t: Throwable) {
+            auditLogger.log("EXECUTION", "CNC_BUY_FAST_PATH_FAILED", mapOf(
+                "symbol" to symbol,
+                "quantity" to qty,
+                "hot_path" to (hot != null),
+                "message" to (t.message ?: t.javaClass.simpleName)
+            ))
+            throw t
+        }
+        auditLogger.log("EXECUTION", "CNC_BUY_SIZED", mapOf(
+            "symbol" to symbol, "available_cnc" to available, "configured_budget" to settings.holdingBudgetRupees,
+            "cash_reserve" to sizing.cashReserve, "reference_price" to referencePrice,
+            "buffered_price" to sizing.bufferedPrice, "deployable_cash" to capital, "quantity" to qty,
+            "hot_path" to (hot != null)
+        ))
         val filled = order.filledQuantity?.takeIf { it > 0 } ?: qty
         val entry = order.averageFillPrice?.takeIf { it > 0.0 } ?: referencePrice
         val investedAmount = entry * filled
@@ -1216,6 +1227,20 @@ class TradingRepository @Inject constructor(
         val sizing = CashAwareCncSizing.size(settings.holdingBudgetRupees.toDouble(), available, referencePrice)
         val capital = sizing.deployableCash
         val qty = sizing.quantity
+        require(qty > 0) { "Safe CNC buying power cannot fund one share of ${row.symbol} after RMS reserve" }
+
+        val ref = stableRef("FLH", "${row.id}-${row.symbol}")
+        val order = try {
+            placeCncBuy(token, row.symbol, qty, ref, decisionStartedNs)
+        } catch (t: Throwable) {
+            auditLogger.log("EXECUTION", "FORECAST_BUY_FAST_PATH_FAILED", mapOf(
+                "symbol" to row.symbol,
+                "quantity" to qty,
+                "hot_path" to (hot != null),
+                "message" to (t.message ?: t.javaClass.simpleName)
+            ))
+            throw t
+        }
         auditLogger.log("EXECUTION", "CNC_BUY_SIZED_FAST", mapOf(
             "symbol" to row.symbol,
             "available_cnc" to available,
@@ -1227,10 +1252,6 @@ class TradingRepository @Inject constructor(
             "quantity" to qty,
             "hot_path" to (hot != null)
         ))
-        require(qty > 0) { "Safe CNC buying power cannot fund one share of ${row.symbol} after RMS reserve" }
-
-        val ref = stableRef("FLH", "${row.id}-${row.symbol}")
-        val order = placeCncBuy(token, row.symbol, qty, ref, decisionStartedNs)
         val filled = order.filledQuantity?.takeIf { it > 0 } ?: qty
         val entry = order.averageFillPrice?.takeIf { it > 0.0 } ?: referencePrice
         val investedAmount = entry * filled
@@ -1799,14 +1820,7 @@ class TradingRepository @Inject constructor(
         val activeStop = updated.stopPrice
         if (LearnedTrailingPolicy.isArmed(activeStop, updated.entryPrice) && activeStop != null && ltp <= activeStop) {
             val triggerStartedNs = SystemClock.elapsedRealtimeNanos()
-            auditLogger.log("TRAILING_STOP", "V7_STAIRCASE_EXIT_TRIGGERED", mapOf(
-                "symbol" to updated.symbol,
-                "ltp" to ltp,
-                "active_stop" to activeStop,
-                "locked_profit_pct" to LearnedTrailingPolicy.lockedPct(updated.entryPrice, activeStop),
-                "high_water_gain_pct" to LearnedTrailingPolicy.gainPct(updated.entryPrice, updated.maxFavourablePrice)
-            ))
-            closeLongHolding(
+            val closed = closeLongHolding(
                 token = token,
                 position = updated,
                 mark = ltp,
@@ -1814,6 +1828,14 @@ class TradingRepository @Inject constructor(
                 notificationStartedNs = triggerStartedNs,
                 fastDispatch = true
             )
+            auditLogger.log("TRAILING_STOP", "V7_STAIRCASE_EXIT_TRIGGERED", mapOf(
+                "symbol" to updated.symbol,
+                "ltp" to ltp,
+                "active_stop" to activeStop,
+                "locked_profit_pct" to LearnedTrailingPolicy.lockedPct(updated.entryPrice, activeStop),
+                "high_water_gain_pct" to LearnedTrailingPolicy.gainPct(updated.entryPrice, updated.maxFavourablePrice),
+                "closed" to (closed != null)
+            ))
         }
     }
 
@@ -1893,11 +1915,6 @@ class TradingRepository @Inject constructor(
             if (snapshotFresh) {
                 reconcilePositionWithBroker(token, local, preferredMark = mark, force = false)
             } else {
-                auditLogger.log("EXECUTION_LATENCY", "FAST_SELL_LOCAL_OWNERSHIP_USED", mapOf(
-                    "symbol" to local.symbol,
-                    "position_id" to local.id,
-                    "broker_cache_age_ms" to (snapshot?.let { System.currentTimeMillis() - it.atMs } ?: -1L)
-                ))
                 local
             }
         } else {
