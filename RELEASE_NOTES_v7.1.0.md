@@ -46,7 +46,7 @@ For every app-owned CNC holding still open after the regular market session:
 2. The app calculates the sell price required for at least **₹100 estimated net profit** after standard Groww NSE delivery charges.
 3. The charge model includes buy + sell brokerage, delivery STT, stamp duty, NSE transaction charge, SEBI turnover charge, IPFT, conservative DP debit charge and GST.
 4. The target is rounded upward to a ₹0.05-safe price step.
-5. One CASH/CNC GTT SELL is created. If price is below the recovery target it uses `UP`; if already above the target it uses `DOWN` to protect the recovery level.
+5. One CASH/CNC GTT SELL is created with a **LIMIT SELL at the calculated recovery price**. If price is below the recovery target it uses `UP`; if already above the target it uses `DOWN`. A gap below the limit waits rather than deliberately filling below the ₹100-net recovery floor.
 6. The holding enters `RECOVERY_GTT` mode. The live trailing engine stops touching it; the app only verifies/reconciles that GTT until the holding closes.
 7. Failed/cancelled/expired recovery GTTs are recreated while the holding still exists.
 
