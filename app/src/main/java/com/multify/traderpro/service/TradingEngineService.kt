@@ -36,6 +36,10 @@ class TradingEngineService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var engineJob: Job? = null
+    private var holdingJob: Job? = null
+    private var hotPathJob: Job? = null
+    @Volatile private var latestManagedCount = 0
+    @Volatile private var latestForecastOutcomeCount = 0
     private var lastAfterHoursResearchAtMs = 0L
 
     override fun onCreate() {
@@ -84,6 +88,8 @@ class TradingEngineService : Service() {
 
     override fun onDestroy() {
         engineJob?.cancel()
+        holdingJob?.cancel()
+        hotPathJob?.cancel()
         scope.cancel()
         auditLogger.log("RUNTIME", "FOREGROUND_ENGINE_DESTROYED")
         super.onDestroy()
@@ -92,46 +98,93 @@ class TradingEngineService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     private fun startEngineLoop() {
+        if (holdingJob?.isActive != true) {
+            holdingJob = scope.launch {
+                auditLogger.log("RUNTIME", "V7_FAST_HOLDING_MONITOR_STARTED")
+                while (isActive) {
+                    try {
+                        latestManagedCount = repository.monitorManagedPositions()
+                        val now = ZonedDateTime.now(INDIA)
+                        val regularSession = now.dayOfWeek.value < 6 &&
+                            now.toLocalTime() >= LocalTime.of(9, 15) &&
+                            now.toLocalTime() < LocalTime.of(15, 30)
+                        delay(if (regularSession) POSITION_LOOP_INTERVAL_MS else CLOSED_SESSION_LOOP_INTERVAL_MS)
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (t: Throwable) {
+                        auditLogger.log("RUNTIME", "V7_FAST_HOLDING_MONITOR_ERROR", mapOf(
+                            "type" to t.javaClass.simpleName,
+                            "message" to (t.message ?: t.javaClass.simpleName)
+                        ))
+                        delay(POSITION_ERROR_BACKOFF_MS)
+                    }
+                }
+            }
+        }
+
+        if (hotPathJob?.isActive != true) {
+            hotPathJob = scope.launch {
+                auditLogger.log("RUNTIME", "V7_EXECUTION_HOT_PATH_STARTED")
+                var lastHeartbeatAtMs = 0L
+                while (isActive) {
+                    try {
+                        val nowMs = System.currentTimeMillis()
+                        if (nowMs - lastHeartbeatAtMs >= HEARTBEAT_INTERVAL_MS) {
+                            repository.recordServiceHeartbeat()
+                            lastHeartbeatAtMs = nowMs
+                        }
+                        runCatching { repository.maintainArmHotPath() }
+                            .onFailure {
+                                auditLogger.log("RUNTIME", "ARM_HOT_PATH_MAINTAIN_ERROR", mapOf(
+                                    "message" to (it.message ?: it.javaClass.simpleName)
+                                ))
+                            }
+                        delay(HOT_PATH_LOOP_INTERVAL_MS)
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (t: Throwable) {
+                        auditLogger.log("RUNTIME", "V7_EXECUTION_HOT_PATH_ERROR", mapOf(
+                            "type" to t.javaClass.simpleName,
+                            "message" to (t.message ?: t.javaClass.simpleName)
+                        ))
+                        delay(HOT_PATH_ERROR_BACKOFF_MS)
+                    }
+                }
+            }
+        }
+
         if (engineJob?.isActive == true) return
         engineJob = scope.launch {
-            auditLogger.log("RUNTIME", "FOREGROUND_ENGINE_STARTED")
+            auditLogger.log("RUNTIME", "FOREGROUND_ENGINE_STARTED", mapOf(
+                "architecture" to "V7_SPLIT_PRIORITY_LOOPS"
+            ))
             runCatching { repository.ensureHistoricalSeed() }
-            var lastHeartbeatAtMs = 0L
             while (isActive) {
                 try {
+                    latestForecastOutcomeCount = runCatching { repository.monitorForecastOutcomes() }
+                        .onFailure {
+                            if (it !is CancellationException) {
+                                auditLogger.log("RUNTIME", "FORECAST_OUTCOME_MONITOR_ERROR", mapOf(
+                                    "message" to (it.message ?: it.javaClass.simpleName)
+                                ))
+                            }
+                        }.getOrDefault(latestForecastOutcomeCount)
+
                     val nowMs = System.currentTimeMillis()
-                    if (nowMs - lastHeartbeatAtMs >= HEARTBEAT_INTERVAL_MS) {
-                        repository.recordServiceHeartbeat()
-                        lastHeartbeatAtMs = nowMs
-                    }
-
-                    runCatching { repository.maintainArmHotPath() }
-                        .onFailure { auditLogger.log("RUNTIME", "ARM_HOT_PATH_MAINTAIN_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
-
-                    val managedCount = runCatching { repository.monitorManagedPositions() }
-                        .onFailure {
-                            if (it !is CancellationException) {
-                                auditLogger.log("RUNTIME", "MANAGED_MONITOR_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName)))
-                            }
-                        }.getOrDefault(0)
-
-                    val forecastOutcomeCount = runCatching { repository.monitorForecastOutcomes() }
-                        .onFailure {
-                            if (it !is CancellationException) {
-                                auditLogger.log("RUNTIME", "FORECAST_OUTCOME_MONITOR_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName)))
-                            }
-                        }.getOrDefault(0)
-
                     val now = ZonedDateTime.now(INDIA)
                     if (now.dayOfWeek.value < 6 &&
                         now.toLocalTime() >= LocalTime.of(9, 15) &&
                         now.toLocalTime() <= LocalTime.of(15, 0)
                     ) {
                         runCatching { repository.generateDailyForecasts(false) }
-                            .onFailure { auditLogger.log("RUNTIME", "FORECAST_SCAN_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
+                            .onFailure {
+                                auditLogger.log("RUNTIME", "FORECAST_SCAN_ERROR", mapOf(
+                                    "message" to (it.message ?: it.javaClass.simpleName)
+                                ))
+                            }
                         runCatching { repository.pendingLongForecastNotifications() }
                             .getOrDefault(emptyList())
-                            .filter { it.qualityTier != "RESEARCH" }
+                            .filter { it.qualityTier == "PRIMARY" }
                             .forEach(::notifyForecast)
                     }
 
@@ -141,21 +194,18 @@ class TradingEngineService : Service() {
                     ) {
                         lastAfterHoursResearchAtMs = nowMs
                         runCatching { repository.runAfterHoursResearch(false) }
-                            .onFailure { auditLogger.log("RUNTIME", "AFTER_HOURS_RESEARCH_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
+                            .onFailure {
+                                auditLogger.log("RUNTIME", "AFTER_HOURS_RESEARCH_ERROR", mapOf(
+                                    "message" to (it.message ?: it.javaClass.simpleName)
+                                ))
+                            }
                     }
 
-                    updateForegroundNotification(managedCount, forecastOutcomeCount)
+                    updateForegroundNotification(latestManagedCount, latestForecastOutcomeCount)
                     val regularSession = now.dayOfWeek.value < 6 &&
                         now.toLocalTime() >= LocalTime.of(9, 15) &&
                         now.toLocalTime() < LocalTime.of(15, 30)
-                    delay(
-                        when {
-                            !regularSession -> CLOSED_SESSION_LOOP_INTERVAL_MS
-                            managedCount > 0 -> POSITION_LOOP_INTERVAL_MS
-                            forecastOutcomeCount > 0 -> FORECAST_LOOP_INTERVAL_MS
-                            else -> IDLE_LOOP_INTERVAL_MS
-                        }
-                    )
+                    delay(if (regularSession) BACKGROUND_LOOP_INTERVAL_MS else CLOSED_SESSION_LOOP_INTERVAL_MS)
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (t: Throwable) {
@@ -233,8 +283,10 @@ class TradingEngineService : Service() {
         private const val FOREGROUND_NOTIFICATION_ID = 68090
         private const val HEARTBEAT_INTERVAL_MS = 15_000L
         private const val POSITION_LOOP_INTERVAL_MS = 1_000L
-        private const val FORECAST_LOOP_INTERVAL_MS = 5_000L
-        private const val IDLE_LOOP_INTERVAL_MS = 10_000L
+        private const val POSITION_ERROR_BACKOFF_MS = 1_000L
+        private const val HOT_PATH_LOOP_INTERVAL_MS = 10_000L
+        private const val HOT_PATH_ERROR_BACKOFF_MS = 2_000L
+        private const val BACKGROUND_LOOP_INTERVAL_MS = 5_000L
         private const val CLOSED_SESSION_LOOP_INTERVAL_MS = 60_000L
         private const val ERROR_BACKOFF_MS = 10_000L
         private const val AFTER_HOURS_RESEARCH_INTERVAL_MS = 15L * 60L * 1000L
