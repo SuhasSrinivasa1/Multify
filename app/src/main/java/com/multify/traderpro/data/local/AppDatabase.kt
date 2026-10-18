@@ -237,6 +237,9 @@ abstract class AppDatabase : RoomDatabase() {
         val MIGRATION_13_14 = object : Migration(13, 14) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE long_forecasts ADD COLUMN strategyFamily TEXT NOT NULL DEFAULT 'UNCLASSIFIED'")
+                db.execSQL("ALTER TABLE forecast_champions ADD COLUMN strategyFamily TEXT NOT NULL DEFAULT 'UNCLASSIFIED'")
+                db.execSQL("DROP INDEX IF EXISTS index_forecast_champions_marketRegime_regime_strategy")
+                db.execSQL("CREATE UNIQUE INDEX index_forecast_champions_marketRegime_regime_strategy_strategyFamily ON forecast_champions(marketRegime, regime, strategy, strategyFamily)")
                 db.execSQL("ALTER TABLE forecast_research_snapshots ADD COLUMN researchCohort TEXT NOT NULL DEFAULT 'LEGACY'")
                 db.execSQL("ALTER TABLE forecast_research_snapshots ADD COLUMN strategyFamily TEXT NOT NULL DEFAULT 'UNCLASSIFIED'")
                 db.execSQL("ALTER TABLE forecast_research_snapshots ADD COLUMN familyScoreJson TEXT NOT NULL DEFAULT '{}'")
