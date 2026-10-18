@@ -34,11 +34,12 @@ data class ManagedPositionEntity(
     val maxFavourablePrice: Double,
     val maxAdversePrice: Double,
     val lastEvaluatedAtMs: Long,
-    val anchorPrice: Double = 0.0,
-    val capitalDeployed: Double = 0.0,
-    val campaignBudget: Double = 0.0,
-    val addCount: Int = 0,
     val trailingArmPct: Double = 0.0,
     val trailingLastRatchetPrice: Double = 0.0,
-    val status: String = "OPEN"
+    val status: String = "OPEN",
+    val smartOrderMode: String = "NONE",
+    val smartOrderTriggerPrice: Double? = null,
+    val smartOrderDirection: String? = null,
+    val smartOrderStatus: String? = null,
+    val smartOrderUpdatedAtMs: Long? = null
 )
