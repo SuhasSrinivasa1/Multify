@@ -136,51 +136,47 @@ data class OrderPayload(
     @SerializedName("average_fill_price") val averageFillPrice: Double? = null
 )
 
-data class OcoLeg(
-    @SerializedName("trigger_price") val triggerPrice: String,
-    @SerializedName("order_type") val orderType: String,
-    val price: String? = null
+data class GttOrder(
+    @SerializedName("order_type") val orderType: String = "MARKET",
+    val price: String? = null,
+    @SerializedName("transaction_type") val transactionType: String = "SELL"
 )
 
-data class OcoCreateRequest(
+data class GttCreateRequest(
     @SerializedName("reference_id") val referenceId: String,
-    @SerializedName("smart_order_type") val smartOrderType: String = "OCO",
+    @SerializedName("smart_order_type") val smartOrderType: String = "GTT",
     val segment: String = "CASH",
     @SerializedName("trading_symbol") val tradingSymbol: String,
     val quantity: Int,
-    @SerializedName("net_position_quantity") val netPositionQuantity: Int,
-    @SerializedName("transaction_type") val transactionType: String,
-    val target: OcoLeg,
-    @SerializedName("stop_loss") val stopLoss: OcoLeg,
+    @SerializedName("trigger_price") val triggerPrice: String,
+    @SerializedName("trigger_direction") val triggerDirection: String,
+    val order: GttOrder = GttOrder(),
     @SerializedName("product_type") val productType: String = "CNC",
     val exchange: String = "NSE",
     val duration: String = "DAY"
 )
 
-data class OcoModifyLeg(
-    @SerializedName("trigger_price") val triggerPrice: String
-)
-
-data class OcoModifyRequest(
-    @SerializedName("smart_order_type") val smartOrderType: String = "OCO",
+data class GttModifyRequest(
+    @SerializedName("smart_order_type") val smartOrderType: String = "GTT",
     val segment: String = "CASH",
-    val duration: String = "DAY",
     val quantity: Int,
-    @SerializedName("product_type") val productType: String = "CNC",
-    val target: OcoModifyLeg,
-    @SerializedName("stop_loss") val stopLoss: OcoModifyLeg
+    @SerializedName("trigger_price") val triggerPrice: String,
+    @SerializedName("trigger_direction") val triggerDirection: String,
+    val order: GttOrder = GttOrder()
 )
 
 data class SmartOrderPayload(
     @SerializedName("smart_order_id") val smartOrderId: String = "",
     @SerializedName("smart_order_type") val smartOrderType: String = "",
+    @SerializedName("reference_id") val referenceId: String? = null,
     val status: String = "",
     @SerializedName("trading_symbol") val tradingSymbol: String = "",
     val quantity: Int = 0,
     @SerializedName("product_type") val productType: String = "",
     val exchange: String = "NSE",
-    val target: OcoLeg? = null,
-    @SerializedName("stop_loss") val stopLoss: OcoLeg? = null,
+    @SerializedName("trigger_price") val triggerPrice: String? = null,
+    @SerializedName("trigger_direction") val triggerDirection: String? = null,
+    val order: GttOrder? = null,
     @SerializedName("triggered_at") val triggeredAt: String? = null,
     val remark: String? = null
 )
