@@ -83,7 +83,8 @@ data class LongForecastEntity(
     val notified: Boolean = false,
     val multifyMatched: Boolean = false,
     val qualityTier: String = "LEGACY",
-    val executionEligible: Boolean = false
+    val executionEligible: Boolean = false,
+    val strategyFamily: String = "UNCLASSIFIED"
 )
 
 @Entity(
@@ -91,12 +92,14 @@ data class LongForecastEntity(
     indices = [
         Index(value = ["researchDate", "scanAtMs"]),
         Index(value = ["researchDate", "symbol"]),
-        Index(value = ["qualityTier"])
+        Index(value = ["qualityTier"]),
+        Index(value = ["researchCohort", "researchDate"])
     ]
 )
 data class ForecastResearchEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val researchDate: String,
+    val researchCohort: String = "LEGACY",
     val scanAtMs: Long,
     val symbol: String,
     val rank: Int,
@@ -108,6 +111,8 @@ data class ForecastResearchEntity(
     val regime: String,
     val marketRegime: String,
     val strategy: String,
+    val strategyFamily: String = "UNCLASSIFIED",
+    val familyScoreJson: String = "{}",
     val directionalScore: Double,
     val confidence: Double,
     val rejectionReason: String,
