@@ -1824,40 +1824,39 @@ class TradingRepository @Inject constructor(
             return@withLock null
         }
 
-        // Force broker truth immediately before every SELL. If a previous network-ambiguous
-        // order actually filled, reconciliation closes the local record and blocks a duplicate.
-        val reconciled = reconcilePositionWithBroker(token, local, preferredMark = mark, force = true)
-        if (reconciled == null || reconciled.quantity <= 0) {
-            auditLogger.log("SAFETY", "DUPLICATE_CLOSE_BLOCKED", mapOf(
-                "symbol" to position.symbol,
-                "position_id" to position.id,
+        val ref = stableRef("CLS", "${local.id}-${local.symbol}")
+        val order = try {
+            placeOwnedCncSell(token, local, ref, notificationStartedNs)
+        } catch (t: Throwable) {
+            brokerInventorySnapshot = null
+            runCatching { reconcilePositionWithBroker(token, local, preferredMark = mark, force = true) }
+            auditLogger.log("EXECUTION", "FAST_SELL_DISPATCH_FAILED", mapOf(
+                "symbol" to local.symbol,
                 "reason" to reason,
-                "stage" to "broker_quantity_already_closed"
+                "message" to (t.message ?: t.javaClass.simpleName)
             ))
-            return@withLock null
+            throw t
         }
 
-        val ref = stableRef("CLS", "${reconciled.id}-${reconciled.symbol}")
-        val order = placeOwnedCncSell(token, reconciled, ref, notificationStartedNs)
         val exit = order.averageFillPrice?.takeIf { it > 0.0 } ?: mark
-        val gross = (exit - reconciled.entryPrice) * reconciled.quantity
-        val costs = estimatedCashCosts(reconciled.entryPrice, exit, reconciled.quantity)
+        val gross = (exit - local.entryPrice) * local.quantity
+        val costs = estimatedCashCosts(local.entryPrice, exit, local.quantity)
         val trade = ManagedTradeEntity(
-            engine = reconciled.engine, symbol = reconciled.symbol, product = "CNC", side = "LONG",
-            quantity = reconciled.quantity, entryPrice = reconciled.entryPrice, exitPrice = exit,
+            engine = local.engine, symbol = local.symbol, product = "CNC", side = "LONG",
+            quantity = local.quantity, entryPrice = local.entryPrice, exitPrice = exit,
             grossPnl = gross, estimatedCosts = costs, netPnl = gross - costs, exitReason = reason,
-            strategy = reconciled.strategy, regime = reconciled.regime, confidence = reconciled.confidence,
-            mfeRupees = max(0.0, reconciled.maxFavourablePrice - reconciled.entryPrice) * reconciled.quantity,
-            maeRupees = max(0.0, reconciled.entryPrice - reconciled.maxAdversePrice) * reconciled.quantity,
-            sourceEventId = reconciled.sourceEventId, openOrderId = reconciled.openOrderId, closeOrderId = order.growwOrderId,
-            openedAtMs = reconciled.openedAtMs, closedAtMs = System.currentTimeMillis()
+            strategy = local.strategy, regime = local.regime, confidence = local.confidence,
+            mfeRupees = max(0.0, local.maxFavourablePrice - local.entryPrice) * local.quantity,
+            maeRupees = max(0.0, local.entryPrice - local.maxAdversePrice) * local.quantity,
+            sourceEventId = local.sourceEventId, openOrderId = local.openOrderId, closeOrderId = order.growwOrderId,
+            openedAtMs = local.openedAtMs, closedAtMs = System.currentTimeMillis()
         )
         managedDao.insertTrade(trade)
-        managedDao.deletePosition(reconciled.id)
+        managedDao.deletePosition(local.id)
         brokerInventorySnapshot = null
         auditLogger.log("HOLDING", "LONG_CLOSED", mapOf(
-            "symbol" to reconciled.symbol,
-            "qty" to reconciled.quantity,
+            "symbol" to local.symbol,
+            "qty" to local.quantity,
             "exit" to exit,
             "reason" to reason,
             "net_pnl" to trade.netPnl
