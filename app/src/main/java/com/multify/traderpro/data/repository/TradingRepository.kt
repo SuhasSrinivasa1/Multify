@@ -703,32 +703,49 @@ class TradingRepository @Inject constructor(
             return
         }
 
-        // Recommendation learning is independent of Groww execution/reconciliation.
-        // A manual broker exit or a failed SELL must not erase Multify's reported result.
-        var closedLearningCall: LearningCallEntity? = null
-        when (parsed.type) {
-            SignalType.TRADE_RELEASE -> recordLiveBuy(eventId, parsed)
-            SignalType.BOOK_PROFIT -> if (!symbol.isNullOrBlank()) {
-                val eventAtMs = dao.byId(eventId)?.receivedAtMs ?: System.currentTimeMillis()
-                closedLearningCall = recordLiveExit(eventId, symbol, parsed.exitPrice, parsed.returnsPct, eventAtMs)
-            }
-            else -> Unit
-        }
-
+        // v7 priority rule: when ARM is already hot, dispatch the real BUY before doing
+        // learning/database enrichment. Learning is still guaranteed in finally.
         val hot = armHotState?.takeIf { System.currentTimeMillis() - it.warmedAtMs <= ARM_HOT_STATE_MAX_AGE_MS }
-        val token = hot?.token ?: ensureToken()
-        if (token == null) {
-            dao.updateForwarding(eventId, "CAPTURED", "AUTH_REQUIRED", "Signal and Multify learning stored. Authenticate Groww to enable ARM.", null)
-            return
-        }
-        if (parsed.type == SignalType.BOOK_PROFIT && closedLearningCall != null) {
-            runCatching { captureMultifyMfe(closedLearningCall!!, token) }
-                .onFailure { auditLogger.log("LEARNING", "MULTIFY_MFE_LIVE_ERROR", mapOf("symbol" to (symbol ?: ""), "message" to (it.message ?: it.javaClass.simpleName))) }
-        }
         val settings = hot?.settings ?: preferences.settings.first()
+
         when (parsed.type) {
-            SignalType.TRADE_RELEASE -> handleMultifyBuy(eventId, parsed, token, settings, notificationStartedNs)
-            SignalType.BOOK_PROFIT -> handleMultifyExit(eventId, parsed, token, settings, notificationStartedNs)
+            SignalType.TRADE_RELEASE -> {
+                if (!settings.armEffective) {
+                    recordLiveBuy(eventId, parsed)
+                    val observed = multifyReferenceEntry(parsed)
+                    dao.updateForwarding(
+                        eventId, "ANALYZED", "LONG_CALL_CAPTURED",
+                        "Multify LONG call captured${observed?.let { " at reference ₹${fmt(it)}" }.orEmpty()}. ARM is off, so no order was placed.",
+                        null
+                    )
+                    return
+                }
+                val token = hot?.token ?: ensureToken()
+                if (token == null) {
+                    recordLiveBuy(eventId, parsed)
+                    dao.updateForwarding(eventId, "CAPTURED", "AUTH_REQUIRED", "Signal and Multify learning stored. Authenticate Groww to enable ARM.", null)
+                    return
+                }
+                try {
+                    handleMultifyBuy(eventId, parsed, token, settings, notificationStartedNs)
+                } finally {
+                    recordLiveBuy(eventId, parsed)
+                }
+            }
+
+            SignalType.BOOK_PROFIT -> {
+                val closedLearningCall = if (!symbol.isNullOrBlank()) {
+                    val eventAtMs = dao.byId(eventId)?.receivedAtMs ?: System.currentTimeMillis()
+                    recordLiveExit(eventId, symbol, parsed.exitPrice, parsed.returnsPct, eventAtMs)
+                } else null
+                val token = hot?.token ?: ensureToken()
+                if (token != null && closedLearningCall != null) {
+                    runCatching { captureMultifyMfe(closedLearningCall, token) }
+                        .onFailure { auditLogger.log("LEARNING", "MULTIFY_MFE_LIVE_ERROR", mapOf("symbol" to (symbol ?: ""), "message" to (it.message ?: it.javaClass.simpleName))) }
+                }
+                handleMultifyExit(eventId, parsed)
+            }
+
             else -> Unit
         }
     }
@@ -785,21 +802,18 @@ class TradingRepository @Inject constructor(
         val filled = order.filledQuantity?.takeIf { it > 0 } ?: qty
         val entry = order.averageFillPrice?.takeIf { it > 0.0 } ?: referencePrice
         val investedAmount = entry * filled
-        val multifyStats = learningStats()
-        val trailArmPct = LearnedTrailingPolicy.dynamicArmPct(multifyStats.longAveragePct)
-        val minimumNetProfit = LearnedTrailingPolicy.minimumNetProfitRupees(entry, filled, trailArmPct)
-        val minimumProfitExit = LearnedTrailingPolicy.minimumExitPriceForNetProfitPct(entry, trailArmPct)
+        val trailTriggerPrice = entry * (1.0 + LearnedTrailingPolicy.ARM_TRIGGER_PCT / 100.0)
         managedDao.insertPosition(
             ManagedPositionEntity(
                 engine = ENGINE_MULTIFY_HOLDING, symbol = symbol, product = "CNC", side = "LONG", quantity = filled,
                 entryPrice = entry, stopPrice = entry * (1.0 - HOLDING_FAILSAFE_STOP_PCT),
-                targetPrice = minimumProfitExit,
-                strategy = "Multify ARM holding · dynamic Multify-MFE trail",
+                targetPrice = trailTriggerPrice,
+                strategy = "Multify ARM holding · v7 fixed staircase trail",
                 regime = "HOLDING_LONG", confidence = 1.0, sourceEventId = eventId,
                 openOrderId = order.growwOrderId, openReferenceId = ref, openedAtMs = System.currentTimeMillis(),
                 lastPrice = entry, maxFavourablePrice = entry, maxAdversePrice = entry, lastEvaluatedAtMs = System.currentTimeMillis(),
                 anchorPrice = entry, capitalDeployed = investedAmount, campaignBudget = capital,
-                trailingArmPct = trailArmPct, trailingLastRatchetPrice = 0.0
+                trailingArmPct = LearnedTrailingPolicy.ARM_TRIGGER_PCT, trailingLastRatchetPrice = 0.0
             )
         )
         armHotState = hot?.copy(
@@ -808,48 +822,48 @@ class TradingRepository @Inject constructor(
         )
         dao.updateForwarding(
             eventId, "DELIVERED", "CNC_LONG_BOUGHT",
-            "ARM bought $filled $symbol into holdings @ ₹${fmt(entry)}. Dynamic trailing arms at +${fmt(trailArmPct)}% estimated net (Multify MFE average, minimum 0.50%).",
+            "ARM bought $filled $symbol into holdings @ ₹${fmt(entry)}. Trail arms at +0.55%, locks +0.50%, then ratchets +0.10% for every +0.10% high-water step.",
             null
         )
         auditLogger.log("HOLDING", "MULTIFY_LONG_OPENED", mapOf(
             "symbol" to symbol, "qty" to filled, "entry" to entry,
             "invested_amount" to investedAmount,
-            "multify_mfe_avg_pct" to multifyStats.longAveragePct,
-            "trail_arm_pct" to trailArmPct,
-            "minimum_net_profit" to minimumNetProfit,
-            "minimum_profit_exit_price" to minimumProfitExit
+            "trail_trigger_pct" to LearnedTrailingPolicy.ARM_TRIGGER_PCT,
+            "initial_lock_pct" to LearnedTrailingPolicy.INITIAL_LOCK_PCT,
+            "ratchet_step_pct" to LearnedTrailingPolicy.RATCHET_STEP_PCT,
+            "dispatch_sla_ms" to 100
         ))
     }
 
     private suspend fun handleMultifyExit(
         eventId: Long,
-        signal: ParsedSignal,
-        token: String,
-        settings: AppSettings,
-        notificationStartedNs: Long?
+        signal: ParsedSignal
     ) {
         val symbol = signal.symbol ?: error("Book-profit signal has no symbol")
         val holding = managedDao.openPosition(ENGINE_MULTIFY_HOLDING, symbol)
         if (holding == null) {
-            dao.updateForwarding(eventId, "ANALYZED", "MULTIFY_EXIT_RECORDED", "Book Profit recorded in Multify learning; no app-owned Multify holding was open.", null)
-            return
-        }
-        val reconciled = reconcilePositionWithBroker(token, holding, signal.exitPrice, force = true)
-        if (reconciled == null) {
-            armHotState = null
             dao.updateForwarding(
-                eventId, "DELIVERED", "MULTIFY_EXIT_RECORDED_MANUAL_CLOSE",
-                "Multify Book Profit recorded. Groww already showed the app-owned $symbol quantity as manually/external closed, so no duplicate SELL was sent.", null
+                eventId, "ANALYZED", "MULTIFY_EXIT_LEARNING_ONLY",
+                "Multify Book Profit was recorded for learning. No app-owned Multify holding was open.",
+                null
             )
             return
         }
-        require(settings.brokerDdpiEnabled) { "DDPI is required to sell the app-owned CNC holding" }
-        val mark = signal.exitPrice ?: reconciled.lastPrice
-        closeLongHolding(token, reconciled, mark, "MULTIFY_BOOK_PROFIT", notificationStartedNs)
-        armHotState = null
-        brokerInventorySnapshot = null
-        dao.updateForwarding(eventId, "DELIVERED", "CNC_LONG_SOLD", "Multify Book Profit sold the remaining app-owned $symbol holding.", null)
+        dao.updateForwarding(
+            eventId, "ANALYZED", "MULTIFY_EXIT_LEARNING_ONLY_TRAIL_CONTINUES",
+            "Multify Book Profit was recorded for MFE/learning only. v7 does not sell on Multify Book Profit; the app-owned holding remains governed by the fixed staircase trailing stop.",
+            null
+        )
+        auditLogger.log("HOLDING", "MULTIFY_BOOK_PROFIT_IGNORED_FOR_EXECUTION", mapOf(
+            "symbol" to symbol,
+            "position_id" to holding.id,
+            "entry" to holding.entryPrice,
+            "last_price" to holding.lastPrice,
+            "stop_price" to holding.stopPrice,
+            "high_water" to holding.maxFavourablePrice
+        ))
     }
+
     suspend fun submitManualSignal(symbol: String, action: String, observedPrice: Double?): Long {
         val normalizedSymbol = symbol.trim().uppercase(Locale.US)
         require(normalizedSymbol.matches(Regex("[A-Z0-9&._-]{1,32}"))) { "Enter a valid NSE symbol" }
