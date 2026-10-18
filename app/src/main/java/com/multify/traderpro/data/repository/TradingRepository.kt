@@ -1836,7 +1836,8 @@ class TradingRepository @Inject constructor(
         position: ManagedPositionEntity,
         mark: Double,
         reason: String,
-        notificationStartedNs: Long? = null
+        notificationStartedNs: Long? = null,
+        fastDispatch: Boolean = false
     ): ManagedTradeEntity? = closePositionMutex.withLock {
         require(position.side == "LONG") { "Only LONG holdings are supported" }
 
@@ -1851,10 +1852,30 @@ class TradingRepository @Inject constructor(
             return@withLock null
         }
 
-        // Force broker truth immediately before every SELL. If a previous network-ambiguous
-        // order actually filled, reconciliation closes the local record and blocks a duplicate.
-        val reconciled = reconcilePositionWithBroker(token, local, preferredMark = mark, force = true)
-        if (reconciled == null || reconciled.quantity <= 0) {
+        val snapshot = brokerInventorySnapshot
+        val snapshotFresh = snapshot != null &&
+            System.currentTimeMillis() - snapshot.atMs <= FAST_SELL_BROKER_CACHE_MAX_AGE_MS
+
+        // v7 latency rule: a staircase/failsafe trigger must not wait for a fresh broker REST
+        // reconciliation before POSTing the SELL. We use a recently refreshed broker snapshot
+        // when available; otherwise the app-owned local quantity is dispatched immediately.
+        // Normal/non-latency-critical closes retain forced broker reconciliation.
+        val sellPosition = if (fastDispatch) {
+            if (snapshotFresh) {
+                reconcilePositionWithBroker(token, local, preferredMark = mark, force = false)
+            } else {
+                auditLogger.log("EXECUTION_LATENCY", "FAST_SELL_LOCAL_OWNERSHIP_USED", mapOf(
+                    "symbol" to local.symbol,
+                    "position_id" to local.id,
+                    "broker_cache_age_ms" to (snapshot?.let { System.currentTimeMillis() - it.atMs } ?: -1L)
+                ))
+                local
+            }
+        } else {
+            reconcilePositionWithBroker(token, local, preferredMark = mark, force = true)
+        }
+
+        if (sellPosition == null || sellPosition.quantity <= 0) {
             auditLogger.log("SAFETY", "DUPLICATE_CLOSE_BLOCKED", mapOf(
                 "symbol" to position.symbol,
                 "position_id" to position.id,
@@ -1864,30 +1885,31 @@ class TradingRepository @Inject constructor(
             return@withLock null
         }
 
-        val ref = stableRef("CLS", "${reconciled.id}-${reconciled.symbol}")
-        val order = placeOwnedCncSell(token, reconciled, ref, notificationStartedNs)
+        val ref = stableRef("CLS", "${sellPosition.id}-${sellPosition.symbol}")
+        val order = placeOwnedCncSell(token, sellPosition, ref, notificationStartedNs)
         val exit = order.averageFillPrice?.takeIf { it > 0.0 } ?: mark
-        val gross = (exit - reconciled.entryPrice) * reconciled.quantity
-        val costs = estimatedCashCosts(reconciled.entryPrice, exit, reconciled.quantity)
+        val gross = (exit - sellPosition.entryPrice) * sellPosition.quantity
+        val costs = estimatedCashCosts(sellPosition.entryPrice, exit, sellPosition.quantity)
         val trade = ManagedTradeEntity(
-            engine = reconciled.engine, symbol = reconciled.symbol, product = "CNC", side = "LONG",
-            quantity = reconciled.quantity, entryPrice = reconciled.entryPrice, exitPrice = exit,
+            engine = sellPosition.engine, symbol = sellPosition.symbol, product = "CNC", side = "LONG",
+            quantity = sellPosition.quantity, entryPrice = sellPosition.entryPrice, exitPrice = exit,
             grossPnl = gross, estimatedCosts = costs, netPnl = gross - costs, exitReason = reason,
-            strategy = reconciled.strategy, regime = reconciled.regime, confidence = reconciled.confidence,
-            mfeRupees = max(0.0, reconciled.maxFavourablePrice - reconciled.entryPrice) * reconciled.quantity,
-            maeRupees = max(0.0, reconciled.entryPrice - reconciled.maxAdversePrice) * reconciled.quantity,
-            sourceEventId = reconciled.sourceEventId, openOrderId = reconciled.openOrderId, closeOrderId = order.growwOrderId,
-            openedAtMs = reconciled.openedAtMs, closedAtMs = System.currentTimeMillis()
+            strategy = sellPosition.strategy, regime = sellPosition.regime, confidence = sellPosition.confidence,
+            mfeRupees = max(0.0, sellPosition.maxFavourablePrice - sellPosition.entryPrice) * sellPosition.quantity,
+            maeRupees = max(0.0, sellPosition.entryPrice - sellPosition.maxAdversePrice) * sellPosition.quantity,
+            sourceEventId = sellPosition.sourceEventId, openOrderId = sellPosition.openOrderId, closeOrderId = order.growwOrderId,
+            openedAtMs = sellPosition.openedAtMs, closedAtMs = System.currentTimeMillis()
         )
         managedDao.insertTrade(trade)
-        managedDao.deletePosition(reconciled.id)
+        managedDao.deletePosition(sellPosition.id)
         brokerInventorySnapshot = null
         auditLogger.log("HOLDING", "LONG_CLOSED", mapOf(
-            "symbol" to reconciled.symbol,
-            "qty" to reconciled.quantity,
+            "symbol" to sellPosition.symbol,
+            "qty" to sellPosition.quantity,
             "exit" to exit,
             "reason" to reason,
-            "net_pnl" to trade.netPnl
+            "net_pnl" to trade.netPnl,
+            "fast_dispatch" to fastDispatch
         ))
         trade
     }
