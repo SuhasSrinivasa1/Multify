@@ -232,7 +232,7 @@ class TradingEngineService : Service() {
         private const val FORECAST_CHANNEL_ID = "forecast_opportunities"
         private const val FOREGROUND_NOTIFICATION_ID = 68090
         private const val HEARTBEAT_INTERVAL_MS = 15_000L
-        private const val POSITION_LOOP_INTERVAL_MS = 1_000L
+        private const val POSITION_LOOP_INTERVAL_MS = 500L
         private const val FORECAST_LOOP_INTERVAL_MS = 5_000L
         private const val IDLE_LOOP_INTERVAL_MS = 10_000L
         private const val CLOSED_SESSION_LOOP_INTERVAL_MS = 60_000L
