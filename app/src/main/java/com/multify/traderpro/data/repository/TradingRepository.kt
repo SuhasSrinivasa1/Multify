@@ -1797,7 +1797,7 @@ class TradingRepository @Inject constructor(
         if (desiredProtectedPrice == null) {
             // Explicitly remove any pre-v7 downside stop. Price weakness alone never sells.
             if (working.stopPrice != null || working.smartOrderMode == HoldingSmartOrderPolicy.MODE_TRAILING_GTT) {
-                working = cancelKnownPositionGtt(token, working, "TRAIL_NOT_ARMED", clearIfTerminal = true)
+                working = cancelKnownPositionGtt(token, working, "TRAIL_NOT_ARMED", clearIfTerminal = false)
                     .copy(stopPrice = null, smartOrderMode = HoldingSmartOrderPolicy.MODE_NONE)
             }
             managedDao.updatePosition(working)
@@ -1825,7 +1825,7 @@ class TradingRepository @Inject constructor(
                 // If a previous ratchet failed and price is already below the desired new stop,
                 // cancel the stale lower GTT before direct exit to make duplicate selling impossible.
                 if (ltp <= desiredProtectedPrice) {
-                    val cancelled = cancelKnownPositionGtt(token, working, "STALE_TRAIL_BEFORE_DIRECT_EXIT", clearIfTerminal = true)
+                    val cancelled = cancelKnownPositionGtt(token, working, "STALE_TRAIL_BEFORE_DIRECT_EXIT", clearIfTerminal = false)
                     if (cancelled.smartOrderId == null) {
                         auditTrailingState(cancelled.copy(stopPrice = desiredProtectedPrice), ltp, desiredStopGainPct, force = true)
                         closeLongHolding(
