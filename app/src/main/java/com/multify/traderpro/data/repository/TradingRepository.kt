@@ -1941,6 +1941,10 @@ class TradingRepository @Inject constructor(
         require(position.smartOrderId.isNullOrBlank()) { "Refusing to create a second GTT for ${position.symbol}" }
         val roundedTrigger = roundSmartOrderPrice(triggerPrice)
         val reference = stableRef(if (mode == HoldingSmartOrderPolicy.MODE_TRAILING_GTT) "MTG" else "MTR", "${position.id}-${position.symbol}-${position.openedAtMs}")
+        val postTriggerOrder = if (mode == HoldingSmartOrderPolicy.MODE_RECOVERY_GTT)
+            GttOrder(orderType = "LIMIT", price = smartPrice(roundedTrigger), transactionType = "SELL")
+        else
+            GttOrder(orderType = "MARKET", price = null, transactionType = "SELL")
         val payload = apiFactory.groww.createGtt(
             bearer(token),
             GttCreateRequest(
@@ -1949,7 +1953,7 @@ class TradingRepository @Inject constructor(
                 quantity = position.quantity,
                 triggerPrice = smartPrice(roundedTrigger),
                 triggerDirection = direction,
-                order = GttOrder(orderType = "MARKET", price = null, transactionType = "SELL")
+                order = postTriggerOrder
             )
         ).requirePayload("Create GTT ${position.symbol}")
         require(payload.smartOrderId.isNotBlank()) { "Groww did not return a GTT id for ${position.symbol}" }
@@ -1975,7 +1979,8 @@ class TradingRepository @Inject constructor(
             "direction" to direction,
             "transaction" to "SELL",
             "product" to "CNC",
-            "post_trigger_order_type" to "MARKET",
+            "post_trigger_order_type" to postTriggerOrder.orderType,
+            "post_trigger_limit_price" to postTriggerOrder.price,
             "mode" to mode,
             "status" to updated.smartOrderStatus
         ))
@@ -1991,6 +1996,10 @@ class TradingRepository @Inject constructor(
     ): ManagedPositionEntity {
         val id = position.smartOrderId ?: return createPositionGtt(token, position, triggerPrice, direction, mode)
         val roundedTrigger = roundSmartOrderPrice(triggerPrice)
+        val postTriggerOrder = if (mode == HoldingSmartOrderPolicy.MODE_RECOVERY_GTT)
+            GttOrder(orderType = "LIMIT", price = smartPrice(roundedTrigger), transactionType = "SELL")
+        else
+            GttOrder(orderType = "MARKET", price = null, transactionType = "SELL")
         val payload = apiFactory.groww.modifyGtt(
             bearer(token),
             id,
@@ -1998,7 +2007,7 @@ class TradingRepository @Inject constructor(
                 quantity = position.quantity,
                 triggerPrice = smartPrice(roundedTrigger),
                 triggerDirection = direction,
-                order = GttOrder(orderType = "MARKET", price = null, transactionType = "SELL")
+                order = postTriggerOrder
             )
         ).requirePayload("Modify GTT ${position.symbol}")
         val now = System.currentTimeMillis()
@@ -2020,6 +2029,8 @@ class TradingRepository @Inject constructor(
             "new_trigger" to roundedTrigger,
             "direction" to direction,
             "quantity" to position.quantity,
+            "post_trigger_order_type" to postTriggerOrder.orderType,
+            "post_trigger_limit_price" to postTriggerOrder.price,
             "mode" to mode,
             "status" to updated.smartOrderStatus
         ))
