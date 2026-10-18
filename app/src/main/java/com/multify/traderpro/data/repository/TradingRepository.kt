@@ -257,7 +257,9 @@ class TradingRepository @Inject constructor(
             .filter { it.isFinite() && it >= 0.0 && it < 25.0 }
         val today = LocalDate.now(INDIA).toString()
         val todayRows = all.filter { it.forecastDate == today }
-        val researchSessions = learningDao.forecastResearchDates().take(RESEARCH_SESSION_GOAL).size
+        val researchSessions = learningDao.forecastResearchDatesForCohort(RESEARCH_COHORT_V7)
+            .take(RESEARCH_SESSION_GOAL)
+            .size
         return ForecastLearningStatsDto(
             rollingTradingDays = keepDates.size,
             completedForecasts = rolling.size,
@@ -265,7 +267,10 @@ class TradingRepository @Inject constructor(
             todayTargetAveragePct = todayRows.map { it.targetPct }.takeIf { it.isNotEmpty() }?.average() ?: 0.0,
             targetFloorPct = ForecastQualityPolicy.MIN_TARGET_PCT,
             researchSessionsCaptured = researchSessions,
-            researchSessionGoal = RESEARCH_SESSION_GOAL
+            researchSessionGoal = RESEARCH_SESSION_GOAL,
+            researchCohort = RESEARCH_COHORT_V7,
+            researchPointerCount = MultifyFamilyPolicy.pointerNames.size,
+            researchFamilyCount = MultifyFamilyPolicy.families.size
         )
     }
 
