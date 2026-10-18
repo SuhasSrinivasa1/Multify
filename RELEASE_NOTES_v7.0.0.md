@@ -4,12 +4,13 @@
 
 - LONG-only NSE CASH/CNC application. There is no intraday or short-selling mode.
 - Production responsibilities are split into three independent loops:
-  - 1-second app-owned holding monitor using one batched Groww LTP request for up to 50 holdings.
+  - 500 ms app-owned holding monitor using one batched Groww LTP request for up to 50 holdings.
   - 10-second execution hot-path maintainer so authentication and CNC buying power stay pre-warmed.
   - lower-priority forecast/research loop so scanning can never block holding exits or hot-path maintenance.
 - BUY and staircase/failsafe SELL paths target **<100 ms app-side trigger/notification to Groww order POST start** when the hot path is available.
 - Broker ACK and exchange fill time are measured separately and are not represented as app-controlled latency.
 - Synchronous audit-file writes were moved out of the order-dispatch critical path.
+- Room destructive migration fallback is disabled; learned data is never silently erased when a migration path is missing.
 - Normal trailing SELLs use a recently refreshed broker-ownership cache rather than waiting for a new broker reconciliation network call before POSTing the order. Stable order references and local ownership checks remain in place.
 
 ## Fixed independent trailing
@@ -46,7 +47,7 @@ Every researched candidate captures **exactly 40 pre-call pointers** and is clas
 
 The 40 pointers cover price location, spread/order-book state, day/52-week context, VWAP/EMA distances and slopes, MACD/RSI, volume/RVOL, candle structure, ATR/volatility, Donchian/opening ranges, wick/body/gap structure, and prior-candle relationships.
 
-For five distinct trading sessions the app stores candidates, family scores, quality decisions, strategy votes, Multify matches, and reconstructed post-scan MFE/MAE/close/target outcomes. Prior completed evidence can add a bounded ranking bonus but can never bypass PRIMARY production safeguards.
+For five distinct trading sessions the app stores candidates, family scores, quality decisions, strategy votes, Multify matches, and reconstructed post-scan MFE/MAE/close/target outcomes. Prior completed evidence can add a bounded ranking bonus but can never bypass PRIMARY production safeguards. Champion evidence is family-specific so one strategy family cannot overwrite another.
 
 ## Version
 
