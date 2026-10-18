@@ -94,7 +94,7 @@ import java.util.Locale
 private enum class Destination(val label: String, val subtitle: String, val icon: ImageVector) {
     Execution("Execution", "ARM status and app-owned CNC holdings", Icons.Default.Dashboard),
     Averages("Averages", "30-day LONG averages", Icons.Default.Analytics),
-    Forecast("Forecast", "Production + analyst LONG candidates · ≥1% target", Icons.Default.Science),
+    Forecast("Forecast", "Up to 5 qualifying LONG calls · ≥1% target", Icons.Default.Science),
     Settings("Settings", "Broker, ARM, holding budget and device controls", Icons.Default.Settings)
 }
 
@@ -311,25 +311,25 @@ private fun ExecutionScreen(
                 }
             }
 
-            item { SectionTitle("Execution speed", "Rolling average from the latest 30 successful LONG CNC fills.") }
+            item { SectionTitle("Execution speed", "App-side trigger → order POST target is <100 ms. Broker ACK/fill latency is measured separately.") }
             item {
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
                     MetricCard(
-                        label = "Avg LONG Buy",
-                        value = executionTime(dashboard.execution.buyLong.averageFillMs, dashboard.execution.buyLong.sampleCount),
-                        supporting = executionSupport(dashboard.execution.buyLong),
+                        label = "BUY app dispatch",
+                        value = executionTime(dashboard.execution.buyLong.averageAppDispatchMs, dashboard.execution.buyLong.dispatchSampleCount),
+                        supporting = "target <100 ms · broker fill " + executionTime(dashboard.execution.buyLong.averageFillMs, dashboard.execution.buyLong.sampleCount),
                         modifier = Modifier.weight(1f)
                     )
                     MetricCard(
-                        label = "Avg LONG Sell",
-                        value = executionTime(dashboard.execution.sellLong.averageFillMs, dashboard.execution.sellLong.sampleCount),
-                        supporting = executionSupport(dashboard.execution.sellLong),
+                        label = "SELL app dispatch",
+                        value = executionTime(dashboard.execution.sellLong.averageAppDispatchMs, dashboard.execution.sellLong.dispatchSampleCount),
+                        supporting = "target <100 ms · broker fill " + executionTime(dashboard.execution.sellLong.averageFillMs, dashboard.execution.sellLong.sampleCount),
                         modifier = Modifier.weight(1f)
                     )
                 }
             }
 
-            item { SectionTitle("Active holdings", "All positions shown here are app-owned LONG CNC holdings. There is no automatic end-of-day exit.") }
+            item { SectionTitle("Active holdings", "LONG CNC only. Profit exits use the fixed staircase trail; Multify Book Profit is learning-only and does not sell.") }
             if (dashboard.positions.isEmpty()) {
                 item { EmptyState("No app-owned holdings", "ARM will buy the next eligible Multify call. Forecast candidates can also be bought manually while ARM is enabled.") }
             } else {
@@ -440,6 +440,9 @@ private fun ArmStatusCard(
 
 @Composable
 private fun HoldingCard(p: PositionDto) {
+    val lockedPct = if (p.averagePrice > 0.0 && p.stopPrice != null && p.stopPrice > p.averagePrice)
+        (p.stopPrice / p.averagePrice - 1.0) * 100.0
+    else null
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha=.22f)),
@@ -454,13 +457,11 @@ private fun HoldingCard(p: PositionDto) {
             KeyValueRow("Average", money(p.averagePrice))
             KeyValueRow("LTP", p.ltp?.let(::money) ?: "—")
             KeyValueRow("Unrealised", money(p.pnl), pnlColor(p.pnl))
-            KeyValueRow(
-                "Dynamic trail arm",
-                p.trailArmPct?.let { "+${String.format(Locale.US, "%.2f", it)}% net" } ?: "Learning"
-            )
+            KeyValueRow("Trail trigger", "+0.55% high-water")
+            KeyValueRow("Staircase", "+0.55 → lock +0.50 · then +0.10% steps")
             p.targetPrice?.let { target ->
                 KeyValueRow(
-                    "Target / reference",
+                    "Forecast / reference target",
                     if (p.averagePrice > 0.0) {
                         val pct = (target / p.averagePrice - 1.0) * 100.0
                         "+${String.format(Locale.US, "%.2f", pct)}% · ${money(target)}"
@@ -468,12 +469,12 @@ private fun HoldingCard(p: PositionDto) {
                 )
             }
             if (p.trailArmed) {
+                KeyValueRow("Locked profit", lockedPct?.let { "+${String.format(Locale.US, "%.2f", it)}%" } ?: "—")
                 KeyValueRow("High water", p.highWaterPrice?.let(::money) ?: "—")
                 KeyValueRow("Current trail stop", p.stopPrice?.let(::money) ?: "—")
-                KeyValueRow("Trail gap", p.trailDistance?.let(::money) ?: "—")
                 KeyValueRow("Last ratchet", p.trailingLastRatchetPrice?.let(::money) ?: "—")
             } else {
-                KeyValueRow("Protective stop", p.stopPrice?.let(::money) ?: "—")
+                KeyValueRow("Emergency stop", p.stopPrice?.let(::money) ?: "—")
             }
             if (!p.strategy.isNullOrBlank()) {
                 Text(p.strategy, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -495,7 +496,7 @@ private fun LongAveragesScreen(state: TraderUiState) {
         item {
             SectionTitle(
                 "Multify forecasted upside",
-                "Rolling 30 recommendation trading days using the maximum price reached from Multify entry until its Book Profit/close signal."
+                "Rolling 30 recommendation trading days using entry → maximum price before Multify Book Profit. Analytics only; this no longer controls trailing."
             )
         }
         item {
@@ -513,7 +514,7 @@ private fun LongAveragesScreen(state: TraderUiState) {
         item {
             SectionTitle(
                 "Forecast engine",
-                "Targets have a hard 1.00% minimum and can rise with Multify MFE or stronger prior full-session forecast MFE."
+                "Forecast targets retain a hard 1.00% minimum. Forecast and Multify averages are displayed as analytics and do not control the fixed trailing staircase."
             )
         }
         item {
@@ -563,7 +564,7 @@ private fun ForecastScreen(
         item {
             SectionTitle(
                 "LONG holding forecast",
-                "PRIMARY = production-qualified and buyable. SECONDARY = analyst observation only. If no setup qualifies, the best RESEARCH candidate stays visible so the engine never goes blind."
+                "Maximum five recommendations per trading day. Every PRIMARY setup that meets production criteria is published immediately; nothing is added merely to fill a quota."
             )
         }
         item {
@@ -572,7 +573,7 @@ private fun ForecastScreen(
                 value = if (forecastLearning.todayTargetAveragePct > 0.0)
                     String.format(Locale.US, "%.2f%%", forecastLearning.todayTargetAveragePct)
                 else "≥1.00%",
-                supporting = "hard ≥1% target · Multify MFE benchmark ${String.format(Locale.US, "%.2f%%", learning.longAveragePct)} · reverse-engineering sessions ${forecastLearning.researchSessionsCaptured}/${forecastLearning.researchSessionGoal}",
+                supporting = "hard ≥1% target · Multify MFE ${String.format(Locale.US, "%.2f%%", learning.longAveragePct)} · v7 research ${forecastLearning.researchSessionsCaptured}/${forecastLearning.researchSessionGoal} sessions · ${forecastLearning.researchPointerCount} pointers / ${forecastLearning.researchFamilyCount} families",
                 modifier = Modifier.fillMaxWidth(),
                 accent = MaterialTheme.colorScheme.primary
             )
@@ -592,7 +593,7 @@ private fun ForecastScreen(
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
                     Text("Multify DNA", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                     Text(
-                        "The scanner records every ranked candidate's technical state, strategy votes, rejection reasons and later MFE/MAE for five trading sessions. PRIMARY execution stays conservative; SECONDARY and RESEARCH candidates collect evidence so thresholds can be calibrated from outcomes instead of guesswork.",
+                        "V7 captures exactly 40 pre-call pointers and classifies every researched stock into exactly three fixed families: momentum continuation, breakout expansion, or pullback/reclaim. Five trading sessions are used to learn which family Multify favors under each market regime.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -654,8 +655,8 @@ private fun ForecastTable(rows: List<ForecastDto>, onBuy: (String) -> Unit, arme
                     Text(
                         String.format(
                             Locale.US,
-                            "%.0f%% confidence · score %.2f · %s · %s",
-                            f.confidence * 100.0, f.score, f.strategy, f.marketRegime
+                            "%.0f%% confidence · score %.2f · %s · %s · %s",
+                            f.confidence * 100.0, f.score, f.strategyFamily, f.strategy, f.marketRegime
                         ),
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -758,7 +759,7 @@ private fun SettingsScreen(
                         Column(Modifier.weight(1f)) {
                             Text("ARM Multify calls", fontWeight = FontWeight.SemiBold)
                             Text(
-                                "When armed, the next eligible Multify call places a CNC BUY. Holdings can remain overnight.",
+                                "When armed, eligible Multify calls place LONG CNC BUYs on the pre-warmed fast path. Multify Book Profit is learning-only; profit SELLs use the fixed staircase trail.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
