@@ -52,7 +52,6 @@ import com.multify.traderpro.engine.CashAwareCncSizing
 import com.multify.traderpro.engine.ExecutionTelemetryMath
 import com.multify.traderpro.engine.ForecastQualityDecision
 import com.multify.traderpro.engine.ForecastQualityPolicy
-import com.multify.traderpro.engine.LearnedTrailingPolicy
 import com.multify.traderpro.engine.LocalStrategyEngine
 import com.multify.traderpro.engine.MultifyFactorFamilies
 import com.multify.traderpro.engine.MultifyFactorModel
@@ -228,7 +227,7 @@ class TradingRepository @Inject constructor(
         val seedValues = mfeCalls.filter { it.source == "SEED" }
             .mapNotNull { it.multifyMfePct }
             .filter { it.isFinite() && it >= 0.0 && it < 25.0 }
-        val fallback = LearnedTrailingPolicy.MIN_DYNAMIC_TRAIL_ARM_PCT
+        val fallback = 0.0
         val pending = learningDao.closedCallsMissingMfe(1000).size
 
         return LearningStatsDto(
@@ -1993,10 +1992,10 @@ class TradingRepository @Inject constructor(
                 targetPrice = p.targetPrice,
                 highWaterPrice = p.maxFavourablePrice,
                 trailingLastRatchetPrice = p.trailingLastRatchetPrice.takeIf { it > 0.0 },
-                trailDistance = if (LearnedTrailingPolicy.isArmed(p.stopPrice, p.entryPrice) && p.stopPrice != null)
+                trailDistance = if (p.stopPrice != null && p.stopPrice > p.entryPrice)
                     (p.maxFavourablePrice - p.stopPrice).coerceAtLeast(0.0) else null,
                 trailArmPct = p.trailingArmPct.takeIf { it.isFinite() && it > 0.0 },
-                trailArmed = LearnedTrailingPolicy.isArmed(p.stopPrice, p.entryPrice),
+                trailArmed = p.stopPrice?.let { it > p.entryPrice } == true,
                 strategy = p.strategy,
                 product = "CNC"
             )
@@ -2259,9 +2258,9 @@ class TradingRepository @Inject constructor(
         private const val MFE_BACKFILL_BATCH_SIZE = 4
         private const val MFE_AFTER_HOURS_BACKFILL_BATCH_SIZE = 16
         private const val HOLDING_FAILSAFE_STOP_PCT = 0.12
-        private const val ARM_HOT_REFRESH_MS = 60_000L
+        private const val ARM_HOT_REFRESH_MS = 20_000L
         private const val ARM_HOT_AUDIT_INTERVAL_MS = 15L * 60L * 1000L
-        private const val ARM_HOT_STATE_MAX_AGE_MS = 120_000L
+        private const val ARM_HOT_STATE_MAX_AGE_MS = 45_000L
         private const val ONE_MINUTE_ATR_CACHE_MS = 60_000L
         private const val EXECUTION_SAMPLE_LIMIT = 30
         private const val BROKER_INVENTORY_REFRESH_MS = 5_000L
