@@ -130,7 +130,7 @@ data class ForecastResearchEntity(
 
 @Entity(
     tableName = "forecast_champions",
-    indices = [Index(value = ["marketRegime", "regime", "strategy"], unique = true)]
+    indices = [Index(value = ["marketRegime", "regime", "strategy", "strategyFamily"], unique = true)]
 )
 data class ForecastChampionEntity(
     @PrimaryKey val key: String,
@@ -138,6 +138,7 @@ data class ForecastChampionEntity(
     val sectorRegime: String = "UNAVAILABLE",
     val regime: String,
     val strategy: String,
+    val strategyFamily: String = "UNCLASSIFIED",
     val wins: Int = 0,
     val losses: Int = 0,
     val sampleCount: Int = 0,
