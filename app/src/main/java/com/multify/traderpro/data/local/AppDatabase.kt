@@ -18,7 +18,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         ForecastChampionEntity::class,
         ResearchReportEntity::class
     ],
-    version = 13,
+    version = 14,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -230,6 +230,17 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL("CREATE INDEX index_forecast_research_snapshots_researchDate_scanAtMs ON forecast_research_snapshots(researchDate, scanAtMs)")
                 db.execSQL("CREATE INDEX index_forecast_research_snapshots_researchDate_symbol ON forecast_research_snapshots(researchDate, symbol)")
                 db.execSQL("CREATE INDEX index_forecast_research_snapshots_qualityTier ON forecast_research_snapshots(qualityTier)")
+            }
+        }
+
+
+        val MIGRATION_13_14 = object : Migration(13, 14) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE long_forecasts ADD COLUMN strategyFamily TEXT NOT NULL DEFAULT 'UNCLASSIFIED'")
+                db.execSQL("ALTER TABLE forecast_research_snapshots ADD COLUMN researchCohort TEXT NOT NULL DEFAULT 'LEGACY'")
+                db.execSQL("ALTER TABLE forecast_research_snapshots ADD COLUMN strategyFamily TEXT NOT NULL DEFAULT 'UNCLASSIFIED'")
+                db.execSQL("ALTER TABLE forecast_research_snapshots ADD COLUMN familyScoreJson TEXT NOT NULL DEFAULT '{}'")
+                db.execSQL("CREATE INDEX index_forecast_research_snapshots_researchCohort_researchDate ON forecast_research_snapshots(researchCohort, researchDate)")
             }
         }
 
