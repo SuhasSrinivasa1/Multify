@@ -18,7 +18,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         ForecastChampionEntity::class,
         ResearchReportEntity::class
     ],
-    version = 13,
+    version = 14,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -230,6 +230,61 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL("CREATE INDEX index_forecast_research_snapshots_researchDate_scanAtMs ON forecast_research_snapshots(researchDate, scanAtMs)")
                 db.execSQL("CREATE INDEX index_forecast_research_snapshots_researchDate_symbol ON forecast_research_snapshots(researchDate, symbol)")
                 db.execSQL("CREATE INDEX index_forecast_research_snapshots_qualityTier ON forecast_research_snapshots(qualityTier)")
+            }
+        }
+
+
+        val MIGRATION_13_14 = object : Migration(13, 14) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // v7.1 removes all averaging-down state from the live position schema and
+                // adds one authoritative app-owned GTT state per holding.
+                db.execSQL("""CREATE TABLE managed_positions_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    engine TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    product TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    quantity INTEGER NOT NULL,
+                    entryPrice REAL NOT NULL,
+                    stopPrice REAL,
+                    targetPrice REAL,
+                    strategy TEXT NOT NULL,
+                    regime TEXT NOT NULL,
+                    confidence REAL NOT NULL,
+                    sourceEventId INTEGER,
+                    openOrderId TEXT NOT NULL,
+                    openReferenceId TEXT NOT NULL,
+                    smartOrderId TEXT,
+                    openedAtMs INTEGER NOT NULL,
+                    lastPrice REAL NOT NULL,
+                    maxFavourablePrice REAL NOT NULL,
+                    maxAdversePrice REAL NOT NULL,
+                    lastEvaluatedAtMs INTEGER NOT NULL,
+                    trailingArmPct REAL NOT NULL,
+                    trailingLastRatchetPrice REAL NOT NULL,
+                    status TEXT NOT NULL,
+                    smartOrderMode TEXT NOT NULL,
+                    smartOrderTriggerPrice REAL,
+                    smartOrderDirection TEXT,
+                    smartOrderStatus TEXT,
+                    smartOrderUpdatedAtMs INTEGER
+                )""")
+                db.execSQL("""INSERT INTO managed_positions_new (
+                    id,engine,symbol,product,side,quantity,entryPrice,stopPrice,targetPrice,strategy,regime,confidence,
+                    sourceEventId,openOrderId,openReferenceId,smartOrderId,openedAtMs,lastPrice,maxFavourablePrice,
+                    maxAdversePrice,lastEvaluatedAtMs,trailingArmPct,trailingLastRatchetPrice,status,smartOrderMode,
+                    smartOrderTriggerPrice,smartOrderDirection,smartOrderStatus,smartOrderUpdatedAtMs
+                ) SELECT
+                    id,engine,symbol,product,side,quantity,entryPrice,stopPrice,targetPrice,strategy,regime,confidence,
+                    sourceEventId,openOrderId,openReferenceId,smartOrderId,openedAtMs,lastPrice,maxFavourablePrice,
+                    maxAdversePrice,lastEvaluatedAtMs,trailingArmPct,trailingLastRatchetPrice,status,'NONE',
+                    NULL,NULL,NULL,NULL
+                FROM managed_positions""")
+                db.execSQL("DROP TABLE managed_positions")
+                db.execSQL("ALTER TABLE managed_positions_new RENAME TO managed_positions")
+                db.execSQL("CREATE INDEX index_managed_positions_engine_symbol_status ON managed_positions(engine,symbol,status)")
+                db.execSQL("CREATE INDEX index_managed_positions_product_symbol_status ON managed_positions(product,symbol,status)")
+                db.execSQL("CREATE INDEX index_managed_positions_openedAtMs ON managed_positions(openedAtMs)")
             }
         }
 
