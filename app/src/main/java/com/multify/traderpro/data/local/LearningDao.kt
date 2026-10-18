@@ -98,6 +98,9 @@ interface LearningDao {
     @Query("SELECT * FROM forecast_research_snapshots WHERE researchDate=:date AND outcomeUpdatedAtMs IS NULL ORDER BY scanAtMs ASC, rank ASC")
     suspend fun pendingForecastResearchOutcomes(date: String): List<ForecastResearchEntity>
 
+    @Query("SELECT * FROM forecast_research_snapshots WHERE researchCohort=:cohort AND researchDate=:date AND outcomeUpdatedAtMs IS NULL ORDER BY scanAtMs ASC, rank ASC")
+    suspend fun pendingForecastResearchOutcomesForCohort(date: String, cohort: String): List<ForecastResearchEntity>
+
     @Query("UPDATE forecast_research_snapshots SET multifyMatched=1, multifyEventId=:eventId, multifyAtMs=:atMs WHERE researchDate=:date AND symbol=:symbol AND scanAtMs < :atMs")
     suspend fun markForecastResearchMultifyMatch(date: String, symbol: String, eventId: Long, atMs: Long)
 
