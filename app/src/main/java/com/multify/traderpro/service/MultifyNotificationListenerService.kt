@@ -108,8 +108,9 @@ class MultifyNotificationListenerService : NotificationListenerService() {
         val parsed = parser.parse(title, text, bigText)
         if (parsed.type == SignalType.UNKNOWN) return
 
-        val critical = parsed.type == SignalType.TRADE_RELEASE || parsed.type == SignalType.BOOK_PROFIT
-        val executor = if (critical) priorityScope else scope
+        val latencyCritical = parsed.type == SignalType.TRADE_RELEASE
+        val researchRelevant = parsed.type == SignalType.TRADE_RELEASE || parsed.type == SignalType.BOOK_PROFIT
+        val executor = if (latencyCritical) priorityScope else scope
         executor.launch {
             if (!repository.shouldCapturePackage(sbn.packageName)) return@launch
 
@@ -137,7 +138,7 @@ class MultifyNotificationListenerService : NotificationListenerService() {
                 repository.processEvent(
                     eventId = id,
                     parsedOverride = parsed,
-                    notificationStartedNs = if (critical) notificationStartedNs else null
+                    notificationStartedNs = if (latencyCritical) notificationStartedNs else null
                 )
             }
             if (processed.isFailure) {
@@ -155,7 +156,7 @@ class MultifyNotificationListenerService : NotificationListenerService() {
                     "message" to message.take(500)
                 ))
                 // Critical broker operations are never blindly replayed after ambiguous failure.
-                if (!critical) enqueueForward(id)
+                if (!latencyCritical) enqueueForward(id)
             }
 
             scope.launch {
@@ -172,7 +173,7 @@ class MultifyNotificationListenerService : NotificationListenerService() {
                 if (parsed.type == SignalType.AUTO_PAUSED) {
                     notifyStatus("ARM disabled", "Multify reported a safety pause. Review broker state before resetting the halt.")
                 }
-                if (critical && processed.isSuccess) {
+                if (researchRelevant && processed.isSuccess) {
                     val handedOff = TradingEngineService.sampleSignal(this@MultifyNotificationListenerService, id, parsed.symbol)
                     auditLogger.log("MULTIFY_RESEARCH", "POST_SIGNAL_RESEARCH_HANDED_OFF", mapOf(
                         "event_id" to id,
