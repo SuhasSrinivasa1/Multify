@@ -54,7 +54,10 @@ import com.multify.traderpro.engine.ForecastQualityDecision
 import com.multify.traderpro.engine.ForecastQualityPolicy
 import com.multify.traderpro.engine.LearnedTrailingPolicy
 import com.multify.traderpro.engine.LocalStrategyEngine
+import com.multify.traderpro.engine.MultifyFactorFamilies
+import com.multify.traderpro.engine.MultifyFactorModel
 import com.multify.traderpro.engine.MultifyReverseEngineering
+import com.multify.traderpro.engine.SteppedTrailingPolicy
 import com.multify.traderpro.engine.StrategyEvaluation
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
@@ -129,6 +132,7 @@ class TradingRepository @Inject constructor(
         val symbol: String,
         val evaluation: StrategyEvaluation,
         val quality: ForecastQualityDecision,
+        val factorModel: MultifyFactorModel,
         val score: Double,
         val championKey: String
     )
@@ -956,6 +960,7 @@ class TradingRepository @Inject constructor(
 
         val ranked = evaluated.map { row ->
             val quality = ForecastQualityPolicy.evaluate(row.second, targetPct, marketRegime)
+            val factorModel = MultifyFactorFamilies.evaluate(row.second, marketRegime)
             val key = championKey(marketRegime, row.second.regime, row.second.strategy)
             val champion = champions[key]
             val championWinRate = champion?.takeIf { it.sampleCount > 0 }?.let { it.wins.toDouble() / it.sampleCount } ?: 0.0
@@ -968,14 +973,16 @@ class TradingRepository @Inject constructor(
             val dnaBonus = if (row.first in dnaSymbols) .08 else 0.0
             val qualityBonus = ForecastQualityPolicy.rankingBonus(row.second, quality.volatilityCapacityPct, targetPct, quality.tier)
             val researchBonus = researchEvidenceBonus(row.second)
+            val familyBonus = MultifyFactorFamilies.rankingBonus(factorModel)
             ForecastCandidate(
                 symbol = row.first,
                 evaluation = row.second,
                 quality = quality,
+                factorModel = factorModel,
                 score = (
                     row.second.confidence +
                     row.second.directionalScore.coerceAtLeast(0.0) * 0.10 +
-                    championBonus + frequencyBonus + dnaBonus + qualityBonus + researchBonus
+                    championBonus + frequencyBonus + dnaBonus + qualityBonus + researchBonus + familyBonus
                 ).coerceIn(0.01, .99),
                 championKey = key
             )
@@ -991,21 +998,13 @@ class TradingRepository @Inject constructor(
             captureForecastResearchScan(today, nowMs, marketRegime, targetPct, ranked.take(RESEARCH_CAPTURE_TOP_N))
         }
 
-        val desired = when {
-            now.toLocalTime() < LocalTime.of(10, 15) -> 1
-            now.toLocalTime() < LocalTime.of(11, 15) -> 2
-            now.toLocalTime() < LocalTime.of(12, 15) -> 3
-            now.toLocalTime() < LocalTime.of(13, 15) -> 4
-            else -> 5
-        }
-        val slots = (desired - existing.size).coerceAtLeast(0)
+        // v7: five is a hard maximum, never a time-based quota.
+        // Every PRIMARY candidate that meets production criteria can be published immediately,
+        // ranked best-first, until the day's five recommendation slots are full.
+        val slots = (MAX_DAILY_RECOMMENDATIONS - existing.size).coerceAtLeast(0)
         val unseen = ranked.filter { it.symbol !in have }
-        val publishable = unseen.filter { it.quality.publishEligible }.toMutableList()
-
-        // Production must never become blind again. If a scan has no publishable setup,
-        // expose the single best RESEARCH candidate for observation only; it cannot be bought.
-        if (publishable.isEmpty() && unseen.isNotEmpty() && slots > 0) {
-            publishable += unseen.first()
+        val publishable = unseen.filter {
+            it.quality.tier == "PRIMARY" && it.quality.publishEligible && it.quality.executionEligible
         }
 
         publishable.take(slots).forEachIndexed { index, item ->
@@ -1026,6 +1025,8 @@ class TradingRepository @Inject constructor(
                     marketRegime = marketRegime,
                     championKey = item.championKey,
                     reason = quality.reason + " · " + item.evaluation.reason +
+                        " · family " + item.factorModel.dominantFamily +
+                        " · family consensus " + fmt(item.factorModel.consensusScore * 100.0) + "%" +
                         " · capacity " + fmt(quality.volatilityCapacityPct) + "% for " + fmt(targetPct) + "% target",
                     generatedAtMs = nowMs,
                     lastPrice = price,
@@ -1045,7 +1046,8 @@ class TradingRepository @Inject constructor(
             "secondary" to (tierCounts["SECONDARY"] ?: 0),
             "research" to (tierCounts["RESEARCH"] ?: 0),
             "published_count" to all.size,
-            "max_slots_by_time" to desired,
+            "max_daily_recommendations" to MAX_DAILY_RECOMMENDATIONS,
+            "available_slots" to slots,
             "target_pct" to targetPct,
             "target_floor_pct" to ForecastQualityPolicy.MIN_TARGET_PCT,
             "multify_mfe_avg_pct" to learned.longAveragePct,
@@ -1059,6 +1061,9 @@ class TradingRepository @Inject constructor(
             "top_candidates" to ranked.take(5).map {
                 mapOf("symbol" to it.symbol, "tier" to it.quality.tier, "score" to it.score,
                     "confidence" to it.evaluation.confidence, "directional_score" to it.evaluation.directionalScore,
+                    "dominant_family" to it.factorModel.dominantFamily,
+                    "family_consensus" to it.factorModel.consensusScore,
+                    "positive_families" to it.factorModel.positiveFamilies,
                     "reason" to it.quality.reason)
             }
         ))
@@ -1073,7 +1078,7 @@ class TradingRepository @Inject constructor(
         candidates: List<ForecastCandidate>
     ) {
         candidates.forEachIndexed { index, item ->
-            val featureMap = researchFeatureMap(item.evaluation)
+            val featureMap = researchFeatureMap(item.evaluation, item.factorModel)
             val votes = item.evaluation.votes.map {
                 mapOf("name" to it.name, "score" to it.score, "note" to it.note)
             }
@@ -1105,9 +1110,18 @@ class TradingRepository @Inject constructor(
         ))
     }
 
-    private fun researchFeatureMap(evaluation: StrategyEvaluation): Map<String, Any?> {
+    private fun researchFeatureMap(
+        evaluation: StrategyEvaluation,
+        factorModel: MultifyFactorModel = MultifyFactorFamilies.evaluate(evaluation, "BREADTH_NEUTRAL")
+    ): Map<String, Any?> {
         val f = evaluation.features
         return linkedMapOf(
+            "factor_model_version" to "V7_40_FACTOR_3_FAMILY",
+            "dominant_family" to factorModel.dominantFamily,
+            "family_consensus" to factorModel.consensusScore,
+            "positive_families" to factorModel.positiveFamilies,
+            "family_scores" to factorModel.families.associate { it.name to it.score },
+            "forty_factors" to factorModel.factors.associate { it.name to mapOf("family" to it.family, "score" to it.score, "raw" to it.raw) },
             "ltp" to f.ltp,
             "bid" to f.bid,
             "ask" to f.ask,
@@ -2217,6 +2231,7 @@ class TradingRepository @Inject constructor(
         private const val MIN_BUDGET = 10_000L
         private const val MAX_BUDGET = 200_000L
         private const val MANUAL_SOURCE = "com.multify.traderpro.manual"
+        private const val MAX_DAILY_RECOMMENDATIONS = 5
         private const val FORECAST_SCAN_INTERVAL_MS = 15L * 60L * 1000L
         private const val FORECAST_OUTCOME_INTERVAL_MS = 60_000L
         private const val FORECAST_SYMBOL_PACING_MS = 150L
