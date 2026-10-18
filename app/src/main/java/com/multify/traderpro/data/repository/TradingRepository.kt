@@ -1767,17 +1767,28 @@ class TradingRepository @Inject constructor(
         val currentLockedPct = LearnedTrailingPolicy.lockedPct(updated.entryPrice, updated.stopPrice)
         val desiredLockedPct = LearnedTrailingPolicy.desiredLockedPct(updated.entryPrice, updated.maxFavourablePrice)
 
-        // Convert any legacy v6.x dynamic profit stop to the v7 staircase. If the holding never
-        // crossed +0.55%, an old armed profit stop is removed and only the emergency failsafe remains.
-        if (currentLockedPct != null && desiredLockedPct == null) {
+        // One-time upgrade translation for v6.x holdings. Legacy adaptive stops are mapped
+        // to the exact v7 staircase implied by the already-observed high-water. After this
+        // translation, v7 profit stops only move upward.
+        val v7Managed = updated.strategy.contains("v7 fixed staircase", ignoreCase = true)
+        if (!v7Managed && currentLockedPct != null) {
+            val translatedStop = if (desiredLockedPct != null) {
+                LearnedTrailingPolicy.stopPrice(updated.entryPrice, desiredLockedPct)
+            } else {
+                updated.entryPrice * (1.0 - HOLDING_FAILSAFE_STOP_PCT)
+            }
             updated = updated.copy(
-                stopPrice = updated.entryPrice * (1.0 - HOLDING_FAILSAFE_STOP_PCT),
-                trailingLastRatchetPrice = 0.0
+                stopPrice = translatedStop,
+                trailingLastRatchetPrice = if (desiredLockedPct != null) updated.maxFavourablePrice else 0.0,
+                trailingArmPct = LearnedTrailingPolicy.ARM_TRIGGER_PCT,
+                strategy = updated.strategy + " · v7 fixed staircase migrated"
             )
-            auditLogger.log("TRAILING_STOP", "V7_LEGACY_TRAIL_RESET", mapOf(
+            auditLogger.log("TRAILING_STOP", "V7_LEGACY_TRAIL_TRANSLATED", mapOf(
                 "symbol" to updated.symbol,
                 "old_locked_pct" to currentLockedPct,
-                "reason" to "high-water below +0.55% v7 trigger"
+                "new_locked_pct" to desiredLockedPct,
+                "new_stop" to translatedStop,
+                "high_water_gain_pct" to LearnedTrailingPolicy.gainPct(updated.entryPrice, updated.maxFavourablePrice)
             ))
         }
 
