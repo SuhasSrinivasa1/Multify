@@ -86,6 +86,15 @@ interface LearningDao {
     @Query("SELECT DISTINCT researchDate FROM forecast_research_snapshots ORDER BY researchDate DESC")
     suspend fun forecastResearchDates(): List<String>
 
+    @Query("SELECT DISTINCT researchDate FROM forecast_research_snapshots WHERE researchCohort=:cohort ORDER BY researchDate DESC")
+    suspend fun forecastResearchDatesForCohort(cohort: String): List<String>
+
+    @Query("SELECT * FROM forecast_research_snapshots WHERE researchCohort=:cohort ORDER BY scanAtMs ASC, rank ASC")
+    suspend fun allForecastResearchForCohort(cohort: String): List<ForecastResearchEntity>
+
+    @Query("SELECT * FROM forecast_research_snapshots WHERE researchCohort=:cohort AND researchDate=:date ORDER BY scanAtMs ASC, rank ASC")
+    suspend fun forecastResearchForDateAndCohort(date: String, cohort: String): List<ForecastResearchEntity>
+
     @Query("SELECT * FROM forecast_research_snapshots WHERE researchDate=:date AND outcomeUpdatedAtMs IS NULL ORDER BY scanAtMs ASC, rank ASC")
     suspend fun pendingForecastResearchOutcomes(date: String): List<ForecastResearchEntity>
 
