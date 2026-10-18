@@ -1343,7 +1343,8 @@ class TradingRepository @Inject constructor(
     private suspend fun refreshForecastChampion(row: LongForecastEntity) {
         val completed = learningDao.allLongForecasts().filter {
             it.marketRegime == row.marketRegime && it.regime == row.regime &&
-                it.strategy == row.strategy && it.status in setOf("TARGET_HIT", "MISSED")
+                it.strategy == row.strategy && it.strategyFamily == row.strategyFamily &&
+                it.status in setOf("TARGET_HIT", "MISSED")
         }
         if (completed.isEmpty()) return
         val wins = completed.count { it.status == "TARGET_HIT" }
