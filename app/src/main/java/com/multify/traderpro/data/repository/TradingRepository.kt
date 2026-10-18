@@ -60,6 +60,9 @@ import com.multify.traderpro.engine.SteppedTrailingPolicy
 import com.multify.traderpro.engine.StrategyEvaluation
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
@@ -75,6 +78,7 @@ import java.time.ZoneId
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import javax.inject.Inject
@@ -123,7 +127,7 @@ class TradingRepository @Inject constructor(
     private var lastArmHotAuditBalance = Double.NaN
     private var lastArmHotAuditArmed: Boolean? = null
     private val oneMinuteAtrCache = mutableMapOf<String, AtrCacheEntry>()
-    private val closePositionMutex = Mutex()
+    private val closePositionMutexes = ConcurrentHashMap<Long, Mutex>()
 
     private data class AtrCacheEntry(val atr: Double, val atMs: Long)
 
@@ -1624,19 +1628,23 @@ class TradingRepository @Inject constructor(
                     ))
                 }.getOrDefault(emptyMap())
 
-            for (position in reconciled) {
-                try {
-                    val ltp = ltps[position.symbol.uppercase(Locale.US)] ?: position.lastPrice
-                    monitorLongHolding(position, token, ltp)
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (t: Throwable) {
-                    auditLogger.log("HOLDING", "MONITOR_ERROR", mapOf(
-                        "symbol" to position.symbol,
-                        "type" to t.javaClass.simpleName,
-                        "message" to (t.message ?: t.javaClass.simpleName)
-                    ))
-                }
+            coroutineScope {
+                reconciled.map { position ->
+                    async {
+                        try {
+                            val ltp = ltps[position.symbol.uppercase(Locale.US)] ?: position.lastPrice
+                            monitorLongHolding(position, token, ltp)
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (t: Throwable) {
+                            auditLogger.log("HOLDING", "MONITOR_ERROR", mapOf(
+                                "symbol" to position.symbol,
+                                "type" to t.javaClass.simpleName,
+                                "message" to (t.message ?: t.javaClass.simpleName)
+                            ))
+                        }
+                    }
+                }.awaitAll()
             }
         }
         return managedDao.openPositions().size
@@ -1809,7 +1817,9 @@ class TradingRepository @Inject constructor(
         mark: Double,
         reason: String,
         notificationStartedNs: Long? = null
-    ): ManagedTradeEntity? = closePositionMutex.withLock {
+    ): ManagedTradeEntity? {
+        val closeMutex = closePositionMutexes.computeIfAbsent(position.id) { Mutex() }
+        return closeMutex.withLock {
         require(position.side == "LONG") { "Only LONG holdings are supported" }
 
         val local = managedDao.openPositionById(position.id)
@@ -1820,6 +1830,7 @@ class TradingRepository @Inject constructor(
                 "reason" to reason,
                 "stage" to "local_position_already_closed"
             ))
+            closePositionMutexes.remove(position.id, closeMutex)
             return@withLock null
         }
 
@@ -1852,6 +1863,7 @@ class TradingRepository @Inject constructor(
         )
         managedDao.insertTrade(trade)
         managedDao.deletePosition(local.id)
+        closePositionMutexes.remove(local.id, closeMutex)
         brokerInventorySnapshot = null
         auditLogger.log("HOLDING", "LONG_CLOSED", mapOf(
             "symbol" to local.symbol,
@@ -1861,6 +1873,7 @@ class TradingRepository @Inject constructor(
             "net_pnl" to trade.netPnl
         ))
         trade
+        }
     }
 
     private suspend fun placeOwnedCncSell(
