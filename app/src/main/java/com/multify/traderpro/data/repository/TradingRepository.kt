@@ -1377,7 +1377,8 @@ class TradingRepository @Inject constructor(
         learningDao.upsertForecastChampion(
             ForecastChampionEntity(
                 key = row.championKey, marketRegime = row.marketRegime, regime = row.regime,
-                strategy = row.strategy, wins = wins, losses = losses, sampleCount = completed.size,
+                strategy = row.strategy, strategyFamily = row.strategyFamily,
+                wins = wins, losses = losses, sampleCount = completed.size,
                 distinctDays = days, distinctSymbols = symbols, frozen = frozen,
                 firstSeenAtMs = previous?.firstSeenAtMs ?: completed.minOf { it.generatedAtMs },
                 lastUpdatedAtMs = System.currentTimeMillis()
