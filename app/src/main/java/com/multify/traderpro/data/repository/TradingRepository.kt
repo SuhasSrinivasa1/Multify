@@ -952,29 +952,30 @@ class TradingRepository @Inject constructor(
         val targetPct = ForecastQualityPolicy.adaptiveTargetPct(learned.longAveragePct, priorMfe)
 
         val have = existing.map { it.symbol }.toSet()
-        val priorResearchDates = learningDao.forecastResearchDates()
+        val priorResearchDates = learningDao.forecastResearchDatesForCohort(RESEARCH_COHORT_V7)
             .filter { it < today }
             .take(RESEARCH_SESSION_GOAL)
             .toSet()
         val priorResearch = if (priorResearchDates.isEmpty()) emptyList() else {
-            learningDao.allForecastResearch()
+            learningDao.allForecastResearchForCohort(RESEARCH_COHORT_V7)
                 .filter { it.researchDate in priorResearchDates && it.outcomeUpdatedAtMs != null }
                 .groupBy { it.researchDate + "|" + it.symbol }
                 .mapNotNull { (_, rows) -> rows.minByOrNull { it.scanAtMs } }
         }
 
-        fun researchEvidenceBonus(evaluation: StrategyEvaluation): Double {
-            val xs = priorResearch.filter {
-                it.regime == evaluation.regime && it.strategy == evaluation.strategy
-            }
+        fun researchEvidenceBonus(evaluation: StrategyEvaluation, family: String): Double {
+            val xs = priorResearch.filter { it.strategyFamily == family && it.regime == evaluation.regime }
             if (xs.size < MIN_RESEARCH_EVIDENCE_ROWS) return 0.0
             val hitRate = xs.count { it.outcomeTargetHit == true }.toDouble() / xs.size
             val avgMfe = xs.mapNotNull { it.outcomeMfePct }.takeIf { it.isNotEmpty() }?.average() ?: 0.0
-            val hitComponent = (hitRate - 0.50) * 0.14
+            val familyMatchRate = xs.count { it.multifyMatched }.toDouble() / xs.size
+            val allMatchRate = if (priorResearch.isEmpty()) 0.0 else priorResearch.count { it.multifyMatched }.toDouble() / priorResearch.size
+            val hitComponent = (hitRate - 0.50) * 0.10
             val mfeComponent = if (targetPct > 0.0)
                 (((avgMfe - targetPct) / targetPct).coerceIn(-1.0, 1.0)) * 0.04
             else 0.0
-            return (hitComponent + mfeComponent).coerceIn(-0.08, 0.10)
+            val multifyLift = (familyMatchRate - allMatchRate) * 0.20
+            return (hitComponent + mfeComponent + multifyLift).coerceIn(-0.08, 0.12)
         }
 
         val ranked = evaluated.map { row ->
