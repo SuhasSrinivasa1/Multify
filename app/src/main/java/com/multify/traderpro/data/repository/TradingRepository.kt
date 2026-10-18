@@ -778,15 +778,15 @@ class TradingRepository @Inject constructor(
         val sizing = CashAwareCncSizing.size(settings.holdingBudgetRupees.toDouble(), available, referencePrice)
         val capital = sizing.deployableCash
         val qty = sizing.quantity
+        require(qty > 0) { "Safe CNC buying power cannot fund one share of $symbol after RMS reserve" }
+
+        val ref = stableRef("MLH", "$eventId-$symbol")
+        val order = placeCncBuy(token, symbol, qty, ref, notificationStartedNs)
         auditLogger.log("EXECUTION", "CNC_BUY_SIZED", mapOf(
             "symbol" to symbol, "available_cnc" to available, "configured_budget" to settings.holdingBudgetRupees,
             "cash_reserve" to sizing.cashReserve, "reference_price" to referencePrice,
             "buffered_price" to sizing.bufferedPrice, "deployable_cash" to capital, "quantity" to qty
         ))
-        require(qty > 0) { "Safe CNC buying power cannot fund one share of $symbol after RMS reserve" }
-
-        val ref = stableRef("MLH", "$eventId-$symbol")
-        val order = placeCncBuy(token, symbol, qty, ref, notificationStartedNs)
         val filled = order.filledQuantity?.takeIf { it > 0 } ?: qty
         val entry = order.averageFillPrice?.takeIf { it > 0.0 } ?: referencePrice
         val investedAmount = entry * filled
