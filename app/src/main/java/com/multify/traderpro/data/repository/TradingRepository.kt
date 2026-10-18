@@ -260,7 +260,10 @@ class TradingRepository @Inject constructor(
             .filter { it.isFinite() && it >= 0.0 && it < 25.0 }
         val today = LocalDate.now(INDIA).toString()
         val todayRows = all.filter { it.forecastDate == today }
-        val researchSessions = learningDao.forecastResearchDates().take(RESEARCH_SESSION_GOAL).size
+        val researchSessions = learningDao.forecastResearchDates()
+            .filter { it >= V7_RESEARCH_COHORT_START_DATE }
+            .take(RESEARCH_SESSION_GOAL)
+            .size
         return ForecastLearningStatsDto(
             rollingTradingDays = keepDates.size,
             completedForecasts = rolling.size,
@@ -1010,7 +1013,10 @@ class TradingRepository @Inject constructor(
         )
 
         val capturedResearchDates = learningDao.forecastResearchDates()
-        val researchCaptureAllowed = today in capturedResearchDates || capturedResearchDates.size < RESEARCH_SESSION_GOAL
+            .filter { it >= V7_RESEARCH_COHORT_START_DATE }
+        val researchCaptureAllowed =
+            today >= V7_RESEARCH_COHORT_START_DATE &&
+            (today in capturedResearchDates || capturedResearchDates.size < RESEARCH_SESSION_GOAL)
         if (researchCaptureAllowed) {
             captureForecastResearchScan(today, nowMs, marketRegime, targetPct, ranked.take(RESEARCH_CAPTURE_TOP_N))
         }
@@ -1075,6 +1081,7 @@ class TradingRepository @Inject constructor(
             "research_capture_allowed" to researchCaptureAllowed,
             "research_sessions_captured" to capturedResearchDates.size,
             "research_session_goal" to RESEARCH_SESSION_GOAL,
+            "research_cohort_start_date" to V7_RESEARCH_COHORT_START_DATE,
             "top_candidates" to ranked.take(5).map {
                 mapOf("symbol" to it.symbol, "tier" to it.quality.tier, "score" to it.score,
                     "confidence" to it.evaluation.confidence, "directional_score" to it.evaluation.directionalScore,
@@ -1452,6 +1459,7 @@ class TradingRepository @Inject constructor(
         }
         val researchUpdated = if (token != null) {
             val incompleteDate = learningDao.forecastResearchDates()
+                .filter { it >= V7_RESEARCH_COHORT_START_DATE }
                 .take(RESEARCH_SESSION_GOAL)
                 .firstOrNull { learningDao.pendingForecastResearchOutcomes(it).isNotEmpty() }
             if (incompleteDate != null) {
@@ -2266,6 +2274,7 @@ class TradingRepository @Inject constructor(
         private const val RESEARCH_BACKFILL_SYMBOL_PACING_MS = 300L
         private const val RESEARCH_BACKFILL_SYMBOL_BATCH = 10
         private const val RESEARCH_SESSION_GOAL = 5
+        private const val V7_RESEARCH_COHORT_START_DATE = "2026-10-19"
         private const val MIN_RESEARCH_EVIDENCE_ROWS = 4
         private const val MFE_BACKFILL_INTERVAL_MS = 5L * 60L * 1000L
         private const val MFE_BACKFILL_BATCH_SIZE = 4
