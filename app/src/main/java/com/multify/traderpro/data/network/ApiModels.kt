@@ -43,6 +43,11 @@ data class PositionDto(
     val trailDistance: Double? = null,
     val trailArmPct: Double? = null,
     val trailArmed: Boolean = false,
+    val smartOrderId: String? = null,
+    val smartOrderMode: String = "NONE",
+    val smartOrderTriggerPrice: Double? = null,
+    val smartOrderDirection: String? = null,
+    val smartOrderStatus: String? = null,
     val strategy: String? = null,
     val product: String = "CNC"
 )
