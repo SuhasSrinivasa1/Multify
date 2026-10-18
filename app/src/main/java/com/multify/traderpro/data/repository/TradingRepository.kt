@@ -1382,7 +1382,7 @@ class TradingRepository @Inject constructor(
     }
 
     private suspend fun backfillForecastResearchOutcomes(date: String, token: String): Int {
-        val pending = learningDao.pendingForecastResearchOutcomes(date)
+        val pending = learningDao.pendingForecastResearchOutcomesForCohort(date, RESEARCH_COHORT_V7)
         if (pending.isEmpty()) return 0
         val sessionDate = runCatching { LocalDate.parse(date) }.getOrNull() ?: return 0
         val sessionEndMs = sessionDate.atTime(15, 30).atZone(INDIA).toInstant().toEpochMilli()
@@ -1455,23 +1455,30 @@ class TradingRepository @Inject constructor(
         if (token != null) {
             runCatching { backfillRecentMultifyMfe(token, MFE_AFTER_HOURS_BACKFILL_BATCH_SIZE, force = true) }
         }
+
         val researchUpdated = if (token != null) {
-            val incompleteDate = learningDao.forecastResearchDates()
+            val incompleteDate = learningDao.forecastResearchDatesForCohort(RESEARCH_COHORT_V7)
                 .take(RESEARCH_SESSION_GOAL)
-                .firstOrNull { learningDao.pendingForecastResearchOutcomes(it).isNotEmpty() }
+                .firstOrNull {
+                    learningDao.pendingForecastResearchOutcomesForCohort(it, RESEARCH_COHORT_V7).isNotEmpty()
+                }
             if (incompleteDate != null) {
                 runCatching { backfillForecastResearchOutcomes(incompleteDate, token) }.getOrDefault(0)
             } else 0
         } else 0
+
         val existing = learningDao.latestResearchReport()
-        if (!force && existing?.reportDate == today && researchUpdated == 0) {
+        if (!force && existing?.reportDate == today &&
+            existing.summary.contains(RESEARCH_COHORT_V7) && researchUpdated == 0
+        ) {
             return ResearchDto(existing.reportDate, existing.title, existing.summary)
         }
 
         val stats = learningStats()
         val forecastLearning = forecastLearningStats()
         val forecasts = learningDao.longForecastsForDate(today)
-        val snapshots = learningDao.forecastResearchForDate(today).filter { it.outcomeUpdatedAtMs != null }
+        val snapshots = learningDao.forecastResearchForDateAndCohort(today, RESEARCH_COHORT_V7)
+            .filter { it.outcomeUpdatedAtMs != null }
         val wins = forecasts.count { it.status == "TARGET_HIT" }
         val matched = forecasts.count { it.multifyMatched }
         val frozen = learningDao.allForecastChampions().count { it.frozen }
@@ -1479,7 +1486,7 @@ class TradingRepository @Inject constructor(
 
         fun tierSummary(tier: String): String {
             val xs = snapshots.filter { it.qualityTier == tier }
-            if (xs.isEmpty()) return "$tier: no completed research rows"
+            if (xs.isEmpty()) return "$tier: no completed v7 rows"
             val hitRate = xs.count { it.outcomeTargetHit == true }.toDouble() / xs.size * 100.0
             val mfe = xs.mapNotNull { it.outcomeMfePct }.takeIf { it.isNotEmpty() }?.average() ?: 0.0
             val mae = xs.mapNotNull { it.outcomeMaePct }.takeIf { it.isNotEmpty() }?.average() ?: 0.0
@@ -1487,8 +1494,20 @@ class TradingRepository @Inject constructor(
             return "$tier: ${xs.size} rows · target hit ${fmt(hitRate)}% · avg MFE ${fmt(mfe)}% · avg MAE ${fmt(mae)}% · Multify matches $multifyMatches"
         }
 
+        fun familySummary(family: String): String {
+            val xs = snapshots.filter { it.strategyFamily == family }
+            if (xs.isEmpty()) return "$family: no completed v7 rows"
+            val hitRate = xs.count { it.outcomeTargetHit == true }.toDouble() / xs.size * 100.0
+            val mfe = xs.mapNotNull { it.outcomeMfePct }.takeIf { it.isNotEmpty() }?.average() ?: 0.0
+            val mae = xs.mapNotNull { it.outcomeMaePct }.takeIf { it.isNotEmpty() }?.average() ?: 0.0
+            val matches = xs.count { it.multifyMatched }
+            return "$family: ${xs.size} rows · hit ${fmt(hitRate)}% · MFE ${fmt(mfe)}% · MAE ${fmt(mae)}% · Multify matches $matches"
+        }
+
         val report = buildString {
+            append("$RESEARCH_COHORT_V7. ")
             append("Rolling 30-trading-day Multify MFE average: ${fmt(stats.longAveragePct)}% (median ${fmt(stats.longMedianPct)}%) from ${stats.rollingCalls} MFE-observed calls. ")
+            append("This Multify average is analytics only and has no trailing-stop dependency. ")
             append("Pending historical MFE backfill: ${stats.mfeBackfillPendingCalls}. ")
             append(
                 if (forecastLearning.completedForecasts > 0)
@@ -1496,26 +1515,36 @@ class TradingRepository @Inject constructor(
                 else
                     "Published-forecast MFE is still learning. "
             )
-            append("Today's average target: ${fmt(avgTarget)}% with a hard 1.00% floor. ")
+            append("Today's average forecast target: ${fmt(avgTarget)}% with a hard 1.00% floor. ")
             append("Published target hits: $wins/${forecasts.size}. ")
-            append("Five-session reverse-engineering capture: ${forecastLearning.researchSessionsCaptured}/${forecastLearning.researchSessionGoal}. ")
+            append("V7 reverse-engineering capture: ${forecastLearning.researchSessionsCaptured}/${forecastLearning.researchSessionGoal} sessions · ${forecastLearning.researchPointerCount} pointers · ${forecastLearning.researchFamilyCount} fixed families. ")
             append(tierSummary("PRIMARY")).append(". ")
             append(tierSummary("SECONDARY")).append(". ")
             append(tierSummary("RESEARCH")).append(". ")
+            MultifyFamilyPolicy.families.forEach { append(familySummary(it)).append(". ") }
             append("Multify later matched $matched/${forecasts.size} published symbols. ")
             append("Frozen LONG champions: $frozen. ")
-            append("Production execution remains PRIMARY-only while SECONDARY/RESEARCH rows collect evidence.")
+            append("Trailing is independently fixed at +0.55% high-water → +0.50% lock, then +0.10% staircase steps.")
         }
         val entity = com.multify.traderpro.data.local.ResearchReportEntity(
-            reportDate = today, generatedAtMs = System.currentTimeMillis(),
-            title = "After-market production forecast review", summary = report
+            reportDate = today,
+            generatedAtMs = System.currentTimeMillis(),
+            title = "V7 production reverse-engineering review",
+            summary = report
         )
         learningDao.insertResearchReport(entity)
-        auditLogger.log("RESEARCH", "AFTER_HOURS_PRODUCTION_REPORT", mapOf(
-            "date" to today, "wins" to wins, "total" to forecasts.size, "matches" to matched,
-            "multify_mfe_avg_pct" to stats.longAveragePct, "forecast_avg_target_pct" to avgTarget,
+        auditLogger.log("RESEARCH", "AFTER_HOURS_V7_REPORT", mapOf(
+            "date" to today,
+            "wins" to wins,
+            "total" to forecasts.size,
+            "matches" to matched,
+            "multify_mfe_avg_pct" to stats.longAveragePct,
+            "forecast_avg_target_pct" to avgTarget,
             "research_rows_completed" to snapshots.size,
-            "research_sessions" to forecastLearning.researchSessionsCaptured
+            "research_sessions" to forecastLearning.researchSessionsCaptured,
+            "research_cohort" to RESEARCH_COHORT_V7,
+            "pointer_count" to MultifyFamilyPolicy.pointerNames.size,
+            "family_count" to MultifyFamilyPolicy.families.size
         ))
         return ResearchDto(today, entity.title, report)
     }
