@@ -1,6 +1,5 @@
 package com.multify.traderpro.engine
 
-import kotlin.math.floor
 import kotlin.math.ln
 
 data class FactorPoint(
