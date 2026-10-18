@@ -94,7 +94,7 @@ import java.util.Locale
 private enum class Destination(val label: String, val subtitle: String, val icon: ImageVector) {
     Execution("Execution", "ARM status and app-owned CNC holdings", Icons.Default.Dashboard),
     Averages("Averages", "30-day LONG averages", Icons.Default.Analytics),
-    Forecast("Forecast", "Production + analyst LONG candidates · ≥1% target", Icons.Default.Science),
+    Forecast("Forecast", "Up to 5 PRIMARY LONG recommendations · ≥1% target", Icons.Default.Science),
     Settings("Settings", "Broker, ARM, holding budget and device controls", Icons.Default.Settings)
 }
 
@@ -454,9 +454,10 @@ private fun HoldingCard(p: PositionDto) {
             KeyValueRow("Average", money(p.averagePrice))
             KeyValueRow("LTP", p.ltp?.let(::money) ?: "—")
             KeyValueRow("Unrealised", money(p.pnl), pnlColor(p.pnl))
+            KeyValueRow("Trail ladder", "arm +0.55% → protect +0.50% · +0.10% steps")
             KeyValueRow(
-                "Dynamic trail arm",
-                p.trailArmPct?.let { "+${String.format(Locale.US, "%.2f", it)}% net" } ?: "Learning"
+                "Arm trigger",
+                p.trailArmPct?.let { "+${String.format(Locale.US, "%.2f", it)}%" } ?: "+0.55%"
             )
             p.targetPrice?.let { target ->
                 KeyValueRow(
@@ -470,8 +471,10 @@ private fun HoldingCard(p: PositionDto) {
             if (p.trailArmed) {
                 KeyValueRow("High water", p.highWaterPrice?.let(::money) ?: "—")
                 KeyValueRow("Current trail stop", p.stopPrice?.let(::money) ?: "—")
+                val protectedPct = p.stopPrice?.takeIf { p.averagePrice > 0.0 }?.let { (it / p.averagePrice - 1.0) * 100.0 }
+                KeyValueRow("Protected gain", protectedPct?.let { "+${String.format(Locale.US, "%.2f", it)}%" } ?: "—")
                 KeyValueRow("Trail gap", p.trailDistance?.let(::money) ?: "—")
-                KeyValueRow("Last ratchet", p.trailingLastRatchetPrice?.let(::money) ?: "—")
+                KeyValueRow("Last ratchet trigger", p.trailingLastRatchetPrice?.let(::money) ?: "—")
             } else {
                 KeyValueRow("Protective stop", p.stopPrice?.let(::money) ?: "—")
             }
@@ -563,7 +566,7 @@ private fun ForecastScreen(
         item {
             SectionTitle(
                 "LONG holding forecast",
-                "PRIMARY = production-qualified and buyable. SECONDARY = analyst observation only. If no setup qualifies, the best RESEARCH candidate stays visible so the engine never goes blind."
+                "Maximum five recommendations per trading day. Every candidate that meets PRIMARY production criteria is published immediately; weaker SECONDARY/RESEARCH rows stay in the learning ledger and are never presented as recommendations."
             )
         }
         item {
@@ -592,10 +595,12 @@ private fun ForecastScreen(
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
                     Text("Multify DNA", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                     Text(
-                        "The scanner records every ranked candidate's technical state, strategy votes, rejection reasons and later MFE/MAE for five trading sessions. PRIMARY execution stays conservative; SECONDARY and RESEARCH candidates collect evidence so thresholds can be calibrated from outcomes instead of guesswork.",
+                        "The reverse-engineering ledger captures 40 observable factors grouped into three fixed families: Momentum/Trend, Participation/Liquidity and Structure/Context. Market regime changes family weights, while all five-session counterfactual MFE/MAE outcomes and later Multify matches remain available for calibration.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                    KeyValueRow("Factor families", "3")
+                    KeyValueRow("Observable factors", "40")
                     KeyValueRow("Positive reference cases", MultifyReverseEngineering.positiveCases.size.toString())
                 }
             }
@@ -637,7 +642,7 @@ private fun ForecastTable(rows: List<ForecastDto>, onBuy: (String) -> Unit, arme
             HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha=.18f))
             if (rows.isEmpty()) {
                 Text(
-                    "Scanner is active. No candidate has been published in the current release window yet.",
+                    "Scanner is active. No PRIMARY candidate currently meets production criteria; research candidates are still being captured in the background.",
                     modifier = Modifier.padding(vertical = 16.dp),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
