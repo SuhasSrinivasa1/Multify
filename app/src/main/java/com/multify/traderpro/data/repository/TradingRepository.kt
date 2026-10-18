@@ -54,6 +54,8 @@ import com.multify.traderpro.engine.ForecastQualityDecision
 import com.multify.traderpro.engine.ForecastQualityPolicy
 import com.multify.traderpro.engine.LearnedTrailingPolicy
 import com.multify.traderpro.engine.LocalStrategyEngine
+import com.multify.traderpro.engine.MultifyFamilyDecision
+import com.multify.traderpro.engine.MultifyFamilyPolicy
 import com.multify.traderpro.engine.MultifyReverseEngineering
 import com.multify.traderpro.engine.StrategyEvaluation
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -116,6 +118,7 @@ class TradingRepository @Inject constructor(
     private var lastForecastOutcomeMonitorAtMs = 0L
     private var brokerInventorySnapshot: BrokerInventorySnapshot? = null
     private var lastClosedSessionReconcileAtMs = 0L
+    private var lastOpenBrokerRefreshAtMs = 0L
     private var lastArmHotAuditAtMs = 0L
     private var lastMfeBackfillAtMs = 0L
     private var lastArmHotAuditBalance = Double.NaN
@@ -129,6 +132,7 @@ class TradingRepository @Inject constructor(
         val symbol: String,
         val evaluation: StrategyEvaluation,
         val quality: ForecastQualityDecision,
+        val family: MultifyFamilyDecision,
         val score: Double,
         val championKey: String
     )
