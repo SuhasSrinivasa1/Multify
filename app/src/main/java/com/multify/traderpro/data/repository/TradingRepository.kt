@@ -2274,11 +2274,13 @@ class TradingRepository @Inject constructor(
         multifyMatched = multifyMatched, entryPrice = entryPrice, targetPrice = targetPrice, targetPct = targetPct,
         status = status, strategy = strategy, regime = regime, marketRegime = marketRegime,
         championTag = championKey, maxFavourablePct = maxFavourablePct, maxAdversePct = maxAdversePct,
-        generatedAtMs = generatedAtMs, qualityTier = qualityTier, executionEligible = executionEligible
+        generatedAtMs = generatedAtMs, qualityTier = qualityTier, executionEligible = executionEligible,
+        strategyFamily = strategyFamily
     )
 
-    private fun championKey(marketRegime: String, regime: String, strategy: String): String =
-        listOf("LONG", marketRegime, regime, strategy).joinToString("|") { it.uppercase(Locale.US).replace("|", "/") }
+    private fun championKey(marketRegime: String, regime: String, strategy: String, family: String): String =
+        listOf("LONG", marketRegime, family, regime, strategy)
+            .joinToString("|") { it.uppercase(Locale.US).replace("|", "/") }
 
     private fun disconnectedDashboard(settings: AppSettings) = DashboardDto(
         armed = settings.armEffective, halted = settings.safetyHalt, marketSession = marketSession(),
@@ -2325,7 +2327,9 @@ class TradingRepository @Inject constructor(
         private const val MIN_BUDGET = 10_000L
         private const val MAX_BUDGET = 200_000L
         private const val MANUAL_SOURCE = "com.multify.traderpro.manual"
-        private const val FORECAST_SCAN_INTERVAL_MS = 15L * 60L * 1000L
+        private const val MAX_DAILY_RECOMMENDATIONS = 5
+        private const val RESEARCH_COHORT_V7 = "V7_FIVE_SESSION_40X3"
+        private const val FORECAST_SCAN_INTERVAL_MS = 5L * 60L * 1000L
         private const val FORECAST_OUTCOME_INTERVAL_MS = 60_000L
         private const val FORECAST_SYMBOL_PACING_MS = 150L
         private const val RESEARCH_CAPTURE_TOP_N = 48
@@ -2337,12 +2341,14 @@ class TradingRepository @Inject constructor(
         private const val MFE_BACKFILL_BATCH_SIZE = 4
         private const val MFE_AFTER_HOURS_BACKFILL_BATCH_SIZE = 16
         private const val HOLDING_FAILSAFE_STOP_PCT = 0.12
-        private const val ARM_HOT_REFRESH_MS = 60_000L
+        private const val ARM_HOT_REFRESH_MS = 30_000L
         private const val ARM_HOT_AUDIT_INTERVAL_MS = 15L * 60L * 1000L
-        private const val ARM_HOT_STATE_MAX_AGE_MS = 120_000L
+        private const val ARM_HOT_STATE_MAX_AGE_MS = 45_000L
         private const val ONE_MINUTE_ATR_CACHE_MS = 60_000L
         private const val EXECUTION_SAMPLE_LIMIT = 30
-        private const val BROKER_INVENTORY_REFRESH_MS = 30_000L
+        private const val BROKER_INVENTORY_REFRESH_MS = 6_000L
+        private const val FAST_SELL_BROKER_CACHE_MAX_AGE_MS = 6_000L
+        private const val OPEN_BROKER_REFRESH_INTERVAL_MS = 5_000L
         private const val CLOSED_SESSION_RECONCILE_MS = 60_000L
         private const val MULTIFY_PACKAGE = "com.multyfi.invest"
         private const val UPLOADED_THREE_MONTH_REALIZED_PCT = 0.49019417475728155
