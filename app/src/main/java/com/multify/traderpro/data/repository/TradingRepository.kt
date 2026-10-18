@@ -1596,162 +1596,168 @@ class TradingRepository @Inject constructor(
         val now = System.currentTimeMillis()
         if (!marketOpen && now - lastClosedSessionReconcileAtMs < CLOSED_SESSION_RECONCILE_MS) return open.size
         if (!marketOpen) lastClosedSessionReconcileAtMs = now
-        val multifyStats = learningStats()
-        val dynamicTrailArmPct = LearnedTrailingPolicy.dynamicArmPct(multifyStats.longAveragePct)
+
+        val reconciled = mutableListOf<ManagedPositionEntity>()
         for (position in open) {
             try {
                 if (position.side != "LONG") {
                     if (marketOpen) closeLegacyNonLong(token, position)
                     continue
                 }
-                val reconciled = reconcilePositionWithBroker(token, position, preferredMark = null, force = !marketOpen)
-                if (marketOpen && reconciled != null) monitorLongHolding(reconciled, token, dynamicTrailArmPct)
+                reconcilePositionWithBroker(token, position, preferredMark = null, force = !marketOpen)?.let(reconciled::add)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (t: Throwable) {
-                auditLogger.log("HOLDING", "MONITOR_ERROR", mapOf(
+                auditLogger.log("HOLDING", "RECONCILE_ERROR", mapOf(
                     "symbol" to position.symbol,
                     "type" to t.javaClass.simpleName,
                     "message" to (t.message ?: t.javaClass.simpleName)
                 ))
             }
         }
+
+        if (marketOpen && reconciled.isNotEmpty()) {
+            val ltps = runCatching { batchManagedLtps(token, reconciled) }
+                .onFailure {
+                    auditLogger.log("MARKET_DATA", "BATCH_LTP_ERROR", mapOf(
+                        "symbols" to reconciled.map { it.symbol },
+                        "message" to (it.message ?: it.javaClass.simpleName)
+                    ))
+                }.getOrDefault(emptyMap())
+
+            for (position in reconciled) {
+                try {
+                    val ltp = ltps[position.symbol.uppercase(Locale.US)] ?: position.lastPrice
+                    monitorLongHolding(position, token, ltp)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (t: Throwable) {
+                    auditLogger.log("HOLDING", "MONITOR_ERROR", mapOf(
+                        "symbol" to position.symbol,
+                        "type" to t.javaClass.simpleName,
+                        "message" to (t.message ?: t.javaClass.simpleName)
+                    ))
+                }
+            }
+        }
         return managedDao.openPositions().size
     }
 
-    private suspend fun monitorLongHolding(position: ManagedPositionEntity, token: String, dynamicTrailArmPct: Double) {
-        val quote = apiFactory.groww.quote(bearer(token), tradingSymbol = position.symbol).requirePayload("Quote ${position.symbol}")
-        val ltp = quote.lastPrice ?: return
+    private suspend fun batchManagedLtps(
+        token: String,
+        positions: List<ManagedPositionEntity>
+    ): Map<String, Double> {
+        val result = linkedMapOf<String, Double>()
+        positions.map { it.symbol.uppercase(Locale.US) }.distinct().chunked(50).forEach { chunk ->
+            val exchangeSymbols = chunk.joinToString(",") { "NSE_$it" }
+            val payload = apiFactory.groww.ltp(
+                bearer(token),
+                exchangeSymbols = exchangeSymbols
+            ).requirePayload("Batch holding LTP")
+            payload.forEach { (key, value) ->
+                if (value.isFinite() && value > 0.0) {
+                    result[key.removePrefix("NSE_").uppercase(Locale.US)] = value
+                }
+            }
+        }
         preferences.recordMarketData()
+        return result
+    }
+
+    private suspend fun monitorLongHolding(position: ManagedPositionEntity, token: String, ltp: Double) {
         val previousHighWater = position.maxFavourablePrice
+        val highWater = max(position.maxFavourablePrice, ltp)
+        val lowWater = min(position.maxAdversePrice, ltp)
+        val upgradeNeeded = kotlin.math.abs(position.trailingArmPct - SteppedTrailingPolicy.ARM_TRIGGER_PCT) > 0.0001
+        val desiredStopGainPct = SteppedTrailingPolicy.stopGainPctForHighWater(position.entryPrice, highWater)
+        val desiredStopPrice = desiredStopGainPct?.let { SteppedTrailingPolicy.stopPrice(position.entryPrice, it) }
+        val failsafeStop = position.entryPrice * (1.0 - HOLDING_FAILSAFE_STOP_PCT)
+
         var updated = position.copy(
             lastPrice = ltp,
-            maxFavourablePrice = max(position.maxFavourablePrice, ltp),
-            maxAdversePrice = min(position.maxAdversePrice, ltp),
-            trailingArmPct = dynamicTrailArmPct,
-            targetPrice = if (position.engine == ENGINE_MULTIFY_HOLDING)
-                LearnedTrailingPolicy.minimumExitPriceForNetProfitPct(position.entryPrice, dynamicTrailArmPct)
-            else position.targetPrice,
+            maxFavourablePrice = highWater,
+            maxAdversePrice = lowWater,
+            trailingArmPct = SteppedTrailingPolicy.ARM_TRIGGER_PCT,
             lastEvaluatedAtMs = System.currentTimeMillis()
         )
-        managedDao.updatePosition(updated)
 
-        val minimumNetProfit = LearnedTrailingPolicy.minimumNetProfitRupees(
-            updated.entryPrice, updated.quantity, dynamicTrailArmPct
-        )
-        val minimumProfitStop = LearnedTrailingPolicy.minimumExitPriceForNetProfitPct(
-            updated.entryPrice, dynamicTrailArmPct
-        )
-        val rawStop = updated.stopPrice
-        val rawArmed = LearnedTrailingPolicy.isArmed(rawStop, updated.entryPrice)
-        val rawStopProtectsGate = rawStop != null &&
-            LearnedTrailingPolicy.estimatedNetProfit(updated.entryPrice, rawStop, updated.quantity) + 0.01 >= minimumNetProfit
-
-        // Any old armed stop that no longer protects the current Multify-MFE threshold
-        // is reset to the emergency failsafe. This keeps upgrades and rising MFE averages safe.
-        if (rawArmed && !rawStopProtectsGate) {
-            val migratedStop = updated.entryPrice * (1.0 - HOLDING_FAILSAFE_STOP_PCT)
+        if (upgradeNeeded) {
+            val legacyStop = position.stopPrice
+            val migratedStop = when {
+                legacyStop != null && legacyStop > position.entryPrice ->
+                    max(legacyStop, desiredStopPrice ?: position.entryPrice)
+                desiredStopPrice != null -> desiredStopPrice
+                else -> failsafeStop
+            }
             updated = updated.copy(
                 stopPrice = migratedStop,
-                trailingLastRatchetPrice = 0.0,
-                lastEvaluatedAtMs = System.currentTimeMillis()
+                trailingLastRatchetPrice = desiredStopGainPct?.let {
+                    position.entryPrice * (1.0 + (it + SteppedTrailingPolicy.TRIGGER_BUFFER_PCT) / 100.0)
+                } ?: 0.0
             )
-            managedDao.updatePosition(updated)
-            auditLogger.log("TRAILING_STOP", "TRAIL_RESET_BELOW_DYNAMIC_MFE_GATE", mapOf(
-                "symbol" to updated.symbol,
-                "old_stop" to rawStop,
-                "new_failsafe_stop" to migratedStop,
-                "multify_mfe_arm_pct" to dynamicTrailArmPct,
-                "minimum_net_profit" to minimumNetProfit,
-                "minimum_profit_exit_price" to minimumProfitStop
+            auditLogger.log("TRAILING_STOP", "V7_TRAIL_MIGRATED", mapOf(
+                "symbol" to position.symbol,
+                "old_trail_arm_pct" to position.trailingArmPct,
+                "new_arm_trigger_pct" to SteppedTrailingPolicy.ARM_TRIGGER_PCT,
+                "old_stop" to legacyStop,
+                "new_stop" to migratedStop,
+                "high_water_gain_pct" to SteppedTrailingPolicy.gainPct(position.entryPrice, highWater)
             ))
         }
 
-        val hardStop = updated.stopPrice
-        if (hardStop != null && !LearnedTrailingPolicy.isArmed(hardStop, updated.entryPrice) && ltp <= hardStop) {
-            closeLongHolding(token, updated, ltp, "HOLDING_FAILSAFE_STOP")
+        managedDao.updatePosition(updated)
+
+        val currentStopBeforeRatchet = updated.stopPrice
+        if (currentStopBeforeRatchet != null &&
+            currentStopBeforeRatchet <= updated.entryPrice &&
+            ltp <= currentStopBeforeRatchet
+        ) {
+            val triggerStartedNs = SystemClock.elapsedRealtimeNanos()
+            closeLongHolding(token, updated, ltp, "HOLDING_FAILSAFE_STOP", triggerStartedNs)
             return
         }
 
-        val atr = currentOneMinuteAtr(updated.symbol, token, ltp)
-        val highWater = updated.maxFavourablePrice
-        val currentStop = updated.stopPrice
-        val alreadyArmed = currentStop != null &&
-            LearnedTrailingPolicy.isArmed(currentStop, updated.entryPrice) &&
-            LearnedTrailingPolicy.estimatedNetProfit(updated.entryPrice, currentStop, updated.quantity) + 0.01 >= minimumNetProfit
-        val profitGateReached = LearnedTrailingPolicy.profitGateReached(
-            updated.entryPrice, highWater, updated.quantity, dynamicTrailArmPct
-        )
-        val canProtectProfitGate = highWater + 1e-9 >= minimumProfitStop + 0.01
-        val thresholdReached = alreadyArmed || (profitGateReached && canProtectProfitGate)
-
-        if (thresholdReached && LearnedTrailingPolicy.shouldRatchet(alreadyArmed, updated.trailingLastRatchetPrice, highWater)) {
-            val previousRatchetHigh = updated.trailingLastRatchetPrice
-            val candidateStop = LearnedTrailingPolicy.ratchetStop(
-                entryPrice = updated.entryPrice,
-                highWaterPrice = highWater,
-                atr = atr,
-                currentStop = currentStop,
-                lastRatchetPrice = previousRatchetHigh,
-                minimumProtectedStop = minimumProfitStop
-            )
-            val stopRaised = !alreadyArmed || candidateStop > (currentStop ?: updated.entryPrice) + .01
-            val effectiveStop = if (stopRaised) candidateStop else currentStop
-            updated = updated.copy(
-                stopPrice = effectiveStop,
-                trailingLastRatchetPrice = highWater,
-                trailingArmPct = dynamicTrailArmPct,
-                lastEvaluatedAtMs = System.currentTimeMillis()
-            )
-            managedDao.updatePosition(updated)
-            val projectedNetAtStop = effectiveStop?.let {
-                LearnedTrailingPolicy.estimatedNetProfit(updated.entryPrice, it, updated.quantity)
+        if (desiredStopGainPct != null && desiredStopPrice != null) {
+            val existingStop = updated.stopPrice
+            val effectiveStop = max(existingStop ?: failsafeStop, desiredStopPrice)
+            val stopRaised = existingStop == null || effectiveStop > existingStop + 0.005
+            if (stopRaised) {
+                val triggerGainPct = desiredStopGainPct + SteppedTrailingPolicy.TRIGGER_BUFFER_PCT
+                val triggerPrice = updated.entryPrice * (1.0 + triggerGainPct / 100.0)
+                updated = updated.copy(
+                    stopPrice = effectiveStop,
+                    trailingLastRatchetPrice = triggerPrice,
+                    trailingArmPct = SteppedTrailingPolicy.ARM_TRIGGER_PCT,
+                    lastEvaluatedAtMs = System.currentTimeMillis()
+                )
+                managedDao.updatePosition(updated)
+                auditLogger.log("TRAILING_STOP", if (existingStop != null && existingStop > updated.entryPrice) "V7_STEP_RATCHET" else "V7_TRAIL_ARMED", mapOf(
+                    "symbol" to updated.symbol,
+                    "entry" to updated.entryPrice,
+                    "ltp" to ltp,
+                    "old_high_water" to previousHighWater,
+                    "new_high_water" to highWater,
+                    "high_water_gain_pct" to SteppedTrailingPolicy.gainPct(updated.entryPrice, highWater),
+                    "trigger_gain_pct" to triggerGainPct,
+                    "protected_gain_pct" to desiredStopGainPct,
+                    "old_stop" to existingStop,
+                    "new_stop" to effectiveStop,
+                    "next_trigger_gain_pct" to SteppedTrailingPolicy.nextTriggerGainPct(desiredStopGainPct)
+                ))
             }
-            auditLogger.log("TRAILING_STOP", if (alreadyArmed) "LONG_RATCHET" else "LONG_ARMED_DYNAMIC_MFE", mapOf(
-                "symbol" to updated.symbol,
-                "ltp" to ltp,
-                "old_high_water" to previousHighWater,
-                "new_high_water" to highWater,
-                "previous_ratchet_high" to previousRatchetHigh,
-                "ratchet_advance" to if (previousRatchetHigh > 0.0) highWater - previousRatchetHigh else highWater - updated.entryPrice,
-                "old_stop" to currentStop,
-                "new_stop" to effectiveStop,
-                "stop_raised" to stopRaised,
-                "multify_mfe_arm_pct" to dynamicTrailArmPct,
-                "invested_amount" to LearnedTrailingPolicy.investedAmount(updated.entryPrice, updated.quantity),
-                "minimum_net_profit" to minimumNetProfit,
-                "projected_net_at_stop" to projectedNetAtStop,
-                "minimum_profit_exit_price" to minimumProfitStop,
-                "atr_1m" to atr,
-                "trail_distance" to LearnedTrailingPolicy.trailDistance(highWater, atr, updated.entryPrice)
-            ))
         }
 
         val activeStop = updated.stopPrice
-        if (LearnedTrailingPolicy.isArmed(activeStop, updated.entryPrice) && activeStop != null && ltp <= activeStop) {
-            val protectedNetAtStop = LearnedTrailingPolicy.estimatedNetProfit(
-                updated.entryPrice, activeStop, updated.quantity
-            )
-            if (protectedNetAtStop + 0.01 >= minimumNetProfit) {
-                auditLogger.log("TRAILING_STOP", "LONG_TRAILING_EXIT_TRIGGERED_DYNAMIC_MFE", mapOf(
-                    "symbol" to updated.symbol,
-                    "ltp" to ltp,
-                    "active_stop" to activeStop,
-                    "protected_net_at_stop" to protectedNetAtStop,
-                    "minimum_net_profit" to minimumNetProfit,
-                    "multify_mfe_arm_pct" to dynamicTrailArmPct
-                ))
-                closeLongHolding(token, updated, ltp, "LONG_TRAILING_PROFIT_STOP_DYNAMIC_MFE")
-            } else {
-                auditLogger.log("TRAILING_STOP", "LONG_TRAILING_EXIT_BLOCKED_BELOW_DYNAMIC_MFE", mapOf(
-                    "symbol" to updated.symbol,
-                    "ltp" to ltp,
-                    "active_stop" to activeStop,
-                    "protected_net_at_stop" to protectedNetAtStop,
-                    "minimum_net_profit" to minimumNetProfit,
-                    "multify_mfe_arm_pct" to dynamicTrailArmPct
-                ))
-            }
+        if (activeStop != null && activeStop > updated.entryPrice && ltp <= activeStop) {
+            val triggerStartedNs = SystemClock.elapsedRealtimeNanos()
+            auditLogger.log("TRAILING_STOP", "V7_TRAILING_EXIT_TRIGGERED", mapOf(
+                "symbol" to updated.symbol,
+                "ltp" to ltp,
+                "active_stop" to activeStop,
+                "protected_gain_pct" to SteppedTrailingPolicy.stopGainPct(updated.entryPrice, activeStop),
+                "high_water_gain_pct" to SteppedTrailingPolicy.gainPct(updated.entryPrice, updated.maxFavourablePrice)
+            ))
+            closeLongHolding(token, updated, ltp, "LONG_TRAILING_PROFIT_STOP_V7_STEP", triggerStartedNs)
         }
     }
 
@@ -2259,7 +2265,7 @@ class TradingRepository @Inject constructor(
         private const val ARM_HOT_STATE_MAX_AGE_MS = 120_000L
         private const val ONE_MINUTE_ATR_CACHE_MS = 60_000L
         private const val EXECUTION_SAMPLE_LIMIT = 30
-        private const val BROKER_INVENTORY_REFRESH_MS = 30_000L
+        private const val BROKER_INVENTORY_REFRESH_MS = 5_000L
         private const val CLOSED_SESSION_RECONCILE_MS = 60_000L
         private const val MULTIFY_PACKAGE = "com.multyfi.invest"
         private const val UPLOADED_THREE_MONTH_REALIZED_PCT = 0.49019417475728155
