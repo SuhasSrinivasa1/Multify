@@ -980,7 +980,8 @@ class TradingRepository @Inject constructor(
 
         val ranked = evaluated.map { row ->
             val quality = ForecastQualityPolicy.evaluate(row.second, targetPct, marketRegime)
-            val key = championKey(marketRegime, row.second.regime, row.second.strategy)
+            val family = MultifyFamilyPolicy.classify(row.second.features, marketRegime)
+            val key = championKey(marketRegime, row.second.regime, row.second.strategy, family.family)
             val champion = champions[key]
             val championWinRate = champion?.takeIf { it.sampleCount > 0 }?.let { it.wins.toDouble() / it.sampleCount } ?: 0.0
             val championBonus = when {
@@ -991,15 +992,17 @@ class TradingRepository @Inject constructor(
             val frequencyBonus = min(.04, (frequency[row.first] ?: 0) * .004)
             val dnaBonus = if (row.first in dnaSymbols) .08 else 0.0
             val qualityBonus = ForecastQualityPolicy.rankingBonus(row.second, quality.volatilityCapacityPct, targetPct, quality.tier)
-            val researchBonus = researchEvidenceBonus(row.second)
+            val familyStrengthBonus = ((family.scores[family.family] ?: 0.0) * 0.10).coerceAtMost(0.10)
+            val researchBonus = researchEvidenceBonus(row.second, family.family)
             ForecastCandidate(
                 symbol = row.first,
                 evaluation = row.second,
                 quality = quality,
+                family = family,
                 score = (
                     row.second.confidence +
                     row.second.directionalScore.coerceAtLeast(0.0) * 0.10 +
-                    championBonus + frequencyBonus + dnaBonus + qualityBonus + researchBonus
+                    championBonus + frequencyBonus + dnaBonus + qualityBonus + familyStrengthBonus + researchBonus
                 ).coerceIn(0.01, .99),
                 championKey = key
             )
