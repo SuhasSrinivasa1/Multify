@@ -468,15 +468,27 @@ private fun HoldingCard(p: PositionDto) {
                     } else money(target)
                 )
             }
-            if (p.trailArmed) {
-                KeyValueRow("High water", p.highWaterPrice?.let(::money) ?: "—")
-                KeyValueRow("Current trail stop", p.stopPrice?.let(::money) ?: "—")
-                val protectedPct = p.stopPrice?.takeIf { p.averagePrice > 0.0 }?.let { (it / p.averagePrice - 1.0) * 100.0 }
-                KeyValueRow("Protected gain", protectedPct?.let { "+${String.format(Locale.US, "%.2f", it)}%" } ?: "—")
-                KeyValueRow("Trail gap", p.trailDistance?.let(::money) ?: "—")
-                KeyValueRow("Last ratchet trigger", p.trailingLastRatchetPrice?.let(::money) ?: "—")
-            } else {
-                KeyValueRow("Protective stop", p.stopPrice?.let(::money) ?: "—")
+            when (p.smartOrderMode) {
+                "RECOVERY_GTT" -> {
+                    KeyValueRow("Exit mode", "₹100-net recovery GTT")
+                    KeyValueRow("GTT trigger", p.smartOrderTriggerPrice?.let(::money) ?: "Pending")
+                    KeyValueRow("GTT direction", p.smartOrderDirection ?: "—")
+                    KeyValueRow("GTT status", p.smartOrderStatus ?: "Pending")
+                    KeyValueRow("Downside sell", "Disabled")
+                }
+                else -> if (p.trailArmed) {
+                    KeyValueRow("Exit mode", if (p.smartOrderId != null) "Server GTT mirrored trail" else "Local trailing fallback")
+                    KeyValueRow("High water", p.highWaterPrice?.let(::money) ?: "—")
+                    KeyValueRow("Current trail stop", p.stopPrice?.let(::money) ?: "—")
+                    val protectedPct = p.stopPrice?.takeIf { p.averagePrice > 0.0 }?.let { (it / p.averagePrice - 1.0) * 100.0 }
+                    KeyValueRow("Protected gain", protectedPct?.let { "+${String.format(Locale.US, "%.2f", it)}%" } ?: "—")
+                    KeyValueRow("Trail gap", p.trailDistance?.let(::money) ?: "—")
+                    KeyValueRow("Last ratchet trigger", p.trailingLastRatchetPrice?.let(::money) ?: "—")
+                    KeyValueRow("GTT status", p.smartOrderStatus ?: if (p.smartOrderId != null) "ACTIVE" else "Local fallback")
+                } else {
+                    KeyValueRow("Exit mode", "Waiting for +0.55% arm")
+                    KeyValueRow("Downside sell", "Disabled · hold through declines")
+                }
             }
             if (!p.strategy.isNullOrBlank()) {
                 Text(p.strategy, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -516,7 +528,7 @@ private fun LongAveragesScreen(state: TraderUiState) {
         item {
             SectionTitle(
                 "Forecast engine",
-                "Targets have a hard 1.00% minimum and can rise with Multify MFE or stronger prior full-session forecast MFE."
+                "Targets have a hard 1.00% minimum. Forecast learning/ranking examples use prior positive-close days only; flat and negative closes remain diagnostic data."
             )
         }
         item {
@@ -595,7 +607,7 @@ private fun ForecastScreen(
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
                     Text("Multify DNA", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                     Text(
-                        "The reverse-engineering ledger captures 40 observable factors grouped into three fixed families: Momentum/Trend, Participation/Liquidity and Structure/Context. Market regime changes family weights, while all five-session counterfactual MFE/MAE outcomes and later Multify matches remain available for calibration.",
+                        "The reverse-engineering ledger captures 40 observable factors grouped into three fixed families: Momentum/Trend, Participation/Liquidity and Structure/Context. Market regime changes family weights. Only prior positive-close outcomes become forecast ranking examples; negative/flat outcomes remain diagnostics.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
