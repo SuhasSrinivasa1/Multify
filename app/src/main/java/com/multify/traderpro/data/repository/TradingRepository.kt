@@ -228,7 +228,7 @@ class TradingRepository @Inject constructor(
         val seedValues = mfeCalls.filter { it.source == "SEED" }
             .mapNotNull { it.multifyMfePct }
             .filter { it.isFinite() && it >= 0.0 && it < 25.0 }
-        val fallback = LearnedTrailingPolicy.MIN_DYNAMIC_TRAIL_ARM_PCT
+        val fallback = 0.0
         val pending = learningDao.closedCallsMissingMfe(1000).size
 
         return LearningStatsDto(
