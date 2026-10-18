@@ -1188,65 +1188,97 @@ class TradingRepository @Inject constructor(
     }
 
     suspend fun executeForecast(symbol: String): String {
+        val decisionStartedNs = SystemClock.elapsedRealtimeNanos()
         val now = ZonedDateTime.now(INDIA)
         require(now.dayOfWeek.value < 6 && marketSession() == "OPEN") { "Forecast BUY is available only during the NSE regular session" }
-        val settings = preferences.settings.first()
+
+        val hot = armHotState?.takeIf { System.currentTimeMillis() - it.warmedAtMs <= ARM_HOT_STATE_MAX_AGE_MS }
+        val settings = hot?.settings ?: preferences.settings.first()
         preArmGuard(settings)
-        val token = ensureToken() ?: error("Authenticate Groww first")
+        val token = hot?.token ?: ensureToken() ?: error("Authenticate Groww first")
+
         val row = learningDao.longForecastsForDate(now.toLocalDate().toString())
             .firstOrNull { it.symbol.equals(symbol, true) } ?: error("No active LONG recommendation for $symbol")
         require(row.status == "ACTIVE") { "$symbol forecast is no longer active" }
-        require(row.executionEligible) { "$symbol is ${row.qualityTier}; only PRIMARY forecast setups can place a real forecast BUY" }
+        require(row.executionEligible && row.qualityTier == "PRIMARY") { "$symbol is not a production-qualified PRIMARY forecast" }
         require(row.targetPct + 1e-9 >= ForecastQualityPolicy.MIN_TARGET_PCT) { "Forecast target is below the 1% quality floor" }
         if (managedDao.openPositions().any { it.symbol.equals(row.symbol, true) && it.side == "LONG" }) {
             return "${row.symbol} is already app-owned; duplicate BUY blocked"
         }
-        val quote = apiFactory.groww.quote(bearer(token), tradingSymbol = row.symbol).requirePayload("Quote ${row.symbol}")
-        val ltp = quote.lastPrice ?: error("Groww quote has no LTP")
-        val margin = apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin")
-        val available = (margin.equity?.cncBalanceAvailable ?: margin.clearCash).coerceAtLeast(0.0)
-        val sizing = CashAwareCncSizing.size(settings.holdingBudgetRupees.toDouble(), available, ltp)
+
+        // Fast path: use the pre-warmed CNC balance and the latest locally observed forecast price.
+        // Network quote/margin calls are only fallback behavior when the hot path is unavailable.
+        val referencePrice = max(row.entryPrice, row.lastPrice.takeIf { it > 0.0 } ?: row.entryPrice)
+        val available = hot?.cncBalance ?: run {
+            val margin = apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin")
+            (margin.equity?.cncBalanceAvailable ?: margin.clearCash).coerceAtLeast(0.0)
+        }
+        val sizing = CashAwareCncSizing.size(settings.holdingBudgetRupees.toDouble(), available, referencePrice)
         val capital = sizing.deployableCash
         val qty = sizing.quantity
-        auditLogger.log("EXECUTION", "CNC_BUY_SIZED", mapOf(
-            "symbol" to row.symbol, "available_cnc" to available, "configured_budget" to settings.holdingBudgetRupees,
-            "cash_reserve" to sizing.cashReserve, "reference_price" to ltp,
-            "buffered_price" to sizing.bufferedPrice, "deployable_cash" to capital, "quantity" to qty
+        auditLogger.log("EXECUTION", "CNC_BUY_SIZED_FAST", mapOf(
+            "symbol" to row.symbol,
+            "available_cnc" to available,
+            "configured_budget" to settings.holdingBudgetRupees,
+            "cash_reserve" to sizing.cashReserve,
+            "reference_price" to referencePrice,
+            "buffered_price" to sizing.bufferedPrice,
+            "deployable_cash" to capital,
+            "quantity" to qty,
+            "hot_path" to (hot != null)
         ))
         require(qty > 0) { "Safe CNC buying power cannot fund one share of ${row.symbol} after RMS reserve" }
+
         val ref = stableRef("FLH", "${row.id}-${row.symbol}")
-        val order = placeCncBuy(token, row.symbol, qty, ref)
+        val order = placeCncBuy(token, row.symbol, qty, ref, decisionStartedNs)
         val filled = order.filledQuantity?.takeIf { it > 0 } ?: qty
-        val entry = order.averageFillPrice?.takeIf { it > 0.0 } ?: ltp
+        val entry = order.averageFillPrice?.takeIf { it > 0.0 } ?: referencePrice
         val investedAmount = entry * filled
-        val multifyStats = learningStats()
-        val trailArmPct = LearnedTrailingPolicy.dynamicArmPct(multifyStats.longAveragePct)
-        val minimumNetProfit = LearnedTrailingPolicy.minimumNetProfitRupees(entry, filled, trailArmPct)
-        val minimumProfitExit = LearnedTrailingPolicy.minimumExitPriceForNetProfitPct(entry, trailArmPct)
         managedDao.insertPosition(
             ManagedPositionEntity(
-                engine = ENGINE_FORECAST_HOLDING, symbol = row.symbol, product = "CNC", side = "LONG", quantity = filled,
-                entryPrice = entry, stopPrice = entry * (1.0 - HOLDING_FAILSAFE_STOP_PCT),
+                engine = ENGINE_FORECAST_HOLDING,
+                symbol = row.symbol,
+                product = "CNC",
+                side = "LONG",
+                quantity = filled,
+                entryPrice = entry,
+                stopPrice = entry * (1.0 - HOLDING_FAILSAFE_STOP_PCT),
                 targetPrice = entry * (1.0 + row.targetPct / 100.0),
-                strategy = "Forecast holding · ${row.strategy} · dynamic Multify-MFE trail",
-                regime = row.regime, confidence = row.confidence,
-                sourceEventId = null, openOrderId = order.growwOrderId, openReferenceId = ref,
-                openedAtMs = System.currentTimeMillis(), lastPrice = entry,
-                maxFavourablePrice = entry, maxAdversePrice = entry, lastEvaluatedAtMs = System.currentTimeMillis(),
-                anchorPrice = entry, capitalDeployed = investedAmount, campaignBudget = capital,
-                trailingArmPct = trailArmPct, trailingLastRatchetPrice = 0.0
+                strategy = "Forecast holding · ${row.strategy} · ${row.strategyFamily} · v7 fixed staircase trail",
+                regime = row.regime,
+                confidence = row.confidence,
+                sourceEventId = null,
+                openOrderId = order.growwOrderId,
+                openReferenceId = ref,
+                openedAtMs = System.currentTimeMillis(),
+                lastPrice = entry,
+                maxFavourablePrice = entry,
+                maxAdversePrice = entry,
+                lastEvaluatedAtMs = System.currentTimeMillis(),
+                anchorPrice = entry,
+                capitalDeployed = investedAmount,
+                campaignBudget = capital,
+                trailingArmPct = LearnedTrailingPolicy.ARM_TRIGGER_PCT,
+                trailingLastRatchetPrice = 0.0
             )
         )
-        auditLogger.log("FORECAST", "LONG_HOLDING_OPENED", mapOf(
-            "symbol" to row.symbol, "qty" to filled, "entry" to entry,
+        armHotState = hot?.copy(
+            cncBalance = max(0.0, hot.cncBalance - entry * filled),
+            warmedAtMs = System.currentTimeMillis()
+        )
+        auditLogger.log("FORECAST", "LONG_HOLDING_OPENED_V7", mapOf(
+            "symbol" to row.symbol,
+            "qty" to filled,
+            "entry" to entry,
             "forecast_target_pct" to row.targetPct,
+            "strategy_family" to row.strategyFamily,
             "invested_amount" to investedAmount,
-            "multify_mfe_avg_pct" to multifyStats.longAveragePct,
-            "trail_arm_pct" to trailArmPct,
-            "minimum_net_profit" to minimumNetProfit,
-            "minimum_profit_exit_price" to minimumProfitExit
+            "trail_trigger_pct" to LearnedTrailingPolicy.ARM_TRIGGER_PCT,
+            "initial_lock_pct" to LearnedTrailingPolicy.INITIAL_LOCK_PCT,
+            "ratchet_step_pct" to LearnedTrailingPolicy.RATCHET_STEP_PCT,
+            "dispatch_sla_ms" to 100
         ))
-        return "BUY ${row.symbol} opened as CNC holding · qty $filled @ ₹${fmt(entry)} · forecast target +${fmt(row.targetPct)}% · trailing arms at +${fmt(trailArmPct)}% estimated net"
+        return "BUY ${row.symbol} opened as CNC holding · qty $filled @ ₹${fmt(entry)} · target +${fmt(row.targetPct)}% · trail 0.55→0.50 then +0.10% steps"
     }
 
     suspend fun pendingLongForecastNotifications(): List<ForecastDto> {
