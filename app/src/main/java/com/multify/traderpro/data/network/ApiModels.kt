@@ -97,7 +97,10 @@ data class ForecastLearningStatsDto(
     val todayTargetAveragePct: Double = 0.0,
     val targetFloorPct: Double = 1.0,
     val researchSessionsCaptured: Int = 0,
-    val researchSessionGoal: Int = 5
+    val researchSessionGoal: Int = 5,
+    val researchCohort: String = "V7",
+    val researchPointerCount: Int = 40,
+    val researchFamilyCount: Int = 3
 )
 
 data class ForecastDto(
@@ -119,7 +122,8 @@ data class ForecastDto(
     val maxAdversePct: Double = 0.0,
     val generatedAtMs: Long = 0L,
     val qualityTier: String = "LEGACY",
-    val executionEligible: Boolean = false
+    val executionEligible: Boolean = false,
+    val strategyFamily: String = "UNCLASSIFIED"
 )
 
 data class ForecastChampionDto(
