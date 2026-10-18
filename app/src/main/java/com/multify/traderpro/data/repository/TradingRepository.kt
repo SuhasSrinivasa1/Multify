@@ -1248,16 +1248,13 @@ class TradingRepository @Inject constructor(
         val filled = order.filledQuantity?.takeIf { it > 0 } ?: qty
         val entry = order.averageFillPrice?.takeIf { it > 0.0 } ?: ltp
         val investedAmount = entry * filled
-        val multifyStats = learningStats()
-        val trailArmPct = LearnedTrailingPolicy.dynamicArmPct(multifyStats.longAveragePct)
-        val minimumNetProfit = LearnedTrailingPolicy.minimumNetProfitRupees(entry, filled, trailArmPct)
-        val minimumProfitExit = LearnedTrailingPolicy.minimumExitPriceForNetProfitPct(entry, trailArmPct)
+        val trailArmPct = SteppedTrailingPolicy.ARM_TRIGGER_PCT
         managedDao.insertPosition(
             ManagedPositionEntity(
                 engine = ENGINE_FORECAST_HOLDING, symbol = row.symbol, product = "CNC", side = "LONG", quantity = filled,
                 entryPrice = entry, stopPrice = entry * (1.0 - HOLDING_FAILSAFE_STOP_PCT),
                 targetPrice = entry * (1.0 + row.targetPct / 100.0),
-                strategy = "Forecast holding · ${row.strategy} · dynamic Multify-MFE trail",
+                strategy = "Forecast holding · ${row.strategy} · v7 fixed stepped trail 0.55→0.50 then +0.10%",
                 regime = row.regime, confidence = row.confidence,
                 sourceEventId = null, openOrderId = order.growwOrderId, openReferenceId = ref,
                 openedAtMs = System.currentTimeMillis(), lastPrice = entry,
@@ -1270,12 +1267,11 @@ class TradingRepository @Inject constructor(
             "symbol" to row.symbol, "qty" to filled, "entry" to entry,
             "forecast_target_pct" to row.targetPct,
             "invested_amount" to investedAmount,
-            "multify_mfe_avg_pct" to multifyStats.longAveragePct,
-            "trail_arm_pct" to trailArmPct,
-            "minimum_net_profit" to minimumNetProfit,
-            "minimum_profit_exit_price" to minimumProfitExit
+            "trail_arm_trigger_pct" to trailArmPct,
+            "initial_protected_gain_pct" to SteppedTrailingPolicy.INITIAL_STOP_GAIN_PCT,
+            "trail_step_pct" to SteppedTrailingPolicy.STEP_PCT
         ))
-        return "BUY ${row.symbol} opened as CNC holding · qty $filled @ ₹${fmt(entry)} · forecast target +${fmt(row.targetPct)}% · trailing arms at +${fmt(trailArmPct)}% estimated net"
+        return "BUY ${row.symbol} opened as CNC holding · qty $filled @ ₹${fmt(entry)} · forecast target +${fmt(row.targetPct)}% · fixed trailing arms at +0.55% and protects +0.50%"
     }
 
     suspend fun pendingLongForecastNotifications(): List<ForecastDto> {
