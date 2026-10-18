@@ -1783,7 +1783,6 @@ class TradingRepository @Inject constructor(
 
         val hardStop = updated.stopPrice
         if (hardStop != null && hardStop <= updated.entryPrice && ltp <= hardStop) {
-            managedDao.updatePosition(updated)
             val triggerStartedNs = SystemClock.elapsedRealtimeNanos()
             closeLongHolding(
                 token = token,
@@ -1824,8 +1823,6 @@ class TradingRepository @Inject constructor(
             ))
         }
 
-        managedDao.updatePosition(updated)
-
         val activeStop = updated.stopPrice
         if (LearnedTrailingPolicy.isArmed(activeStop, updated.entryPrice) && activeStop != null && ltp <= activeStop) {
             val triggerStartedNs = SystemClock.elapsedRealtimeNanos()
@@ -1845,7 +1842,10 @@ class TradingRepository @Inject constructor(
                 "high_water_gain_pct" to LearnedTrailingPolicy.gainPct(updated.entryPrice, updated.maxFavourablePrice),
                 "closed" to (closed != null)
             ))
+            return
         }
+
+        managedDao.updatePosition(updated)
     }
 
     private suspend fun currentOneMinuteAtr(symbol: String, token: String, ltp: Double): Double {
@@ -2361,7 +2361,7 @@ class TradingRepository @Inject constructor(
         private const val RESEARCH_COHORT_V7 = "V7_FIVE_SESSION_40X3"
         private const val FORECAST_SCAN_INTERVAL_MS = 5L * 60L * 1000L
         private const val FORECAST_OUTCOME_INTERVAL_MS = 60_000L
-        private const val FORECAST_SYMBOL_PACING_MS = 150L
+        private const val FORECAST_SYMBOL_PACING_MS = 300L
         private const val RESEARCH_CAPTURE_TOP_N = 48
         private const val RESEARCH_BACKFILL_SYMBOL_PACING_MS = 300L
         private const val RESEARCH_BACKFILL_SYMBOL_BATCH = 10
