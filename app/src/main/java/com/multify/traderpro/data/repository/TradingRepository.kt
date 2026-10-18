@@ -1102,13 +1102,13 @@ class TradingRepository @Inject constructor(
         candidates: List<ForecastCandidate>
     ) {
         candidates.forEachIndexed { index, item ->
-            val featureMap = researchFeatureMap(item.evaluation)
             val votes = item.evaluation.votes.map {
                 mapOf("name" to it.name, "score" to it.score, "note" to it.note)
             }
             learningDao.insertForecastResearch(
                 ForecastResearchEntity(
                     researchDate = date,
+                    researchCohort = RESEARCH_COHORT_V7,
                     scanAtMs = scanAtMs,
                     symbol = item.symbol,
                     rank = index + 1,
@@ -1120,68 +1120,30 @@ class TradingRepository @Inject constructor(
                     regime = item.evaluation.regime,
                     marketRegime = marketRegime,
                     strategy = item.evaluation.strategy,
+                    strategyFamily = item.family.family,
+                    familyScoreJson = researchGson.toJson(item.family.scores),
                     directionalScore = item.evaluation.directionalScore,
                     confidence = item.evaluation.confidence,
                     rejectionReason = item.quality.failedRules.joinToString("; ").ifBlank { item.quality.reason },
-                    featureJson = researchGson.toJson(featureMap),
+                    featureJson = researchGson.toJson(item.family.pointers),
                     voteJson = researchGson.toJson(votes)
                 )
             )
         }
-        auditLogger.log("FORECAST_RESEARCH", "SCAN_CAPTURED", mapOf(
-            "date" to date, "scan_at_ms" to scanAtMs, "count" to candidates.size, "target_pct" to targetPct,
-            "market_regime" to marketRegime
+        auditLogger.log("FORECAST_RESEARCH", "SCAN_CAPTURED_V7", mapOf(
+            "cohort" to RESEARCH_COHORT_V7,
+            "date" to date,
+            "scan_at_ms" to scanAtMs,
+            "count" to candidates.size,
+            "target_pct" to targetPct,
+            "market_regime" to marketRegime,
+            "pointer_count" to MultifyFamilyPolicy.pointerNames.size,
+            "family_count" to MultifyFamilyPolicy.families.size
         ))
     }
 
-    private fun researchFeatureMap(evaluation: StrategyEvaluation): Map<String, Any?> {
-        val f = evaluation.features
-        return linkedMapOf(
-            "ltp" to f.ltp,
-            "bid" to f.bid,
-            "ask" to f.ask,
-            "spread_bps" to f.spreadBps,
-            "order_book_imbalance" to f.orderBookImbalance,
-            "day_change_pct" to f.dayChangePct,
-            "market_cap" to f.marketCap,
-            "range52_position" to f.range52Position,
-            "vwap" to f.vwap,
-            "ema9" to f.ema9,
-            "ema20" to f.ema20,
-            "ema50" to f.ema50,
-            "ema9_slope_atr" to f.ema9Slope,
-            "ema20_slope_atr" to f.ema20Slope,
-            "vwap_slope_atr" to f.vwapSlope,
-            "macd_histogram_slope" to f.macdHistogramSlope,
-            "rsi_slope" to f.rsiSlope,
-            "volume_acceleration" to f.volumeAcceleration,
-            "green_volume_share" to f.greenVolumeShare,
-            "structure_score" to f.structureScore,
-            "session_high_distance_pct" to f.sessionHighDistancePct,
-            "session_low_distance_pct" to f.sessionLowDistancePct,
-            "atr14" to f.atr14,
-            "atr_pct" to f.atr14?.let { if (f.ltp > 0.0) it / f.ltp * 100.0 else null },
-            "rsi14" to f.rsi14,
-            "boll_width" to f.bollWidth,
-            "macd_histogram" to f.macdHistogram,
-            "trend_slope_atr" to f.trendSlopeAtr,
-            "rvol" to f.rvol,
-            "donchian_high" to f.donchianHigh,
-            "donchian_low" to f.donchianLow,
-            "orb5_high" to f.orb5High,
-            "orb5_low" to f.orb5Low,
-            "orb15_high" to f.orb15High,
-            "orb15_low" to f.orb15Low,
-            "last_open" to f.lastOpen,
-            "last_high" to f.lastHigh,
-            "last_low" to f.lastLow,
-            "last_close" to f.lastClose,
-            "prev_open" to f.prevOpen,
-            "prev_high" to f.prevHigh,
-            "prev_low" to f.prevLow,
-            "prev_close" to f.prevClose
-        )
-    }
+    private fun researchFeatureMap(evaluation: StrategyEvaluation): Map<String, Double?> =
+        MultifyFamilyPolicy.featureVector(evaluation.features)
 
     suspend fun captureMultifyResearchSnapshot(eventId: Long, symbol: String) {
         val token = ensureToken() ?: return
@@ -1191,14 +1153,22 @@ class TradingRepository @Inject constructor(
                     "event_id" to eventId, "symbol" to symbol, "message" to (it.message ?: it.javaClass.simpleName)
                 ))
             }.getOrNull() ?: return
-        auditLogger.log("MULTIFY_RESEARCH", "FEATURE_SNAPSHOT", mapOf(
+        val today = LocalDate.now(INDIA).toString()
+        val latestResearch = learningDao.forecastResearchForDateAndCohort(today, RESEARCH_COHORT_V7).lastOrNull()
+        val marketRegime = latestResearch?.marketRegime ?: "BREADTH_NEUTRAL"
+        val family = MultifyFamilyPolicy.classify(evaluation.features, marketRegime)
+        auditLogger.log("MULTIFY_RESEARCH", "FEATURE_SNAPSHOT_V7", mapOf(
             "event_id" to eventId,
             "symbol" to symbol,
             "regime" to evaluation.regime,
+            "market_regime" to marketRegime,
+            "strategy_family" to family.family,
+            "family_scores" to family.scores,
+            "pointer_count" to family.pointers.size,
             "directional_score" to evaluation.directionalScore,
             "confidence" to evaluation.confidence,
             "strategy" to evaluation.strategy,
-            "features" to researchFeatureMap(evaluation),
+            "features_40" to family.pointers,
             "votes" to evaluation.votes.map { mapOf("name" to it.name, "score" to it.score, "note" to it.note) }
         ))
     }
