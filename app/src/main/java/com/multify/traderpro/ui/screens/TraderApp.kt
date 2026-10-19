@@ -582,6 +582,24 @@ private fun ForecastScreen(
             )
         }
         item {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha=.18f)),
+                shape = RoundedCornerShape(20.dp)
+            ) {
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("Forecast engine · ACTIVE", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        if (state.settings.armEffective)
+                            "Learning and forecasting are running. ARM is ON, so eligible PRIMARY rows may also be bought."
+                        else
+                            "Learning and forecasting continue normally while ARM is OFF. Trading is disabled; research and recommendations are not.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+        item {
             MetricCard(
                 label = "Today's Forecast Avg Upside",
                 value = if (forecastLearning.todayTargetAveragePct > 0.0)
