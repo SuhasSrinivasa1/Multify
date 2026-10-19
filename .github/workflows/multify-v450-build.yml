@@ -1,5 +1,5 @@
-name: Multify Trader Pro v7.1.0 Trailing GTT Recovery Build
-# CI trigger for verified v7.1.0 trailing GTT recovery build
+name: Multify Trader Pro v7.2.0 Market-Wide Forecast Build
+# CI trigger for verified v7.2.0 market-wide forecast build
 
 on:
   workflow_dispatch:
@@ -103,11 +103,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v7.1.0-trailing-gtt-recovery-debug.apk
+          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v7.2.0-marketwide-forecast-debug.apk
           if [ -f app/build/outputs/apk/release/app-release.apk ]; then
-            cp app/build/outputs/apk/release/app-release.apk dist/Multify-TraderPro-v7.1.0-trailing-gtt-recovery-release.apk
+            cp app/build/outputs/apk/release/app-release.apk dist/Multify-TraderPro-v7.2.0-marketwide-forecast-release.apk
           elif [ -f app/build/outputs/apk/release/app-release-unsigned.apk ]; then
-            cp app/build/outputs/apk/release/app-release-unsigned.apk dist/Multify-TraderPro-v7.1.0-trailing-gtt-recovery-release-unsigned.apk
+            cp app/build/outputs/apk/release/app-release-unsigned.apk dist/Multify-TraderPro-v7.2.0-marketwide-forecast-release-unsigned.apk
           fi
           (cd dist && sha256sum *.apk > SHA256SUMS.txt)
           : > dist/signature.txt
@@ -122,27 +122,27 @@ jobs:
             echo "=== $(basename "$apk") ===" >> dist/package-verification.txt
             "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$apk" | grep -E "^(package:|application-label:)" >> dist/package-verification.txt
           done
-          git archive --format=zip --output=dist/Multify-TraderPro-v7.1.0-source.zip HEAD
+          git archive --format=zip --output=dist/Multify-TraderPro-v7.2.0-source.zip HEAD
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Multify-TraderPro-v7.1.0-verified
+          name: Multify-TraderPro-v7.2.0-verified
           path: dist/
           if-no-files-found: error
 
-      - name: Publish verified v7.1.0 assets
+      - name: Publish verified v7.2.0 assets
         if: github.ref == 'refs/heads/main'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          TAG="v7.1.0-trailing-gtt-recovery"
-          TITLE="Multify Trader Pro v7.1.0 Trailing GTT Recovery"
+          TAG="v7.2.0-marketwide-forecast"
+          TITLE="Multify Trader Pro v7.2.0 Market-Wide Forecast"
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG"               dist/Multify-TraderPro-v7.1.0-trailing-gtt-recovery-debug.apk               dist/Multify-TraderPro-v7.1.0-source.zip               dist/SHA256SUMS.txt               dist/signature.txt               dist/package-verification.txt               --clobber
+            gh release upload "$TAG"               dist/Multify-TraderPro-v7.2.0-marketwide-forecast-debug.apk               dist/Multify-TraderPro-v7.2.0-source.zip               dist/SHA256SUMS.txt               dist/signature.txt               dist/package-verification.txt               --clobber
           else
-            gh release create "$TAG"               --target "$GITHUB_SHA"               --title "$TITLE"               --notes-file RELEASE_NOTES_v7.1.0.md               dist/Multify-TraderPro-v7.1.0-trailing-gtt-recovery-debug.apk               dist/Multify-TraderPro-v7.1.0-source.zip               dist/SHA256SUMS.txt               dist/signature.txt               dist/package-verification.txt
+            gh release create "$TAG"               --target "$GITHUB_SHA"               --title "$TITLE"               --notes-file RELEASE_NOTES_v7.2.0.md               dist/Multify-TraderPro-v7.2.0-marketwide-forecast-debug.apk               dist/Multify-TraderPro-v7.2.0-source.zip               dist/SHA256SUMS.txt               dist/signature.txt               dist/package-verification.txt
           fi
 
       - name: Publish build pointer
@@ -159,11 +159,11 @@ jobs:
           {
             "run_id": "$GITHUB_RUN_ID",
             "commit_sha": "$GITHUB_SHA",
-            "artifact_name": "Multify-TraderPro-v7.1.0-verified",
-            "release_tag": "v7.1.0-trailing-gtt-recovery",
+            "artifact_name": "Multify-TraderPro-v7.2.0-verified",
+            "release_tag": "v7.2.0-marketwide-forecast",
             "job_status": "${{ job.status }}"
           }
           EOF
           git add latest-build.json
-          git commit -m "Record v7.1.0 build $GITHUB_RUN_ID (${{ job.status }})"
+          git commit -m "Record v7.2.0 build $GITHUB_RUN_ID (${{ job.status }})"
           git push origin HEAD:build-metadata
