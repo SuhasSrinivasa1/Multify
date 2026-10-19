@@ -77,6 +77,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import retrofit2.HttpException
+import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.security.MessageDigest
 import java.time.Instant
@@ -89,6 +90,7 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.zip.ZipEntry
+import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -2900,6 +2902,176 @@ class TradingRepository @Inject constructor(
 
     data class LogExportResult(val entries: Int, val signalCount: Int, val tradeCount: Int)
 
+    data class LearningRestoreResult(
+        val learningCalls: Int,
+        val researchSnapshots: Int,
+        val forecasts: Int,
+        val champions: Int,
+        val reports: Int
+    ) {
+        val total: Int get() = learningCalls + researchSnapshots + forecasts + champions + reports
+    }
+
+    /**
+     * Restores learning-only state from a Multify diagnostics ZIP after a debug-signature migration.
+     * Trading state is intentionally excluded: no holdings, orders, execution samples, credentials,
+     * ARM flags, broker state or settings are imported.
+     */
+    suspend fun restoreLearningFromLogs(uri: Uri): LearningRestoreResult {
+        val entries = linkedMapOf<String, String>()
+        var totalBytes = 0L
+        appContext.contentResolver.openInputStream(uri)?.use { raw ->
+            ZipInputStream(raw).use { zip ->
+                while (true) {
+                    val entry = zip.nextEntry ?: break
+                    val name = entry.name.substringAfterLast('/')
+                    if (name in LEARNING_RESTORE_FILES) {
+                        val out = ByteArrayOutputStream()
+                        val buffer = ByteArray(8192)
+                        var entryBytes = 0L
+                        while (true) {
+                            val read = zip.read(buffer)
+                            if (read <= 0) break
+                            entryBytes += read
+                            totalBytes += read
+                            require(entryBytes <= MAX_RESTORE_ENTRY_BYTES) { "Restore entry $name is too large" }
+                            require(totalBytes <= MAX_RESTORE_TOTAL_BYTES) { "Restore ZIP is too large" }
+                            out.write(buffer, 0, read)
+                        }
+                        entries[name] = out.toString(Charsets.UTF_8.name())
+                    }
+                    zip.closeEntry()
+                }
+            }
+        } ?: error("Unable to open restore ZIP")
+
+        require(entries.isNotEmpty()) { "This ZIP does not contain Multify learning files" }
+        val gson = GsonBuilder().disableHtmlEscaping().create()
+        var restoredCalls = 0
+        var restoredResearch = 0
+        var restoredForecasts = 0
+        var restoredChampions = 0
+        var restoredReports = 0
+
+        entries["long_learning.json"]?.let { json ->
+            val rows = JsonParser.parseString(json).asJsonArray
+            rows.forEach { node ->
+                val x = node.asJsonObject
+                val callDate = x.get("date")?.takeUnless { it.isJsonNull }?.asString ?: return@forEach
+                val symbol = x.get("symbol")?.takeUnless { it.isJsonNull }?.asString?.uppercase(Locale.US) ?: return@forEach
+                val source = x.get("source")?.takeUnless { it.isJsonNull }?.asString ?: "RESTORED"
+                val entryPrice = x.get("entry_price")?.takeUnless { it.isJsonNull }?.asDouble ?: return@forEach
+                if (!entryPrice.isFinite() || entryPrice <= 0.0) return@forEach
+                val existing = learningDao.callForDateSymbolAction(callDate, symbol, "BUY")
+                val targetPrice = x.get("target_price")?.takeUnless { it.isJsonNull }?.asDouble
+                val targetPct = x.get("target_pct")?.takeUnless { it.isJsonNull }?.asDouble
+                val exitPrice = x.get("exit_price")?.takeUnless { it.isJsonNull }?.asDouble
+                val longReturn = x.get("long_return_pct")?.takeUnless { it.isJsonNull }?.asDouble
+                val maxPrice = x.get("multify_max_price")?.takeUnless { it.isJsonNull }?.asDouble
+                val mfe = x.get("multify_mfe_pct")?.takeUnless { it.isJsonNull }?.asDouble
+                val updated = if (existing == null) {
+                    LearningCallEntity(
+                        callDate = callDate,
+                        symbol = symbol,
+                        source = source,
+                        action = "BUY",
+                        entryPrice = entryPrice,
+                        targetPrice = targetPrice,
+                        targetPct = targetPct,
+                        multifyExitPrice = exitPrice,
+                        longRealizedPct = longReturn,
+                        multifyMaxPrice = maxPrice,
+                        multifyMfePct = mfe,
+                        updatedAtMs = System.currentTimeMillis()
+                    )
+                } else {
+                    existing.copy(
+                        source = existing.source.ifBlank { source },
+                        entryPrice = entryPrice,
+                        targetPrice = targetPrice ?: existing.targetPrice,
+                        targetPct = targetPct ?: existing.targetPct,
+                        multifyExitPrice = exitPrice ?: existing.multifyExitPrice,
+                        longRealizedPct = longReturn ?: existing.longRealizedPct,
+                        multifyMaxPrice = maxPrice ?: existing.multifyMaxPrice,
+                        multifyMfePct = mfe ?: existing.multifyMfePct,
+                        updatedAtMs = System.currentTimeMillis()
+                    )
+                }
+                if (existing == null) learningDao.insertCall(updated) else learningDao.updateCall(updated)
+                restoredCalls++
+            }
+        }
+
+        entries["forecast_research_snapshots.json"]?.let { json ->
+            val imported = gson.fromJson(json, Array<ForecastResearchEntity>::class.java).orEmpty()
+            val existingKeys = learningDao.allForecastResearch().map {
+                "${it.researchDate}|${it.scanAtMs}|${it.symbol.uppercase(Locale.US)}|${it.rank}"
+            }.toHashSet()
+            imported.forEach { row ->
+                if (row.researchDate.isBlank() || row.symbol.isBlank() || row.entryPrice <= 0.0) return@forEach
+                val key = "${row.researchDate}|${row.scanAtMs}|${row.symbol.uppercase(Locale.US)}|${row.rank}"
+                if (key in existingKeys) return@forEach
+                learningDao.insertForecastResearch(row.copy(id = 0, symbol = row.symbol.uppercase(Locale.US)))
+                existingKeys += key
+                restoredResearch++
+            }
+        }
+
+        entries["long_forecasts.json"]?.let { json ->
+            val imported = gson.fromJson(json, Array<LongForecastEntity>::class.java).orEmpty()
+            imported.forEach { row ->
+                if (row.forecastDate.isBlank() || row.symbol.isBlank() || row.entryPrice <= 0.0) return@forEach
+                val existing = learningDao.longForecastsForDate(row.forecastDate)
+                    .firstOrNull { it.symbol.equals(row.symbol, true) }
+                learningDao.upsertLongForecast(
+                    row.copy(
+                        id = existing?.id ?: 0,
+                        symbol = row.symbol.uppercase(Locale.US),
+                        notified = true
+                    )
+                )
+                restoredForecasts++
+            }
+        }
+
+        entries["long_champions.json"]?.let { json ->
+            val imported = gson.fromJson(json, Array<ForecastChampionEntity>::class.java).orEmpty()
+            imported.forEach { row ->
+                if (row.key.isBlank()) return@forEach
+                learningDao.upsertForecastChampion(row)
+                restoredChampions++
+            }
+        }
+
+        entries["research.json"]?.let { json ->
+            val imported = gson.fromJson(json, Array<com.multify.traderpro.data.local.ResearchReportEntity>::class.java).orEmpty()
+            imported.forEach { row ->
+                if (row.reportDate.isBlank()) return@forEach
+                learningDao.insertResearchReport(row.copy(id = 0))
+                restoredReports++
+            }
+        }
+
+        historicalSeedEnsured = false
+        ensureHistoricalSeed()
+        auditLogger.log("MIGRATION", "LEARNING_RESTORE_COMPLETED", mapOf(
+            "learning_calls" to restoredCalls,
+            "research_snapshots" to restoredResearch,
+            "forecasts" to restoredForecasts,
+            "champions" to restoredChampions,
+            "reports" to restoredReports,
+            "trading_state_restored" to false,
+            "credentials_restored" to false
+        ))
+        return LearningRestoreResult(
+            learningCalls = restoredCalls,
+            researchSnapshots = restoredResearch,
+            forecasts = restoredForecasts,
+            champions = restoredChampions,
+            reports = restoredReports
+        )
+    }
+
     suspend fun exportCompleteLogs(uri: Uri): LogExportResult {
         val gson = GsonBuilder().setPrettyPrinting().create()
         val settings = preferences.settings.first()
@@ -3111,6 +3283,15 @@ class TradingRepository @Inject constructor(
         private const val RESEARCH_BACKFILL_SYMBOL_PACING_MS = 300L
         private const val RESEARCH_BACKFILL_SYMBOL_BATCH = 10
         private const val RESEARCH_BACKFILL_NETWORK_ABORT_AFTER = 3
+        private val LEARNING_RESTORE_FILES = setOf(
+            "long_learning.json",
+            "forecast_research_snapshots.json",
+            "long_forecasts.json",
+            "long_champions.json",
+            "research.json"
+        )
+        private const val MAX_RESTORE_ENTRY_BYTES = 32L * 1024L * 1024L
+        private const val MAX_RESTORE_TOTAL_BYTES = 64L * 1024L * 1024L
         private const val RESEARCH_SESSION_GOAL = 5
         private const val V7_RESEARCH_COHORT_START_DATE = "2026-10-19"
         private const val MIN_RESEARCH_EVIDENCE_ROWS = 4
