@@ -58,6 +58,7 @@ import com.multify.traderpro.engine.ForecastQualityPolicy
 import com.multify.traderpro.engine.GrowwDeliveryCostPolicy
 import com.multify.traderpro.engine.HoldingSmartOrderPolicy
 import com.multify.traderpro.engine.LocalStrategyEngine
+import com.multify.traderpro.engine.MarketDiscoveryPolicy
 import com.multify.traderpro.engine.MultifyFactorFamilies
 import com.multify.traderpro.engine.MultifyFactorModel
 import com.multify.traderpro.engine.MultifyReverseEngineering
@@ -134,6 +135,9 @@ class TradingRepository @Inject constructor(
     private val closePositionMutexes = ConcurrentHashMap<Long, Mutex>()
     private val lastTrailStateAuditAtMs = ConcurrentHashMap<Long, Long>()
     private val lastSmartOrderStatusAtMs = ConcurrentHashMap<Long, Long>()
+    private val discoverySessionOpenLtps = ConcurrentHashMap<String, Double>()
+    private val discoveryPreviousLtps = ConcurrentHashMap<String, Double>()
+    @Volatile private var discoveryDate: String = ""
 
     private data class ForecastCandidate(
         val symbol: String,
@@ -919,15 +923,26 @@ class TradingRepository @Inject constructor(
         val recentDates = calls.map { it.callDate }.distinct().sortedDescending().take(30).toSet()
         val rolling = calls.filter { it.callDate in recentDates }
         val frequency = rolling.groupingBy { it.symbol }.eachCount()
-        val recentSymbols = frequency.entries.sortedByDescending { it.value }.take(20).map { it.key }
+        val recentSymbols = frequency.entries.sortedByDescending { it.value }.take(12).map { it.key }
         val dnaSymbols = MultifyReverseEngineering.positiveCases.map { it.symbol }
         val master = nseSymbols.symbols()
+
+        // v7.2 two-stage forecasting: first scan the full NSE equity master with Groww batch LTP
+        // to discover live relative-strength/momentum names. Only the best names then consume the
+        // expensive quote + four-day candle + 40-factor evaluation. ARM/trading state is irrelevant.
+        val discoveredSymbols = if (master.isEmpty()) emptyList() else
+            discoverMarketWideCandidates(token, master, today)
+
         val slot = (now.hour * 60 + now.minute) / 30
         val rotating = if (master.isEmpty()) emptyList() else {
             val seed = kotlin.math.abs(today.hashCode() + slot * 977)
-            (0 until min(28, master.size)).map { i -> master[Math.floorMod(seed + i * 131, master.size)] }
+            (0 until min(DISCOVERY_ROTATING_FALLBACK, master.size)).map { i ->
+                master[Math.floorMod(seed + i * 131, master.size)]
+            }
         }
-        val universe = (dnaSymbols + recentSymbols + rotating).distinct().take(48)
+        val universe = (discoveredSymbols + dnaSymbols + recentSymbols + rotating)
+            .distinct()
+            .take(DETAILED_FORECAST_UNIVERSE_LIMIT)
         val evaluated = mutableListOf<Pair<String, StrategyEvaluation>>()
         for (symbol in universe) {
             val evaluation = runCatching { forecastEvaluation(symbol, token) }
@@ -1093,6 +1108,11 @@ class TradingRepository @Inject constructor(
             "research_sessions_captured" to capturedResearchDates.size,
             "research_session_goal" to RESEARCH_SESSION_GOAL,
             "research_cohort_start_date" to V7_RESEARCH_COHORT_START_DATE,
+            "nse_master_count" to master.size,
+            "market_wide_discovered" to discoveredSymbols.size,
+            "detailed_universe_count" to universe.size,
+            "arm_effective" to preferences.settings.first().armEffective,
+            "forecasting_independent_of_arm" to true,
             "top_candidates" to ranked.take(5).map {
                 mapOf("symbol" to it.symbol, "tier" to it.quality.tier, "score" to it.score,
                     "confidence" to it.evaluation.confidence, "directional_score" to it.evaluation.directionalScore,
@@ -1221,6 +1241,81 @@ class TradingRepository @Inject constructor(
             "features" to researchFeatureMap(evaluation),
             "votes" to evaluation.votes.map { mapOf("name" to it.name, "score" to it.score, "note" to it.note) }
         ))
+    }
+
+    private suspend fun discoverMarketWideCandidates(
+        token: String,
+        master: List<String>,
+        today: String
+    ): List<String> {
+        if (discoveryDate != today) {
+            discoverySessionOpenLtps.clear()
+            discoveryPreviousLtps.clear()
+            discoveryDate = today
+        }
+
+        val previous = discoveryPreviousLtps.toMap()
+        val sessionOpen = discoverySessionOpenLtps.toMap()
+        val current = linkedMapOf<String, Double>()
+        var batchErrors = 0
+        var batchCount = 0
+
+        master.distinct().chunked(50).forEachIndexed { index, chunk ->
+            batchCount++
+            runCatching {
+                val exchangeSymbols = chunk.joinToString(",") { "NSE_$it" }
+                apiFactory.groww.ltp(
+                    bearer(token),
+                    exchangeSymbols = exchangeSymbols
+                ).requirePayload("Market-wide discovery LTP")
+            }.onSuccess { payload ->
+                payload.forEach { (key, value) ->
+                    if (value.isFinite() && value >= 10.0) {
+                        current[key.removePrefix("NSE_").uppercase(Locale.US)] = value
+                    }
+                }
+            }.onFailure {
+                batchErrors++
+                auditLogger.log("FORECAST_DISCOVERY", "LTP_BATCH_ERROR", mapOf(
+                    "batch_index" to index,
+                    "batch_size" to chunk.size,
+                    "message" to (it.message ?: it.javaClass.simpleName)
+                ))
+            }
+            if (index + 1 < (master.size + 49) / 50) delay(DISCOVERY_BATCH_PACING_MS)
+        }
+
+        val ranked = MarketDiscoveryPolicy.rank(
+            currentLtps = current,
+            previousLtps = previous,
+            sessionOpenLtps = sessionOpen,
+            limit = DISCOVERY_DYNAMIC_LIMIT
+        )
+
+        current.forEach { (symbol, ltp) ->
+            discoverySessionOpenLtps.putIfAbsent(symbol, ltp)
+            discoveryPreviousLtps[symbol] = ltp
+        }
+        preferences.recordMarketData()
+
+        auditLogger.log("FORECAST_DISCOVERY", "MARKET_WIDE_SCAN", mapOf(
+            "master_count" to master.size,
+            "ltp_coverage" to current.size,
+            "batch_count" to batchCount,
+            "batch_errors" to batchErrors,
+            "baseline_ready" to previous.isNotEmpty(),
+            "selected" to ranked.size,
+            "top_movers" to ranked.take(10).map {
+                mapOf(
+                    "symbol" to it.symbol,
+                    "ltp" to it.ltp,
+                    "pulse_pct" to it.pulsePct,
+                    "session_pct" to it.sessionPct,
+                    "discovery_score" to it.score
+                )
+            }
+        ))
+        return ranked.map { it.symbol }
     }
 
     private suspend fun forecastEvaluation(symbol: String, token: String): StrategyEvaluation {
@@ -2847,6 +2942,10 @@ class TradingRepository @Inject constructor(
         private const val FORECAST_SCAN_INTERVAL_MS = 5L * 60L * 1000L
         private const val FORECAST_OUTCOME_INTERVAL_MS = 60_000L
         private const val FORECAST_SYMBOL_PACING_MS = 150L
+        private const val DETAILED_FORECAST_UNIVERSE_LIMIT = 48
+        private const val DISCOVERY_DYNAMIC_LIMIT = 28
+        private const val DISCOVERY_ROTATING_FALLBACK = 16
+        private const val DISCOVERY_BATCH_PACING_MS = 125L
         private const val RESEARCH_CAPTURE_TOP_N = 48
         private const val RESEARCH_BACKFILL_SYMBOL_PACING_MS = 300L
         private const val RESEARCH_BACKFILL_SYMBOL_BATCH = 10
