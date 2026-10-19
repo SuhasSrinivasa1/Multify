@@ -1,7 +1,7 @@
 {
-  "run_id": "39204199173",
-  "commit_sha": "2b4ff8bc657940467f6403613365196c042a9d1b",
+  "run_id": "39204256591",
+  "commit_sha": "4b4dbdc9feddb6c6ce87f35ca01ed12c245dc2f1",
   "artifact_name": "Multify-TraderPro-v7.1.0-verified",
   "release_tag": "v7.1.0-trailing-gtt-recovery",
-  "job_status": "success"
+  "job_status": "failure"
 }
