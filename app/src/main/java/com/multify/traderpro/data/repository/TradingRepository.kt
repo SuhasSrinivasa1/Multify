@@ -269,16 +269,33 @@ class TradingRepository @Inject constructor(
 
     suspend fun forecastLearningStats(): ForecastLearningStatsDto {
         val all = learningDao.allLongForecasts()
-        val completed = all.filter {
+        // Positive-close-only rows remain the training set, per forecasting policy.
+        val completedLearning = all.filter {
             it.status in setOf("TARGET_HIT", "MISSED") &&
                 PositiveCloseForecastPolicy.isPositiveClose(it.entryPrice, it.lastPrice)
         }
-        val dates = completed.mapNotNull { runCatching { LocalDate.parse(it.forecastDate) }.getOrNull() }
+        val dates = completedLearning.mapNotNull { runCatching { LocalDate.parse(it.forecastDate) }.getOrNull() }
             .distinct().sortedDescending()
         val keepDates = dates.take(30).map { it.toString() }.toSet()
-        val rolling = completed.filter { it.forecastDate in keepDates }
-        val values = rolling.map { it.maxFavourablePct }
+        val rollingLearning = completedLearning.filter { it.forecastDate in keepDates }
+        val learningMfe = rollingLearning.map { it.maxFavourablePct }
             .filter { it.isFinite() && it >= 0.0 && it < 25.0 }
+
+        // Performance diagnostics intentionally include ALL completed forecasts so target calibration
+        // cannot look better merely because negative-close examples are excluded from training.
+        val completedEvaluation = all.filter { it.status in setOf("TARGET_HIT", "MISSED") }
+        val evaluationDates = completedEvaluation
+            .mapNotNull { runCatching { LocalDate.parse(it.forecastDate) }.getOrNull() }
+            .distinct().sortedDescending()
+            .take(30).map { it.toString() }.toSet()
+        val rollingEvaluation = completedEvaluation.filter { it.forecastDate in evaluationDates }
+        val evaluationMfe = rollingEvaluation.map { it.maxFavourablePct }
+            .filter { it.isFinite() && it >= 0.0 && it < 25.0 }
+        val evaluationCount = rollingEvaluation.size
+        fun ratePct(predicate: (LongForecastEntity) -> Boolean): Double =
+            if (evaluationCount == 0) 0.0
+            else rollingEvaluation.count(predicate).toDouble() / evaluationCount.toDouble() * 100.0
+
         val today = LocalDate.now(INDIA).toString()
         val todayRows = all.filter { it.forecastDate == today }
         val researchSessions = learningDao.forecastResearchDates()
@@ -287,12 +304,19 @@ class TradingRepository @Inject constructor(
             .size
         return ForecastLearningStatsDto(
             rollingTradingDays = keepDates.size,
-            completedForecasts = rolling.size,
-            longAveragePct = AdaptiveLearningMath.rollingMean(values, 0.0),
+            completedForecasts = rollingLearning.size,
+            longAveragePct = AdaptiveLearningMath.rollingMean(learningMfe, 0.0),
             todayTargetAveragePct = todayRows.map { it.targetPct }.takeIf { it.isNotEmpty() }?.average() ?: 0.0,
             targetFloorPct = ForecastQualityPolicy.MIN_TARGET_PCT,
             researchSessionsCaptured = researchSessions,
-            researchSessionGoal = RESEARCH_SESSION_GOAL
+            researchSessionGoal = RESEARCH_SESSION_GOAL,
+            evaluatedCompletedForecasts = evaluationCount,
+            trailArmHitRatePct = ratePct { it.maxFavourablePct + 1e-9 >= SteppedTrailingPolicy.ARM_TRIGGER_PCT },
+            onePctHitRatePct = ratePct { it.maxFavourablePct + 1e-9 >= 1.0 },
+            targetHitRatePct = ratePct { it.status == "TARGET_HIT" },
+            mfeP25Pct = AdaptiveLearningMath.quantile(evaluationMfe, 0.25, 0.0),
+            mfeMedianPct = AdaptiveLearningMath.quantile(evaluationMfe, 0.50, 0.0),
+            mfeP75Pct = AdaptiveLearningMath.quantile(evaluationMfe, 0.75, 0.0)
         )
     }
 
@@ -644,6 +668,16 @@ class TradingRepository @Inject constructor(
             val heartbeatAge = if (settings.serviceHeartbeatAtMs > 0L) nowMs - settings.serviceHeartbeatAtMs else Long.MAX_VALUE
             val listenerAge = if (settings.listenerHeartbeatAtMs > 0L) nowMs - settings.listenerHeartbeatAtMs else Long.MAX_VALUE
             val dataAge = if (settings.lastMarketDataAtMs > 0L) nowMs - settings.lastMarketDataAtMs else Long.MAX_VALUE
+            val discoveryHealth = marketDiscoveryStateStore.loadHealth(today)
+            val discoveryAge = discoveryHealth?.let { nowMs - it.updatedAtMs } ?: Long.MAX_VALUE
+            val discoveryStatus = when {
+                discoveryHealth == null -> "WAITING"
+                discoveryHealth.abortedForNetwork -> "DEGRADED"
+                !discoveryHealth.baselineReady -> "WARMING"
+                discoveryHealth.coverageRatio < MIN_DISCOVERY_COVERAGE_RATIO -> "DEGRADED"
+                discoveryAge > DISCOVERY_HEALTH_STALE_MS -> "STALE"
+                else -> "HEALTHY"
+            }
             DashboardDto(
                 armed = settings.armEffective, halted = settings.safetyHalt, marketSession = marketSession(),
                 asOf = ZonedDateTime.now(INDIA).format(DateTimeFormatter.ISO_OFFSET_DATE_TIME),
@@ -664,6 +698,11 @@ class TradingRepository @Inject constructor(
                     marketData = if (dataAge <= 15_000L) "FRESH" else "STALE",
                     symbolMaster = if (nseSymbols.isStale()) "STALE" else "FRESH",
                     foregroundService = if (heartbeatAge <= 30_000L) "RUNNING" else "NOT_HEARTBEATING",
+                    discovery = discoveryStatus,
+                    discoveryCoveragePct = (discoveryHealth?.coverageRatio ?: 0.0) * 100.0,
+                    discoveryBaselineAgeMs = discoveryAge,
+                    discoveryBatchErrors = discoveryHealth?.batchErrors ?: 0,
+                    discoveryBaselineReady = discoveryHealth?.baselineReady ?: false,
                     lastNotificationAtMs = settings.lastNotificationAtMs,
                     reconnectCount = settings.listenerReconnectCount,
                     lastReconnectAtMs = settings.lastListenerReconnectAtMs,
@@ -1363,6 +1402,13 @@ class TradingRepository @Inject constructor(
             ))
         }
 
+        marketDiscoveryStateStore.recordHealth(
+            date = today,
+            coverageRatio = coverageRatio,
+            batchErrors = batchErrors,
+            abortedForNetwork = abortedForNetwork,
+            baselineReady = baselineReady
+        )
         preferences.recordMarketData()
         auditLogger.log("FORECAST_DISCOVERY", "MARKET_WIDE_SCAN", mapOf(
             "master_count" to distinctMaster.size,
@@ -3271,6 +3317,7 @@ class TradingRepository @Inject constructor(
         private const val FORECAST_OUTCOME_RETRY_BACKOFF_MS = 750L
         private const val FORECAST_SYMBOL_PACING_MS = 150L
         private const val PRIMARY_CONFIRMATION_WINDOW_MS = 20L * 60L * 1000L
+        private const val DISCOVERY_HEALTH_STALE_MS = 12L * 60L * 1000L
         private const val DETAILED_FORECAST_UNIVERSE_LIMIT = 48
         private const val DISCOVERY_DYNAMIC_LIMIT = 28
         private const val DISCOVERY_ROTATING_FALLBACK = 16
