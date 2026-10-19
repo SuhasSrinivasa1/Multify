@@ -12,6 +12,15 @@ internal data class PersistedMarketDiscoveryState(
     val updatedAtMs: Long
 )
 
+internal data class PersistedMarketDiscoveryHealth(
+    val date: String,
+    val coverageRatio: Double,
+    val batchErrors: Int,
+    val abortedForNetwork: Boolean,
+    val baselineReady: Boolean,
+    val updatedAtMs: Long
+)
+
 internal object MarketDiscoveryStateCodec {
     fun encode(values: Map<String, Double>): String = values.entries.asSequence()
         .filter { it.key.isNotBlank() && it.value.isFinite() && it.value > 0.0 }
@@ -67,6 +76,37 @@ class MarketDiscoveryStateStore @Inject constructor(
             .commit()
     }
 
+    internal fun recordHealth(
+        date: String,
+        coverageRatio: Double,
+        batchErrors: Int,
+        abortedForNetwork: Boolean,
+        baselineReady: Boolean
+    ) {
+        prefs.edit()
+            .putString(KEY_HEALTH_DATE, date)
+            .putString(KEY_HEALTH_COVERAGE, coverageRatio.coerceIn(0.0, 1.0).toString())
+            .putInt(KEY_HEALTH_BATCH_ERRORS, batchErrors.coerceAtLeast(0))
+            .putBoolean(KEY_HEALTH_ABORTED, abortedForNetwork)
+            .putBoolean(KEY_HEALTH_BASELINE_READY, baselineReady)
+            .putLong(KEY_HEALTH_UPDATED_AT, System.currentTimeMillis())
+            .commit()
+    }
+
+    internal fun loadHealth(date: String): PersistedMarketDiscoveryHealth? {
+        if (prefs.getString(KEY_HEALTH_DATE, null) != date) return null
+        val updated = prefs.getLong(KEY_HEALTH_UPDATED_AT, 0L)
+        if (updated <= 0L) return null
+        return PersistedMarketDiscoveryHealth(
+            date = date,
+            coverageRatio = prefs.getString(KEY_HEALTH_COVERAGE, "0")?.toDoubleOrNull()?.coerceIn(0.0, 1.0) ?: 0.0,
+            batchErrors = prefs.getInt(KEY_HEALTH_BATCH_ERRORS, 0),
+            abortedForNetwork = prefs.getBoolean(KEY_HEALTH_ABORTED, false),
+            baselineReady = prefs.getBoolean(KEY_HEALTH_BASELINE_READY, false),
+            updatedAtMs = updated
+        )
+    }
+
     internal fun clear() {
         prefs.edit().clear().commit()
     }
@@ -76,5 +116,11 @@ class MarketDiscoveryStateStore @Inject constructor(
         private const val KEY_SESSION_OPEN = "session_open"
         private const val KEY_PREVIOUS = "previous"
         private const val KEY_UPDATED_AT = "updated_at"
+        private const val KEY_HEALTH_DATE = "health_date"
+        private const val KEY_HEALTH_COVERAGE = "health_coverage"
+        private const val KEY_HEALTH_BATCH_ERRORS = "health_batch_errors"
+        private const val KEY_HEALTH_ABORTED = "health_aborted"
+        private const val KEY_HEALTH_BASELINE_READY = "health_baseline_ready"
+        private const val KEY_HEALTH_UPDATED_AT = "health_updated_at"
     }
 }
