@@ -41,7 +41,7 @@ class MarketDiscoveryStateStore @Inject constructor(
 ) {
     private val prefs = context.getSharedPreferences("market_discovery_state_v73", Context.MODE_PRIVATE)
 
-    fun load(date: String): PersistedMarketDiscoveryState? {
+    internal fun load(date: String): PersistedMarketDiscoveryState? {
         val storedDate = prefs.getString(KEY_DATE, null) ?: return null
         if (storedDate != date) {
             clear()
@@ -58,7 +58,7 @@ class MarketDiscoveryStateStore @Inject constructor(
         )
     }
 
-    fun save(date: String, sessionOpenLtps: Map<String, Double>, previousLtps: Map<String, Double>) {
+    internal fun save(date: String, sessionOpenLtps: Map<String, Double>, previousLtps: Map<String, Double>) {
         prefs.edit()
             .putString(KEY_DATE, date)
             .putString(KEY_SESSION_OPEN, MarketDiscoveryStateCodec.encode(sessionOpenLtps))
@@ -67,7 +67,7 @@ class MarketDiscoveryStateStore @Inject constructor(
             .commit()
     }
 
-    fun clear() {
+    internal fun clear() {
         prefs.edit().clear().commit()
     }
 
