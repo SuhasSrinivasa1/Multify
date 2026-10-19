@@ -98,7 +98,7 @@ class ForecastQualityPolicyTest {
         assertFalse(q.executionEligible)
     }
 
-    @Test fun weakBreadthDemotesOtherwisePrimarySetupToObservationOnly() {
+    @Test fun strongCounterBreadthTrendCanStillBePrimary() {
         val e = StrategyEvaluation(
             regime = "TREND",
             directionalScore = 0.92,
@@ -109,9 +109,27 @@ class ForecastQualityPolicyTest {
             features = features()
         )
         val q = ForecastQualityPolicy.evaluate(e, 1.0, "BREADTH_WEAK")
+        assertEquals("PRIMARY", q.tier)
+        assertTrue(q.publishEligible)
+        assertTrue(q.executionEligible)
+    }
+
+    @Test fun weakBreadthStillRejectsStockWithoutRelativeStrength() {
+        val weak = features().copy(dayChangePct = 0.10)
+        val e = StrategyEvaluation(
+            regime = "TREND",
+            directionalScore = 0.92,
+            confidence = 0.92,
+            strategy = "VWAP trend continuation",
+            reason = "test",
+            votes = emptyList(),
+            features = weak
+        )
+        val q = ForecastQualityPolicy.evaluate(e, 1.0, "BREADTH_WEAK")
         assertEquals("SECONDARY", q.tier)
         assertTrue(q.publishEligible)
         assertFalse(q.executionEligible)
+        assertTrue(q.failedRules.contains("insufficient counter-breadth stock strength"))
     }
 
     @Test fun lowVolatilityRemainsResearchOnly() {
