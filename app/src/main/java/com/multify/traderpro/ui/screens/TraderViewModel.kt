@@ -205,6 +205,22 @@ class TraderViewModel @Inject constructor(
         }
     }
 
+    fun restoreLearning(uri: Uri) {
+        viewModelScope.launch {
+            remote.value = remote.value.copy(loading = true, error = null, message = null)
+            runCatching { repository.restoreLearningFromLogs(uri) }
+                .onSuccess { result ->
+                    remote.value = remote.value.copy(
+                        loading = false,
+                        message = "Learning restored · ${result.learningCalls} Multify rows · ${result.researchSnapshots} research snapshots · ${result.forecasts} forecasts · ${result.champions} champions · ${result.reports} reports. Trading state was not restored.",
+                        error = null
+                    )
+                    refresh(silent = true)
+                }
+                .onFailure { remote.value = remote.value.copy(loading = false, error = it.userMessage()) }
+        }
+    }
+
     fun clearBanner() {
         remote.value = remote.value.copy(message = null, error = null)
     }
