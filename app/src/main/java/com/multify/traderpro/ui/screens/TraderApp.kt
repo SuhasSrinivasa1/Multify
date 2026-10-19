@@ -110,6 +110,10 @@ fun TraderApp(viewModel: TraderViewModel = hiltViewModel()) {
         contract = ActivityResultContracts.CreateDocument("application/zip")
     ) { uri -> if (uri != null) viewModel.exportLogs(uri) }
 
+    val restoreLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri -> if (uri != null) viewModel.restoreLearning(uri) }
+
     LaunchedEffect(state.message, state.error) {
         val text = state.error ?: state.message
         if (!text.isNullOrBlank()) {
@@ -182,7 +186,8 @@ fun TraderApp(viewModel: TraderViewModel = hiltViewModel()) {
                     onBudgetChanged = viewModel::setHoldingBudget,
                     onSubmitManualSignal = viewModel::submitManualSignal,
                     onResetHalt = { showResetConfirm = true },
-                    onExportLogs = { exportLauncher.launch(defaultLogFileName()) }
+                    onExportLogs = { exportLauncher.launch(defaultLogFileName()) },
+                    onRestoreLearning = { restoreLauncher.launch(arrayOf("application/zip", "application/octet-stream")) }
                 )
             }
             if (state.loading) LinearProgressIndicator(Modifier.fillMaxWidth().align(Alignment.TopCenter))
@@ -736,7 +741,8 @@ private fun SettingsScreen(
     onBudgetChanged: (Long) -> Unit,
     onSubmitManualSignal: (String, String, String) -> Unit,
     onResetHalt: () -> Unit,
-    onExportLogs: () -> Unit
+    onExportLogs: () -> Unit,
+    onRestoreLearning: () -> Unit
 ) {
     val context = LocalContext.current
     var apiKey by remember { mutableStateOf("") }
@@ -864,6 +870,14 @@ private fun SettingsScreen(
                     KeyValueRow("Build", BuildConfig.VERSION_CODE.toString())
                     KeyValueRow("Package", BuildConfig.APPLICATION_ID)
                     Button(onClick = onExportLogs, modifier = Modifier.fillMaxWidth()) { Text("Export long-only logs") }
+                    OutlinedButton(onClick = onRestoreLearning, modifier = Modifier.fillMaxWidth()) {
+                        Text("Restore learning from exported ZIP")
+                    }
+                    Text(
+                        "Restore imports learning only. It never restores holdings, orders, Groww credentials, ARM state or broker settings.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
         }
