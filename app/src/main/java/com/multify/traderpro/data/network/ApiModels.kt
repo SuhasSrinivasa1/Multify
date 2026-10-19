@@ -102,7 +102,14 @@ data class ForecastLearningStatsDto(
     val todayTargetAveragePct: Double = 0.0,
     val targetFloorPct: Double = 1.0,
     val researchSessionsCaptured: Int = 0,
-    val researchSessionGoal: Int = 5
+    val researchSessionGoal: Int = 5,
+    val evaluatedCompletedForecasts: Int = 0,
+    val trailArmHitRatePct: Double = 0.0,
+    val onePctHitRatePct: Double = 0.0,
+    val targetHitRatePct: Double = 0.0,
+    val mfeP25Pct: Double = 0.0,
+    val mfeMedianPct: Double = 0.0,
+    val mfeP75Pct: Double = 0.0
 )
 
 data class ForecastDto(
@@ -151,6 +158,11 @@ data class EngineHealthDto(
     val marketData: String = "UNKNOWN",
     val symbolMaster: String = "UNKNOWN",
     val foregroundService: String = "UNKNOWN",
+    val discovery: String = "UNKNOWN",
+    val discoveryCoveragePct: Double = 0.0,
+    val discoveryBaselineAgeMs: Long = Long.MAX_VALUE,
+    val discoveryBatchErrors: Int = 0,
+    val discoveryBaselineReady: Boolean = false,
     val lastNotificationAtMs: Long = 0L,
     val reconnectCount: Long = 0L,
     val lastReconnectAtMs: Long = 0L,
