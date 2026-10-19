@@ -26,6 +26,10 @@ object ForecastQualityPolicy {
     const val SECONDARY_MAX_SPREAD_BPS = 45.0
     const val SECONDARY_MIN_RVOL = 0.70
 
+    const val WEAK_BREADTH_MIN_DAY_STRENGTH_PCT = 0.35
+    const val WEAK_BREADTH_MIN_CONFIDENCE = 0.68
+    const val WEAK_BREADTH_MIN_DIRECTIONAL_SCORE = 0.35
+
     fun adaptiveTargetPct(multifyMfeAveragePct: Double, priorForecastMfePct: List<Double>): Double {
         val prior = priorForecastMfePct.filter { it.isFinite() && it >= 0.0 && it < 25.0 }
         val robustForecastMfe = if (prior.isEmpty()) 0.0 else max(
@@ -53,7 +57,14 @@ object ForecastQualityPolicy {
         val momentumVotes = listOf(aboveVwap, emaAligned, emaSlopePositive, trendSlopePositive, structureHealthy).count { it }
 
         val primaryFails = mutableListOf<String>()
-        if (marketRegime == "BREADTH_WEAK") primaryFails += "weak market breadth"
+        // Market breadth is context, never an all-market veto. In weak breadth, a stock may still
+        // qualify when it shows clear counter-breadth relative strength.
+        val weakBreadthRelativeStrength = marketRegime != "BREADTH_WEAK" || (
+            (f.dayChangePct ?: Double.NEGATIVE_INFINITY) >= WEAK_BREADTH_MIN_DAY_STRENGTH_PCT &&
+                evaluation.confidence >= WEAK_BREADTH_MIN_CONFIDENCE &&
+                evaluation.directionalScore >= WEAK_BREADTH_MIN_DIRECTIONAL_SCORE
+            )
+        if (!weakBreadthRelativeStrength) primaryFails += "insufficient counter-breadth stock strength"
         if (evaluation.regime != "TREND") primaryFails += "not TREND"
         if (evaluation.confidence < PRIMARY_MIN_CONFIDENCE) primaryFails += "confidence below PRIMARY floor"
         if (evaluation.directionalScore < PRIMARY_MIN_DIRECTIONAL_SCORE) primaryFails += "directional score below PRIMARY floor"
@@ -73,7 +84,10 @@ object ForecastQualityPolicy {
                 publishEligible = true,
                 executionEligible = true,
                 volatilityCapacityPct = capacityPct,
-                reason = "Production TREND setup: momentum alignment, liquidity and volatility capacity confirmed"
+                reason = if (marketRegime == "BREADTH_WEAK")
+                    "Production TREND setup: counter-breadth relative strength, liquidity and volatility capacity confirmed"
+                else
+                    "Production TREND setup: momentum alignment, liquidity and volatility capacity confirmed"
             )
         }
 
