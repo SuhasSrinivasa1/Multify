@@ -55,6 +55,7 @@ import com.multify.traderpro.engine.CashAwareCncSizing
 import com.multify.traderpro.engine.ExecutionTelemetryMath
 import com.multify.traderpro.engine.ForecastQualityDecision
 import com.multify.traderpro.engine.ForecastQualityPolicy
+import com.multify.traderpro.engine.ForecastPublicationPolicy
 import com.multify.traderpro.engine.GrowwDeliveryCostPolicy
 import com.multify.traderpro.engine.HoldingSmartOrderPolicy
 import com.multify.traderpro.engine.LocalStrategyEngine
@@ -76,6 +77,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import retrofit2.HttpException
+import java.io.IOException
 import java.security.MessageDigest
 import java.time.Instant
 import java.time.LocalDate
@@ -117,6 +119,7 @@ class TradingRepository @Inject constructor(
     private val parser: NotificationParser,
     private val nseSymbols: NseSymbolRepository,
     private val auditLogger: AuditLogger,
+    private val marketDiscoveryStateStore: MarketDiscoveryStateStore,
     @ApplicationContext private val appContext: Context
 ) {
     val settings: Flow<AppSettings> = preferences.settings
@@ -135,9 +138,14 @@ class TradingRepository @Inject constructor(
     private val closePositionMutexes = ConcurrentHashMap<Long, Mutex>()
     private val lastTrailStateAuditAtMs = ConcurrentHashMap<Long, Long>()
     private val lastSmartOrderStatusAtMs = ConcurrentHashMap<Long, Long>()
-    private val discoverySessionOpenLtps = ConcurrentHashMap<String, Double>()
-    private val discoveryPreviousLtps = ConcurrentHashMap<String, Double>()
-    @Volatile private var discoveryDate: String = ""
+
+    private data class MarketDiscoveryPass(
+        val symbols: List<String>,
+        val baselineReady: Boolean,
+        val coverageRatio: Double,
+        val restoredFromDisk: Boolean,
+        val batchErrors: Int
+    )
 
     private data class ForecastCandidate(
         val symbol: String,
@@ -927,11 +935,14 @@ class TradingRepository @Inject constructor(
         val dnaSymbols = MultifyReverseEngineering.positiveCases.map { it.symbol }
         val master = nseSymbols.symbols()
 
-        // v7.2 two-stage forecasting: first scan the full NSE equity master with Groww batch LTP
-        // to discover live relative-strength/momentum names. Only the best names then consume the
-        // expensive quote + four-day candle + 40-factor evaluation. ARM/trading state is irrelevant.
-        val discoveredSymbols = if (master.isEmpty()) emptyList() else
+        // v7.3 persists broad discovery state across Android process death. A truly cold pass is
+        // research-only; production waits for healthy market-wide baseline coverage.
+        val discoveryPass = if (master.isEmpty()) {
+            MarketDiscoveryPass(emptyList(), false, 0.0, false, 0)
+        } else {
             discoverMarketWideCandidates(token, master, today)
+        }
+        val discoveredSymbols = discoveryPass.symbols
 
         val slot = (now.hour * 60 + now.minute) / 30
         val rotating = if (master.isEmpty()) emptyList() else {
@@ -976,6 +987,8 @@ class TradingRepository @Inject constructor(
         val targetPct = ForecastQualityPolicy.adaptiveTargetPct(learned.longAveragePct, priorMfe)
 
         val have = existing.map { it.symbol }.toSet()
+        val priorTodayResearch = learningDao.forecastResearchForDate(today)
+            .filter { it.scanAtMs < nowMs && nowMs - it.scanAtMs <= PRIMARY_CONFIRMATION_WINDOW_MS }
         val priorResearchDates = learningDao.forecastResearchDates()
             .filter { it < today }
             .take(RESEARCH_SESSION_GOAL)
@@ -1052,8 +1065,27 @@ class TradingRepository @Inject constructor(
         // ranked best-first, until the day's five recommendation slots are full.
         val slots = (MAX_DAILY_RECOMMENDATIONS - existing.size).coerceAtLeast(0)
         val unseen = ranked.filter { it.symbol !in have }
-        val publishable = unseen.filter {
-            it.quality.tier == "PRIMARY" && it.quality.publishEligible && it.quality.executionEligible
+        fun priorPrimaryHits(symbol: String): Int = priorTodayResearch
+            .asSequence()
+            .filter {
+                it.symbol.equals(symbol, true) &&
+                    it.qualityTier == "PRIMARY" &&
+                    it.publishEligible &&
+                    it.executionEligible
+            }
+            .map { it.scanAtMs }
+            .distinct()
+            .count()
+
+        val publishable = unseen.filter { item ->
+            val currentPrimary =
+                item.quality.tier == "PRIMARY" && item.quality.publishEligible && item.quality.executionEligible
+            ForecastPublicationPolicy.isReady(
+                discoveryBaselineReady = discoveryPass.baselineReady,
+                currentPrimary = currentPrimary,
+                discoveredMarketWide = item.symbol in discoveredSymbols,
+                priorPrimaryHits = priorPrimaryHits(item.symbol)
+            )
         }
 
         publishable.take(slots).forEachIndexed { index, item ->
@@ -1110,15 +1142,29 @@ class TradingRepository @Inject constructor(
             "research_cohort_start_date" to V7_RESEARCH_COHORT_START_DATE,
             "nse_master_count" to master.size,
             "market_wide_discovered" to discoveredSymbols.size,
+            "discovery_baseline_ready" to discoveryPass.baselineReady,
+            "discovery_coverage_pct" to (discoveryPass.coverageRatio * 100.0),
+            "discovery_state_restored" to discoveryPass.restoredFromDisk,
+            "discovery_batch_errors" to discoveryPass.batchErrors,
             "detailed_universe_count" to universe.size,
             "arm_effective" to preferences.settings.first().armEffective,
             "forecasting_independent_of_arm" to true,
+            "publishable_after_confirmation" to publishable.size,
+            "publication_suppressed_until_discovery_ready" to !discoveryPass.baselineReady,
             "top_candidates" to ranked.take(5).map {
                 mapOf("symbol" to it.symbol, "tier" to it.quality.tier, "score" to it.score,
                     "confidence" to it.evaluation.confidence, "directional_score" to it.evaluation.directionalScore,
                     "dominant_family" to it.factorModel.dominantFamily,
                     "family_consensus" to it.factorModel.consensusScore,
                     "positive_families" to it.factorModel.positiveFamilies,
+                    "market_wide_discovered" to (it.symbol in discoveredSymbols),
+                    "prior_primary_confirmations" to priorPrimaryHits(it.symbol),
+                    "publication_ready" to ForecastPublicationPolicy.isReady(
+                        discoveryPass.baselineReady,
+                        it.quality.tier == "PRIMARY" && it.quality.publishEligible && it.quality.executionEligible,
+                        it.symbol in discoveredSymbols,
+                        priorPrimaryHits(it.symbol)
+                    ),
                     "reason" to it.quality.reason)
             }
         ))
@@ -1247,63 +1293,85 @@ class TradingRepository @Inject constructor(
         token: String,
         master: List<String>,
         today: String
-    ): List<String> {
-        if (discoveryDate != today) {
-            discoverySessionOpenLtps.clear()
-            discoveryPreviousLtps.clear()
-            discoveryDate = today
-        }
-
-        val previous = discoveryPreviousLtps.toMap()
-        val sessionOpen = discoverySessionOpenLtps.toMap()
+    ): MarketDiscoveryPass {
+        val distinctMaster = master.distinct()
+        val persisted = marketDiscoveryStateStore.load(today)
+        val previous = persisted?.previousLtps.orEmpty()
+        val sessionOpen = persisted?.sessionOpenLtps.orEmpty()
+        val restored = persisted != null
         val current = linkedMapOf<String, Double>()
         var batchErrors = 0
-        var batchCount = 0
+        var consecutiveFailures = 0
+        var abortedForNetwork = false
+        val chunks = distinctMaster.chunked(50)
 
-        master.distinct().chunked(50).forEachIndexed { index, chunk ->
-            batchCount++
-            runCatching {
-                val exchangeSymbols = chunk.joinToString(",") { "NSE_$it" }
-                apiFactory.groww.ltp(
-                    bearer(token),
-                    exchangeSymbols = exchangeSymbols
-                ).requirePayload("Market-wide discovery LTP")
-            }.onSuccess { payload ->
+        for ((index, chunk) in chunks.withIndex()) {
+            val payload = fetchDiscoveryLtpBatch(token, chunk, index)
+            if (payload == null) {
+                batchErrors++
+                consecutiveFailures++
+                if (consecutiveFailures >= DISCOVERY_CONSECUTIVE_FAILURE_ABORT) {
+                    abortedForNetwork = true
+                    auditLogger.log("FORECAST_DISCOVERY", "LTP_SCAN_ABORTED_NETWORK", mapOf(
+                        "batch_index" to index,
+                        "master_count" to distinctMaster.size,
+                        "coverage_so_far" to current.size,
+                        "consecutive_failures" to consecutiveFailures
+                    ))
+                    break
+                }
+            } else {
+                consecutiveFailures = 0
                 payload.forEach { (key, value) ->
                     if (value.isFinite() && value >= 10.0) {
                         current[key.removePrefix("NSE_").uppercase(Locale.US)] = value
                     }
                 }
-            }.onFailure {
-                batchErrors++
-                auditLogger.log("FORECAST_DISCOVERY", "LTP_BATCH_ERROR", mapOf(
-                    "batch_index" to index,
-                    "batch_size" to chunk.size,
-                    "message" to (it.message ?: it.javaClass.simpleName)
-                ))
             }
-            if (index + 1 < (master.size + 49) / 50) delay(DISCOVERY_BATCH_PACING_MS)
+            if (index + 1 < chunks.size) delay(DISCOVERY_BATCH_PACING_MS)
         }
 
-        val ranked = MarketDiscoveryPolicy.rank(
-            currentLtps = current,
-            previousLtps = previous,
-            sessionOpenLtps = sessionOpen,
-            limit = DISCOVERY_DYNAMIC_LIMIT
-        )
+        val denominator = distinctMaster.size.coerceAtLeast(1)
+        val coverageRatio = current.size.toDouble() / denominator.toDouble()
+        val previousCoverageRatio = previous.size.toDouble() / denominator.toDouble()
+        val baselineReady =
+            previousCoverageRatio >= MIN_DISCOVERY_COVERAGE_RATIO &&
+                coverageRatio >= MIN_DISCOVERY_COVERAGE_RATIO &&
+                !abortedForNetwork
 
-        current.forEach { (symbol, ltp) ->
-            discoverySessionOpenLtps.putIfAbsent(symbol, ltp)
-            discoveryPreviousLtps[symbol] = ltp
+        val ranked = if (baselineReady) {
+            MarketDiscoveryPolicy.rank(
+                currentLtps = current,
+                previousLtps = previous,
+                sessionOpenLtps = sessionOpen,
+                limit = DISCOVERY_DYNAMIC_LIMIT
+            )
+        } else emptyList()
+
+        if (coverageRatio >= MIN_DISCOVERY_COVERAGE_RATIO && !abortedForNetwork) {
+            val mergedSessionOpen = sessionOpen.toMutableMap()
+            current.forEach { (symbol, ltp) -> mergedSessionOpen.putIfAbsent(symbol, ltp) }
+            marketDiscoveryStateStore.save(today, mergedSessionOpen, current)
+        } else {
+            auditLogger.log("FORECAST_DISCOVERY", "BASELINE_NOT_OVERWRITTEN", mapOf(
+                "coverage_pct" to coverageRatio * 100.0,
+                "required_coverage_pct" to MIN_DISCOVERY_COVERAGE_RATIO * 100.0,
+                "aborted_for_network" to abortedForNetwork,
+                "persisted_previous_count" to previous.size
+            ))
         }
+
         preferences.recordMarketData()
-
         auditLogger.log("FORECAST_DISCOVERY", "MARKET_WIDE_SCAN", mapOf(
-            "master_count" to master.size,
+            "master_count" to distinctMaster.size,
             "ltp_coverage" to current.size,
-            "batch_count" to batchCount,
+            "coverage_pct" to coverageRatio * 100.0,
+            "batch_count" to chunks.size,
             "batch_errors" to batchErrors,
-            "baseline_ready" to previous.isNotEmpty(),
+            "aborted_for_network" to abortedForNetwork,
+            "baseline_ready" to baselineReady,
+            "state_restored" to restored,
+            "persisted_baseline_count" to previous.size,
             "selected" to ranked.size,
             "top_movers" to ranked.take(10).map {
                 mapOf(
@@ -1315,8 +1383,40 @@ class TradingRepository @Inject constructor(
                 )
             }
         ))
-        return ranked.map { it.symbol }
+        return MarketDiscoveryPass(
+            ranked.map { it.symbol }, baselineReady, coverageRatio, restored, batchErrors
+        )
     }
+
+    private suspend fun fetchDiscoveryLtpBatch(
+        token: String,
+        chunk: List<String>,
+        batchIndex: Int
+    ): Map<String, Double>? {
+        var lastFailure: Throwable? = null
+        for (attempt in 0 until DISCOVERY_BATCH_ATTEMPTS) {
+            try {
+                val exchangeSymbols = chunk.joinToString(",") { "NSE_$it" }
+                return apiFactory.groww.ltp(
+                    bearer(token),
+                    exchangeSymbols = exchangeSymbols
+                ).requirePayload("Market-wide discovery LTP")
+            } catch (t: Throwable) {
+                lastFailure = t
+                if (!isTransientMarketDataFailure(t) || attempt + 1 >= DISCOVERY_BATCH_ATTEMPTS) break
+                delay(if (t is HttpException && t.code() == 429) 1_250L else DISCOVERY_RETRY_BACKOFF_MS)
+            }
+        }
+        auditLogger.log("FORECAST_DISCOVERY", "LTP_BATCH_ERROR", mapOf(
+            "batch_index" to batchIndex,
+            "batch_size" to chunk.size,
+            "message" to (lastFailure?.message ?: lastFailure?.javaClass?.simpleName ?: "unknown")
+        ))
+        return null
+    }
+
+    private fun isTransientMarketDataFailure(t: Throwable): Boolean =
+        t is IOException || (t is HttpException && (t.code() == 429 || t.code() >= 500))
 
     private suspend fun forecastEvaluation(symbol: String, token: String): StrategyEvaluation {
         val now = ZonedDateTime.now(INDIA)
@@ -1409,44 +1509,74 @@ class TradingRepository @Inject constructor(
         if (rows.isEmpty()) return 0
         val token = ensureToken() ?: return rows.count { it.status == "ACTIVE" }
 
+        val ltps = fetchForecastOutcomeLtps(token, rows.map { it.symbol })
+        if (ltps.isEmpty()) return rows.count { it.status == "ACTIVE" }
+        preferences.recordMarketData()
+
         for (row in rows) {
-            runCatching {
-                val ltp = apiFactory.groww.quote(bearer(token), tradingSymbol = row.symbol)
-                    .requirePayload("Forecast outcome quote ${row.symbol}").lastPrice ?: return@runCatching
-                preferences.recordMarketData()
-                val movePct = (ltp / row.entryPrice - 1.0) * 100.0
-                val adversePct = max(0.0, (row.entryPrice - ltp) / row.entryPrice * 100.0)
-                val hitNow = ltp >= row.targetPrice
-                val expired = now.toLocalTime() >= LocalTime.of(15, 0)
-                val status = when {
-                    row.status == "TARGET_HIT" -> "TARGET_HIT"
-                    hitNow -> "TARGET_HIT"
-                    expired -> "MISSED"
-                    else -> "ACTIVE"
-                }
-                val statusChanged = status != row.status
-                val updated = row.copy(
-                    status = status,
-                    targetHitAtMs = when {
-                        row.targetHitAtMs != null -> row.targetHitAtMs
-                        hitNow -> nowMs
-                        else -> null
-                    },
-                    lastPrice = ltp,
-                    maxFavourablePct = max(row.maxFavourablePct, max(0.0, movePct)),
-                    maxAdversePct = max(row.maxAdversePct, adversePct),
-                    lastObservedAtMs = nowMs
-                )
-                learningDao.updateLongForecast(updated)
-                if (statusChanged && status != "ACTIVE") refreshForecastChampion(updated)
-            }.onFailure {
-                auditLogger.log("FORECAST", "OUTCOME_MONITOR_ERROR", mapOf(
-                    "symbol" to row.symbol,
-                    "message" to (it.message ?: it.javaClass.simpleName)
-                ))
+            val ltp = ltps[row.symbol.uppercase(Locale.US)] ?: continue
+            val movePct = (ltp / row.entryPrice - 1.0) * 100.0
+            val adversePct = max(0.0, (row.entryPrice - ltp) / row.entryPrice * 100.0)
+            val hitNow = ltp >= row.targetPrice
+            val expired = now.toLocalTime() >= LocalTime.of(15, 0)
+            val status = when {
+                row.status == "TARGET_HIT" -> "TARGET_HIT"
+                hitNow -> "TARGET_HIT"
+                expired -> "MISSED"
+                else -> "ACTIVE"
             }
+            val statusChanged = status != row.status
+            val updated = row.copy(
+                status = status,
+                targetHitAtMs = when {
+                    row.targetHitAtMs != null -> row.targetHitAtMs
+                    hitNow -> nowMs
+                    else -> null
+                },
+                lastPrice = ltp,
+                maxFavourablePct = max(row.maxFavourablePct, max(0.0, movePct)),
+                maxAdversePct = max(row.maxAdversePct, adversePct),
+                lastObservedAtMs = nowMs
+            )
+            learningDao.updateLongForecast(updated)
+            if (statusChanged && status != "ACTIVE") refreshForecastChampion(updated)
         }
         return learningDao.longForecastsForDate(today).count { it.status == "ACTIVE" }
+    }
+
+    private suspend fun fetchForecastOutcomeLtps(token: String, symbols: List<String>): Map<String, Double> {
+        val result = linkedMapOf<String, Double>()
+        for ((index, chunk) in symbols.map { it.uppercase(Locale.US) }.distinct().chunked(50).withIndex()) {
+            var payload: Map<String, Double>? = null
+            var lastFailure: Throwable? = null
+            for (attempt in 0 until FORECAST_OUTCOME_BATCH_ATTEMPTS) {
+                try {
+                    payload = apiFactory.groww.ltp(
+                        bearer(token),
+                        exchangeSymbols = chunk.joinToString(",") { "NSE_$it" }
+                    ).requirePayload("Forecast outcome batch LTP")
+                    break
+                } catch (t: Throwable) {
+                    lastFailure = t
+                    if (!isTransientMarketDataFailure(t) || attempt + 1 >= FORECAST_OUTCOME_BATCH_ATTEMPTS) break
+                    delay(FORECAST_OUTCOME_RETRY_BACKOFF_MS)
+                }
+            }
+            if (payload == null) {
+                auditLogger.log("FORECAST", "OUTCOME_BATCH_ERROR", mapOf(
+                    "batch_index" to index,
+                    "symbols" to chunk,
+                    "message" to (lastFailure?.message ?: lastFailure?.javaClass?.simpleName ?: "unknown")
+                ))
+                continue
+            }
+            payload.forEach { (key, value) ->
+                if (value.isFinite() && value > 0.0) {
+                    result[key.removePrefix("NSE_").uppercase(Locale.US)] = value
+                }
+            }
+        }
+        return result
     }
 
     private suspend fun refreshForecastChampion(row: LongForecastEntity) {
@@ -1496,14 +1626,16 @@ class TradingRepository @Inject constructor(
         val sessionDate = runCatching { LocalDate.parse(date) }.getOrNull() ?: return 0
         val sessionEndMs = sessionDate.atTime(15, 30).atZone(INDIA).toInstant().toEpochMilli()
         var updatedCount = 0
-        pending.groupBy { it.symbol }.entries
-            .take(RESEARCH_BACKFILL_SYMBOL_BATCH)
-            .forEach { (symbol, rows) ->
+        var consecutiveNetworkFailures = 0
+        val groups = pending.groupBy { it.symbol }.entries.take(RESEARCH_BACKFILL_SYMBOL_BATCH)
+
+        for ((symbol, rows) in groups) {
             val earliest = rows.minOf { it.scanAtMs }
             val startTime = Instant.ofEpochMilli(earliest)
                 .atZone(INDIA).toLocalDateTime().format(HIST_FORMAT)
             val endTime = sessionDate.atTime(15, 30).format(HIST_FORMAT)
-            val historical = runCatching {
+            var failure: Throwable? = null
+            val historical = try {
                 apiFactory.groww.historicalCandles(
                     bearer(token),
                     growwSymbol = "NSE-$symbol",
@@ -1511,41 +1643,63 @@ class TradingRepository @Inject constructor(
                     endTime = endTime,
                     candleInterval = "5minute"
                 ).requirePayload("Forecast research outcome $symbol")
-            }.onFailure {
+            } catch (t: Throwable) {
+                failure = t
+                null
+            }
+
+            if (historical == null) {
                 auditLogger.log("FORECAST_RESEARCH", "OUTCOME_BACKFILL_ERROR", mapOf(
-                    "date" to date, "symbol" to symbol, "message" to (it.message ?: it.javaClass.simpleName)
+                    "date" to date, "symbol" to symbol,
+                    "message" to (failure?.message ?: failure?.javaClass?.simpleName ?: "unknown")
                 ))
-            }.getOrNull()
-            if (historical != null) {
-                preferences.recordMarketData()
-                val candles = historical.candles.mapNotNull { x ->
-                    if (x.size < 5) return@mapNotNull null
-                    val atMs = researchCandleTimestampMs(x[0]) ?: return@mapNotNull null
-                    val high = runCatching { x[2].asDouble }.getOrNull() ?: return@mapNotNull null
-                    val low = runCatching { x[3].asDouble }.getOrNull() ?: return@mapNotNull null
-                    val close = runCatching { x[4].asDouble }.getOrNull() ?: return@mapNotNull null
-                    ResearchCandle(atMs, high, low, close)
-                }.sortedBy { it.atMs }
-                rows.forEach { row ->
-                    val xs = candles.filter { it.atMs >= row.scanAtMs && it.atMs <= sessionEndMs }
-                    if (xs.isEmpty() || row.entryPrice <= 0.0) return@forEach
-                    val high = xs.maxOf { it.high }
-                    val low = xs.minOf { it.low }
-                    val close = xs.last().close
-                    val mfe = max(0.0, (high / row.entryPrice - 1.0) * 100.0)
-                    val mae = max(0.0, (row.entryPrice - low) / row.entryPrice * 100.0)
-                    val closePct = (close / row.entryPrice - 1.0) * 100.0
-                    learningDao.updateForecastResearch(
-                        row.copy(
-                            outcomeMfePct = mfe,
-                            outcomeMaePct = mae,
-                            outcomeClosePct = closePct,
-                            outcomeTargetHit = high + 1e-9 >= row.entryPrice * (1.0 + row.targetPct / 100.0),
-                            outcomeUpdatedAtMs = System.currentTimeMillis()
-                        )
-                    )
-                    updatedCount++
+                if (failure != null && isTransientMarketDataFailure(failure)) {
+                    consecutiveNetworkFailures++
+                    if (consecutiveNetworkFailures >= RESEARCH_BACKFILL_NETWORK_ABORT_AFTER) {
+                        auditLogger.log("FORECAST_RESEARCH", "OUTCOME_BACKFILL_NETWORK_ABORT", mapOf(
+                            "date" to date,
+                            "updated_before_abort" to updatedCount,
+                            "remaining_rows" to pending.size,
+                            "consecutive_network_failures" to consecutiveNetworkFailures
+                        ))
+                        break
+                    }
+                } else {
+                    consecutiveNetworkFailures = 0
                 }
+                delay(RESEARCH_BACKFILL_SYMBOL_PACING_MS)
+                continue
+            }
+
+            consecutiveNetworkFailures = 0
+            preferences.recordMarketData()
+            val candles = historical.candles.mapNotNull { x ->
+                if (x.size < 5) return@mapNotNull null
+                val atMs = researchCandleTimestampMs(x[0]) ?: return@mapNotNull null
+                val high = runCatching { x[2].asDouble }.getOrNull() ?: return@mapNotNull null
+                val low = runCatching { x[3].asDouble }.getOrNull() ?: return@mapNotNull null
+                val close = runCatching { x[4].asDouble }.getOrNull() ?: return@mapNotNull null
+                ResearchCandle(atMs, high, low, close)
+            }.sortedBy { it.atMs }
+            rows.forEach { row ->
+                val xs = candles.filter { it.atMs >= row.scanAtMs && it.atMs <= sessionEndMs }
+                if (xs.isEmpty() || row.entryPrice <= 0.0) return@forEach
+                val high = xs.maxOf { it.high }
+                val low = xs.minOf { it.low }
+                val close = xs.last().close
+                val mfe = max(0.0, (high / row.entryPrice - 1.0) * 100.0)
+                val mae = max(0.0, (row.entryPrice - low) / row.entryPrice * 100.0)
+                val closePct = (close / row.entryPrice - 1.0) * 100.0
+                learningDao.updateForecastResearch(
+                    row.copy(
+                        outcomeMfePct = mfe,
+                        outcomeMaePct = mae,
+                        outcomeClosePct = closePct,
+                        outcomeTargetHit = high + 1e-9 >= row.entryPrice * (1.0 + row.targetPct / 100.0),
+                        outcomeUpdatedAtMs = System.currentTimeMillis()
+                    )
+                )
+                updatedCount++
             }
             delay(RESEARCH_BACKFILL_SYMBOL_PACING_MS)
         }
@@ -2941,14 +3095,22 @@ class TradingRepository @Inject constructor(
         private const val MAX_DAILY_RECOMMENDATIONS = 5
         private const val FORECAST_SCAN_INTERVAL_MS = 5L * 60L * 1000L
         private const val FORECAST_OUTCOME_INTERVAL_MS = 60_000L
+        private const val FORECAST_OUTCOME_BATCH_ATTEMPTS = 2
+        private const val FORECAST_OUTCOME_RETRY_BACKOFF_MS = 750L
         private const val FORECAST_SYMBOL_PACING_MS = 150L
+        private const val PRIMARY_CONFIRMATION_WINDOW_MS = 20L * 60L * 1000L
         private const val DETAILED_FORECAST_UNIVERSE_LIMIT = 48
         private const val DISCOVERY_DYNAMIC_LIMIT = 28
         private const val DISCOVERY_ROTATING_FALLBACK = 16
-        private const val DISCOVERY_BATCH_PACING_MS = 125L
+        private const val DISCOVERY_BATCH_PACING_MS = 200L
+        private const val DISCOVERY_BATCH_ATTEMPTS = 2
+        private const val DISCOVERY_RETRY_BACKOFF_MS = 750L
+        private const val DISCOVERY_CONSECUTIVE_FAILURE_ABORT = 3
+        private const val MIN_DISCOVERY_COVERAGE_RATIO = 0.85
         private const val RESEARCH_CAPTURE_TOP_N = 48
         private const val RESEARCH_BACKFILL_SYMBOL_PACING_MS = 300L
         private const val RESEARCH_BACKFILL_SYMBOL_BATCH = 10
+        private const val RESEARCH_BACKFILL_NETWORK_ABORT_AFTER = 3
         private const val RESEARCH_SESSION_GOAL = 5
         private const val V7_RESEARCH_COHORT_START_DATE = "2026-10-19"
         private const val MIN_RESEARCH_EVIDENCE_ROWS = 4
