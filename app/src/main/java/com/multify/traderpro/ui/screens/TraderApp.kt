@@ -559,6 +559,46 @@ private fun LongAveragesScreen(state: TraderUiState) {
                 )
             }
         }
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                MetricCard(
+                    label = "Reached +0.55%",
+                    value = if (forecastLearning.evaluatedCompletedForecasts > 0)
+                        String.format(Locale.US, "%.1f%%", forecastLearning.trailArmHitRatePct)
+                    else "Learning",
+                    supporting = "trail-arm opportunity rate · all completed forecasts",
+                    modifier = Modifier.weight(1f)
+                )
+                MetricCard(
+                    label = "Reached +1.00%",
+                    value = if (forecastLearning.evaluatedCompletedForecasts > 0)
+                        String.format(Locale.US, "%.1f%%", forecastLearning.onePctHitRatePct)
+                    else "Learning",
+                    supporting = "all completed forecasts",
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        }
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                MetricCard(
+                    label = "Full target hit",
+                    value = if (forecastLearning.evaluatedCompletedForecasts > 0)
+                        String.format(Locale.US, "%.1f%%", forecastLearning.targetHitRatePct)
+                    else "Learning",
+                    supporting = "${forecastLearning.evaluatedCompletedForecasts} completed evaluations",
+                    modifier = Modifier.weight(1f)
+                )
+                MetricCard(
+                    label = "MFE distribution",
+                    value = if (forecastLearning.evaluatedCompletedForecasts > 0)
+                        String.format(Locale.US, "%.2f%% median", forecastLearning.mfeMedianPct)
+                    else "Learning",
+                    supporting = String.format(Locale.US, "P25 %.2f%% · P75 %.2f%%", forecastLearning.mfeP25Pct, forecastLearning.mfeP75Pct),
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        }
     }
 }
 
@@ -583,7 +623,7 @@ private fun ForecastScreen(
         item {
             SectionTitle(
                 "LONG holding forecast",
-                "Maximum five recommendations per trading day. Every candidate that meets PRIMARY production criteria is published immediately; weaker SECONDARY/RESEARCH rows stay in the learning ledger and are never presented as recommendations."
+                "Maximum five recommendations per trading day. PRIMARY candidates must persist across scans before publication; weaker SECONDARY/RESEARCH rows stay in the learning ledger and are never presented as recommendations."
             )
         }
         item {
@@ -598,6 +638,38 @@ private fun ForecastScreen(
                             "Learning and forecasting are running. ARM is ON, so eligible PRIMARY rows may also be bought."
                         else
                             "Learning and forecasting continue normally while ARM is OFF. Trading is disabled; research and recommendations are not.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+        item {
+            val health = dashboard?.health ?: com.multify.traderpro.data.network.EngineHealthDto()
+            val ageText = if (health.discoveryBaselineAgeMs == Long.MAX_VALUE) "—"
+                else if (health.discoveryBaselineAgeMs < 60_000L) "<1 min"
+                else "${health.discoveryBaselineAgeMs / 60_000L} min"
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = when (health.discovery) {
+                        "HEALTHY" -> MaterialTheme.colorScheme.primaryContainer.copy(alpha=.18f)
+                        "WARMING", "WAITING" -> MaterialTheme.colorScheme.secondaryContainer.copy(alpha=.22f)
+                        else -> MaterialTheme.colorScheme.errorContainer.copy(alpha=.22f)
+                    }
+                ),
+                shape = RoundedCornerShape(20.dp)
+            ) {
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                    Text("Discovery health · ${health.discovery}", fontWeight = FontWeight.SemiBold)
+                    KeyValueRow("NSE coverage", String.format(Locale.US, "%.1f%%", health.discoveryCoveragePct))
+                    KeyValueRow("Baseline", if (health.discoveryBaselineReady) "Ready" else "Warming")
+                    KeyValueRow("Baseline age", ageText)
+                    KeyValueRow("Failed batches", health.discoveryBatchErrors.toString())
+                    Text(
+                        if (health.discoveryBaselineReady)
+                            "Production publication can use the persisted broad-market baseline."
+                        else
+                            "Research continues, but production recommendations are suppressed until broad-market discovery is healthy.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
