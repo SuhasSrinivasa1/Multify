@@ -129,9 +129,9 @@ class TraderViewModel @Inject constructor(
                     remote.value = remote.value.copy(
                         loading = false,
                         message = if (enabled)
-                            "Forecast auto-buy enabled · fixed CNC LIMIT entry and fixed published target · ARM required"
+                            "Forecast auto-buy enabled · fixed GTT UP entry trigger and fixed published target · ARM required"
                         else
-                            "Forecast auto-buy disabled · pending unfilled forecast LIMIT orders are being cancelled"
+                            "Forecast auto-buy disabled · active untriggered forecast entry GTTs are being cancelled"
                     )
                     refresh(silent = true)
                 }
