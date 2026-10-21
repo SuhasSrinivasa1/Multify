@@ -1,82 +1,39 @@
-# Multify Trader Pro v7.5.1 — Fixed Engine with Embedded Historical Intelligence
+# Multify Trader Pro v7.5.1 — Seeded Immutable Fixed Engine
 
-v7.5.1 makes the Fixed/Forecast architecture self-contained for a fresh installation.
+v7.5.1 is intended for a fresh install and includes the decision intelligence recovered from the diagnostic exports already supplied during development.
 
-## What was embedded
+## Bundled prior intelligence
 
-The build merges every Multify diagnostic export available during the build:
+On a truly empty fresh-install database, before the Fixed snapshot is sealed, the app automatically imports a bundled decision-intelligence seed assembled from the uploaded v7.1, v7.2 and v7.3.2 diagnostic exports.
 
-- v7.1.0 export from 2026-10-19
-- v7.2.0 export from 2026-10-19
-- v7.3.2 export from 2026-10-21 11:51 IST
+The bundled decision state contains:
+- 108 unique historical Multify BUY learning rows, including the 103 historical seed rows plus APPENDED, RECOVERY and LIVE rows available in the uploaded logs
+- 10 prior published Forecast recommendations/outcomes from October 19 and October 21
+- 2 Forecast champion records present in the latest uploaded diagnostic state
+- prior research-report summaries
 
-The merged, de-duplicated seed contains:
+The uploaded research-snapshot files contained thousands of raw scan observations, but none had completed outcome fields in those exports. Under the existing Forecast code those incomplete rows were diagnostic capture only and were not eligible as historical positive-close research evidence for today's ranking. They are therefore not promoted into the bundled learned seed.
 
-- 108 historical Multify learning calls
-- 10 historical published Forecast recommendations
-- 4,370 Forecast research observations
-- 2 champion states
-- 2 after-market research reports
-
-The latest exported recommendation state contains five October 21 PRIMARY Forecast rows:
-SWARNSAR, LTTS, LAGNAM, GENSOL and MARALOVER.
-
-No later v7.4.1 device export was available in the build inputs, so recommendations or learning created only on-device after the 11:51 IST export cannot be reconstructed.
-
-## Why today's Forecast was not fully fresh
-
-The adaptive Forecast engine combines live market data with historical state. In the frozen v7.4.1 mechanism, historical inputs can include:
-
-- rolling Multify MFE history used in target calibration
-- recent Multify symbol-frequency evidence
-- frozen observable Multify reference cases
-- historical Forecast outcomes that meet the positive-close learning rule
-- champion state
-- completed positive-close research evidence when available
-
-The uploaded research observations had no completed outcome rows at the freeze point, so they did not contribute a research-evidence ranking bonus to the recommendations observed that day. They are still embedded so adaptive Forecast can later backfill and learn from them.
-
-## Fresh-install behavior
-
-A fresh v7.5.1 installation no longer requires a manual ZIP restore to initialize Fixed.
-
-On first launch:
-
-1. The embedded historical bundle is checksum verified.
-2. Adaptive Forecast is seeded with the embedded learning calls, historical forecasts, research observations, champions and reports.
-3. Fixed is restored from the deterministic immutable snapshot built from the same historical evidence.
-4. Fixed never accepts future adaptive learning.
-5. Forecast continues to learn normally.
-
-If an upgraded installation already contains richer on-device learning, the app preserves that device state and only fills missing historical evidence from the embedded bundle before sealing Fixed.
-
-## Fixed remains immutable
-
-Fixed retains the frozen v7.4.1:
-
-- local strategy/feature engine
-- 40-factor, three-family model
-- Forecast quality gates
-- publication/confirmation policy
+The normal frozen v7.4.1 code/reference state remains included separately:
+- 40 observable factors / 3 factor families
+- strategy engine
+- quality gates
+- publication confirmation rules
 - market-discovery ranking
-- positive-close policy
-- target-learning math
+- positive-close learning policy
 - Multify observable reference cases
-- embedded historical learning/reference state
+- target-calibration math
 
-Fixed outcome monitoring is diagnostic only and never changes Fixed ranking or targets.
+## Fresh-install sequence
 
-## Execution remains independent
+1. Detect an empty learning database.
+2. Import the bundled prior decision intelligence.
+3. Seal the immutable Fixed snapshot from that state.
+4. Continue running Forecast against the same seeded historical state.
+5. Fixed never accepts later Forecast/Multify learning; Forecast continues adapting.
 
-Forecast and Fixed retain independent auto-buy toggles under the common ARM master switch.
+If the app already contains learning data, the bundled seed is not automatically merged over it.
 
-Both use:
+All v7.5.0 Fixed/Forecast independence, separate auto-buy toggles, ARM master safety switch, GTT UP entries and long-only holding protections remain unchanged.
 
-- published recommendation entry as a Groww GTT trigger
-- trigger direction UP
-- CNC MARKET child order
-- published target left fixed
-
-Forecast and Fixed may independently recommend and own the same symbol.
-
-Version: `7.5.1-fixed-embedded-history` (`versionCode 751`).
+Version: `7.5.1-fixed-engine-seeded` (`versionCode 751`).
