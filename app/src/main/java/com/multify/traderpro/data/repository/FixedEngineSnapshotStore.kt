@@ -40,7 +40,7 @@ class FixedEngineSnapshotStore @Inject constructor(
     @ApplicationContext context: Context
 ) {
     private val file = File(context.filesDir, FILE_NAME)
-    private val meta = context.getSharedPreferences("fixed_engine_snapshot_meta_v75", Context.MODE_PRIVATE)
+    private val meta = context.getSharedPreferences("fixed_engine_snapshot_meta_v754_final", Context.MODE_PRIVATE)
     private val gson = GsonBuilder().disableHtmlEscaping().create()
     @Volatile private var cached: FixedEngineSnapshot? = null
 
@@ -122,9 +122,9 @@ class FixedEngineSnapshotStore @Inject constructor(
         .digest(bytes).joinToString("") { "%02x".format(it) }
 
     companion object {
-        const val SNAPSHOT_ID = "FIXED-V741-2026-10-21"
-        const val SOURCE_VERSION = "7.4.1-forecast-gtt-autobuy"
-        private const val FILE_NAME = "fixed_engine_snapshot_v741.json.gz"
+        const val SNAPSHOT_ID = "FIXED-V741-20261021-190239-FINAL"
+        const val SOURCE_VERSION = "7.4.1-forecast-gtt-autobuy-debug-20261021-190239-final"
+        private const val FILE_NAME = "fixed_engine_snapshot_v741_20261021_190239_final.json.gz"
         private const val KEY_AWAITING_RESTORE = "awaiting_restore"
     }
 }
