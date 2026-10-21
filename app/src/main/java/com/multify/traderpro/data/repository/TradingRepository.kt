@@ -3034,6 +3034,50 @@ class TradingRepository @Inject constructor(
         return learningDao.longForecastsForDate(today).count { it.status == "ACTIVE" }
     }
 
+    suspend fun monitorFixedOutcomes(): Int {
+        val nowMs = System.currentTimeMillis()
+        val today = LocalDate.now(INDIA).toString()
+        val rows = fixedRecommendationStore.recommendations(today)
+        if (rows.isEmpty()) return 0
+        if (nowMs - lastFixedOutcomeMonitorAtMs < FORECAST_OUTCOME_INTERVAL_MS) {
+            return rows.count { it.status == "ACTIVE" }
+        }
+        lastFixedOutcomeMonitorAtMs = nowMs
+        val token = ensureToken() ?: return rows.count { it.status == "ACTIVE" }
+        val ltps = fetchForecastOutcomeLtps(token, rows.map { it.symbol })
+        if (ltps.isEmpty()) return rows.count { it.status == "ACTIVE" }
+        preferences.recordMarketData()
+        val now = ZonedDateTime.now(INDIA)
+        for (row in rows) {
+            val ltp = ltps[row.symbol.uppercase(Locale.US)] ?: continue
+            val movePct = (ltp / row.entryPrice - 1.0) * 100.0
+            val adversePct = max(0.0, (row.entryPrice - ltp) / row.entryPrice * 100.0)
+            val hitNow = ltp >= row.targetPrice
+            val expired = now.toLocalTime() >= LocalTime.of(15, 0)
+            val status = when {
+                row.status == "TARGET_HIT" -> "TARGET_HIT"
+                hitNow -> "TARGET_HIT"
+                expired -> "MISSED"
+                else -> "ACTIVE"
+            }
+            fixedRecommendationStore.update(
+                row.copy(
+                    status = status,
+                    targetHitAtMs = when {
+                        row.targetHitAtMs != null -> row.targetHitAtMs
+                        hitNow -> nowMs
+                        else -> null
+                    },
+                    lastPrice = ltp,
+                    maxFavourablePct = max(row.maxFavourablePct, max(0.0, movePct)),
+                    maxAdversePct = max(row.maxAdversePct, adversePct),
+                    lastObservedAtMs = nowMs
+                )
+            )
+        }
+        return fixedRecommendationStore.recommendations(today).count { it.status == "ACTIVE" }
+    }
+
     private suspend fun fetchForecastOutcomeLtps(token: String, symbols: List<String>): Map<String, Double> {
         val result = linkedMapOf<String, Double>()
         for ((index, chunk) in symbols.map { it.uppercase(Locale.US) }.distinct().chunked(50).withIndex()) {
