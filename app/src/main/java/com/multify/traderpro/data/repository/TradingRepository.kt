@@ -956,7 +956,9 @@ class TradingRepository @Inject constructor(
             val execution = executionStats()
             val today = LocalDate.now(INDIA).toString()
             val forecasts = learningDao.longForecastsForDate(today).map { it.toForecastDto() }
-            val fixedForecasts = fixedRecommendationStore.recommendations(today).map { it.toDto() }
+            val fixedForecasts = fixedRecommendationStore.recommendations(today)
+                .filter { it.entryPrice > FIXED_MIN_STOCK_PRICE_RUPEES }
+                .map { it.toDto() }
             val champions = learningDao.allForecastChampions()
                 .map { ForecastChampionDto(it.marketRegime, it.regime, it.strategy, it.wins, it.losses, it.sampleCount, it.distinctDays, it.distinctSymbols, it.frozen) }
             val research = learningDao.latestResearchReport()?.let { ResearchDto(it.reportDate, it.title, it.summary) } ?: ResearchDto()
@@ -1173,10 +1175,10 @@ class TradingRepository @Inject constructor(
             preferences.recordMarketData()
             quote.lastPrice ?: error("Groww quote does not contain LTP")
         }
-        val sizing = CashAwareCncSizing.size(settings.holdingBudgetRupees.toDouble(), available, referencePrice)
+        val sizing = CashAwareCncSizing.sizeStrictBudget(settings.holdingBudgetRupees.toDouble(), available, referencePrice)
         val capital = sizing.deployableCash
         val qty = sizing.quantity
-        require(qty > 0) { "Safe CNC buying power cannot fund one share of $symbol after RMS reserve" }
+        require(qty > 0) { "Multify BUY skipped: full configured budget ₹${settings.holdingBudgetRupees} is not available" }
 
         val ref = stableRef("MLH", "$eventId-$symbol")
         val order = placeCncBuy(token, symbol, qty, ref, notificationStartedNs)
@@ -1554,6 +1556,7 @@ class TradingRepository @Inject constructor(
         val now = ZonedDateTime.now(INDIA)
         val today = now.toLocalDate().toString()
         val existing = fixedRecommendationStore.recommendations(today)
+            .filter { it.entryPrice > FIXED_MIN_STOCK_PRICE_RUPEES }
         if (now.dayOfWeek.value >= 6 || now.toLocalTime() < LocalTime.of(9, 15) || now.toLocalTime() > LocalTime.of(15, 0)) {
             return existing.map { it.toDto() }
         }
@@ -1599,7 +1602,7 @@ class TradingRepository @Inject constructor(
                     ))
                 }
                 .getOrNull() ?: continue
-            if (evaluation.features.ltp < 10.0) continue
+            if (evaluation.features.ltp <= FIXED_MIN_STOCK_PRICE_RUPEES) continue
             evaluated += symbol to evaluation
             delay(FIXED_V741_FORECAST_SYMBOL_PACING_MS)
         }
@@ -1750,6 +1753,7 @@ class TradingRepository @Inject constructor(
         }
 
         val all = fixedRecommendationStore.recommendations(today)
+            .filter { it.entryPrice > FIXED_MIN_STOCK_PRICE_RUPEES }
         val tierCounts = ranked.groupingBy { it.quality.tier }.eachCount()
         auditLogger.log("FIXED_ENGINE", "LONG_SCAN_TIERED", mapOf(
             "snapshot_id" to snapshot.payload.snapshotId,
@@ -1828,7 +1832,7 @@ class TradingRepository @Inject constructor(
             } else {
                 consecutiveFailures = 0
                 payload.forEach { (key, value) ->
-                    if (value.isFinite() && value >= 10.0) {
+                    if (value.isFinite() && value > FIXED_MIN_STOCK_PRICE_RUPEES) {
                         current[key.removePrefix("NSE_").uppercase(Locale.US)] = value
                     }
                 }
@@ -2189,7 +2193,7 @@ class TradingRepository @Inject constructor(
         val ltp = quote.lastPrice ?: error("Groww quote has no LTP")
         val margin = apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin")
         val available = (margin.equity?.cncBalanceAvailable ?: margin.clearCash).coerceAtLeast(0.0)
-        val sizing = CashAwareCncSizing.size(settings.holdingBudgetRupees.toDouble(), available, ltp)
+        val sizing = CashAwareCncSizing.sizeStrictBudget(settings.holdingBudgetRupees.toDouble(), available, ltp)
         val capital = sizing.deployableCash
         val qty = sizing.quantity
         auditLogger.log("EXECUTION", "CNC_BUY_SIZED", mapOf(
@@ -2197,7 +2201,7 @@ class TradingRepository @Inject constructor(
             "cash_reserve" to sizing.cashReserve, "reference_price" to ltp,
             "buffered_price" to sizing.bufferedPrice, "deployable_cash" to capital, "quantity" to qty
         ))
-        require(qty > 0) { "Safe CNC buying power cannot fund one share of ${row.symbol} after RMS reserve" }
+        require(qty > 0) { "Forecast BUY skipped: full configured budget ₹${settings.holdingBudgetRupees} is not available" }
         val ref = stableRef("FLH", "${row.id}-${row.symbol}")
         val order = placeCncBuy(token, row.symbol, qty, ref)
         val filled = order.filledQuantity?.takeIf { it > 0 } ?: qty
@@ -2273,7 +2277,7 @@ class TradingRepository @Inject constructor(
                 ))
             }.getOrNull() ?: continue
             val available = (margin.equity?.cncBalanceAvailable ?: margin.clearCash).coerceAtLeast(0.0)
-            val sizing = CashAwareCncSizing.size(
+            val sizing = CashAwareCncSizing.sizeStrictBudget(
                 liveSettings.holdingBudgetRupees.toDouble(),
                 available,
                 row.entryPrice
@@ -2754,6 +2758,7 @@ class TradingRepository @Inject constructor(
             return "Fixed auto-buy GTT is already pending for ${row.symbol} at ₹${fmt(pendingAuto.fixedEntryPrice)}"
         }
         require(row.status == "ACTIVE") { "$symbol Fixed recommendation is no longer active" }
+        require(row.entryPrice > FIXED_MIN_STOCK_PRICE_RUPEES) { "Fixed only executes recommendations above ₹${fmt(FIXED_MIN_STOCK_PRICE_RUPEES)}" }
         require(row.executionEligible && row.qualityTier == "PRIMARY") { "Only PRIMARY Fixed recommendations can place a real BUY" }
         if (managedDao.openPosition(ENGINE_FIXED_HOLDING, row.symbol) != null) {
             return "${row.symbol} already has a Fixed holding; duplicate Fixed BUY blocked"
@@ -2762,8 +2767,8 @@ class TradingRepository @Inject constructor(
         val ltp = quote.lastPrice ?: error("Groww quote has no LTP")
         val margin = apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin")
         val available = (margin.equity?.cncBalanceAvailable ?: margin.clearCash).coerceAtLeast(0.0)
-        val sizing = CashAwareCncSizing.size(settings.holdingBudgetRupees.toDouble(), available, ltp)
-        require(sizing.quantity > 0) { "Safe CNC buying power cannot fund one share of ${row.symbol} after RMS reserve" }
+        val sizing = CashAwareCncSizing.sizeFixedAvailable(settings.holdingBudgetRupees.toDouble(), available, ltp)
+        require(sizing.quantity > 0) { "Fixed BUY skipped: remaining CNC cash cannot fund one buffered share of ${row.symbol}" }
         val ref = stableRef("FXH", "${row.id}-${row.symbol}")
         val order = placeCncBuy(token, row.symbol, sizing.quantity, ref)
         val filled = order.filledQuantity?.takeIf { it > 0 } ?: sizing.quantity
@@ -2822,7 +2827,12 @@ class TradingRepository @Inject constructor(
 
         reconcileFixedAutoBuyOrders()
         val rows = fixedRecommendationStore.recommendations(today)
-            .filter { it.status == "ACTIVE" && it.executionEligible && it.qualityTier == "PRIMARY" }
+            .filter {
+                it.status == "ACTIVE" &&
+                    it.executionEligible &&
+                    it.qualityTier == "PRIMARY" &&
+                    it.entryPrice > FIXED_MIN_STOCK_PRICE_RUPEES
+            }
             .sortedBy { it.generatedAtMs }
 
         var submitted = 0
@@ -2840,7 +2850,7 @@ class TradingRepository @Inject constructor(
                     ))
                 }.getOrNull() ?: continue
             val available = (margin.equity?.cncBalanceAvailable ?: margin.clearCash).coerceAtLeast(0.0)
-            val sizing = CashAwareCncSizing.size(liveSettings.holdingBudgetRupees.toDouble(), available, row.entryPrice)
+            val sizing = CashAwareCncSizing.sizeFixedAvailable(liveSettings.holdingBudgetRupees.toDouble(), available, row.entryPrice)
             if (sizing.quantity <= 0) {
                 auditLogger.log("FIXED_AUTO_BUY", "SKIPPED_NO_CASH", mapOf(
                     "symbol" to row.symbol,
@@ -4966,6 +4976,7 @@ class TradingRepository @Inject constructor(
         private const val FORECAST_SYMBOL_PACING_MS = 150L
         private const val FORECAST_AUTO_BUY_ORDER_PACING_MS = 175L
         private const val FORECAST_AUTO_BUY_CANCEL_RECHECK_MS = 300L
+        private const val FIXED_MIN_STOCK_PRICE_RUPEES = 100.0
         private const val FIXED_V741_FORECAST_SCAN_INTERVAL_MS = 5L * 60L * 1000L
         private const val FIXED_V741_FORECAST_SYMBOL_PACING_MS = 150L
         private const val FIXED_V741_PRIMARY_CONFIRMATION_WINDOW_MS = 20L * 60L * 1000L
