@@ -1,7 +1,7 @@
 {
-  "run_id": "39583783654",
-  "commit_sha": "d583e0c25e859aaebb835a8498bf15766aa920bc",
+  "run_id": "39583916499",
+  "commit_sha": "d12935f21af88c5f7fc9045fe33a2e45fdf6a27c",
   "artifact_name": "Multify-TraderPro-v7.3.0-verified",
   "release_tag": "v7.3.0-resilient-forecast",
-  "job_status": "success"
+  "job_status": "failure"
 }
