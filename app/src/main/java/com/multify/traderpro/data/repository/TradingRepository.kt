@@ -4359,6 +4359,7 @@ class TradingRepository @Inject constructor(
             val pnl = (ltp - p.entryPrice) * p.quantity
             PositionDto(
                 symbol = p.symbol,
+                engine = p.engine,
                 quantity = p.quantity,
                 averagePrice = p.entryPrice,
                 ltp = ltp,
@@ -4479,6 +4480,15 @@ class TradingRepository @Inject constructor(
 
         require(entries.isNotEmpty()) { "This ZIP does not contain Multify learning files" }
         val gson = GsonBuilder().disableHtmlEscaping().create()
+        var restoredFixedSnapshot = false
+        entries["fixed_engine_snapshot.json"]?.let { json ->
+            if (fixedEngineSnapshotStore.loadOrNull() == null) {
+                val payload = gson.fromJson(json, FixedEngineSnapshotPayload::class.java)
+                fixedEngineSnapshotStore.restoreExactIfAbsent(payload)
+                fixedSnapshotAudited = false
+                restoredFixedSnapshot = true
+            }
+        }
         var restoredCalls = 0
         var restoredResearch = 0
         var restoredForecasts = 0
@@ -4586,12 +4596,19 @@ class TradingRepository @Inject constructor(
 
         historicalSeedEnsured = false
         ensureHistoricalSeed()
+        if (fixedEngineSnapshotStore.loadOrNull() == null && fixedEngineSnapshotStore.isAwaitingRestore()) {
+            fixedEngineSnapshotStore.clearAwaitingRestore()
+            runCatching { ensureFixedEngineSnapshot() }
+                .onSuccess { restoredFixedSnapshot = true }
+                .onFailure { fixedEngineSnapshotStore.markAwaitingRestore() }
+        }
         auditLogger.log("MIGRATION", "LEARNING_RESTORE_COMPLETED", mapOf(
             "learning_calls" to restoredCalls,
             "research_snapshots" to restoredResearch,
             "forecasts" to restoredForecasts,
             "champions" to restoredChampions,
             "reports" to restoredReports,
+            "fixed_snapshot_restored_or_captured" to restoredFixedSnapshot,
             "trading_state_restored" to false,
             "credentials_restored" to false
         ))
@@ -4630,11 +4647,16 @@ class TradingRepository @Inject constructor(
         val forecasts = learningDao.allLongForecasts()
         val champions = learningDao.allForecastChampions()
         val research = learningDao.allResearchReports()
-        val forecastAutoBuyOrders = forecastAutoBuyOrderStore.all(LocalDate.now(INDIA).toString())
+        val today = LocalDate.now(INDIA).toString()
+        val forecastAutoBuyOrders = forecastAutoBuyOrderStore.all(today)
+        val fixedAutoBuyOrders = fixedAutoBuyOrderStore.all(today)
+        val fixedRecommendations = fixedRecommendationStore.recommendations(today)
+        val fixedSnapshot = fixedEngineSnapshotStore.loadOrNull()
         val safeSettings = mapOf(
             "holding_budget_rupees" to settings.holdingBudgetRupees,
             "arm_effective" to settings.armEffective,
             "forecast_auto_buy_enabled" to settings.forecastAutoBuyEnabled,
+            "fixed_auto_buy_enabled" to settings.fixedAutoBuyEnabled,
             "package_filter" to settings.packageFilter,
             "broker_authenticated" to settings.brokerAuthenticated,
             "ddpi_enabled" to settings.brokerDdpiEnabled,
@@ -4666,10 +4688,13 @@ class TradingRepository @Inject constructor(
                 add("long_champions.json", champions)
                 add("research.json", research)
                 add("forecast_auto_buy_orders.json", forecastAutoBuyOrders)
+                add("fixed_recommendations.json", fixedRecommendations)
+                add("fixed_auto_buy_orders.json", fixedAutoBuyOrders)
+                fixedSnapshot?.let { add("fixed_engine_snapshot.json", it.payload) }
                 addText("system_audit.jsonl", auditLogger.readAll())
             }
         } ?: error("Unable to open export destination")
-        return LogExportResult(13, signals.size, trades.size)
+        return LogExportResult(if (fixedSnapshot != null) 16 else 15, signals.size, trades.size)
     }
 
     suspend fun shouldCapturePackage(packageName: String): Boolean {
@@ -4754,6 +4779,9 @@ class TradingRepository @Inject constructor(
     private fun championKey(marketRegime: String, regime: String, strategy: String): String =
         listOf("LONG", marketRegime, regime, strategy).joinToString("|") { it.uppercase(Locale.US).replace("|", "/") }
 
+    private fun fixedChampionKey(marketRegime: String, regime: String, strategy: String): String =
+        listOf("LONG", marketRegime, regime, strategy).joinToString("|") { it.uppercase(Locale.US).replace("|", "/") }
+
     private fun disconnectedDashboard(settings: AppSettings) = DashboardDto(
         armed = settings.armEffective, halted = settings.safetyHalt, marketSession = marketSession(),
         asOf = ZonedDateTime.now(INDIA).format(DateTimeFormatter.ISO_OFFSET_DATE_TIME),
@@ -4806,6 +4834,20 @@ class TradingRepository @Inject constructor(
         private const val FORECAST_SYMBOL_PACING_MS = 150L
         private const val FORECAST_AUTO_BUY_ORDER_PACING_MS = 175L
         private const val FORECAST_AUTO_BUY_CANCEL_RECHECK_MS = 300L
+        private const val FIXED_V741_FORECAST_SCAN_INTERVAL_MS = 5L * 60L * 1000L
+        private const val FIXED_V741_FORECAST_SYMBOL_PACING_MS = 150L
+        private const val FIXED_V741_PRIMARY_CONFIRMATION_WINDOW_MS = 20L * 60L * 1000L
+        private const val FIXED_V741_DETAILED_FORECAST_UNIVERSE_LIMIT = 48
+        private const val FIXED_V741_DISCOVERY_DYNAMIC_LIMIT = 28
+        private const val FIXED_V741_DISCOVERY_ROTATING_FALLBACK = 16
+        private const val FIXED_V741_DISCOVERY_BATCH_PACING_MS = 200L
+        private const val FIXED_V741_DISCOVERY_BATCH_ATTEMPTS = 2
+        private const val FIXED_V741_DISCOVERY_RETRY_BACKOFF_MS = 750L
+        private const val FIXED_V741_DISCOVERY_CONSECUTIVE_FAILURE_ABORT = 3
+        private const val FIXED_V741_MIN_DISCOVERY_COVERAGE_RATIO = 0.85
+        private const val FIXED_V741_RESEARCH_CAPTURE_TOP_N = 48
+        private const val FIXED_V741_RESEARCH_SESSION_GOAL = 5
+        private const val FIXED_V741_MIN_RESEARCH_EVIDENCE_ROWS = 4
         private const val PRIMARY_CONFIRMATION_WINDOW_MS = 20L * 60L * 1000L
         private const val DISCOVERY_HEALTH_STALE_MS = 12L * 60L * 1000L
         private const val DETAILED_FORECAST_UNIVERSE_LIMIT = 48
@@ -4825,7 +4867,8 @@ class TradingRepository @Inject constructor(
             "forecast_research_snapshots.json",
             "long_forecasts.json",
             "long_champions.json",
-            "research.json"
+            "research.json",
+            "fixed_engine_snapshot.json"
         )
         private const val MAX_RESTORE_ENTRY_BYTES = 32L * 1024L * 1024L
         private const val MAX_RESTORE_TOTAL_BYTES = 64L * 1024L * 1024L
@@ -4850,5 +4893,6 @@ class TradingRepository @Inject constructor(
         private const val DEFAULT_LONG_REALIZED_PCT = 0.33
         const val ENGINE_MULTIFY_HOLDING = "MULTIFY_HOLDING"
         const val ENGINE_FORECAST_HOLDING = "FORECAST_HOLDING"
+        const val ENGINE_FIXED_HOLDING = "FIXED_HOLDING"
     }
 }
