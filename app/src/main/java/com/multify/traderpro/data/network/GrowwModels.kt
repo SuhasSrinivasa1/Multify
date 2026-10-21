@@ -132,8 +132,15 @@ data class OrderPayload(
     @SerializedName("order_status") val orderStatus: String = "",
     @SerializedName("order_reference_id") val orderReferenceId: String = "",
     val remark: String? = null,
+    val price: Double? = null,
     @SerializedName("filled_quantity") val filledQuantity: Int? = null,
+    @SerializedName("remaining_quantity") val remainingQuantity: Int? = null,
     @SerializedName("average_fill_price") val averageFillPrice: Double? = null
+)
+
+data class OrderCancelRequest(
+    val segment: String = "CASH",
+    @SerializedName("groww_order_id") val growwOrderId: String
 )
 
 data class GttOrder(
