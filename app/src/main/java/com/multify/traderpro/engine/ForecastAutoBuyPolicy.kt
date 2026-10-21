@@ -11,7 +11,7 @@ object ForecastAutoBuyPolicy {
         status.equals("COMPLETED", ignoreCase = true)
 
     fun isTerminal(status: String): Boolean =
-        status.uppercase() in setOf("COMPLETED", "CANCELLED", "EXPIRED", "FAILED", "REJECTED")
+        status.uppercase() in setOf("COMPLETED", "CANCELLED", "EXPIRED", "FAILED", "REJECTED", "EXECUTED", "DELIVERY_AWAITED")
 
     fun canCancelBeforeTrigger(status: String): Boolean =
         status.equals("ACTIVE", ignoreCase = true)
