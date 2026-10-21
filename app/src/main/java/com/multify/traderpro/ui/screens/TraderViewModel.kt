@@ -121,6 +121,24 @@ class TraderViewModel @Inject constructor(
         }
     }
 
+    fun setForecastAutoBuy(enabled: Boolean) {
+        viewModelScope.launch {
+            remote.value = remote.value.copy(loading = true, error = null, message = null)
+            runCatching { repository.setForecastAutoBuy(enabled) }
+                .onSuccess {
+                    remote.value = remote.value.copy(
+                        loading = false,
+                        message = if (enabled)
+                            "Forecast auto-buy enabled · fixed CNC LIMIT entry and fixed published target · ARM required"
+                        else
+                            "Forecast auto-buy disabled · pending unfilled forecast LIMIT orders are being cancelled"
+                    )
+                    refresh(silent = true)
+                }
+                .onFailure { remote.value = remote.value.copy(loading = false, error = it.userMessage()) }
+        }
+    }
+
     fun setHoldingBudget(value: Long) {
         viewModelScope.launch {
             runCatching { repository.setHoldingBudget(value) }
