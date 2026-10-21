@@ -1516,8 +1516,13 @@ class TradingRepository @Inject constructor(
         val settings = preferences.settings.first()
         preArmGuard(settings)
         val token = ensureToken() ?: error("Authenticate Groww first")
-        val row = learningDao.longForecastsForDate(now.toLocalDate().toString())
+        val today = now.toLocalDate().toString()
+        val row = learningDao.longForecastsForDate(today)
             .firstOrNull { it.symbol.equals(symbol, true) } ?: error("No active LONG recommendation for $symbol")
+        val pendingAuto = forecastAutoBuyOrderStore.forSymbol(today, row.symbol)
+        if (pendingAuto != null && !isForecastAutoBuyTerminal(pendingAuto.status)) {
+            return "Auto-buy LIMIT is already pending for ${row.symbol} @ ₹${fmt(pendingAuto.fixedEntryPrice)}; duplicate manual BUY blocked"
+        }
         require(row.status == "ACTIVE") { "$symbol forecast is no longer active" }
         require(row.executionEligible) { "$symbol is ${row.qualityTier}; only PRIMARY forecast setups can place a real forecast BUY" }
         require(row.targetPct + 1e-9 >= ForecastQualityPolicy.MIN_TARGET_PCT) { "Forecast target is below the 1% quality floor" }
@@ -1567,6 +1572,382 @@ class TradingRepository @Inject constructor(
         ))
         return "BUY ${row.symbol} opened as CNC holding · qty $filled @ ₹${fmt(entry)} · forecast target +${fmt(row.targetPct)}% · fixed trailing arms at +0.55% and protects +0.50%"
     }
+
+    /**
+     * Auto-buy uses the immutable published forecast prices. The broker order is CNC/DAY/LIMIT at
+     * the published entry price; the published target price is carried forward unchanged.
+     * ARM remains the master execution switch.
+     */
+    suspend fun autoBuyForecastRecommendations(): Int {
+        val now = ZonedDateTime.now(INDIA)
+        if (now.dayOfWeek.value >= 6 || marketSession() != "OPEN") return 0
+        val settings = preferences.settings.first()
+        if (!settings.forecastAutoBuyEnabled || !settings.armEffective || settings.safetyHalt) return 0
+        preArmGuard(settings)
+        val token = ensureToken() ?: return 0
+        val today = now.toLocalDate().toString()
+
+        reconcileForecastAutoBuyOrders()
+
+        val rows = learningDao.longForecastsForDate(today)
+            .filter {
+                it.status == "ACTIVE" &&
+                    it.executionEligible &&
+                    it.qualityTier == "PRIMARY"
+            }
+            .sortedBy { it.generatedAtMs }
+
+        var submitted = 0
+        for (row in rows) {
+            if (managedDao.openPositionForSymbol(row.symbol) != null) continue
+            if (forecastAutoBuyOrderStore.forSymbol(today, row.symbol) != null) continue
+
+            val margin = runCatching {
+                apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin")
+            }.onFailure {
+                auditLogger.log("FORECAST_AUTO_BUY", "MARGIN_ERROR", mapOf(
+                    "symbol" to row.symbol,
+                    "message" to (it.message ?: it.javaClass.simpleName)
+                ))
+            }.getOrNull() ?: continue
+            val available = (margin.equity?.cncBalanceAvailable ?: margin.clearCash).coerceAtLeast(0.0)
+            val sizing = CashAwareCncSizing.size(
+                settings.holdingBudgetRupees.toDouble(),
+                available,
+                row.entryPrice
+            )
+            if (sizing.quantity <= 0) {
+                auditLogger.log("FORECAST_AUTO_BUY", "SKIPPED_NO_CASH", mapOf(
+                    "symbol" to row.symbol,
+                    "fixed_entry_price" to row.entryPrice,
+                    "fixed_target_price" to row.targetPrice,
+                    "available_cnc" to available,
+                    "configured_budget" to settings.holdingBudgetRupees
+                ))
+                continue
+            }
+
+            val reference = stableRef("FAH", "${row.forecastDate}-${row.id}-${row.symbol}")
+            val placedAtMs = System.currentTimeMillis()
+            val order = runCatching {
+                submitForecastLimitBuy(
+                    token = token,
+                    row = row,
+                    qty = sizing.quantity,
+                    reference = reference
+                )
+            }.onFailure {
+                auditLogger.log("FORECAST_AUTO_BUY", "LIMIT_SUBMIT_ERROR", mapOf(
+                    "symbol" to row.symbol,
+                    "reference" to reference,
+                    "fixed_entry_price" to row.entryPrice,
+                    "fixed_target_price" to row.targetPrice,
+                    "message" to (it.message ?: it.javaClass.simpleName)
+                ))
+            }.getOrNull() ?: continue
+
+            val orderId = order.growwOrderId
+            if (orderId.isBlank()) {
+                auditLogger.log("FORECAST_AUTO_BUY", "LIMIT_ACK_MISSING_ID", mapOf(
+                    "symbol" to row.symbol,
+                    "reference" to reference
+                ))
+                continue
+            }
+            forecastAutoBuyOrderStore.upsert(
+                ForecastAutoBuyOrderState(
+                    date = today,
+                    forecastId = row.id,
+                    symbol = row.symbol,
+                    orderId = orderId,
+                    referenceId = reference,
+                    quantity = sizing.quantity,
+                    fixedEntryPrice = row.entryPrice,
+                    fixedTargetPrice = row.targetPrice,
+                    placedAtMs = placedAtMs,
+                    status = order.orderStatus.ifBlank { "ACKED" }
+                )
+            )
+            auditLogger.log("FORECAST_AUTO_BUY", "FIXED_LIMIT_SUBMITTED", mapOf(
+                "symbol" to row.symbol,
+                "order_id" to orderId,
+                "reference" to reference,
+                "quantity" to sizing.quantity,
+                "fixed_entry_price" to row.entryPrice,
+                "fixed_target_price" to row.targetPrice,
+                "broker_status" to order.orderStatus,
+                "arm_effective" to settings.armEffective
+            ))
+            submitted++
+            delay(FORECAST_AUTO_BUY_ORDER_PACING_MS)
+        }
+
+        if (submitted > 0) reconcileForecastAutoBuyOrders()
+        return submitted
+    }
+
+    suspend fun reconcileForecastAutoBuyOrders(
+        forceCancel: Boolean = false,
+        cancelReason: String = ""
+    ): Int {
+        val today = LocalDate.now(INDIA).toString()
+        val states = forecastAutoBuyOrderStore.all(today)
+        if (states.isEmpty()) return 0
+        val token = ensureToken() ?: return states.count { !isForecastAutoBuyTerminal(it.status) }
+        val settings = preferences.settings.first()
+        val forecasts = learningDao.longForecastsForDate(today)
+            .associateBy { it.symbol.uppercase(Locale.US) }
+
+        var pending = 0
+        for (state in states) {
+            if (isForecastAutoBuyTerminal(state.status) && !state.status.equals("CANCELLED", true)) {
+                continue
+            }
+
+            val existingPosition = managedDao.openPositionForSymbol(state.symbol)
+            if (existingPosition != null) {
+                cancelForecastAutoBuyIfOpen(token, state, "HOLDING_ALREADY_EXISTS")
+                forecastAutoBuyOrderStore.remove(today, state.symbol)
+                continue
+            }
+
+            var broker = runCatching {
+                apiFactory.groww.orderStatus(bearer(token), state.orderId)
+                    .requirePayload("Forecast auto-buy order status ${state.symbol}")
+            }.onFailure {
+                auditLogger.log("FORECAST_AUTO_BUY", "STATUS_ERROR", mapOf(
+                    "symbol" to state.symbol,
+                    "order_id" to state.orderId,
+                    "message" to (it.message ?: it.javaClass.simpleName)
+                ))
+            }.getOrNull()
+            if (broker == null) {
+                pending++
+                continue
+            }
+
+            val forecast = forecasts[state.symbol.uppercase(Locale.US)]
+            val cancelRequired =
+                forceCancel ||
+                    !settings.forecastAutoBuyEnabled ||
+                    !settings.armEffective ||
+                    settings.safetyHalt ||
+                    forecast == null ||
+                    forecast.status != "ACTIVE" ||
+                    !forecast.executionEligible
+
+            var brokerStatus = broker.orderStatus.uppercase(Locale.US)
+            var filled = (broker.filledQuantity ?: 0).coerceIn(0, state.quantity)
+            val partialOpen = filled in 1 until state.quantity && !isForecastAutoBuyTerminal(brokerStatus)
+
+            if (!isForecastAutoBuyTerminal(brokerStatus) && (cancelRequired || partialOpen)) {
+                val reason = when {
+                    partialOpen -> "PARTIAL_FILL_CANCEL_REMAINDER"
+                    cancelReason.isNotBlank() -> cancelReason
+                    forecast?.status != "ACTIVE" -> "FORECAST_NO_LONGER_ACTIVE"
+                    else -> "AUTO_BUY_NOT_EXECUTION_ELIGIBLE"
+                }
+                val cancelled = runCatching {
+                    apiFactory.groww.cancelOrder(
+                        bearer(token),
+                        OrderCancelRequest(growwOrderId = state.orderId)
+                    ).requirePayload("Cancel forecast auto-buy ${state.symbol}")
+                }.onFailure {
+                    auditLogger.log("FORECAST_AUTO_BUY", "CANCEL_ERROR", mapOf(
+                        "symbol" to state.symbol,
+                        "order_id" to state.orderId,
+                        "reason" to reason,
+                        "filled_quantity" to filled,
+                        "message" to (it.message ?: it.javaClass.simpleName)
+                    ))
+                    if (partialOpen) runCatching { preferences.setSafetyHalt(true) }
+                }.getOrNull()
+
+                if (cancelled != null) {
+                    auditLogger.log("FORECAST_AUTO_BUY", "CANCEL_REQUESTED", mapOf(
+                        "symbol" to state.symbol,
+                        "order_id" to state.orderId,
+                        "reason" to reason,
+                        "filled_quantity" to filled,
+                        "status" to cancelled.orderStatus
+                    ))
+                    delay(FORECAST_AUTO_BUY_CANCEL_RECHECK_MS)
+                    broker = runCatching {
+                        apiFactory.groww.orderStatus(bearer(token), state.orderId)
+                            .requirePayload("Forecast auto-buy post-cancel status ${state.symbol}")
+                    }.getOrDefault(cancelled)
+                    brokerStatus = broker.orderStatus.uppercase(Locale.US)
+                    filled = (broker.filledQuantity ?: filled).coerceIn(0, state.quantity)
+                }
+            }
+
+            val finalState = isForecastAutoBuyTerminal(brokerStatus) || filled >= state.quantity
+            if (filled > 0 && finalState) {
+                openFilledForecastAutoBuyPosition(state, forecast, broker, filled)
+                forecastAutoBuyOrderStore.remove(today, state.symbol)
+                continue
+            }
+
+            if (finalState && filled == 0) {
+                if (cancelRequired && brokerStatus == "CANCELLED") {
+                    forecastAutoBuyOrderStore.remove(today, state.symbol)
+                } else {
+                    forecastAutoBuyOrderStore.upsert(state.copy(status = brokerStatus))
+                }
+                auditLogger.log("FORECAST_AUTO_BUY", "ORDER_TERMINAL_NO_FILL", mapOf(
+                    "symbol" to state.symbol,
+                    "order_id" to state.orderId,
+                    "status" to brokerStatus
+                ))
+                continue
+            }
+
+            forecastAutoBuyOrderStore.upsert(state.copy(status = brokerStatus.ifBlank { state.status }))
+            pending++
+        }
+        return pending
+    }
+
+    private suspend fun submitForecastLimitBuy(
+        token: String,
+        row: LongForecastEntity,
+        qty: Int,
+        reference: String
+    ): OrderPayload {
+        require(qty > 0) { "Forecast auto-buy quantity is zero" }
+        require(row.entryPrice.isFinite() && row.entryPrice > 0.0) { "Forecast entry price is invalid" }
+        val brokerStartedNs = SystemClock.elapsedRealtimeNanos()
+        val placed = try {
+            apiFactory.groww.placeOrder(
+                bearer(token),
+                OrderCreateRequest(
+                    tradingSymbol = row.symbol,
+                    quantity = qty,
+                    price = row.entryPrice,
+                    triggerPrice = 0.0,
+                    validity = "DAY",
+                    exchange = "NSE",
+                    segment = "CASH",
+                    product = "CNC",
+                    orderType = "LIMIT",
+                    transactionType = "BUY",
+                    orderReferenceId = reference
+                )
+            ).requirePayload("Forecast LIMIT BUY ${row.symbol}")
+        } catch (t: Throwable) {
+            val recovered = runCatching {
+                apiFactory.groww.orderStatusByReference(
+                    bearer(token),
+                    referenceId = reference,
+                    segment = "CASH"
+                ).requirePayload("Forecast LIMIT BUY reference recovery ${row.symbol}")
+            }.getOrNull()
+            recovered?.takeIf { it.growwOrderId.isNotBlank() } ?: throw t
+        }
+        val brokerAckLatencyMs =
+            ((SystemClock.elapsedRealtimeNanos() - brokerStartedNs).coerceAtLeast(0L)) / 1_000_000L
+        preferences.recordOrderLatency(0L, brokerAckLatencyMs)
+        auditLogger.log("EXECUTION_LATENCY", "FORECAST_LIMIT_ACK", mapOf(
+            "symbol" to row.symbol,
+            "broker_ack_ms" to brokerAckLatencyMs,
+            "fixed_entry_price" to row.entryPrice,
+            "fixed_target_price" to row.targetPrice,
+            "order_type" to "LIMIT",
+            "product" to "CNC"
+        ))
+        return placed
+    }
+
+    private suspend fun cancelForecastAutoBuyIfOpen(
+        token: String,
+        state: ForecastAutoBuyOrderState,
+        reason: String
+    ) {
+        val status = runCatching {
+            apiFactory.groww.orderStatus(bearer(token), state.orderId)
+                .requirePayload("Forecast auto-buy duplicate status ${state.symbol}")
+        }.getOrNull() ?: return
+        if (isForecastAutoBuyTerminal(status.orderStatus)) return
+        runCatching {
+            apiFactory.groww.cancelOrder(
+                bearer(token),
+                OrderCancelRequest(growwOrderId = state.orderId)
+            ).requirePayload("Cancel duplicate forecast auto-buy ${state.symbol}")
+        }.onSuccess {
+            auditLogger.log("FORECAST_AUTO_BUY", "DUPLICATE_PENDING_CANCELLED", mapOf(
+                "symbol" to state.symbol,
+                "order_id" to state.orderId,
+                "reason" to reason
+            ))
+        }
+    }
+
+    private suspend fun openFilledForecastAutoBuyPosition(
+        state: ForecastAutoBuyOrderState,
+        forecast: LongForecastEntity?,
+        broker: OrderPayload,
+        filledQuantity: Int
+    ) {
+        if (managedDao.openPositionForSymbol(state.symbol) != null) return
+        val actualFill = broker.averageFillPrice?.takeIf { it.isFinite() && it > 0.0 }
+            ?: state.fixedEntryPrice
+        val now = System.currentTimeMillis()
+        val trailArmPct = SteppedTrailingPolicy.ARM_TRIGGER_PCT
+        managedDao.insertPosition(
+            ManagedPositionEntity(
+                engine = ENGINE_FORECAST_HOLDING,
+                symbol = state.symbol,
+                product = "CNC",
+                side = "LONG",
+                quantity = filledQuantity,
+                entryPrice = actualFill,
+                stopPrice = null,
+                targetPrice = state.fixedTargetPrice,
+                strategy = buildString {
+                    append("Forecast auto-buy · fixed LIMIT entry ₹")
+                    append(fmt(state.fixedEntryPrice))
+                    append(" · fixed target ₹")
+                    append(fmt(state.fixedTargetPrice))
+                    forecast?.strategy?.takeIf { it.isNotBlank() }?.let { append(" · "); append(it) }
+                    append(" · v7 fixed stepped trail 0.55→0.50 then +0.10%")
+                },
+                regime = forecast?.regime ?: "FORECAST_AUTO_BUY",
+                confidence = forecast?.confidence ?: 1.0,
+                sourceEventId = null,
+                openOrderId = state.orderId,
+                openReferenceId = state.referenceId,
+                openedAtMs = now,
+                lastPrice = actualFill,
+                maxFavourablePrice = actualFill,
+                maxAdversePrice = actualFill,
+                lastEvaluatedAtMs = now,
+                trailingArmPct = trailArmPct,
+                trailingLastRatchetPrice = 0.0,
+                smartOrderMode = HoldingSmartOrderPolicy.MODE_NONE
+            )
+        )
+        brokerInventorySnapshot = null
+        auditLogger.log("FORECAST_AUTO_BUY", "FIXED_LIMIT_FILLED", mapOf(
+            "symbol" to state.symbol,
+            "order_id" to state.orderId,
+            "quantity" to filledQuantity,
+            "fixed_entry_limit" to state.fixedEntryPrice,
+            "actual_fill_price" to actualFill,
+            "fixed_target_price" to state.fixedTargetPrice,
+            "target_recalculated" to false,
+            "trail_arm_trigger_pct" to trailArmPct
+        ))
+    }
+
+    private fun isForecastAutoBuyTerminal(status: String): Boolean =
+        status.uppercase(Locale.US) in setOf(
+            "REJECTED",
+            "FAILED",
+            "CANCELLED",
+            "EXECUTED",
+            "COMPLETED",
+            "DELIVERY_AWAITED"
+        )
 
     suspend fun pendingLongForecastNotifications(): List<ForecastDto> {
         val today = LocalDate.now(INDIA).toString()
@@ -3348,6 +3729,8 @@ class TradingRepository @Inject constructor(
         private const val FORECAST_OUTCOME_BATCH_ATTEMPTS = 2
         private const val FORECAST_OUTCOME_RETRY_BACKOFF_MS = 750L
         private const val FORECAST_SYMBOL_PACING_MS = 150L
+        private const val FORECAST_AUTO_BUY_ORDER_PACING_MS = 175L
+        private const val FORECAST_AUTO_BUY_CANCEL_RECHECK_MS = 300L
         private const val PRIMARY_CONFIRMATION_WINDOW_MS = 20L * 60L * 1000L
         private const val DISCOVERY_HEALTH_STALE_MS = 12L * 60L * 1000L
         private const val DETAILED_FORECAST_UNIVERSE_LIMIT = 48
