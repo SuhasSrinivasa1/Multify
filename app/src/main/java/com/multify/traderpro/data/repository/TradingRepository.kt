@@ -140,6 +140,7 @@ class TradingRepository @Inject constructor(
     private var lastArmHotAuditBalance = Double.NaN
     private var lastArmHotAuditArmed: Boolean? = null
     private val closePositionMutexes = ConcurrentHashMap<Long, Mutex>()
+    private val forecastAutoBuySubmissionMutex = Mutex()
     private val lastTrailStateAuditAtMs = ConcurrentHashMap<Long, Long>()
     private val lastSmartOrderStatusAtMs = ConcurrentHashMap<Long, Long>()
 
@@ -565,6 +566,14 @@ class TradingRepository @Inject constructor(
                 preferences.setArm(false)
                 armHotState = null
                 error("ARM could not pre-warm Groww token and CNC buying power")
+            }
+            if (preferences.settings.first().forecastAutoBuyEnabled && marketSession() == "OPEN") {
+                runCatching { autoBuyForecastRecommendations() }
+                    .onFailure {
+                        auditLogger.log("FORECAST_AUTO_BUY", "ARM_ENABLE_SWEEP_ERROR", mapOf(
+                            "message" to (it.message ?: it.javaClass.simpleName)
+                        ))
+                    }
             }
         } else {
             runCatching { reconcileForecastAutoBuyOrders(forceCancel = true, cancelReason = "ARM_DISABLED") }
@@ -1578,7 +1587,10 @@ class TradingRepository @Inject constructor(
      * the published entry price; the published target price is carried forward unchanged.
      * ARM remains the master execution switch.
      */
-    suspend fun autoBuyForecastRecommendations(): Int {
+    suspend fun autoBuyForecastRecommendations(): Int =
+        forecastAutoBuySubmissionMutex.withLock { autoBuyForecastRecommendationsLocked() }
+
+    private suspend fun autoBuyForecastRecommendationsLocked(): Int {
         val now = ZonedDateTime.now(INDIA)
         if (now.dayOfWeek.value >= 6 || marketSession() != "OPEN") return 0
         val settings = preferences.settings.first()
@@ -1599,6 +1611,8 @@ class TradingRepository @Inject constructor(
 
         var submitted = 0
         for (row in rows) {
+            val liveSettings = preferences.settings.first()
+            if (!liveSettings.forecastAutoBuyEnabled || !liveSettings.armEffective || liveSettings.safetyHalt) break
             if (managedDao.openPositionForSymbol(row.symbol) != null) continue
             if (forecastAutoBuyOrderStore.forSymbol(today, row.symbol) != null) continue
 
@@ -1612,7 +1626,7 @@ class TradingRepository @Inject constructor(
             }.getOrNull() ?: continue
             val available = (margin.equity?.cncBalanceAvailable ?: margin.clearCash).coerceAtLeast(0.0)
             val sizing = CashAwareCncSizing.size(
-                settings.holdingBudgetRupees.toDouble(),
+                liveSettings.holdingBudgetRupees.toDouble(),
                 available,
                 row.entryPrice
             )
@@ -1622,10 +1636,13 @@ class TradingRepository @Inject constructor(
                     "fixed_entry_price" to row.entryPrice,
                     "fixed_target_price" to row.targetPrice,
                     "available_cnc" to available,
-                    "configured_budget" to settings.holdingBudgetRupees
+                    "configured_budget" to liveSettings.holdingBudgetRupees
                 ))
                 continue
             }
+
+            val executionSettings = preferences.settings.first()
+            if (!executionSettings.forecastAutoBuyEnabled || !executionSettings.armEffective || executionSettings.safetyHalt) break
 
             val reference = stableRef("FAH", "${row.forecastDate}-${row.id}-${row.symbol}")
             val placedAtMs = System.currentTimeMillis()
@@ -1676,7 +1693,7 @@ class TradingRepository @Inject constructor(
                 "fixed_entry_price" to row.entryPrice,
                 "fixed_target_price" to row.targetPrice,
                 "broker_status" to order.orderStatus,
-                "arm_effective" to settings.armEffective
+                "arm_effective" to executionSettings.armEffective
             ))
             submitted++
             delay(FORECAST_AUTO_BUY_ORDER_PACING_MS)
