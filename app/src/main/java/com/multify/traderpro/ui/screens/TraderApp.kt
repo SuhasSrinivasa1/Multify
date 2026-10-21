@@ -94,7 +94,7 @@ import java.util.Locale
 private enum class Destination(val label: String, val subtitle: String, val icon: ImageVector) {
     Execution("Execution", "ARM status and app-owned CNC holdings", Icons.Default.Dashboard),
     Averages("Averages", "30-day LONG averages", Icons.Default.Analytics),
-    Forecast("Forecast", "Up to 5 PRIMARY LONG recommendations · ≥1% target", Icons.Default.Science),
+    Forecast("Forecast", "Confirmed PRIMARY LONG recommendations · ≥1% target", Icons.Default.Science),
     Settings("Settings", "Broker, ARM, holding budget and device controls", Icons.Default.Settings)
 }
 
@@ -184,6 +184,7 @@ fun TraderApp(viewModel: TraderViewModel = hiltViewModel()) {
                         if (state.settings.armEffective) viewModel.setArm(false) else showArmConfirm = true
                     },
                     onBudgetChanged = viewModel::setHoldingBudget,
+                    onForecastAutoBuyChanged = viewModel::setForecastAutoBuy,
                     onSubmitManualSignal = viewModel::submitManualSignal,
                     onResetHalt = { showResetConfirm = true },
                     onExportLogs = { exportLauncher.launch(defaultLogFileName()) },
@@ -634,8 +635,10 @@ private fun ForecastScreen(
                 Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text("Forecast engine · ACTIVE", fontWeight = FontWeight.SemiBold)
                     Text(
-                        if (state.settings.armEffective)
-                            "Learning and forecasting are running. ARM is ON, so eligible PRIMARY rows may also be bought."
+                        if (state.settings.armEffective && state.settings.forecastAutoBuyEnabled)
+                            "Learning and forecasting are running. ARM and Forecast Auto-buy are ON; new confirmed PRIMARY rows submit fixed-price CNC LIMIT buys automatically."
+                        else if (state.settings.armEffective)
+                            "Learning and forecasting are running. ARM is ON; forecast recommendations remain manual unless Forecast Auto-buy is enabled in Settings."
                         else
                             "Learning and forecasting continue normally while ARM is OFF. Trading is disabled; research and recommendations are not.",
                         style = MaterialTheme.typography.bodySmall,
@@ -811,6 +814,7 @@ private fun SettingsScreen(
     onAuthenticate: () -> Unit,
     onArmRequested: () -> Unit,
     onBudgetChanged: (Long) -> Unit,
+    onForecastAutoBuyChanged: (Boolean) -> Unit,
     onSubmitManualSignal: (String, String, String) -> Unit,
     onResetHalt: () -> Unit,
     onExportLogs: () -> Unit,
@@ -885,6 +889,34 @@ private fun SettingsScreen(
                         onValueChangeFinished = { onBudgetChanged(budget.toLong()) },
                         valueRange = 10_000f..200_000f,
                         steps = 18
+                    )
+                    HorizontalDivider()
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Auto-buy forecast recommendations", fontWeight = FontWeight.SemiBold)
+                            Text(
+                                "When enabled, every new confirmed PRIMARY forecast submits a Groww CNC DAY LIMIT BUY at the published entry price. The published target price stays fixed. ARM must also be ON.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = state.settings.forecastAutoBuyEnabled,
+                            onCheckedChange = onForecastAutoBuyChanged
+                        )
+                    }
+                    KeyValueRow(
+                        "Forecast auto-buy",
+                        when {
+                            state.settings.forecastAutoBuyEnabled && armed -> "ACTIVE · ARM ON"
+                            state.settings.forecastAutoBuyEnabled -> "Enabled · waiting for ARM"
+                            else -> "OFF · manual BUY only"
+                        }
+                    )
+                    Text(
+                        "Entry control: fixed published LIMIT price. Groww may fill at that price or better; an unfilled order remains pending until filled/cancelled for the day. Target reference is never recalculated from a later LTP or fill.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     if (state.settings.safetyHalt) {
                         Button(
