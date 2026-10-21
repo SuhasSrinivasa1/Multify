@@ -108,6 +108,9 @@ class TradingEngineService : Service() {
                     runCatching { repository.maintainArmHotPath() }
                         .onFailure { auditLogger.log("RUNTIME", "ARM_HOT_PATH_MAINTAIN_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
 
+                    runCatching { repository.reconcileForecastAutoBuyOrders() }
+                        .onFailure { auditLogger.log("RUNTIME", "FORECAST_AUTO_BUY_RECONCILE_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
+
                     val managedCount = runCatching { repository.monitorManagedPositions() }
                         .onFailure {
                             if (it !is CancellationException) {
@@ -129,6 +132,8 @@ class TradingEngineService : Service() {
                     ) {
                         runCatching { repository.generateDailyForecasts(false) }
                             .onFailure { auditLogger.log("RUNTIME", "FORECAST_SCAN_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
+                        runCatching { repository.autoBuyForecastRecommendations() }
+                            .onFailure { auditLogger.log("RUNTIME", "FORECAST_AUTO_BUY_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
                         runCatching { repository.pendingLongForecastNotifications() }
                             .getOrDefault(emptyList())
                             .filter { it.qualityTier == "PRIMARY" && it.executionEligible }
