@@ -945,13 +945,18 @@ class TradingRepository @Inject constructor(
 
     suspend fun refreshDashboard(): DashboardDto {
         val settings = preferences.settings.first()
+        // Fixed is self-contained in the APK and must initialize even when Groww is not authenticated.
+        // This prevents the Fixed tab from incorrectly showing zero history / "Capturing…" merely
+        // because the broker session is unavailable.
+        val fixedSnapshotState = runCatching { ensureFixedEngineSnapshot() }.getOrNull()
         val token = secretStore.getAccessToken()
-        if (!settings.brokerAuthenticated || token.isNullOrBlank()) return disconnectedDashboard(settings)
+        if (!settings.brokerAuthenticated || token.isNullOrBlank()) {
+            return disconnectedDashboard(settings, fixedSnapshotState)
+        }
         return try {
             val margin = apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin")
             val cnc = (margin.equity?.cncBalanceAvailable ?: margin.clearCash).coerceAtLeast(0.0)
             armHotState = ArmHotState(token, settings, cnc, System.currentTimeMillis())
-            val fixedSnapshotState = runCatching { ensureFixedEngineSnapshot() }.getOrNull()
             ensureHistoricalSeed()
             runCatching { backfillRecentMultifyMfe(token, MFE_BACKFILL_BATCH_SIZE) }
             val learning = learningStats()
@@ -1039,27 +1044,13 @@ class TradingRepository @Inject constructor(
                     discoveryBaselineReady = fixedDiscoveryHealth?.baselineReady ?: false,
                     marketDataAgeMs = dataAge
                 ),
-                fixedSnapshot = fixedSnapshotState?.let { fixed ->
-                    FixedSnapshotDto(
-                        snapshotId = fixed.payload.snapshotId,
-                        sourceVersion = fixed.payload.sourceVersion,
-                        frozenAtMs = fixed.payload.frozenAtMs,
-                        sha256 = fixed.sha256,
-                        learningCalls = fixed.payload.learningCalls.size,
-                        historicalForecasts = fixed.payload.longForecasts.size,
-                        researchSnapshots = fixed.payload.researchSnapshots.size,
-                        champions = fixed.payload.champions.size
-                    )
-                } ?: FixedSnapshotDto(
-                    snapshotId = "PENDING_RESTORE",
-                    sourceVersion = "Restore v7.4.1 diagnostic learning ZIP before Fixed is sealed"
-                ),
+                fixedSnapshot = fixedSnapshotDto(fixedSnapshotState),
                 positions = snapshot.positions,
                 recentDecisions = (snapshot.recentDecisions + events).take(10)
             )
         } catch (t: Throwable) {
             if (t.message?.contains("401") == true || t.message?.contains("author", true) == true) preferences.updateAuthState(authenticated = false)
-            disconnectedDashboard(preferences.settings.first()).copy(
+            disconnectedDashboard(preferences.settings.first(), fixedSnapshotState).copy(
                 broker = BrokerStatusDto(configured = hasBrokerCredentials(), connected = false, detail = t.message)
             )
         }
@@ -4927,11 +4918,44 @@ class TradingRepository @Inject constructor(
     private fun fixedChampionKey(marketRegime: String, regime: String, strategy: String): String =
         listOf("LONG", marketRegime, regime, strategy).joinToString("|") { it.uppercase(Locale.US).replace("|", "/") }
 
-    private fun disconnectedDashboard(settings: AppSettings) = DashboardDto(
+    private fun fixedSnapshotDto(snapshot: FixedEngineSnapshot?): FixedSnapshotDto {
+        val frozenAverage = snapshot?.let { fixedSnapshotMultifyMfeAverage(it) }
+            ?: FixedFinalContract.CANONICAL_MULTIFY_MFE_AVG_PCT
+        val floor = FixedForecastQualityPolicy.MIN_TARGET_PCT
+        return snapshot?.let { fixed ->
+            FixedSnapshotDto(
+                snapshotId = fixed.payload.snapshotId,
+                sourceVersion = fixed.payload.sourceVersion,
+                frozenAtMs = fixed.payload.frozenAtMs,
+                sha256 = fixed.sha256,
+                learningCalls = fixed.payload.learningCalls.size,
+                historicalForecasts = fixed.payload.longForecasts.size,
+                researchSnapshots = fixed.payload.researchSnapshots.size,
+                champions = fixed.payload.champions.size,
+                frozenMultifyMfeAveragePct = frozenAverage,
+                targetFloorPct = floor,
+                fixedTargetPct = max(floor, frozenAverage)
+            )
+        } ?: FixedSnapshotDto(
+            snapshotId = FixedFinalContract.CONTRACT_ID,
+            sourceVersion = FixedEngineSnapshotStore.SOURCE_VERSION,
+            frozenAtMs = FixedFinalContract.REFERENCE_EXPORT_AT_MS,
+            learningCalls = FixedFinalContract.CANONICAL_LEARNING_CALLS,
+            historicalForecasts = 0,
+            researchSnapshots = 0,
+            champions = 0,
+            frozenMultifyMfeAveragePct = frozenAverage,
+            targetFloorPct = floor,
+            fixedTargetPct = max(floor, frozenAverage)
+        )
+    }
+
+    private fun disconnectedDashboard(settings: AppSettings, fixedSnapshot: FixedEngineSnapshot? = null) = DashboardDto(
         armed = settings.armEffective, halted = settings.safetyHalt, marketSession = marketSession(),
         asOf = ZonedDateTime.now(INDIA).format(DateTimeFormatter.ISO_OFFSET_DATE_TIME),
         broker = BrokerStatusDto(configured = hasBrokerCredentials(), connected = false, detail = "Refresh & Authenticate required"),
-        risk = RiskStatusDto(maxExposure = settings.holdingBudgetRupees.toDouble(), riskMode = if (settings.safetyHalt) "HALTED" else "DISARMED")
+        risk = RiskStatusDto(maxExposure = settings.holdingBudgetRupees.toDouble(), riskMode = if (settings.safetyHalt) "HALTED" else "DISARMED"),
+        fixedSnapshot = fixedSnapshotDto(fixedSnapshot)
     )
 
     private fun marketSession(): String {
