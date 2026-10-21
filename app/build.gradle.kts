@@ -30,8 +30,8 @@ android {
         applicationId = "com.multify.traderpro.vivoy73final"
         minSdk = 26
         targetSdk = 35
-        versionCode = 752
-        versionName = "7.5.2-fixed-min100-flex-wallet"
+        versionCode = 753
+        versionName = "7.5.3-fixed-1530-window"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
     }
