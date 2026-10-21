@@ -28,6 +28,7 @@ import com.multify.traderpro.data.network.ExecutionStatsDto
 import com.multify.traderpro.data.network.ForecastChampionDto
 import com.multify.traderpro.data.network.ForecastDto
 import com.multify.traderpro.data.network.ForecastLearningStatsDto
+import com.multify.traderpro.data.network.FixedSnapshotDto
 import com.multify.traderpro.data.network.GttCreateRequest
 import com.multify.traderpro.data.network.GttModifyRequest
 import com.multify.traderpro.data.network.GttOrder
@@ -59,6 +60,17 @@ import com.multify.traderpro.engine.ForecastAutoBuyPolicy
 import com.multify.traderpro.engine.ForecastQualityDecision
 import com.multify.traderpro.engine.ForecastQualityPolicy
 import com.multify.traderpro.engine.ForecastPublicationPolicy
+import com.multify.traderpro.engine.FixedAdaptiveLearningMath
+import com.multify.traderpro.engine.FixedForecastPublicationPolicy
+import com.multify.traderpro.engine.FixedForecastQualityDecision
+import com.multify.traderpro.engine.FixedForecastQualityPolicy
+import com.multify.traderpro.engine.FixedLocalStrategyEngine
+import com.multify.traderpro.engine.FixedMarketDiscoveryPolicy
+import com.multify.traderpro.engine.FixedMultifyFactorFamilies
+import com.multify.traderpro.engine.FixedMultifyFactorModel
+import com.multify.traderpro.engine.FixedMultifyReverseEngineering
+import com.multify.traderpro.engine.FixedPositiveCloseForecastPolicy
+import com.multify.traderpro.engine.FixedStrategyEvaluation
 import com.multify.traderpro.engine.GrowwDeliveryCostPolicy
 import com.multify.traderpro.engine.HoldingSmartOrderPolicy
 import com.multify.traderpro.engine.LocalStrategyEngine
@@ -126,15 +138,22 @@ class TradingRepository @Inject constructor(
     private val auditLogger: AuditLogger,
     private val marketDiscoveryStateStore: MarketDiscoveryStateStore,
     private val forecastAutoBuyOrderStore: ForecastAutoBuyOrderStore,
+    private val fixedEngineSnapshotStore: FixedEngineSnapshotStore,
+    private val fixedRecommendationStore: FixedRecommendationStore,
+    private val fixedAutoBuyOrderStore: FixedAutoBuyOrderStore,
+    private val fixedMarketDiscoveryStateStore: FixedMarketDiscoveryStateStore,
     @ApplicationContext private val appContext: Context
 ) {
     val settings: Flow<AppSettings> = preferences.settings
     val recentEvents: Flow<List<SignalEventEntity>> = dao.observeRecent(100)
 
     @Volatile private var historicalSeedEnsured = false
+    @Volatile private var fixedSnapshotAudited = false
     @Volatile private var armHotState: ArmHotState? = null
     private var lastForecastScanAtMs = 0L
+    private var lastFixedScanAtMs = 0L
     private var lastForecastOutcomeMonitorAtMs = 0L
+    private var lastFixedOutcomeMonitorAtMs = 0L
     private var brokerInventorySnapshot: BrokerInventorySnapshot? = null
     private var lastClosedSessionReconcileAtMs = 0L
     private var lastArmHotAuditAtMs = 0L
@@ -143,6 +162,7 @@ class TradingRepository @Inject constructor(
     private var lastArmHotAuditArmed: Boolean? = null
     private val closePositionMutexes = ConcurrentHashMap<Long, Mutex>()
     private val forecastAutoBuySubmissionMutex = Mutex()
+    private val fixedAutoBuySubmissionMutex = Mutex()
     private val lastTrailStateAuditAtMs = ConcurrentHashMap<Long, Long>()
     private val lastSmartOrderStatusAtMs = ConcurrentHashMap<Long, Long>()
 
@@ -159,6 +179,15 @@ class TradingRepository @Inject constructor(
         val evaluation: StrategyEvaluation,
         val quality: ForecastQualityDecision,
         val factorModel: MultifyFactorModel,
+        val score: Double,
+        val championKey: String
+    )
+
+    private data class FixedCandidate(
+        val symbol: String,
+        val evaluation: FixedStrategyEvaluation,
+        val quality: FixedForecastQualityDecision,
+        val factorModel: FixedMultifyFactorModel,
         val score: Double,
         val championKey: String
     )
@@ -184,6 +213,48 @@ class TradingRepository @Inject constructor(
         val cncBalance: Double,
         val warmedAtMs: Long
     )
+
+    internal suspend fun ensureFixedEngineSnapshot(): FixedEngineSnapshot {
+        var snapshot = fixedEngineSnapshotStore.loadOrNull()
+        if (snapshot == null) {
+            val calls = learningDao.allCalls()
+            val forecasts = learningDao.allLongForecasts()
+            val research = learningDao.allForecastResearch()
+            val champions = learningDao.allForecastChampions()
+            val emptyPreUpgradeState = calls.isEmpty() && forecasts.isEmpty() && research.isEmpty() && champions.isEmpty()
+            if (emptyPreUpgradeState) {
+                fixedEngineSnapshotStore.markAwaitingRestore()
+                error("Fixed engine is waiting for the v7.4.1 learning restore before its immutable snapshot is sealed")
+            }
+            if (fixedEngineSnapshotStore.isAwaitingRestore()) {
+                error("Fixed engine snapshot is pending restore. Restore the v7.4.1 diagnostic ZIP first.")
+            }
+            snapshot = fixedEngineSnapshotStore.captureIfAbsent(
+                learningCalls = calls,
+                longForecasts = forecasts,
+                researchSnapshots = research,
+                champions = champions
+            )
+        }
+        val frozen = requireNotNull(snapshot)
+        val today = LocalDate.now(INDIA).toString()
+        fixedRecommendationStore.seedFromAdaptiveIfEmpty(today, learningDao.longForecastsForDate(today))
+        if (!fixedSnapshotAudited) {
+            fixedSnapshotAudited = true
+            auditLogger.log("FIXED_ENGINE", "IMMUTABLE_SNAPSHOT_READY", mapOf(
+                "snapshot_id" to frozen.payload.snapshotId,
+                "source_version" to frozen.payload.sourceVersion,
+                "frozen_at_ms" to frozen.payload.frozenAtMs,
+                "sha256" to frozen.sha256,
+                "learning_calls" to frozen.payload.learningCalls.size,
+                "long_forecasts" to frozen.payload.longForecasts.size,
+                "research_snapshots" to frozen.payload.researchSnapshots.size,
+                "champions" to frozen.payload.champions.size,
+                "adaptive_updates_allowed" to false
+            ))
+        }
+        return frozen
+    }
 
     suspend fun ensureHistoricalSeed() {
         if (historicalSeedEnsured) return
@@ -577,8 +648,17 @@ class TradingRepository @Inject constructor(
                         ))
                     }
             }
+            if (preferences.settings.first().fixedAutoBuyEnabled && marketSession() == "OPEN") {
+                runCatching { autoBuyFixedRecommendations() }
+                    .onFailure {
+                        auditLogger.log("FIXED_AUTO_BUY", "ARM_ENABLE_SWEEP_ERROR", mapOf(
+                            "message" to (it.message ?: it.javaClass.simpleName)
+                        ))
+                    }
+            }
         } else {
             runCatching { reconcileForecastAutoBuyOrders(forceCancel = true, cancelReason = "ARM_DISABLED") }
+            runCatching { reconcileFixedAutoBuyOrders(forceCancel = true, cancelReason = "ARM_DISABLED") }
             armHotState = null
         }
         auditLogger.log("SETTINGS", if (enabled) "ARM_ENABLED" else "ARM_DISABLED")
@@ -618,10 +698,45 @@ class TradingRepository @Inject constructor(
         }
     }
 
+    suspend fun setFixedAutoBuy(enabled: Boolean) {
+        preferences.setFixedAutoBuy(enabled)
+        auditLogger.log(
+            "SETTINGS",
+            if (enabled) "FIXED_AUTO_BUY_ENABLED" else "FIXED_AUTO_BUY_DISABLED",
+            mapOf(
+                "requires_arm" to true,
+                "snapshot_id" to FixedEngineSnapshotStore.SNAPSHOT_ID,
+                "entry_gtt" to true,
+                "trigger_direction" to ForecastAutoBuyPolicy.TRIGGER_DIRECTION,
+                "child_order_type" to ForecastAutoBuyPolicy.CHILD_ORDER_TYPE
+            )
+        )
+        if (enabled) {
+            ensureFixedEngineSnapshot()
+            val s = preferences.settings.first()
+            if (s.armEffective && marketSession() == "OPEN") {
+                runCatching { autoBuyFixedRecommendations() }
+                    .onFailure {
+                        auditLogger.log("FIXED_AUTO_BUY", "ENABLE_SWEEP_ERROR", mapOf(
+                            "message" to (it.message ?: it.javaClass.simpleName)
+                        ))
+                    }
+            }
+        } else {
+            runCatching { reconcileFixedAutoBuyOrders(forceCancel = true, cancelReason = "AUTO_BUY_DISABLED") }
+                .onFailure {
+                    auditLogger.log("FIXED_AUTO_BUY", "DISABLE_CANCEL_ERROR", mapOf(
+                        "message" to (it.message ?: it.javaClass.simpleName)
+                    ))
+                }
+        }
+    }
+
     suspend fun resetHalt() {
         preferences.setSafetyHalt(false)
         preferences.setArm(false)
         runCatching { reconcileForecastAutoBuyOrders(forceCancel = true, cancelReason = "HALT_RESET_ARM_OFF") }
+        runCatching { reconcileFixedAutoBuyOrders(forceCancel = true, cancelReason = "HALT_RESET_ARM_OFF") }
         armHotState = null
         auditLogger.log("SAFETY", "HALT_RESET_ARM_OFF")
     }
