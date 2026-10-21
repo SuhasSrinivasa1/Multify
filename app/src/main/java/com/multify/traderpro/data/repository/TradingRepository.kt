@@ -42,6 +42,7 @@ import com.multify.traderpro.data.network.PositionDto
 import com.multify.traderpro.data.network.QuotePayload
 import com.multify.traderpro.data.network.RecentDecisionDto
 import com.multify.traderpro.data.network.ResearchDto
+import com.multify.traderpro.data.network.SmartOrderPayload
 import com.multify.traderpro.data.network.RiskStatusDto
 import com.multify.traderpro.data.network.TokenRequest
 import com.multify.traderpro.data.preferences.AppPreferences
@@ -1537,7 +1538,7 @@ class TradingRepository @Inject constructor(
         val row = learningDao.longForecastsForDate(today)
             .firstOrNull { it.symbol.equals(symbol, true) } ?: error("No active LONG recommendation for $symbol")
         val pendingAuto = forecastAutoBuyOrderStore.forSymbol(today, row.symbol)
-        if (pendingAuto != null && !isForecastAutoBuyTerminal(pendingAuto.status)) {
+        if (pendingAuto != null && !ForecastAutoBuyPolicy.isTerminal(pendingAuto.status)) {
             return "Auto-buy GTT is already pending for ${row.symbol} at fixed entry trigger ₹${fmt(pendingAuto.fixedEntryPrice)}; duplicate manual BUY blocked"
         }
         require(row.status == "ACTIVE") { "$symbol forecast is no longer active" }
