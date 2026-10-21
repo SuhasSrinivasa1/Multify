@@ -2050,8 +2050,8 @@ class TradingRepository @Inject constructor(
         require(row.status == "ACTIVE") { "$symbol forecast is no longer active" }
         require(row.executionEligible) { "$symbol is ${row.qualityTier}; only PRIMARY forecast setups can place a real forecast BUY" }
         require(row.targetPct + 1e-9 >= ForecastQualityPolicy.MIN_TARGET_PCT) { "Forecast target is below the 1% quality floor" }
-        if (managedDao.openPositions().any { it.symbol.equals(row.symbol, true) && it.side == "LONG" }) {
-            return "${row.symbol} is already app-owned; duplicate BUY blocked"
+        if (managedDao.openPosition(ENGINE_FORECAST_HOLDING, row.symbol) != null) {
+            return "${row.symbol} already has a Forecast holding; duplicate Forecast BUY blocked"
         }
         val quote = apiFactory.groww.quote(bearer(token), tradingSymbol = row.symbol).requirePayload("Quote ${row.symbol}")
         val ltp = quote.lastPrice ?: error("Groww quote has no LTP")
@@ -2129,7 +2129,7 @@ class TradingRepository @Inject constructor(
         for (row in rows) {
             val liveSettings = preferences.settings.first()
             if (!liveSettings.forecastAutoBuyEnabled || !liveSettings.armEffective || liveSettings.safetyHalt) break
-            if (managedDao.openPositionForSymbol(row.symbol) != null) continue
+            if (managedDao.openPosition(ENGINE_FORECAST_HOLDING, row.symbol) != null) continue
             if (forecastAutoBuyOrderStore.forSymbol(today, row.symbol) != null) continue
 
             val margin = runCatching {
@@ -2240,7 +2240,7 @@ class TradingRepository @Inject constructor(
                 continue
             }
 
-            val existingPosition = managedDao.openPositionForSymbol(state.symbol)
+            val existingPosition = managedDao.openPosition(ENGINE_FORECAST_HOLDING, state.symbol)
             if (existingPosition != null) {
                 cancelForecastEntryGttIfActive(token, state, "HOLDING_ALREADY_EXISTS")
                 forecastAutoBuyOrderStore.remove(state.date, state.symbol)
@@ -2463,7 +2463,7 @@ class TradingRepository @Inject constructor(
         forecast: LongForecastEntity?,
         token: String
     ) {
-        if (managedDao.openPositionForSymbol(state.symbol) != null) return
+        if (managedDao.openPosition(ENGINE_FORECAST_HOLDING, state.symbol) != null) return
 
         // The forecast entry remains the strategy's immutable entry reference. Groww's smart-order
         // response does not expose the child MARKET fill price. We record the broker's same-day debit
@@ -2575,7 +2575,7 @@ class TradingRepository @Inject constructor(
         broker: OrderPayload,
         filledQuantity: Int
     ) {
-        if (managedDao.openPositionForSymbol(state.symbol) != null) return
+        if (managedDao.openPosition(ENGINE_FORECAST_HOLDING, state.symbol) != null) return
         val actualFill = broker.averageFillPrice?.takeIf { it.isFinite() && it > 0.0 }
             ?: state.fixedEntryPrice
         val now = System.currentTimeMillis()
