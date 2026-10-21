@@ -163,7 +163,11 @@ class TraderViewModel @Inject constructor(
     fun generateForecasts() {
         viewModelScope.launch {
             remote.value = remote.value.copy(loading = true, error = null, message = null)
-            runCatching { repository.generateDailyForecasts(force = true) }
+            runCatching {
+                val rows = repository.generateDailyForecasts(force = true)
+                repository.autoBuyForecastRecommendations()
+                rows
+            }
                 .onSuccess { rows ->
                     remote.value = remote.value.copy(loading = false, message = "LONG forecast refreshed · ${rows.size} candidates", error = null)
                     refresh(silent = true)
