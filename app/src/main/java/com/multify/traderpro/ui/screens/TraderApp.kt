@@ -636,7 +636,7 @@ private fun ForecastScreen(
                     Text("Forecast engine · ACTIVE", fontWeight = FontWeight.SemiBold)
                     Text(
                         if (state.settings.armEffective && state.settings.forecastAutoBuyEnabled)
-                            "Learning and forecasting are running. ARM and Forecast Auto-buy are ON; new confirmed PRIMARY rows submit fixed-price CNC LIMIT buys automatically."
+                            "Learning and forecasting are running. ARM and Forecast Auto-buy are ON; new confirmed PRIMARY rows create fixed-entry UP-trigger GTT buys automatically."
                         else if (state.settings.armEffective)
                             "Learning and forecasting are running. ARM is ON; forecast recommendations remain manual unless Forecast Auto-buy is enabled in Settings."
                         else
@@ -895,7 +895,7 @@ private fun SettingsScreen(
                         Column(Modifier.weight(1f)) {
                             Text("Auto-buy forecast recommendations", fontWeight = FontWeight.SemiBold)
                             Text(
-                                "When enabled, every new confirmed PRIMARY forecast submits a Groww CNC DAY LIMIT BUY at the published entry price. The published target price stays fixed. ARM must also be ON.",
+                                "When enabled, every new confirmed PRIMARY forecast creates a Groww CNC GTT at the published entry price with trigger direction UP. When that fixed trigger is crossed upward, Groww sends a MARKET BUY. The published target price stays fixed. ARM must also be ON.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -914,7 +914,7 @@ private fun SettingsScreen(
                         }
                     )
                     Text(
-                        "Entry control: fixed published LIMIT price. Groww may fill at that price or better; an unfilled order remains pending until filled/cancelled for the day. Target reference is never recalculated from a later LTP or fill.",
+                        "Entry control: fixed published GTT trigger with direction UP. A stock falling through the entry does not trigger the BUY; the trigger must be crossed upward. The broker fill can differ slightly because the child order is MARKET. The published target reference is never recalculated.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
