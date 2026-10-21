@@ -76,6 +76,19 @@ interface GrowwApi {
         @Query("segment") segment: String = "CASH"
     ): ApiEnvelope<OrderPayload>
 
+    @GET("v1/order/status/reference/{referenceId}")
+    suspend fun orderStatusByReference(
+        @Header("Authorization") authorization: String,
+        @Path("referenceId") referenceId: String,
+        @Query("segment") segment: String = "CASH"
+    ): ApiEnvelope<OrderPayload>
+
+    @POST("v1/order/cancel")
+    suspend fun cancelOrder(
+        @Header("Authorization") authorization: String,
+        @Body request: OrderCancelRequest
+    ): ApiEnvelope<OrderPayload>
+
     @POST("v1/order-advance/create")
     suspend fun createGtt(
         @Header("Authorization") authorization: String,
