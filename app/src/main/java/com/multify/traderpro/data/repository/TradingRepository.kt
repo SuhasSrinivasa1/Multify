@@ -744,6 +744,7 @@ class TradingRepository @Inject constructor(
     suspend fun forceLocalDisarm() {
         preferences.setSafetyHalt(true)
         runCatching { reconcileForecastAutoBuyOrders(forceCancel = true, cancelReason = "SAFETY_HALT") }
+        runCatching { reconcileFixedAutoBuyOrders(forceCancel = true, cancelReason = "SAFETY_HALT") }
         armHotState = null
         auditLogger.log("SAFETY", "LOCAL_DISARM")
     }
@@ -814,6 +815,7 @@ class TradingRepository @Inject constructor(
             val margin = apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin")
             val cnc = (margin.equity?.cncBalanceAvailable ?: margin.clearCash).coerceAtLeast(0.0)
             armHotState = ArmHotState(token, settings, cnc, System.currentTimeMillis())
+            val fixedSnapshotState = runCatching { ensureFixedEngineSnapshot() }.getOrNull()
             ensureHistoricalSeed()
             runCatching { backfillRecentMultifyMfe(token, MFE_BACKFILL_BATCH_SIZE) }
             val learning = learningStats()
@@ -822,6 +824,7 @@ class TradingRepository @Inject constructor(
             val execution = executionStats()
             val today = LocalDate.now(INDIA).toString()
             val forecasts = learningDao.longForecastsForDate(today).map { it.toForecastDto() }
+            val fixedForecasts = fixedRecommendationStore.recommendations(today).map { it.toDto() }
             val champions = learningDao.allForecastChampions()
                 .map { ForecastChampionDto(it.marketRegime, it.regime, it.strategy, it.wins, it.losses, it.sampleCount, it.distinctDays, it.distinctSymbols, it.frozen) }
             val research = learningDao.latestResearchReport()?.let { ResearchDto(it.reportDate, it.title, it.summary) } ?: ResearchDto()
@@ -843,6 +846,16 @@ class TradingRepository @Inject constructor(
                 discoveryAge > DISCOVERY_HEALTH_STALE_MS -> "STALE"
                 else -> "HEALTHY"
             }
+            val fixedDiscoveryHealth = fixedMarketDiscoveryStateStore.loadHealth(today)
+            val fixedDiscoveryAge = fixedDiscoveryHealth?.let { nowMs - it.updatedAtMs } ?: Long.MAX_VALUE
+            val fixedDiscoveryStatus = when {
+                fixedDiscoveryHealth == null -> "WAITING"
+                fixedDiscoveryHealth.abortedForNetwork -> "DEGRADED"
+                !fixedDiscoveryHealth.baselineReady -> "WARMING"
+                fixedDiscoveryHealth.coverageRatio < FIXED_V741_MIN_DISCOVERY_COVERAGE_RATIO -> "DEGRADED"
+                fixedDiscoveryAge > DISCOVERY_HEALTH_STALE_MS -> "STALE"
+                else -> "HEALTHY"
+            }
             DashboardDto(
                 armed = settings.armEffective, halted = settings.safetyHalt, marketSession = marketSession(),
                 asOf = ZonedDateTime.now(INDIA).format(DateTimeFormatter.ISO_OFFSET_DATE_TIME),
@@ -855,7 +868,7 @@ class TradingRepository @Inject constructor(
                     riskMode = when { settings.safetyHalt -> "HALTED"; settings.armEffective -> "ARMED"; else -> "DISARMED" }
                 ),
                 summary = snapshot.summary, execution = execution, learning = learning, forecastLearning = forecastLearning,
-                forecasts = forecasts, forecastChampions = champions,
+                forecasts = forecasts, fixedForecasts = fixedForecasts, forecastChampions = champions,
                 research = research,
                 health = EngineHealthDto(
                     listener = if (listenerAge <= 60_000L) "HEALTHY" else "UNHEALTHY",
@@ -876,6 +889,33 @@ class TradingRepository @Inject constructor(
                     lastBrokerAckLatencyMs = settings.lastBrokerAckLatencyMs,
                     marketDataAgeMs = dataAge
                 ),
+                fixedHealth = EngineHealthDto(
+                    broker = "CONNECTED",
+                    marketData = if (dataAge <= 15_000L) "FRESH" else "STALE",
+                    symbolMaster = if (nseSymbols.isStale()) "STALE" else "FRESH",
+                    foregroundService = if (heartbeatAge <= 30_000L) "RUNNING" else "NOT_HEARTBEATING",
+                    discovery = fixedDiscoveryStatus,
+                    discoveryCoveragePct = (fixedDiscoveryHealth?.coverageRatio ?: 0.0) * 100.0,
+                    discoveryBaselineAgeMs = fixedDiscoveryAge,
+                    discoveryBatchErrors = fixedDiscoveryHealth?.batchErrors ?: 0,
+                    discoveryBaselineReady = fixedDiscoveryHealth?.baselineReady ?: false,
+                    marketDataAgeMs = dataAge
+                ),
+                fixedSnapshot = fixedSnapshotState?.let { fixed ->
+                    FixedSnapshotDto(
+                        snapshotId = fixed.payload.snapshotId,
+                        sourceVersion = fixed.payload.sourceVersion,
+                        frozenAtMs = fixed.payload.frozenAtMs,
+                        sha256 = fixed.sha256,
+                        learningCalls = fixed.payload.learningCalls.size,
+                        historicalForecasts = fixed.payload.longForecasts.size,
+                        researchSnapshots = fixed.payload.researchSnapshots.size,
+                        champions = fixed.payload.champions.size
+                    )
+                } ?: FixedSnapshotDto(
+                    snapshotId = "PENDING_RESTORE",
+                    sourceVersion = "Restore v7.4.1 diagnostic learning ZIP before Fixed is sealed"
+                ),
                 positions = snapshot.positions,
                 recentDecisions = (snapshot.recentDecisions + events).take(10)
             )
@@ -892,6 +932,7 @@ class TradingRepository @Inject constructor(
         parsedOverride: ParsedSignal? = null,
         notificationStartedNs: Long? = null
     ) {
+        runCatching { ensureFixedEngineSnapshot() }
         val parsed = parsedOverride ?: run {
             val event = dao.byId(eventId) ?: return
             parser.parse(event.title, event.text, event.bigText)
@@ -1121,6 +1162,7 @@ class TradingRepository @Inject constructor(
     }
 
     suspend fun generateDailyForecasts(force: Boolean = false): List<ForecastDto> {
+        runCatching { ensureFixedEngineSnapshot() }
         ensureHistoricalSeed()
         val now = ZonedDateTime.now(INDIA)
         val today = now.toLocalDate().toString()
