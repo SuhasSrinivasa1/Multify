@@ -237,8 +237,14 @@ class TradingRepository @Inject constructor(
             )
         }
         val frozen = requireNotNull(snapshot)
-        val today = LocalDate.now(INDIA).toString()
-        fixedRecommendationStore.seedFromAdaptiveIfEmpty(today, learningDao.longForecastsForDate(today))
+        // Seed only the recommendation rows that were inside the immutable installation-time snapshot.
+        // Never copy future adaptive Forecast rows into Fixed.
+        val snapshotDate = Instant.ofEpochMilli(frozen.payload.frozenAtMs)
+            .atZone(INDIA).toLocalDate().toString()
+        fixedRecommendationStore.seedFromAdaptiveIfEmpty(
+            snapshotDate,
+            frozen.payload.longForecasts.filter { it.forecastDate == snapshotDate }
+        )
         if (!fixedSnapshotAudited) {
             fixedSnapshotAudited = true
             auditLogger.log("FIXED_ENGINE", "IMMUTABLE_SNAPSHOT_READY", mapOf(
@@ -1672,7 +1678,7 @@ class TradingRepository @Inject constructor(
         master: List<String>,
         today: String
     ): MarketDiscoveryPass {
-        fixedMarketDiscoveryStateStore.seedIfEmpty(today, marketDiscoveryStateStore.load(today))
+        // Fixed owns its discovery baseline. Do not seed it from the adaptive Forecast engine.
         val distinctMaster = master.distinct()
         val persisted = fixedMarketDiscoveryStateStore.load(today)
         val previous = persisted?.previousLtps.orEmpty()
