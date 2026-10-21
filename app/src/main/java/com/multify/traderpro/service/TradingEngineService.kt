@@ -95,6 +95,9 @@ class TradingEngineService : Service() {
         if (engineJob?.isActive == true) return
         engineJob = scope.launch {
             auditLogger.log("RUNTIME", "FOREGROUND_ENGINE_STARTED")
+            // Capture the immutable Fixed reference state before v7.5 performs any adaptive writes.
+            runCatching { repository.ensureFixedEngineSnapshot() }
+                .onFailure { auditLogger.log("RUNTIME", "FIXED_SNAPSHOT_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
             runCatching { repository.ensureHistoricalSeed() }
             var lastHeartbeatAtMs = 0L
             while (isActive) {
@@ -110,6 +113,8 @@ class TradingEngineService : Service() {
 
                     runCatching { repository.reconcileForecastAutoBuyOrders() }
                         .onFailure { auditLogger.log("RUNTIME", "FORECAST_AUTO_BUY_RECONCILE_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
+                    runCatching { repository.reconcileFixedAutoBuyOrders() }
+                        .onFailure { auditLogger.log("RUNTIME", "FIXED_AUTO_BUY_RECONCILE_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
 
                     val managedCount = runCatching { repository.monitorManagedPositions() }
                         .onFailure {
@@ -125,6 +130,13 @@ class TradingEngineService : Service() {
                             }
                         }.getOrDefault(0)
 
+                    val fixedOutcomeCount = runCatching { repository.monitorFixedOutcomes() }
+                        .onFailure {
+                            if (it !is CancellationException) {
+                                auditLogger.log("RUNTIME", "FIXED_OUTCOME_MONITOR_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName)))
+                            }
+                        }.getOrDefault(0)
+
                     val now = ZonedDateTime.now(INDIA)
                     if (now.dayOfWeek.value < 6 &&
                         now.toLocalTime() >= LocalTime.of(9, 15) &&
@@ -132,9 +144,13 @@ class TradingEngineService : Service() {
                     ) {
                         runCatching { repository.generateDailyForecasts(false) }
                             .onFailure { auditLogger.log("RUNTIME", "FORECAST_SCAN_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
-                        // v7.4.1: arm every newly confirmed PRIMARY forecast through fixed-entry UP-trigger GTT auto-buy when enabled.
+                        runCatching { repository.generateFixedForecasts(false) }
+                            .onFailure { auditLogger.log("RUNTIME", "FIXED_SCAN_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
+                        // Adaptive Forecast and immutable Fixed execution are independent under the same ARM master switch.
                         runCatching { repository.autoBuyForecastRecommendations() }
                             .onFailure { auditLogger.log("RUNTIME", "FORECAST_AUTO_BUY_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
+                        runCatching { repository.autoBuyFixedRecommendations() }
+                            .onFailure { auditLogger.log("RUNTIME", "FIXED_AUTO_BUY_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
                         runCatching { repository.pendingLongForecastNotifications() }
                             .getOrDefault(emptyList())
                             .filter { it.qualityTier == "PRIMARY" && it.executionEligible }
@@ -150,7 +166,7 @@ class TradingEngineService : Service() {
                             .onFailure { auditLogger.log("RUNTIME", "AFTER_HOURS_RESEARCH_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
                     }
 
-                    updateForegroundNotification(managedCount, forecastOutcomeCount)
+                    updateForegroundNotification(managedCount, forecastOutcomeCount, fixedOutcomeCount)
                     val regularSession = now.dayOfWeek.value < 6 &&
                         now.toLocalTime() >= LocalTime.of(9, 15) &&
                         now.toLocalTime() < LocalTime.of(15, 30)
@@ -158,7 +174,7 @@ class TradingEngineService : Service() {
                         when {
                             !regularSession -> CLOSED_SESSION_LOOP_INTERVAL_MS
                             managedCount > 0 -> POSITION_LOOP_INTERVAL_MS
-                            forecastOutcomeCount > 0 -> FORECAST_LOOP_INTERVAL_MS
+                            forecastOutcomeCount > 0 || fixedOutcomeCount > 0 -> FORECAST_LOOP_INTERVAL_MS
                             else -> IDLE_LOOP_INTERVAL_MS
                         }
                     )
@@ -197,9 +213,9 @@ class TradingEngineService : Service() {
         manager.notify((f.symbol.hashCode() xor f.generatedAtMs.toInt()).and(Int.MAX_VALUE), notification)
     }
 
-    private fun updateForegroundNotification(managedCount: Int, forecastOutcomeCount: Int) {
+    private fun updateForegroundNotification(managedCount: Int, forecastOutcomeCount: Int, fixedOutcomeCount: Int) {
         val text = "Production engine active · " + managedCount + " holdings · " +
-            forecastOutcomeCount + " active forecast outcomes"
+            forecastOutcomeCount + " adaptive + " + fixedOutcomeCount + " fixed outcomes"
         getSystemService(NotificationManager::class.java)
             .notify(FOREGROUND_NOTIFICATION_ID, engineNotification(text))
     }
