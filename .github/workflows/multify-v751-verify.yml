@@ -1,4 +1,4 @@
-name: Multify Trader Pro v7.5.1 Seeded Fixed Engine Verification
+name: Multify Trader Pro v7.5.1 Embedded Fixed Intelligence Verification
 
 on:
   workflow_dispatch:
@@ -47,13 +47,14 @@ jobs:
       - name: Android unit tests
         run: gradle --no-daemon testDebugUnitTest
 
-      - name: Verify seeded Fixed architecture
+      - name: Verify embedded Fixed architecture
         shell: bash
         run: |
           set -euo pipefail
-          grep -R 'MULTIFY-DECISION-INTELLIGENCE-2026-10-21' app/src/main/java
-          test -s app/src/main/assets/fixed_decision_seed_v751.b64
-          grep -R 'bootstrapBundledDecisionIntelligenceIfEmpty' app/src/main/java
+          test -s app/src/main/assets/embedded_historic_intelligence_v2.json.gz
+          grep -R 'class EmbeddedHistoricalIntelligenceStore' app/src/main/java
+          grep -R 'ensureEmbeddedHistoricalIntelligence' app/src/main/java
+          grep -R 'EMBEDDED_HISTORIC_INTELLIGENCE_READY' app/src/main/java
           grep -R 'FIXED-V741-2026-10-21' app/src/main/java
           grep -R 'Auto-buy Fixed recommendations' app/src/main/java/com/multify/traderpro/ui/screens/TraderApp.kt
           grep -R 'Fixed("Fixed"' app/src/main/java/com/multify/traderpro/ui/screens/TraderApp.kt
@@ -70,9 +71,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v7.5.1-fixed-engine-seeded-debug.apk
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/Multify-TraderPro-v7.5.1-fixed-engine-seeded-debug.apk > dist/signature.txt
-          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/Multify-TraderPro-v7.5.1-fixed-engine-seeded-debug.apk | grep -E "^(package:|application-label:)" > dist/package-verification.txt
+          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v7.5.1-fixed-embedded-history-debug.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/Multify-TraderPro-v7.5.1-fixed-embedded-history-debug.apk > dist/signature.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/Multify-TraderPro-v7.5.1-fixed-embedded-history-debug.apk | grep -E "^(package:|application-label:)" > dist/package-verification.txt
           (cd dist && sha256sum *.apk > SHA256SUMS.txt)
           git archive --format=zip --output=dist/Multify-TraderPro-v7.5.1-source.zip HEAD
 
