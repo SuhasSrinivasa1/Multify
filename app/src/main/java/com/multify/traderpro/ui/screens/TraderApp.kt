@@ -78,6 +78,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.multify.traderpro.BuildConfig
 import com.multify.traderpro.data.network.DashboardDto
 import com.multify.traderpro.data.network.ExecutionAverageDto
+import com.multify.traderpro.engine.FixedFinalContract
+import com.multify.traderpro.engine.FixedForecastQualityPolicy
 import com.multify.traderpro.data.network.ForecastDto
 import com.multify.traderpro.data.network.PositionDto
 import com.multify.traderpro.engine.MultifyReverseEngineering
@@ -749,7 +751,21 @@ private fun FixedScreen(
 ) {
     val dashboard = state.dashboard
     val rows = dashboard?.fixedForecasts.orEmpty().sortedBy { it.rank }
-    val snapshot = dashboard?.fixedSnapshot ?: com.multify.traderpro.data.network.FixedSnapshotDto()
+    val snapshot = dashboard?.fixedSnapshot ?: com.multify.traderpro.data.network.FixedSnapshotDto(
+        snapshotId = FixedFinalContract.CONTRACT_ID,
+        sourceVersion = "v7.4.1 final reference",
+        frozenAtMs = FixedFinalContract.REFERENCE_EXPORT_AT_MS,
+        learningCalls = FixedFinalContract.CANONICAL_LEARNING_CALLS,
+        historicalForecasts = 0,
+        researchSnapshots = 0,
+        champions = 0,
+        frozenMultifyMfeAveragePct = FixedFinalContract.CANONICAL_MULTIFY_MFE_AVG_PCT,
+        targetFloorPct = FixedForecastQualityPolicy.MIN_TARGET_PCT,
+        fixedTargetPct = maxOf(
+            FixedForecastQualityPolicy.MIN_TARGET_PCT,
+            FixedFinalContract.CANONICAL_MULTIFY_MFE_AVG_PCT
+        )
+    )
     val health = dashboard?.fixedHealth ?: com.multify.traderpro.data.network.EngineHealthDto()
 
     LazyColumn(
@@ -760,7 +776,7 @@ private fun FixedScreen(
         item {
             SectionTitle(
                 "Fixed LONG recommendations",
-                "Frozen v7.4.1 recommendation intelligence. Live market data changes; the model, reference cases, parameters and installation-time learning snapshot do not."
+                "Frozen v7.4.1 recommendation intelligence. Live market data changes; the model, reference cases, parameters and embedded calibration snapshot do not."
             )
         }
         item {
@@ -776,10 +792,15 @@ private fun FixedScreen(
                         "Snapshot SHA",
                         snapshot.sha256.takeIf { it.isNotBlank() }?.take(12)?.plus("…") ?: "Pending"
                     )
-                    KeyValueRow("Frozen learning calls", snapshot.learningCalls.toString())
-                    KeyValueRow("Frozen historical forecasts", snapshot.historicalForecasts.toString())
-                    KeyValueRow("Frozen research rows", snapshot.researchSnapshots.toString())
-                    KeyValueRow("Frozen champions", snapshot.champions.toString())
+                    KeyValueRow("Frozen Multify calibration calls", snapshot.learningCalls.toString())
+                    KeyValueRow("Prior Forecast feedback rows", snapshot.historicalForecasts.toString())
+                    KeyValueRow("Prior research-feedback rows", snapshot.researchSnapshots.toString())
+                    KeyValueRow("Prior champion bonuses", snapshot.champions.toString())
+                    Text(
+                        "The 0 feedback rows are intentional, not missing phone history. The accepted v7.4.1 reference session did not use prior Forecast/champion/research feedback; keeping them empty prevents post-hoc learning.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                     Text(
                         if (state.settings.armEffective && state.settings.fixedAutoBuyEnabled)
                             "ARM and Fixed Auto-buy are ON. New Fixed PRIMARY recommendations create independent GTT UP entry orders."
@@ -792,6 +813,15 @@ private fun FixedScreen(
                     )
                 }
             }
+        }
+        item {
+            MetricCard(
+                label = "Fixed Avg Upside · FROZEN",
+                value = String.format(Locale.US, "%.2f%%", snapshot.fixedTargetPct),
+                supporting = "hard floor ≥${String.format(Locale.US, "%.2f%%", snapshot.targetFloorPct)} · frozen Multify MFE benchmark ${String.format(Locale.US, "%.2f%%", snapshot.frozenMultifyMfeAveragePct)} · this value does not learn or drift",
+                modifier = Modifier.fillMaxWidth(),
+                accent = MaterialTheme.colorScheme.primary
+            )
         }
         item {
             val ageText = if (health.discoveryBaselineAgeMs == Long.MAX_VALUE) "—"
@@ -835,7 +865,7 @@ private fun FixedScreen(
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
                     Text("What is frozen", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                     Text(
-                        "The v7.4.1 strategy implementation, 40-factor model, factor-family rules, quality gates, publication rules, Multify reference cases, target-learning reference state, research evidence and champion state are frozen. Fixed outcome tracking is diagnostic only and never feeds future Fixed ranking.",
+                        "The complete v7.4.1 selection pipeline used by the accepted reference session is frozen: strategy implementation, 40-factor model, factor-family rules, quality gates, publication rules, Multify reference cases and target calibration. Prior Forecast/research/champion feedback is intentionally empty in the final reference state. Fixed outcome tracking is diagnostic only and never feeds future Fixed ranking.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
