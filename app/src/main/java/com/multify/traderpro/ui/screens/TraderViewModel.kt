@@ -139,6 +139,24 @@ class TraderViewModel @Inject constructor(
         }
     }
 
+    fun setFixedAutoBuy(enabled: Boolean) {
+        viewModelScope.launch {
+            remote.value = remote.value.copy(loading = true, error = null, message = null)
+            runCatching { repository.setFixedAutoBuy(enabled) }
+                .onSuccess {
+                    remote.value = remote.value.copy(
+                        loading = false,
+                        message = if (enabled)
+                            "Fixed auto-buy enabled · immutable Fixed recommendations use GTT UP entry triggers · ARM required"
+                        else
+                            "Fixed auto-buy disabled · active untriggered Fixed entry GTTs are being cancelled"
+                    )
+                    refresh(silent = true)
+                }
+                .onFailure { remote.value = remote.value.copy(loading = false, error = it.userMessage()) }
+        }
+    }
+
     fun setHoldingBudget(value: Long) {
         viewModelScope.launch {
             runCatching { repository.setHoldingBudget(value) }
@@ -170,6 +188,36 @@ class TraderViewModel @Inject constructor(
             }
                 .onSuccess { rows ->
                     remote.value = remote.value.copy(loading = false, message = "LONG forecast refreshed · ${rows.size} candidates", error = null)
+                    refresh(silent = true)
+                }
+                .onFailure { remote.value = remote.value.copy(loading = false, error = it.userMessage()) }
+        }
+    }
+
+    fun generateFixed() {
+        viewModelScope.launch {
+            remote.value = remote.value.copy(loading = true, error = null, message = null)
+            runCatching {
+                val rows = repository.generateFixedForecasts(force = true)
+                repository.autoBuyFixedRecommendations()
+                rows
+            }.onSuccess { rows ->
+                remote.value = remote.value.copy(
+                    loading = false,
+                    message = "Fixed engine refreshed · ${rows.size} recommendations · frozen v7.4.1 logic",
+                    error = null
+                )
+                refresh(silent = true)
+            }.onFailure { remote.value = remote.value.copy(loading = false, error = it.userMessage()) }
+        }
+    }
+
+    fun executeFixed(symbol: String) {
+        viewModelScope.launch {
+            remote.value = remote.value.copy(loading = true, error = null, message = null)
+            runCatching { repository.executeFixed(symbol) }
+                .onSuccess { result ->
+                    remote.value = remote.value.copy(loading = false, message = result, error = null)
                     refresh(silent = true)
                 }
                 .onFailure { remote.value = remote.value.copy(loading = false, error = it.userMessage()) }
