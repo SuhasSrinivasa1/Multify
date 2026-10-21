@@ -95,6 +95,7 @@ private enum class Destination(val label: String, val subtitle: String, val icon
     Execution("Execution", "ARM status and app-owned CNC holdings", Icons.Default.Dashboard),
     Averages("Averages", "30-day LONG averages", Icons.Default.Analytics),
     Forecast("Forecast", "Confirmed PRIMARY LONG recommendations · ≥1% target", Icons.Default.Science),
+    Fixed("Fixed", "Frozen v7.4.1 recommendation engine", Icons.Default.Shield),
     Settings("Settings", "Broker, ARM, holding budget and device controls", Icons.Default.Settings)
 }
 
@@ -176,6 +177,11 @@ fun TraderApp(viewModel: TraderViewModel = hiltViewModel()) {
                     onResearch = viewModel::runAfterHoursResearch,
                     onBuy = viewModel::executeForecast
                 )
+                Destination.Fixed -> FixedScreen(
+                    state = state,
+                    onGenerate = viewModel::generateFixed,
+                    onBuy = viewModel::executeFixed
+                )
                 Destination.Settings -> SettingsScreen(
                     state = state,
                     onSave = viewModel::saveBrokerSettings,
@@ -185,6 +191,7 @@ fun TraderApp(viewModel: TraderViewModel = hiltViewModel()) {
                     },
                     onBudgetChanged = viewModel::setHoldingBudget,
                     onForecastAutoBuyChanged = viewModel::setForecastAutoBuy,
+                    onFixedAutoBuyChanged = viewModel::setFixedAutoBuy,
                     onSubmitManualSignal = viewModel::submitManualSignal,
                     onResetHalt = { showResetConfirm = true },
                     onExportLogs = { exportLauncher.launch(defaultLogFileName()) },
@@ -735,6 +742,110 @@ private fun ForecastScreen(
 }
 
 @Composable
+private fun FixedScreen(
+    state: TraderUiState,
+    onGenerate: () -> Unit,
+    onBuy: (String) -> Unit
+) {
+    val dashboard = state.dashboard
+    val rows = dashboard?.fixedForecasts.orEmpty().sortedBy { it.rank }
+    val snapshot = dashboard?.fixedSnapshot ?: com.multify.traderpro.data.network.FixedSnapshotDto()
+    val health = dashboard?.fixedHealth ?: com.multify.traderpro.data.network.EngineHealthDto()
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp, 14.dp, 16.dp, 32.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        item {
+            SectionTitle(
+                "Fixed LONG recommendations",
+                "Frozen v7.4.1 recommendation intelligence. Live market data changes; the model, reference cases, parameters and installation-time learning snapshot do not."
+            )
+        }
+        item {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha=.18f)),
+                shape = RoundedCornerShape(20.dp)
+            ) {
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                    Text("Fixed engine · IMMUTABLE", fontWeight = FontWeight.SemiBold)
+                    KeyValueRow("Snapshot", snapshot.snapshotId.ifBlank { "Capturing…" })
+                    KeyValueRow("Source", snapshot.sourceVersion.ifBlank { "v7.4.1" })
+                    KeyValueRow(
+                        "Snapshot SHA",
+                        snapshot.sha256.takeIf { it.isNotBlank() }?.take(12)?.plus("…") ?: "Pending"
+                    )
+                    KeyValueRow("Frozen learning calls", snapshot.learningCalls.toString())
+                    KeyValueRow("Frozen historical forecasts", snapshot.historicalForecasts.toString())
+                    KeyValueRow("Frozen research rows", snapshot.researchSnapshots.toString())
+                    KeyValueRow("Frozen champions", snapshot.champions.toString())
+                    Text(
+                        if (state.settings.armEffective && state.settings.fixedAutoBuyEnabled)
+                            "ARM and Fixed Auto-buy are ON. New Fixed PRIMARY recommendations create independent GTT UP entry orders."
+                        else if (state.settings.armEffective)
+                            "ARM is ON. Fixed recommendations remain manual unless Fixed Auto-buy is enabled in Settings."
+                        else
+                            "Fixed scanning continues while ARM is OFF. No Fixed broker order is sent.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+        item {
+            val ageText = if (health.discoveryBaselineAgeMs == Long.MAX_VALUE) "—"
+                else if (health.discoveryBaselineAgeMs < 60_000L) "<1 min"
+                else "${health.discoveryBaselineAgeMs / 60_000L} min"
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = when (health.discovery) {
+                        "HEALTHY" -> MaterialTheme.colorScheme.primaryContainer.copy(alpha=.18f)
+                        "WARMING", "WAITING" -> MaterialTheme.colorScheme.secondaryContainer.copy(alpha=.22f)
+                        else -> MaterialTheme.colorScheme.errorContainer.copy(alpha=.22f)
+                    }
+                ),
+                shape = RoundedCornerShape(20.dp)
+            ) {
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                    Text("Fixed discovery · ${health.discovery}", fontWeight = FontWeight.SemiBold)
+                    KeyValueRow("NSE coverage", String.format(Locale.US, "%.1f%%", health.discoveryCoveragePct))
+                    KeyValueRow("Baseline", if (health.discoveryBaselineReady) "Ready" else "Warming")
+                    KeyValueRow("Baseline age", ageText)
+                    KeyValueRow("Failed batches", health.discoveryBatchErrors.toString())
+                }
+            }
+        }
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                Button(onClick = onGenerate, modifier = Modifier.weight(1f)) { Text("Refresh Fixed") }
+                OutlinedButton(
+                    onClick = {},
+                    enabled = false,
+                    modifier = Modifier.weight(1f)
+                ) { Text("Learning locked") }
+            }
+        }
+        item { ForecastTable(rows, onBuy, state.settings.armEffective) }
+        item {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                shape = RoundedCornerShape(20.dp)
+            ) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                    Text("What is frozen", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "The v7.4.1 strategy implementation, 40-factor model, factor-family rules, quality gates, publication rules, Multify reference cases, target-learning reference state, research evidence and champion state are frozen. Fixed outcome tracking is diagnostic only and never feeds future Fixed ranking.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun ForecastTable(rows: List<ForecastDto>, onBuy: (String) -> Unit, armed: Boolean) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -815,6 +926,7 @@ private fun SettingsScreen(
     onArmRequested: () -> Unit,
     onBudgetChanged: (Long) -> Unit,
     onForecastAutoBuyChanged: (Boolean) -> Unit,
+    onFixedAutoBuyChanged: (Boolean) -> Unit,
     onSubmitManualSignal: (String, String, String) -> Unit,
     onResetHalt: () -> Unit,
     onExportLogs: () -> Unit,
@@ -915,6 +1027,34 @@ private fun SettingsScreen(
                     )
                     Text(
                         "Entry control: fixed published GTT trigger with direction UP. A stock falling through the entry does not trigger the BUY; the trigger must be crossed upward. The broker fill can differ slightly because the child order is MARKET. The published target reference is never recalculated.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    HorizontalDivider()
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Auto-buy Fixed recommendations", fontWeight = FontWeight.SemiBold)
+                            Text(
+                                "When enabled, every new PRIMARY recommendation from the immutable Fixed engine creates its own Groww CNC GTT at the Fixed entry price with trigger direction UP. The Fixed target stays unchanged. ARM must also be ON.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = state.settings.fixedAutoBuyEnabled,
+                            onCheckedChange = onFixedAutoBuyChanged
+                        )
+                    }
+                    KeyValueRow(
+                        "Fixed auto-buy",
+                        when {
+                            state.settings.fixedAutoBuyEnabled && armed -> "ACTIVE · ARM ON"
+                            state.settings.fixedAutoBuyEnabled -> "Enabled · waiting for ARM"
+                            else -> "OFF · manual BUY only"
+                        }
+                    )
+                    Text(
+                        "Forecast and Fixed are independent. The same symbol may be recommended and owned by both engines. Fixed uses the frozen v7.4.1 snapshot and never learns from future Forecast or Multify outcomes.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
