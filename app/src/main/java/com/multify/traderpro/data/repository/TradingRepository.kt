@@ -1101,10 +1101,8 @@ class TradingRepository @Inject constructor(
             captureForecastResearchScan(today, nowMs, marketRegime, targetPct, ranked.take(RESEARCH_CAPTURE_TOP_N))
         }
 
-        // v7: five is a hard maximum, never a time-based quota.
-        // Every PRIMARY candidate that meets production criteria can be published immediately,
-        // ranked best-first, until the day's five recommendation slots are full.
-        val slots = (MAX_DAILY_RECOMMENDATIONS - existing.size).coerceAtLeast(0)
+        // v7.3.3: there is no daily numeric recommendation cap.
+        // Every newly confirmed PRIMARY candidate can publish; same-day duplicate symbols remain blocked.
         val unseen = ranked.filter { it.symbol !in have }
         fun priorPrimaryHits(symbol: String): Int = priorTodayResearch
             .asSequence()
@@ -1129,7 +1127,7 @@ class TradingRepository @Inject constructor(
             )
         }
 
-        publishable.take(slots).forEachIndexed { index, item ->
+        publishable.forEachIndexed { index, item ->
             val price = item.evaluation.features.ltp
             val quality = item.quality
             learningDao.upsertLongForecast(
@@ -1168,8 +1166,8 @@ class TradingRepository @Inject constructor(
             "secondary" to (tierCounts["SECONDARY"] ?: 0),
             "research" to (tierCounts["RESEARCH"] ?: 0),
             "published_count" to all.size,
-            "max_daily_recommendations" to MAX_DAILY_RECOMMENDATIONS,
-            "available_slots" to slots,
+            "daily_recommendation_cap" to "NONE",
+            "newly_publishable_count" to publishable.size,
             "target_pct" to targetPct,
             "target_floor_pct" to ForecastQualityPolicy.MIN_TARGET_PCT,
             "multify_mfe_avg_pct" to learned.longAveragePct,
@@ -3310,7 +3308,6 @@ class TradingRepository @Inject constructor(
         private const val MIN_BUDGET = 10_000L
         private const val MAX_BUDGET = 200_000L
         private const val MANUAL_SOURCE = "com.multify.traderpro.manual"
-        private const val MAX_DAILY_RECOMMENDATIONS = 5
         private const val FORECAST_SCAN_INTERVAL_MS = 5L * 60L * 1000L
         private const val FORECAST_OUTCOME_INTERVAL_MS = 60_000L
         private const val FORECAST_OUTCOME_BATCH_ATTEMPTS = 2
