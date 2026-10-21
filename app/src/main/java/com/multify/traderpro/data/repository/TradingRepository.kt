@@ -16,6 +16,7 @@ import com.multify.traderpro.data.local.ManagedPositionEntity
 import com.multify.traderpro.data.local.ManagedTradeDao
 import com.multify.traderpro.data.local.ManagedTradeEntity
 import com.multify.traderpro.data.local.PriceObservationEntity
+import com.multify.traderpro.data.local.ResearchReportEntity
 import com.multify.traderpro.data.local.SignalEventDao
 import com.multify.traderpro.data.local.SignalEventEntity
 import com.multify.traderpro.data.logging.AuditLogger
@@ -139,6 +140,7 @@ class TradingRepository @Inject constructor(
     private val marketDiscoveryStateStore: MarketDiscoveryStateStore,
     private val forecastAutoBuyOrderStore: ForecastAutoBuyOrderStore,
     private val fixedEngineSnapshotStore: FixedEngineSnapshotStore,
+    private val embeddedHistoricalIntelligenceStore: EmbeddedHistoricalIntelligenceStore,
     private val fixedRecommendationStore: FixedRecommendationStore,
     private val fixedAutoBuyOrderStore: FixedAutoBuyOrderStore,
     private val fixedMarketDiscoveryStateStore: FixedMarketDiscoveryStateStore,
@@ -148,6 +150,7 @@ class TradingRepository @Inject constructor(
     val recentEvents: Flow<List<SignalEventEntity>> = dao.observeRecent(100)
 
     @Volatile private var historicalSeedEnsured = false
+    @Volatile private var embeddedHistoricalIntelligenceEnsured = false
     @Volatile private var fixedSnapshotAudited = false
     @Volatile private var armHotState: ArmHotState? = null
     private var lastForecastScanAtMs = 0L
@@ -163,6 +166,7 @@ class TradingRepository @Inject constructor(
     private val closePositionMutexes = ConcurrentHashMap<Long, Mutex>()
     private val forecastAutoBuySubmissionMutex = Mutex()
     private val fixedAutoBuySubmissionMutex = Mutex()
+    private val embeddedHistoricalSeedMutex = Mutex()
     private val lastTrailStateAuditAtMs = ConcurrentHashMap<Long, Long>()
     private val lastSmartOrderStatusAtMs = ConcurrentHashMap<Long, Long>()
 
@@ -214,30 +218,151 @@ class TradingRepository @Inject constructor(
         val warmedAtMs: Long
     )
 
+    private suspend fun ensureEmbeddedHistoricalIntelligence(): EmbeddedHistoricalIntelligencePayload {
+        val payload = embeddedHistoricalIntelligenceStore.load()
+        if (embeddedHistoricalIntelligenceEnsured) return payload
+
+        embeddedHistoricalSeedMutex.withLock {
+            if (!embeddedHistoricalIntelligenceEnsured) {
+                var insertedCalls = 0
+                var enrichedCalls = 0
+                var insertedForecasts = 0
+                var insertedResearch = 0
+                var insertedChampions = 0
+                var insertedReports = 0
+
+                payload.fixedSnapshot.learningCalls.forEach { seed ->
+                    val symbol = seed.symbol.uppercase(Locale.US)
+                    val existing = learningDao.callForDateSymbolAction(seed.callDate, symbol, "BUY")
+                    if (existing == null) {
+                        learningDao.insertCall(
+                            seed.copy(
+                                id = 0,
+                                symbol = symbol,
+                                action = "BUY",
+                                updatedAtMs = payload.latestExportAtMs
+                            )
+                        )
+                        insertedCalls++
+                    } else {
+                        val merged = existing.copy(
+                            targetPrice = existing.targetPrice ?: seed.targetPrice,
+                            targetPct = existing.targetPct ?: seed.targetPct,
+                            multifyExitPrice = existing.multifyExitPrice ?: seed.multifyExitPrice,
+                            longRealizedPct = existing.longRealizedPct ?: seed.longRealizedPct,
+                            multifyMaxPrice = existing.multifyMaxPrice ?: seed.multifyMaxPrice,
+                            multifyMfePct = existing.multifyMfePct ?: seed.multifyMfePct
+                        )
+                        if (merged != existing) {
+                            learningDao.updateCall(merged)
+                            enrichedCalls++
+                        }
+                    }
+                }
+
+                val existingForecastKeys = learningDao.allLongForecasts()
+                    .map { it.forecastDate + "|" + it.symbol.uppercase(Locale.US) }
+                    .toHashSet()
+                payload.fixedSnapshot.longForecasts.forEach { seed ->
+                    val symbol = seed.symbol.uppercase(Locale.US)
+                    val key = seed.forecastDate + "|" + symbol
+                    if (key !in existingForecastKeys) {
+                        learningDao.upsertLongForecast(
+                            seed.copy(id = 0, symbol = symbol, notified = true)
+                        )
+                        existingForecastKeys += key
+                        insertedForecasts++
+                    }
+                }
+
+                val existingResearchKeys = learningDao.allForecastResearch()
+                    .map {
+                        it.researchDate + "|" + it.scanAtMs + "|" +
+                            it.symbol.uppercase(Locale.US) + "|" + it.rank
+                    }
+                    .toHashSet()
+                payload.fixedSnapshot.researchSnapshots.forEach { seed ->
+                    val symbol = seed.symbol.uppercase(Locale.US)
+                    val key = seed.researchDate + "|" + seed.scanAtMs + "|" + symbol + "|" + seed.rank
+                    if (key !in existingResearchKeys) {
+                        learningDao.insertForecastResearch(seed.copy(id = 0, symbol = symbol))
+                        existingResearchKeys += key
+                        insertedResearch++
+                    }
+                }
+
+                val existingChampionKeys = learningDao.allForecastChampions().map { it.key }.toHashSet()
+                payload.fixedSnapshot.champions.forEach { seed ->
+                    if (seed.key.isNotBlank() && seed.key !in existingChampionKeys) {
+                        learningDao.upsertForecastChampion(seed)
+                        existingChampionKeys += seed.key
+                        insertedChampions++
+                    }
+                }
+
+                val existingReportDates = learningDao.allResearchReports().map { it.reportDate }.toHashSet()
+                payload.reports.forEach { seed ->
+                    if (seed.reportDate.isNotBlank() && seed.reportDate !in existingReportDates) {
+                        learningDao.insertResearchReport(seed.copy(id = 0))
+                        existingReportDates += seed.reportDate
+                        insertedReports++
+                    }
+                }
+
+                embeddedHistoricalIntelligenceEnsured = true
+                auditLogger.log("MIGRATION", "EMBEDDED_HISTORIC_INTELLIGENCE_READY", mapOf(
+                    "schema_version" to payload.schemaVersion,
+                    "source_exports" to payload.sourceExports,
+                    "latest_export_at_ms" to payload.latestExportAtMs,
+                    "embedded_learning_calls" to payload.fixedSnapshot.learningCalls.size,
+                    "embedded_forecasts" to payload.fixedSnapshot.longForecasts.size,
+                    "embedded_research_snapshots" to payload.fixedSnapshot.researchSnapshots.size,
+                    "embedded_champions" to payload.fixedSnapshot.champions.size,
+                    "embedded_reports" to payload.reports.size,
+                    "inserted_learning_calls" to insertedCalls,
+                    "enriched_learning_calls" to enrichedCalls,
+                    "inserted_forecasts" to insertedForecasts,
+                    "inserted_research_snapshots" to insertedResearch,
+                    "inserted_champions" to insertedChampions,
+                    "inserted_reports" to insertedReports
+                ))
+            }
+        }
+        return payload
+    }
+
     internal suspend fun ensureFixedEngineSnapshot(): FixedEngineSnapshot {
         var snapshot = fixedEngineSnapshotStore.loadOrNull()
         if (snapshot == null) {
-            val calls = learningDao.allCalls()
-            val forecasts = learningDao.allLongForecasts()
-            val research = learningDao.allForecastResearch()
-            val champions = learningDao.allForecastChampions()
-            val emptyPreUpgradeState = calls.isEmpty() && forecasts.isEmpty() && research.isEmpty() && champions.isEmpty()
-            if (emptyPreUpgradeState) {
-                fixedEngineSnapshotStore.markAwaitingRestore()
-                error("Fixed engine is waiting for the v7.4.1 learning restore before its immutable snapshot is sealed")
+            val beforeCalls = learningDao.allCalls()
+            val beforeForecasts = learningDao.allLongForecasts()
+            val beforeResearch = learningDao.allForecastResearch()
+            val beforeChampions = learningDao.allForecastChampions()
+            val hadDeviceLearningState =
+                beforeCalls.isNotEmpty() || beforeForecasts.isNotEmpty() ||
+                    beforeResearch.isNotEmpty() || beforeChampions.isNotEmpty()
+
+            val embedded = ensureEmbeddedHistoricalIntelligence()
+            fixedEngineSnapshotStore.clearAwaitingRestore()
+
+            snapshot = if (!hadDeviceLearningState) {
+                // Fresh install: use the deterministic build-time snapshot assembled from every
+                // previously uploaded diagnostic export. This makes Fixed self-contained.
+                fixedEngineSnapshotStore.restoreExactIfAbsent(embedded.fixedSnapshot)
+            } else {
+                // Upgrade with an existing database: preserve the richer on-device state, while
+                // the embedded history above fills only missing historical evidence.
+                fixedEngineSnapshotStore.captureIfAbsent(
+                    learningCalls = learningDao.allCalls(),
+                    longForecasts = learningDao.allLongForecasts(),
+                    researchSnapshots = learningDao.allForecastResearch(),
+                    champions = learningDao.allForecastChampions()
+                )
             }
-            if (fixedEngineSnapshotStore.isAwaitingRestore()) {
-                error("Fixed engine snapshot is pending restore. Restore the v7.4.1 diagnostic ZIP first.")
-            }
-            snapshot = fixedEngineSnapshotStore.captureIfAbsent(
-                learningCalls = calls,
-                longForecasts = forecasts,
-                researchSnapshots = research,
-                champions = champions
-            )
         }
+
         val frozen = requireNotNull(snapshot)
-        // Seed only the recommendation rows that were inside the immutable installation-time snapshot.
+        // Seed only recommendation rows stored inside the immutable Fixed snapshot.
         // Never copy future adaptive Forecast rows into Fixed.
         val snapshotDate = Instant.ofEpochMilli(frozen.payload.frozenAtMs)
             .atZone(INDIA).toLocalDate().toString()
@@ -263,6 +388,7 @@ class TradingRepository @Inject constructor(
     }
 
     suspend fun ensureHistoricalSeed() {
+        ensureEmbeddedHistoricalIntelligence()
         if (historicalSeedEnsured) return
         val now = System.currentTimeMillis()
         var inserted = 0
