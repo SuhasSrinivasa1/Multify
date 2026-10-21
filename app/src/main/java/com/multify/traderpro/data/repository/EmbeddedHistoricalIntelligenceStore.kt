@@ -69,20 +69,10 @@ class EmbeddedHistoricalIntelligenceStore @Inject constructor(
         .digest(bytes).joinToString("") { "%02x".format(it) }
 
     companion object {
-        const val SCHEMA_VERSION = 1
-        const val COMPRESSED_SHA256 = "654ebd723982ab0e9742b75711a1750d400f308c1e7f84a102831e5f05f2a714"
-        const val JSON_SHA256 = "496e804ae84d74a56cf05135dab411dbeac0022513090bbd0fde7c506777ee36"
+        const val SCHEMA_VERSION = 2
+        const val COMPRESSED_SHA256 = "8cc0cd5accc08921fd710af4ecd4f58ab1b9b5b41bc686f8713e6a7ea1267738"
+        const val JSON_SHA256 = "c5d23a7d14ef413c25f63d43672d8729c77469c589e1c4e36dd2f209ec7f304b"
 
-        val PARTS = listOf(
-            "embedded_historic_intelligence_v1.part01",
-            "embedded_historic_intelligence_v1.part02",
-            "embedded_historic_intelligence_v1.part03",
-            "embedded_historic_intelligence_v1.part04",
-            "embedded_historic_intelligence_v1.part05",
-            "embedded_historic_intelligence_v1.part06",
-            "embedded_historic_intelligence_v1.part07",
-            "embedded_historic_intelligence_v1.part08",
-            "embedded_historic_intelligence_v1.part09"
-        )
+        val PARTS = listOf("embedded_historic_intelligence_v2.json.gz")
     }
 }
