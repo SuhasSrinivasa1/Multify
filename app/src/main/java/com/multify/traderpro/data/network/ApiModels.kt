@@ -93,7 +93,10 @@ data class FixedSnapshotDto(
     val learningCalls: Int = 0,
     val historicalForecasts: Int = 0,
     val researchSnapshots: Int = 0,
-    val champions: Int = 0
+    val champions: Int = 0,
+    val frozenMultifyMfeAveragePct: Double = 0.0,
+    val targetFloorPct: Double = 1.0,
+    val fixedTargetPct: Double = 1.0
 )
 
 data class LearningStatsDto(
