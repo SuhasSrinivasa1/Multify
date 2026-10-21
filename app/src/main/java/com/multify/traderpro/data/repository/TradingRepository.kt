@@ -2854,6 +2854,132 @@ class TradingRepository @Inject constructor(
         return pending
     }
 
+    private suspend fun submitFixedEntryGtt(
+        token: String,
+        row: FixedRecommendationRecord,
+        qty: Int,
+        reference: String
+    ): SmartOrderPayload {
+        require(qty > 0) { "Fixed auto-buy quantity is zero" }
+        require(row.entryPrice.isFinite() && row.entryPrice > 0.0) { "Fixed entry price is invalid" }
+        val brokerStartedNs = SystemClock.elapsedRealtimeNanos()
+        val placed = try {
+            apiFactory.groww.createGtt(
+                bearer(token),
+                GttCreateRequest(
+                    referenceId = reference,
+                    smartOrderType = ForecastAutoBuyPolicy.SMART_ORDER_TYPE,
+                    segment = "CASH",
+                    tradingSymbol = row.symbol,
+                    quantity = qty,
+                    triggerPrice = fmt(row.entryPrice),
+                    triggerDirection = ForecastAutoBuyPolicy.TRIGGER_DIRECTION,
+                    order = GttOrder(
+                        orderType = ForecastAutoBuyPolicy.CHILD_ORDER_TYPE,
+                        price = null,
+                        transactionType = "BUY"
+                    ),
+                    productType = "CNC",
+                    exchange = "NSE",
+                    duration = "DAY"
+                )
+            ).requirePayload("Fixed entry GTT ${row.symbol}")
+        } catch (t: Throwable) {
+            recoverFixedEntryGttByReference(token, reference) ?: throw t
+        }
+        preferences.recordOrderLatency(0L, ((SystemClock.elapsedRealtimeNanos() - brokerStartedNs).coerceAtLeast(0L)) / 1_000_000L)
+        return placed
+    }
+
+    private suspend fun recoverFixedEntryGttByReference(token: String, reference: String): SmartOrderPayload? {
+        for (status in listOf("ACTIVE", "TRIGGERED", "COMPLETED", "CANCELLED")) {
+            for (page in 0..4) {
+                val payload = runCatching {
+                    apiFactory.groww.listSmartOrders(
+                        bearer(token), segment = "CASH", smartOrderType = ForecastAutoBuyPolicy.SMART_ORDER_TYPE,
+                        status = status, page = page, pageSize = 50
+                    ).requirePayload("Recover Fixed entry GTT")
+                }.getOrNull() ?: break
+                payload.orders.firstOrNull { it.referenceId == reference }?.let { return it }
+                if (payload.orders.size < 50) break
+            }
+        }
+        return null
+    }
+
+    private suspend fun cancelFixedEntryGttIfActive(token: String, state: ForecastAutoBuyOrderState, reason: String) {
+        val broker = runCatching {
+            apiFactory.groww.smartOrderStatus(
+                bearer(token), segment = "CASH", smartOrderType = ForecastAutoBuyPolicy.SMART_ORDER_TYPE,
+                smartOrderId = state.orderId
+            ).requirePayload("Fixed duplicate GTT status ${state.symbol}")
+        }.getOrNull() ?: return
+        if (!ForecastAutoBuyPolicy.canCancelBeforeTrigger(broker.status)) return
+        runCatching {
+            apiFactory.groww.cancelSmartOrder(
+                bearer(token), segment = "CASH", smartOrderType = ForecastAutoBuyPolicy.SMART_ORDER_TYPE,
+                smartOrderId = state.orderId
+            ).requirePayload("Cancel duplicate Fixed entry GTT ${state.symbol}")
+        }.onSuccess {
+            auditLogger.log("FIXED_AUTO_BUY", "DUPLICATE_GTT_CANCELLED", mapOf(
+                "symbol" to state.symbol,
+                "smart_order_id" to state.orderId,
+                "reason" to reason
+            ))
+        }
+    }
+
+    private suspend fun openCompletedFixedEntryGttPosition(
+        state: ForecastAutoBuyOrderState,
+        row: FixedRecommendationRecord?,
+        token: String
+    ) {
+        if (managedDao.openPosition(ENGINE_FIXED_HOLDING, state.symbol) != null) return
+        val observedBrokerFill = runCatching {
+            apiFactory.groww.positions(bearer(token), segment = "CASH")
+                .requirePayload("Fixed GTT fill position ${state.symbol}").positions
+                .firstOrNull { it.tradingSymbol.equals(state.symbol, true) }?.debitPrice
+                ?.takeIf { it.isFinite() && it > 0.0 }
+        }.getOrNull()
+        val now = System.currentTimeMillis()
+        managedDao.insertPosition(
+            ManagedPositionEntity(
+                engine = ENGINE_FIXED_HOLDING,
+                symbol = state.symbol,
+                product = "CNC",
+                side = "LONG",
+                quantity = state.quantity,
+                entryPrice = state.fixedEntryPrice,
+                stopPrice = null,
+                targetPrice = state.fixedTargetPrice,
+                strategy = "Fixed ${FixedEngineSnapshotStore.SNAPSHOT_ID} auto-buy · GTT UP ₹${fmt(state.fixedEntryPrice)} · MARKET child · fixed target ₹${fmt(state.fixedTargetPrice)} · ${row?.strategy.orEmpty()} · v7 stepped trail 0.55→0.50 then +0.10%",
+                regime = row?.regime ?: "FIXED_ENGINE",
+                confidence = row?.confidence ?: 1.0,
+                sourceEventId = null,
+                openOrderId = state.orderId,
+                openReferenceId = state.referenceId,
+                openedAtMs = now,
+                lastPrice = state.fixedEntryPrice,
+                maxFavourablePrice = state.fixedEntryPrice,
+                maxAdversePrice = state.fixedEntryPrice,
+                lastEvaluatedAtMs = now,
+                trailingArmPct = SteppedTrailingPolicy.ARM_TRIGGER_PCT,
+                trailingLastRatchetPrice = 0.0,
+                smartOrderMode = HoldingSmartOrderPolicy.MODE_NONE
+            )
+        )
+        brokerInventorySnapshot = null
+        auditLogger.log("FIXED_AUTO_BUY", "ENTRY_GTT_COMPLETED", mapOf(
+            "symbol" to state.symbol,
+            "smart_order_id" to state.orderId,
+            "quantity" to state.quantity,
+            "fixed_entry_trigger" to state.fixedEntryPrice,
+            "observed_broker_debit_price" to observedBrokerFill,
+            "fixed_target_price" to state.fixedTargetPrice,
+            "snapshot_id" to FixedEngineSnapshotStore.SNAPSHOT_ID
+        ))
+    }
+
     suspend fun pendingLongForecastNotifications(): List<ForecastDto> {
         val today = LocalDate.now(INDIA).toString()
         val rows = learningDao.pendingLongForecastNotifications(today)
