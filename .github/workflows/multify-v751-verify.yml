@@ -1,4 +1,4 @@
-name: Multify Trader Pro v7.5.3 Fixed 15:30 Verification
+name: Multify Trader Pro v7.5.4 Final Fixed Lock Verification
 
 on:
   workflow_dispatch:
@@ -17,6 +17,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -47,30 +49,69 @@ jobs:
       - name: Android unit tests
         run: gradle --no-daemon testDebugUnitTest
 
-      - name: Verify embedded Fixed architecture
+      - name: Verify final Fixed architecture and source lock
         shell: bash
         run: |
           set -euo pipefail
           test -s app/src/main/assets/embedded_historic_intelligence_v2.json.gz
           grep -R 'class EmbeddedHistoricalIntelligenceStore' app/src/main/java
-          grep -R 'ensureEmbeddedHistoricalIntelligence' app/src/main/java
-          grep -R 'EMBEDDED_HISTORIC_INTELLIGENCE_READY' app/src/main/java
-          grep -R 'FIXED-V741-2026-10-21' app/src/main/java
-          grep -R 'FIXED_MIN_STOCK_PRICE_RUPEES = 100.0' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
-          grep -n "now.toLocalTime() >= LocalTime.of(15, 30)" app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt | grep -q '^1560:'
-          grep -n "val expired = now.toLocalTime() >= LocalTime.of(15, 30)" app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt | grep -q '^3198:'
+          grep -R 'FIXED-V741-20261021-190239-FINAL' app/src/main/java
+          grep -R 'd807204a6d5d71a69f45ef4d21d7ef63063b85b56d401a6795e8f265a9f393fe' app/src/main/java
+          grep -R 'CANONICAL_LEARNING_CALLS = 107' app/src/main/java
+          grep -R 'CANONICAL_MULTIFY_MFE_AVG_PCT = 1.1161043030113955' app/src/main/java
+          grep -R 'price_gate_stage" to "PUBLICATION_ONLY"' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
+          grep -R 'if (evaluation.features.ltp < 10.0) continue' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
+          grep -R 'features.ltp <= FIXED_MIN_STOCK_PRICE_RUPEES' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
+          grep -R 'LocalTime.of(9, 15)' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
+          grep -R 'LocalTime.of(15, 30)' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
           grep -R 'sizeFixedAvailable' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
           grep -R 'sizeStrictBudget' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
           grep -R 'ARM_TRIGGER_PCT = 0.55' app/src/main/java/com/multify/traderpro/engine/SteppedTrailingPolicy.kt
           grep -R 'INITIAL_STOP_GAIN_PCT = 0.50' app/src/main/java/com/multify/traderpro/engine/SteppedTrailingPolicy.kt
           grep -R 'STEP_PCT = 0.10' app/src/main/java/com/multify/traderpro/engine/SteppedTrailingPolicy.kt
-          grep -R 'MULTIFY_BOOK_PROFIT_IGNORED_FOR_EXECUTION' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
-          grep -R 'Auto-buy Fixed recommendations' app/src/main/java/com/multify/traderpro/ui/screens/TraderApp.kt
-          grep -R 'Fixed("Fixed"' app/src/main/java/com/multify/traderpro/ui/screens/TraderApp.kt
-          grep -R 'managedDao.openPosition(ENGINE_FIXED_HOLDING' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
-          grep -R 'managedDao.openPosition(ENGINE_FORECAST_HOLDING' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
-          ! grep -R 'seedFromAdaptiveIfEmpty(today, learningDao.longForecastsForDate(today))' app/src/main/java
           ! grep -R 'MAX_DAILY_RECOMMENDATIONS' app/src/main/java
+
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+
+          manifest = Path("FIXED_FINAL_LOCK.gitsha").read_text().splitlines()
+          for line in manifest:
+              line = line.strip()
+              if not line or line.startswith("#") or line.startswith("REGION "):
+                  continue
+              expected, path = line.split(None, 1)
+              actual = subprocess.check_output(["git", "hash-object", path], text=True).strip()
+              assert actual == expected, f"Final Fixed lock changed: {path}: {actual} != {expected}"
+
+          repo = Path("app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt").read_text()
+          begin = repo.index("    // FIXED_FINAL_LOCK_BEGIN:")
+          end_marker = "    // FIXED_FINAL_LOCK_END: FIXED-V741-20261021-190239-FINAL"
+          end = repo.index(end_marker, begin) + len(end_marker)
+          if end < len(repo) and repo[end:end+1] == "\n":
+              end += 1
+          region = repo[begin:end]
+          actual_region = subprocess.check_output(["git", "hash-object", "--stdin"], input=region, text=True).strip()
+          expected_region = next(x.split()[1] for x in manifest if x.startswith("REGION "))
+          assert actual_region == expected_region, f"Final Fixed coordinator region changed: {actual_region} != {expected_region}"
+
+          pairs = [
+              ("LocalStrategyEngine.kt", "FixedLocalStrategyEngine.kt"),
+              ("ForecastQualityPolicy.kt", "FixedForecastQualityPolicy.kt"),
+              ("MultifyFactorFamilies.kt", "FixedMultifyFactorFamilies.kt"),
+              ("ForecastPublicationPolicy.kt", "FixedForecastPublicationPolicy.kt"),
+              ("MarketDiscoveryPolicy.kt", "FixedMarketDiscoveryPolicy.kt"),
+              ("PositiveCloseForecastPolicy.kt", "FixedPositiveCloseForecastPolicy.kt"),
+              ("MultifyReverseEngineering.kt", "FixedMultifyReverseEngineering.kt"),
+          ]
+          root = "app/src/main/java/com/multify/traderpro/engine/"
+          ref = "ca0eecaf63d2cc3500e11fd73f8de9bf2d87e39f"
+          for original, fixed in pairs:
+              old = subprocess.check_output(["git", "show", f"{ref}:{root}{original}"], text=True)
+              frozen = Path(root + fixed).read_text()
+              normalize = lambda s: s.replace("Fixed", "").replace("fixed", "")
+              assert normalize(old) == normalize(frozen), f"{fixed} drifted from exact v7.4.1 implementation"
+          PY
 
       - name: Build debug APK
         run: gradle --no-daemon assembleDebug
@@ -80,14 +121,14 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v7.5.3-fixed-1530-window-debug.apk
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/Multify-TraderPro-v7.5.3-fixed-1530-window-debug.apk > dist/signature.txt
-          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/Multify-TraderPro-v7.5.3-fixed-1530-window-debug.apk | grep -E "^(package:|application-label:)" > dist/package-verification.txt
+          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v7.5.4-final-fixed-v741-lock-debug.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/Multify-TraderPro-v7.5.4-final-fixed-v741-lock-debug.apk > dist/signature.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/Multify-TraderPro-v7.5.4-final-fixed-v741-lock-debug.apk | grep -E "^(package:|application-label:)" > dist/package-verification.txt
           (cd dist && sha256sum *.apk > SHA256SUMS.txt)
-          git archive --format=zip --output=dist/Multify-TraderPro-v7.5.3-source.zip HEAD
+          git archive --format=zip --output=dist/Multify-TraderPro-v7.5.4-source.zip HEAD
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Multify-TraderPro-v7.5.3-verified
+          name: Multify-TraderPro-v7.5.4-final-fixed-verified
           path: dist/
           if-no-files-found: error
