@@ -1,0 +1,84 @@
+name: Multify Trader Pro v7.4.0 Forecast Auto-buy Verification
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - 'app/**'
+      - 'backend/**'
+      - 'build.gradle.kts'
+      - 'settings.gradle.kts'
+      - 'gradle.properties'
+      - '.github/workflows/multify-v740-verify.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify-debug:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Backend tests
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+          PYTHONPATH="$GITHUB_WORKSPACE" PHONE_HMAC_SECRET=test-secret-test-secret-test-secret GROWW_API_KEY=test-api-key GROWW_TOTP_SECRET=JBSWY3DPEHPK3PXP python -m pytest -q backend/tests
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android SDK 35 packages
+        shell: bash
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Android unit tests
+        run: gradle --no-daemon testDebugUnitTest
+
+      - name: Verify forecast auto-buy architecture
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -R 'forecastAutoBuyEnabled' app/src/main/java/com/multify/traderpro/data/preferences/AppPreferences.kt
+          grep -R 'orderType = "LIMIT"' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
+          grep -R 'price = row.entryPrice' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
+          grep -R 'targetPrice = state.fixedTargetPrice' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
+          grep -R '!settings.forecastAutoBuyEnabled || !settings.armEffective' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
+          grep -R 'autoBuyForecastRecommendations' app/src/main/java/com/multify/traderpro/service/TradingEngineService.kt
+          ! grep -R 'MAX_DAILY_RECOMMENDATIONS' app/src/main/java
+          ! grep -R 'publishable.take' app/src/main/java
+
+      - name: Build debug APK
+        run: gradle --no-daemon assembleDebug
+
+      - name: Verify package and signature
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v7.4.0-forecast-autobuy-debug.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/Multify-TraderPro-v7.4.0-forecast-autobuy-debug.apk > dist/signature.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/Multify-TraderPro-v7.4.0-forecast-autobuy-debug.apk | grep -E "^(package:|application-label:)" > dist/package-verification.txt
+          (cd dist && sha256sum *.apk > SHA256SUMS.txt)
+          git archive --format=zip --output=dist/Multify-TraderPro-v7.4.0-source.zip HEAD
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Multify-TraderPro-v7.4.0-verified
+          path: dist/
+          if-no-files-found: error
