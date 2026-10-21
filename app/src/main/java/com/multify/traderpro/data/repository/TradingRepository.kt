@@ -35,6 +35,7 @@ import com.multify.traderpro.data.network.GrowwApiFactory
 import com.multify.traderpro.data.network.GrowwHolding
 import com.multify.traderpro.data.network.GrowwPosition
 import com.multify.traderpro.data.network.LearningStatsDto
+import com.multify.traderpro.data.network.OrderCancelRequest
 import com.multify.traderpro.data.network.OrderCreateRequest
 import com.multify.traderpro.data.network.OrderPayload
 import com.multify.traderpro.data.network.PositionDto
@@ -122,6 +123,7 @@ class TradingRepository @Inject constructor(
     private val nseSymbols: NseSymbolRepository,
     private val auditLogger: AuditLogger,
     private val marketDiscoveryStateStore: MarketDiscoveryStateStore,
+    private val forecastAutoBuyOrderStore: ForecastAutoBuyOrderStore,
     @ApplicationContext private val appContext: Context
 ) {
     val settings: Flow<AppSettings> = preferences.settings
@@ -565,20 +567,50 @@ class TradingRepository @Inject constructor(
                 error("ARM could not pre-warm Groww token and CNC buying power")
             }
         } else {
+            runCatching { reconcileForecastAutoBuyOrders(forceCancel = true, cancelReason = "ARM_DISABLED") }
             armHotState = null
         }
         auditLogger.log("SETTINGS", if (enabled) "ARM_ENABLED" else "ARM_DISABLED")
     }
 
+    suspend fun setForecastAutoBuy(enabled: Boolean) {
+        preferences.setForecastAutoBuy(enabled)
+        auditLogger.log(
+            "SETTINGS",
+            if (enabled) "FORECAST_AUTO_BUY_ENABLED" else "FORECAST_AUTO_BUY_DISABLED",
+            mapOf("requires_arm" to true, "fixed_entry_limit" to true, "fixed_target" to true)
+        )
+        if (enabled) {
+            val s = preferences.settings.first()
+            if (s.armEffective && marketSession() == "OPEN") {
+                runCatching { autoBuyForecastRecommendations() }
+                    .onFailure {
+                        auditLogger.log("FORECAST_AUTO_BUY", "ENABLE_SWEEP_ERROR", mapOf(
+                            "message" to (it.message ?: it.javaClass.simpleName)
+                        ))
+                    }
+            }
+        } else {
+            runCatching { reconcileForecastAutoBuyOrders(forceCancel = true, cancelReason = "AUTO_BUY_DISABLED") }
+                .onFailure {
+                    auditLogger.log("FORECAST_AUTO_BUY", "DISABLE_CANCEL_ERROR", mapOf(
+                        "message" to (it.message ?: it.javaClass.simpleName)
+                    ))
+                }
+        }
+    }
+
     suspend fun resetHalt() {
         preferences.setSafetyHalt(false)
         preferences.setArm(false)
+        runCatching { reconcileForecastAutoBuyOrders(forceCancel = true, cancelReason = "HALT_RESET_ARM_OFF") }
         armHotState = null
         auditLogger.log("SAFETY", "HALT_RESET_ARM_OFF")
     }
 
     suspend fun forceLocalDisarm() {
         preferences.setSafetyHalt(true)
+        runCatching { reconcileForecastAutoBuyOrders(forceCancel = true, cancelReason = "SAFETY_HALT") }
         armHotState = null
         auditLogger.log("SAFETY", "LOCAL_DISARM")
     }
@@ -3142,9 +3174,11 @@ class TradingRepository @Inject constructor(
         val forecasts = learningDao.allLongForecasts()
         val champions = learningDao.allForecastChampions()
         val research = learningDao.allResearchReports()
+        val forecastAutoBuyOrders = forecastAutoBuyOrderStore.all(LocalDate.now(INDIA).toString())
         val safeSettings = mapOf(
             "holding_budget_rupees" to settings.holdingBudgetRupees,
             "arm_effective" to settings.armEffective,
+            "forecast_auto_buy_enabled" to settings.forecastAutoBuyEnabled,
             "package_filter" to settings.packageFilter,
             "broker_authenticated" to settings.brokerAuthenticated,
             "ddpi_enabled" to settings.brokerDdpiEnabled,
@@ -3175,10 +3209,11 @@ class TradingRepository @Inject constructor(
                 add("long_forecasts.json", forecasts)
                 add("long_champions.json", champions)
                 add("research.json", research)
+                add("forecast_auto_buy_orders.json", forecastAutoBuyOrders)
                 addText("system_audit.jsonl", auditLogger.readAll())
             }
         } ?: error("Unable to open export destination")
-        return LogExportResult(12, signals.size, trades.size)
+        return LogExportResult(13, signals.size, trades.size)
     }
 
     suspend fun shouldCapturePackage(packageName: String): Boolean {
