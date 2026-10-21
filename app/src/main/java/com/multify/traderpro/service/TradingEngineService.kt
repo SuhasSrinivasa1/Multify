@@ -132,6 +132,7 @@ class TradingEngineService : Service() {
                     ) {
                         runCatching { repository.generateDailyForecasts(false) }
                             .onFailure { auditLogger.log("RUNTIME", "FORECAST_SCAN_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
+                        // v7.4: execute every newly confirmed PRIMARY forecast through fixed-price auto-buy when enabled.
                         runCatching { repository.autoBuyForecastRecommendations() }
                             .onFailure { auditLogger.log("RUNTIME", "FORECAST_AUTO_BUY_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
                         runCatching { repository.pendingLongForecastNotifications() }
