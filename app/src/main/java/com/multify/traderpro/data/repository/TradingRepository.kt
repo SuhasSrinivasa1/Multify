@@ -1557,7 +1557,7 @@ class TradingRepository @Inject constructor(
         val today = now.toLocalDate().toString()
         val existing = fixedRecommendationStore.recommendations(today)
             .filter { it.entryPrice > FIXED_MIN_STOCK_PRICE_RUPEES }
-        if (now.dayOfWeek.value >= 6 || now.toLocalTime() < LocalTime.of(9, 15) || now.toLocalTime() > LocalTime.of(15, 0)) {
+        if (now.dayOfWeek.value >= 6 || now.toLocalTime() < LocalTime.of(9, 15) || now.toLocalTime() >= LocalTime.of(15, 30)) {
             return existing.map { it.toDto() }
         }
         val nowMs = System.currentTimeMillis()
@@ -3195,7 +3195,7 @@ class TradingRepository @Inject constructor(
             val movePct = (ltp / row.entryPrice - 1.0) * 100.0
             val adversePct = max(0.0, (row.entryPrice - ltp) / row.entryPrice * 100.0)
             val hitNow = ltp >= row.targetPrice
-            val expired = now.toLocalTime() >= LocalTime.of(15, 0)
+            val expired = now.toLocalTime() >= LocalTime.of(15, 30)
             val status = when {
                 row.status == "TARGET_HIT" -> "TARGET_HIT"
                 hitNow -> "TARGET_HIT"
