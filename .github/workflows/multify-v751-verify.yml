@@ -1,4 +1,4 @@
-name: Multify Trader Pro v7.5.4 Final Fixed Lock Verification
+name: Multify Trader Pro v7.5.5 Fixed Reference UI Verification
 
 on:
   workflow_dispatch:
@@ -59,6 +59,9 @@ jobs:
           grep -R 'd807204a6d5d71a69f45ef4d21d7ef63063b85b56d401a6795e8f265a9f393fe' app/src/main/java
           grep -R 'CANONICAL_LEARNING_CALLS = 107' app/src/main/java
           grep -R 'CANONICAL_MULTIFY_MFE_AVG_PCT = 1.1161043030113955' app/src/main/java
+          grep -R 'Fixed Avg Upside · FROZEN' app/src/main/java/com/multify/traderpro/ui/screens/TraderApp.kt
+          grep -R 'Frozen Multify calibration calls' app/src/main/java/com/multify/traderpro/ui/screens/TraderApp.kt
+          grep -R 'fixedSnapshotDto(fixedSnapshotState)' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
           grep -R 'price_gate_stage" to "PUBLICATION_ONLY"' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
           grep -R 'if (evaluation.features.ltp < 10.0) continue' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
           grep -R 'features.ltp <= FIXED_MIN_STOCK_PRICE_RUPEES' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
@@ -121,14 +124,14 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v7.5.4-final-fixed-v741-lock-debug.apk
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/Multify-TraderPro-v7.5.4-final-fixed-v741-lock-debug.apk > dist/signature.txt
-          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/Multify-TraderPro-v7.5.4-final-fixed-v741-lock-debug.apk | grep -E "^(package:|application-label:)" > dist/package-verification.txt
+          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v7.5.5-fixed-reference-ui-debug.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/Multify-TraderPro-v7.5.5-fixed-reference-ui-debug.apk > dist/signature.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/Multify-TraderPro-v7.5.5-fixed-reference-ui-debug.apk | grep -E "^(package:|application-label:)" > dist/package-verification.txt
           (cd dist && sha256sum *.apk > SHA256SUMS.txt)
-          git archive --format=zip --output=dist/Multify-TraderPro-v7.5.4-source.zip HEAD
+          git archive --format=zip --output=dist/Multify-TraderPro-v7.5.5-source.zip HEAD
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Multify-TraderPro-v7.5.4-final-fixed-verified
+          name: Multify-TraderPro-v7.5.5-fixed-reference-verified
           path: dist/
           if-no-files-found: error
