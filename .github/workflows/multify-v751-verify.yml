@@ -1,4 +1,4 @@
-name: Multify Trader Pro v7.5.1 Embedded Fixed Intelligence Verification
+name: Multify Trader Pro v7.5.2 Fixed Guardrails Verification
 
 on:
   workflow_dispatch:
@@ -56,6 +56,13 @@ jobs:
           grep -R 'ensureEmbeddedHistoricalIntelligence' app/src/main/java
           grep -R 'EMBEDDED_HISTORIC_INTELLIGENCE_READY' app/src/main/java
           grep -R 'FIXED-V741-2026-10-21' app/src/main/java
+          grep -R 'FIXED_MIN_STOCK_PRICE_RUPEES = 100.0' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
+          grep -R 'sizeFixedAvailable' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
+          grep -R 'sizeStrictBudget' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
+          grep -R 'ARM_TRIGGER_PCT = 0.55' app/src/main/java/com/multify/traderpro/engine/SteppedTrailingPolicy.kt
+          grep -R 'INITIAL_STOP_GAIN_PCT = 0.50' app/src/main/java/com/multify/traderpro/engine/SteppedTrailingPolicy.kt
+          grep -R 'STEP_PCT = 0.10' app/src/main/java/com/multify/traderpro/engine/SteppedTrailingPolicy.kt
+          grep -R 'MULTIFY_BOOK_PROFIT_IGNORED_FOR_EXECUTION' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
           grep -R 'Auto-buy Fixed recommendations' app/src/main/java/com/multify/traderpro/ui/screens/TraderApp.kt
           grep -R 'Fixed("Fixed"' app/src/main/java/com/multify/traderpro/ui/screens/TraderApp.kt
           grep -R 'managedDao.openPosition(ENGINE_FIXED_HOLDING' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
@@ -71,14 +78,14 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v7.5.1-fixed-embedded-history-debug.apk
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/Multify-TraderPro-v7.5.1-fixed-embedded-history-debug.apk > dist/signature.txt
-          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/Multify-TraderPro-v7.5.1-fixed-embedded-history-debug.apk | grep -E "^(package:|application-label:)" > dist/package-verification.txt
+          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v7.5.2-fixed-min100-flex-wallet-debug.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/Multify-TraderPro-v7.5.2-fixed-min100-flex-wallet-debug.apk > dist/signature.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/Multify-TraderPro-v7.5.2-fixed-min100-flex-wallet-debug.apk | grep -E "^(package:|application-label:)" > dist/package-verification.txt
           (cd dist && sha256sum *.apk > SHA256SUMS.txt)
-          git archive --format=zip --output=dist/Multify-TraderPro-v7.5.1-source.zip HEAD
+          git archive --format=zip --output=dist/Multify-TraderPro-v7.5.2-source.zip HEAD
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Multify-TraderPro-v7.5.1-verified
+          name: Multify-TraderPro-v7.5.2-verified
           path: dist/
           if-no-files-found: error
