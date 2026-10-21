@@ -63,6 +63,7 @@ import com.multify.traderpro.engine.ForecastQualityPolicy
 import com.multify.traderpro.engine.ForecastPublicationPolicy
 import com.multify.traderpro.engine.FixedAdaptiveLearningMath
 import com.multify.traderpro.engine.FixedForecastPublicationPolicy
+import com.multify.traderpro.engine.FixedFinalContract
 import com.multify.traderpro.engine.FixedForecastQualityDecision
 import com.multify.traderpro.engine.FixedForecastQualityPolicy
 import com.multify.traderpro.engine.FixedLocalStrategyEngine
@@ -334,53 +335,56 @@ class TradingRepository @Inject constructor(
     internal suspend fun ensureFixedEngineSnapshot(): FixedEngineSnapshot {
         var snapshot = fixedEngineSnapshotStore.loadOrNull()
         if (snapshot == null) {
-            val beforeCalls = learningDao.allCalls()
-            val beforeForecasts = learningDao.allLongForecasts()
-            val beforeResearch = learningDao.allForecastResearch()
-            val beforeChampions = learningDao.allForecastChampions()
-            val hadDeviceLearningState =
-                beforeCalls.isNotEmpty() || beforeForecasts.isNotEmpty() ||
-                    beforeResearch.isNotEmpty() || beforeChampions.isNotEmpty()
-
+            // Always derive Fixed from the checksum-verified build-time history seed. Never capture
+            // device/adaptive Forecast state: that would make Fixed change across installations.
             val embedded = ensureEmbeddedHistoricalIntelligence()
-            fixedEngineSnapshotStore.clearAwaitingRestore()
-
-            snapshot = if (!hadDeviceLearningState) {
-                // Fresh install: use the deterministic build-time snapshot assembled from every
-                // previously uploaded diagnostic export. This makes Fixed self-contained.
-                fixedEngineSnapshotStore.restoreExactIfAbsent(embedded.fixedSnapshot)
-            } else {
-                // Upgrade with an existing database: preserve the richer on-device state, while
-                // the embedded history above fills only missing historical evidence.
-                fixedEngineSnapshotStore.captureIfAbsent(
-                    learningCalls = learningDao.allCalls(),
-                    longForecasts = learningDao.allLongForecasts(),
-                    researchSnapshots = learningDao.allForecastResearch(),
-                    champions = learningDao.allForecastChampions()
-                )
+            val canonicalCalls = embedded.fixedSnapshot.learningCalls
+                .filterNot {
+                    it.callDate == FixedFinalContract.EXCLUDED_LEARNING_DATE &&
+                        it.symbol.equals(FixedFinalContract.EXCLUDED_LEARNING_SYMBOL, true)
+                }
+            require(canonicalCalls.size == FixedFinalContract.CANONICAL_LEARNING_CALLS) {
+                "Final Fixed learning-call contract mismatch: ${canonicalCalls.size}"
             }
+            val finalPayload = FixedEngineSnapshotPayload(
+                snapshotId = FixedEngineSnapshotStore.SNAPSHOT_ID,
+                frozenAtMs = FixedFinalContract.REFERENCE_EXPORT_AT_MS,
+                sourceVersion = FixedEngineSnapshotStore.SOURCE_VERSION,
+                learningCalls = canonicalCalls,
+                // The perfect v7.4.1 session started without prior published-Forecast/champion/
+                // completed-research feedback. Keep those feedback channels permanently empty.
+                longForecasts = emptyList(),
+                researchSnapshots = emptyList(),
+                champions = emptyList()
+            )
+            fixedEngineSnapshotStore.clearAwaitingRestore()
+            snapshot = fixedEngineSnapshotStore.restoreExactIfAbsent(finalPayload)
         }
 
         val frozen = requireNotNull(snapshot)
-        // Seed only recommendation rows stored inside the immutable Fixed snapshot.
-        // Never copy future adaptive Forecast rows into Fixed.
-        val snapshotDate = Instant.ofEpochMilli(frozen.payload.frozenAtMs)
-            .atZone(INDIA).toLocalDate().toString()
-        fixedRecommendationStore.seedFromAdaptiveIfEmpty(
-            snapshotDate,
-            frozen.payload.longForecasts.filter { it.forecastDate == snapshotDate }
-        )
+        require(frozen.payload.snapshotId == FixedFinalContract.CONTRACT_ID) {
+            "Final Fixed contract id mismatch"
+        }
+        require(frozen.payload.learningCalls.size == FixedFinalContract.CANONICAL_LEARNING_CALLS) {
+            "Final Fixed learning history changed"
+        }
+        val frozenMfe = fixedSnapshotMultifyMfeAverage(frozen)
+        require(kotlin.math.abs(frozenMfe - FixedFinalContract.CANONICAL_MULTIFY_MFE_AVG_PCT) < 1e-9) {
+            "Final Fixed MFE calibration changed: $frozenMfe"
+        }
+
         if (!fixedSnapshotAudited) {
             fixedSnapshotAudited = true
-            auditLogger.log("FIXED_ENGINE", "IMMUTABLE_SNAPSHOT_READY", mapOf(
-                "snapshot_id" to frozen.payload.snapshotId,
-                "source_version" to frozen.payload.sourceVersion,
-                "frozen_at_ms" to frozen.payload.frozenAtMs,
-                "sha256" to frozen.sha256,
+            auditLogger.log("FIXED_ENGINE", "FINAL_CONTRACT_READY", mapOf(
+                "contract_id" to FixedFinalContract.CONTRACT_ID,
+                "source_commit" to FixedFinalContract.SOURCE_COMMIT,
+                "source_log_sha256" to FixedFinalContract.SOURCE_LOG_SHA256,
+                "snapshot_sha256" to frozen.sha256,
                 "learning_calls" to frozen.payload.learningCalls.size,
-                "long_forecasts" to frozen.payload.longForecasts.size,
-                "research_snapshots" to frozen.payload.researchSnapshots.size,
-                "champions" to frozen.payload.champions.size,
+                "frozen_multify_mfe_avg_pct" to frozenMfe,
+                "prior_forecast_feedback_rows" to 0,
+                "prior_champion_feedback_rows" to 0,
+                "prior_research_feedback_rows" to 0,
                 "adaptive_updates_allowed" to false
             ))
         }
@@ -1551,6 +1555,7 @@ class TradingRepository @Inject constructor(
         return all.map { it.toForecastDto() }
     }
 
+    // FIXED_FINAL_LOCK_BEGIN: FIXED-V741-20261021-190239-FINAL
     suspend fun generateFixedForecasts(force: Boolean = false): List<ForecastDto> {
         val snapshot = ensureFixedEngineSnapshot()
         val now = ZonedDateTime.now(INDIA)
@@ -1568,6 +1573,7 @@ class TradingRepository @Inject constructor(
         lastFixedScanAtMs = nowMs
 
         val calls = snapshot.payload.learningCalls.filter { it.action.equals("BUY", true) }
+        require(calls.size == FixedFinalContract.CANONICAL_LEARNING_CALLS) { "Final Fixed learning-call count changed" }
         val recentDates = calls.map { it.callDate }.distinct().sortedDescending().take(30).toSet()
         val rolling = calls.filter { it.callDate in recentDates }
         val frequency = rolling.groupingBy { it.symbol }.eachCount()
@@ -1602,7 +1608,9 @@ class TradingRepository @Inject constructor(
                     ))
                 }
                 .getOrNull() ?: continue
-            if (evaluation.features.ltp <= FIXED_MIN_STOCK_PRICE_RUPEES) continue
+            // Keep the v7.4.1 model universe intact. The >₹100 rule is a publication/execution
+            // overlay only; filtering here would alter breadth, family weights and candidate rank.
+            if (evaluation.features.ltp < 10.0) continue
             evaluated += symbol to evaluation
             delay(FIXED_V741_FORECAST_SYMBOL_PACING_MS)
         }
@@ -1614,29 +1622,17 @@ class TradingRepository @Inject constructor(
             breadth <= -.50 -> "BREADTH_WEAK"
             else -> "BREADTH_NEUTRAL"
         }
-        val champions = snapshot.payload.champions.associateBy { it.key }
+        // Final Fixed has no historical Forecast/champion/research feedback. Those channels were
+        // empty when the reference v7.4.1 session produced the accepted calls and must stay empty
+        // forever. Live same-day confirmation observations below are still part of v7.4.1 logic.
+        val champions = emptyMap<String, com.multify.traderpro.data.local.ForecastChampionEntity>()
         val learnedAverage = fixedSnapshotMultifyMfeAverage(snapshot)
-        val priorForecasts = snapshot.payload.longForecasts.filter {
-            it.forecastDate < today && it.status in setOf("TARGET_HIT", "MISSED") &&
-                FixedPositiveCloseForecastPolicy.isPositiveClose(it.entryPrice, it.lastPrice)
-        }
-        val priorMfe = priorForecasts.map { it.maxFavourablePct }
-            .filter { it.isFinite() && it >= 0.0 && it < 25.0 }
-        val targetPct = FixedForecastQualityPolicy.adaptiveTargetPct(learnedAverage, priorMfe)
+        val targetPct = FixedForecastQualityPolicy.adaptiveTargetPct(learnedAverage, emptyList())
 
         val have = existing.map { it.symbol }.toSet()
         val priorTodayResearch = fixedRecommendationStore.observations(today)
             .filter { it.scanAtMs < nowMs && nowMs - it.scanAtMs <= FIXED_V741_PRIMARY_CONFIRMATION_WINDOW_MS }
-        val priorResearchDates = snapshot.payload.researchSnapshots
-            .map { it.researchDate }.distinct().filter { it < today }.sortedDescending()
-            .take(FIXED_V741_RESEARCH_SESSION_GOAL).toSet()
-        val priorResearch = snapshot.payload.researchSnapshots
-            .filter {
-                it.researchDate in priorResearchDates && it.outcomeUpdatedAtMs != null &&
-                    FixedPositiveCloseForecastPolicy.isPositiveResearchClose(it.outcomeClosePct)
-            }
-            .groupBy { it.researchDate + "|" + it.symbol }
-            .mapNotNull { (_, rows) -> rows.minByOrNull { it.scanAtMs } }
+        val priorResearch = emptyList<com.multify.traderpro.data.local.ForecastResearchEntity>()
 
         fun researchEvidenceBonus(evaluation: FixedStrategyEvaluation): Double {
             val xs = priorResearch.filter {
@@ -1712,6 +1708,9 @@ class TradingRepository @Inject constructor(
             .count()
 
         val publishable = unseen.filter { item ->
+            // User-requested Fixed-only overlay. Apply it here, after the full v7.4.1 universe,
+            // breadth and ranking have been calculated, so the underlying model remains 1:1.
+            if (item.evaluation.features.ltp <= FIXED_MIN_STOCK_PRICE_RUPEES) return@filter false
             val currentPrimary = item.quality.tier == "PRIMARY" &&
                 item.quality.publishEligible && item.quality.executionEligible
             FixedForecastPublicationPolicy.isReady(
@@ -1758,6 +1757,9 @@ class TradingRepository @Inject constructor(
         auditLogger.log("FIXED_ENGINE", "LONG_SCAN_TIERED", mapOf(
             "snapshot_id" to snapshot.payload.snapshotId,
             "snapshot_sha256" to snapshot.sha256,
+            "final_contract_id" to FixedFinalContract.CONTRACT_ID,
+            "reference_log_sha256" to FixedFinalContract.SOURCE_LOG_SHA256,
+            "price_gate_stage" to "PUBLICATION_ONLY",
             "date" to today,
             "evaluated" to evaluated.size,
             "primary" to (tierCounts["PRIMARY"] ?: 0),
@@ -1832,7 +1834,7 @@ class TradingRepository @Inject constructor(
             } else {
                 consecutiveFailures = 0
                 payload.forEach { (key, value) ->
-                    if (value.isFinite() && value > FIXED_MIN_STOCK_PRICE_RUPEES) {
+                    if (value.isFinite() && value >= 10.0) {
                         current[key.removePrefix("NSE_").uppercase(Locale.US)] = value
                     }
                 }
@@ -1901,6 +1903,7 @@ class TradingRepository @Inject constructor(
         ))
         return null
     }
+    // FIXED_FINAL_LOCK_END: FIXED-V741-20261021-190239-FINAL
 
     private suspend fun captureForecastResearchScan(
         date: String,
