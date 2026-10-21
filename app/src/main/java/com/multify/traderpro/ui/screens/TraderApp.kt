@@ -623,7 +623,7 @@ private fun ForecastScreen(
         item {
             SectionTitle(
                 "LONG holding forecast",
-                "Maximum five recommendations per trading day. PRIMARY candidates must persist across scans before publication; weaker SECONDARY/RESEARCH rows stay in the learning ledger and are never presented as recommendations."
+                "No daily numeric recommendation cap. Every newly confirmed PRIMARY candidate can be published; PRIMARY candidates must persist across scans before publication, while weaker SECONDARY/RESEARCH rows remain in the learning ledger."
             )
         }
         item {
