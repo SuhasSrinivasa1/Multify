@@ -54,6 +54,7 @@ import com.multify.traderpro.domain.SignalType
 import com.multify.traderpro.engine.AdaptiveLearningMath
 import com.multify.traderpro.engine.CashAwareCncSizing
 import com.multify.traderpro.engine.ExecutionTelemetryMath
+import com.multify.traderpro.engine.ForecastAutoBuyPolicy
 import com.multify.traderpro.engine.ForecastQualityDecision
 import com.multify.traderpro.engine.ForecastQualityPolicy
 import com.multify.traderpro.engine.ForecastPublicationPolicy
@@ -587,7 +588,14 @@ class TradingRepository @Inject constructor(
         auditLogger.log(
             "SETTINGS",
             if (enabled) "FORECAST_AUTO_BUY_ENABLED" else "FORECAST_AUTO_BUY_DISABLED",
-            mapOf("requires_arm" to true, "fixed_entry_limit" to true, "fixed_target" to true)
+            mapOf(
+                "requires_arm" to true,
+                "entry_gtt" to true,
+                "trigger_direction" to ForecastAutoBuyPolicy.TRIGGER_DIRECTION,
+                "child_order_type" to ForecastAutoBuyPolicy.CHILD_ORDER_TYPE,
+                "fixed_entry_trigger" to true,
+                "fixed_target" to true
+            )
         )
         if (enabled) {
             val s = preferences.settings.first()
@@ -1530,7 +1538,7 @@ class TradingRepository @Inject constructor(
             .firstOrNull { it.symbol.equals(symbol, true) } ?: error("No active LONG recommendation for $symbol")
         val pendingAuto = forecastAutoBuyOrderStore.forSymbol(today, row.symbol)
         if (pendingAuto != null && !isForecastAutoBuyTerminal(pendingAuto.status)) {
-            return "Auto-buy LIMIT is already pending for ${row.symbol} @ ₹${fmt(pendingAuto.fixedEntryPrice)}; duplicate manual BUY blocked"
+            return "Auto-buy GTT is already pending for ${row.symbol} at fixed entry trigger ₹${fmt(pendingAuto.fixedEntryPrice)}; duplicate manual BUY blocked"
         }
         require(row.status == "ACTIVE") { "$symbol forecast is no longer active" }
         require(row.executionEligible) { "$symbol is ${row.qualityTier}; only PRIMARY forecast setups can place a real forecast BUY" }
@@ -1583,8 +1591,9 @@ class TradingRepository @Inject constructor(
     }
 
     /**
-     * Auto-buy uses the immutable published forecast prices. The broker order is CNC/DAY/LIMIT at
-     * the published entry price; the published target price is carried forward unchanged.
+     * Forecast auto-buy uses the immutable published forecast entry as a Groww GTT trigger.
+     * Direction is UP and the post-trigger order is MARKET, so a falling stock does not get bought
+     * merely because it trades down through the forecast entry. The published target stays fixed.
      * ARM remains the master execution switch.
      */
     suspend fun autoBuyForecastRecommendations(): Int =
@@ -1633,7 +1642,7 @@ class TradingRepository @Inject constructor(
             if (sizing.quantity <= 0) {
                 auditLogger.log("FORECAST_AUTO_BUY", "SKIPPED_NO_CASH", mapOf(
                     "symbol" to row.symbol,
-                    "fixed_entry_price" to row.entryPrice,
+                    "fixed_entry_trigger" to row.entryPrice,
                     "fixed_target_price" to row.targetPrice,
                     "available_cnc" to available,
                     "configured_budget" to liveSettings.holdingBudgetRupees
@@ -1644,28 +1653,28 @@ class TradingRepository @Inject constructor(
             val executionSettings = preferences.settings.first()
             if (!executionSettings.forecastAutoBuyEnabled || !executionSettings.armEffective || executionSettings.safetyHalt) break
 
-            val reference = stableRef("FAH", "${row.forecastDate}-${row.id}-${row.symbol}")
+            val reference = stableRef("FAG", "${row.forecastDate}-${row.id}-${row.symbol}")
             val placedAtMs = System.currentTimeMillis()
-            val order = runCatching {
-                submitForecastLimitBuy(
+            val gtt = runCatching {
+                submitForecastEntryGtt(
                     token = token,
                     row = row,
                     qty = sizing.quantity,
                     reference = reference
                 )
             }.onFailure {
-                auditLogger.log("FORECAST_AUTO_BUY", "LIMIT_SUBMIT_ERROR", mapOf(
+                auditLogger.log("FORECAST_AUTO_BUY", "GTT_SUBMIT_ERROR", mapOf(
                     "symbol" to row.symbol,
                     "reference" to reference,
-                    "fixed_entry_price" to row.entryPrice,
+                    "fixed_entry_trigger" to row.entryPrice,
                     "fixed_target_price" to row.targetPrice,
                     "message" to (it.message ?: it.javaClass.simpleName)
                 ))
             }.getOrNull() ?: continue
 
-            val orderId = order.growwOrderId
-            if (orderId.isBlank()) {
-                auditLogger.log("FORECAST_AUTO_BUY", "LIMIT_ACK_MISSING_ID", mapOf(
+            val smartOrderId = gtt.smartOrderId
+            if (smartOrderId.isBlank()) {
+                auditLogger.log("FORECAST_AUTO_BUY", "GTT_ACK_MISSING_ID", mapOf(
                     "symbol" to row.symbol,
                     "reference" to reference
                 ))
@@ -1676,23 +1685,26 @@ class TradingRepository @Inject constructor(
                     date = today,
                     forecastId = row.id,
                     symbol = row.symbol,
-                    orderId = orderId,
+                    orderId = smartOrderId,
                     referenceId = reference,
                     quantity = sizing.quantity,
                     fixedEntryPrice = row.entryPrice,
                     fixedTargetPrice = row.targetPrice,
                     placedAtMs = placedAtMs,
-                    status = order.orderStatus.ifBlank { "ACKED" }
+                    status = gtt.status.ifBlank { "ACTIVE" },
+                    brokerKind = ForecastAutoBuyPolicy.BROKER_KIND_GTT
                 )
             )
-            auditLogger.log("FORECAST_AUTO_BUY", "FIXED_LIMIT_SUBMITTED", mapOf(
+            auditLogger.log("FORECAST_AUTO_BUY", "ENTRY_GTT_SUBMITTED", mapOf(
                 "symbol" to row.symbol,
-                "order_id" to orderId,
+                "smart_order_id" to smartOrderId,
                 "reference" to reference,
                 "quantity" to sizing.quantity,
-                "fixed_entry_price" to row.entryPrice,
+                "fixed_entry_trigger" to row.entryPrice,
+                "trigger_direction" to ForecastAutoBuyPolicy.TRIGGER_DIRECTION,
+                "child_order_type" to ForecastAutoBuyPolicy.CHILD_ORDER_TYPE,
                 "fixed_target_price" to row.targetPrice,
-                "broker_status" to order.orderStatus,
+                "broker_status" to gtt.status,
                 "arm_effective" to executionSettings.armEffective
             ))
             submitted++
@@ -1708,33 +1720,37 @@ class TradingRepository @Inject constructor(
         cancelReason: String = ""
     ): Int {
         val today = LocalDate.now(INDIA).toString()
-        val states = forecastAutoBuyOrderStore.all(today)
+        val states = forecastAutoBuyOrderStore.all()
         if (states.isEmpty()) return 0
-        val token = ensureToken() ?: return states.count { !isForecastAutoBuyTerminal(it.status) }
+        val token = ensureToken() ?: return states.count { !ForecastAutoBuyPolicy.isTerminal(it.status) }
         val settings = preferences.settings.first()
-        val forecasts = learningDao.longForecastsForDate(today)
-            .associateBy { it.symbol.uppercase(Locale.US) }
+        val forecastsById = learningDao.allLongForecasts().associateBy { it.id }
 
         var pending = 0
         for (state in states) {
-            if (isForecastAutoBuyTerminal(state.status) && !state.status.equals("CANCELLED", true)) {
+            if (state.brokerKind == ForecastAutoBuyPolicy.BROKER_KIND_LEGACY_LIMIT) {
+                reconcileLegacyForecastLimitOrder(token, state, cancelReason)
                 continue
             }
 
             val existingPosition = managedDao.openPositionForSymbol(state.symbol)
             if (existingPosition != null) {
-                cancelForecastAutoBuyIfOpen(token, state, "HOLDING_ALREADY_EXISTS")
-                forecastAutoBuyOrderStore.remove(today, state.symbol)
+                cancelForecastEntryGttIfActive(token, state, "HOLDING_ALREADY_EXISTS")
+                forecastAutoBuyOrderStore.remove(state.date, state.symbol)
                 continue
             }
 
-            var broker = runCatching {
-                apiFactory.groww.orderStatus(bearer(token), state.orderId)
-                    .requirePayload("Forecast auto-buy order status ${state.symbol}")
+            val broker = runCatching {
+                apiFactory.groww.smartOrderStatus(
+                    bearer(token),
+                    segment = "CASH",
+                    smartOrderType = ForecastAutoBuyPolicy.SMART_ORDER_TYPE,
+                    smartOrderId = state.orderId
+                ).requirePayload("Forecast auto-buy GTT status ${state.symbol}")
             }.onFailure {
-                auditLogger.log("FORECAST_AUTO_BUY", "STATUS_ERROR", mapOf(
+                auditLogger.log("FORECAST_AUTO_BUY", "GTT_STATUS_ERROR", mapOf(
                     "symbol" to state.symbol,
-                    "order_id" to state.orderId,
+                    "smart_order_id" to state.orderId,
                     "message" to (it.message ?: it.javaClass.simpleName)
                 ))
             }.getOrNull()
@@ -1743,171 +1759,217 @@ class TradingRepository @Inject constructor(
                 continue
             }
 
-            val forecast = forecasts[state.symbol.uppercase(Locale.US)]
-            val cancelRequired =
-                forceCancel ||
-                    !settings.forecastAutoBuyEnabled ||
-                    !settings.armEffective ||
-                    settings.safetyHalt ||
-                    forecast == null ||
-                    forecast.status != "ACTIVE" ||
-                    !forecast.executionEligible
+            val forecast = forecastsById[state.forecastId]
+            val forecastActive = forecast?.status == "ACTIVE"
+            val executionEligible = forecast?.executionEligible == true
+            val cancelRequired = ForecastAutoBuyPolicy.shouldCancel(
+                stateDate = state.date,
+                today = today,
+                autoBuyEnabled = settings.forecastAutoBuyEnabled,
+                armEffective = settings.armEffective,
+                safetyHalt = settings.safetyHalt,
+                forecastActive = forecastActive,
+                executionEligible = executionEligible,
+                forceCancel = forceCancel
+            )
+            val status = broker.status.uppercase(Locale.US)
 
-            var brokerStatus = broker.orderStatus.uppercase(Locale.US)
-            var filled = (broker.filledQuantity ?: 0).coerceIn(0, state.quantity)
-            val partialOpen = filled in 1 until state.quantity && !isForecastAutoBuyTerminal(brokerStatus)
-
-            if (!isForecastAutoBuyTerminal(brokerStatus) && (cancelRequired || partialOpen)) {
-                val reason = when {
-                    partialOpen -> "PARTIAL_FILL_CANCEL_REMAINDER"
-                    cancelReason.isNotBlank() -> cancelReason
-                    forecast?.status != "ACTIVE" -> "FORECAST_NO_LONGER_ACTIVE"
-                    else -> "AUTO_BUY_NOT_EXECUTION_ELIGIBLE"
-                }
-                val cancelled = runCatching {
-                    apiFactory.groww.cancelOrder(
-                        bearer(token),
-                        OrderCancelRequest(growwOrderId = state.orderId)
-                    ).requirePayload("Cancel forecast auto-buy ${state.symbol}")
-                }.onFailure {
-                    auditLogger.log("FORECAST_AUTO_BUY", "CANCEL_ERROR", mapOf(
-                        "symbol" to state.symbol,
-                        "order_id" to state.orderId,
-                        "reason" to reason,
-                        "filled_quantity" to filled,
-                        "message" to (it.message ?: it.javaClass.simpleName)
-                    ))
-                    if (partialOpen) runCatching { preferences.setSafetyHalt(true) }
-                }.getOrNull()
-
-                if (cancelled != null) {
-                    auditLogger.log("FORECAST_AUTO_BUY", "CANCEL_REQUESTED", mapOf(
-                        "symbol" to state.symbol,
-                        "order_id" to state.orderId,
-                        "reason" to reason,
-                        "filled_quantity" to filled,
-                        "status" to cancelled.orderStatus
-                    ))
-                    delay(FORECAST_AUTO_BUY_CANCEL_RECHECK_MS)
-                    broker = runCatching {
-                        apiFactory.groww.orderStatus(bearer(token), state.orderId)
-                            .requirePayload("Forecast auto-buy post-cancel status ${state.symbol}")
-                    }.getOrDefault(cancelled)
-                    brokerStatus = broker.orderStatus.uppercase(Locale.US)
-                    filled = (broker.filledQuantity ?: filled).coerceIn(0, state.quantity)
-                }
-            }
-
-            val finalState = isForecastAutoBuyTerminal(brokerStatus) || filled >= state.quantity
-            if (filled > 0 && finalState) {
-                openFilledForecastAutoBuyPosition(state, forecast, broker, filled)
-                forecastAutoBuyOrderStore.remove(today, state.symbol)
+            if (ForecastAutoBuyPolicy.isCompleted(status)) {
+                openCompletedForecastEntryGttPosition(state, forecast, token)
+                forecastAutoBuyOrderStore.remove(state.date, state.symbol)
                 continue
             }
 
-            if (finalState && filled == 0) {
-                if (cancelRequired && brokerStatus == "CANCELLED") {
-                    forecastAutoBuyOrderStore.remove(today, state.symbol)
-                } else {
-                    forecastAutoBuyOrderStore.upsert(state.copy(status = brokerStatus))
-                }
-                auditLogger.log("FORECAST_AUTO_BUY", "ORDER_TERMINAL_NO_FILL", mapOf(
+            if (ForecastAutoBuyPolicy.isTerminal(status)) {
+                forecastAutoBuyOrderStore.remove(state.date, state.symbol)
+                auditLogger.log("FORECAST_AUTO_BUY", "GTT_TERMINAL_NO_FILL", mapOf(
                     "symbol" to state.symbol,
-                    "order_id" to state.orderId,
-                    "status" to brokerStatus
+                    "smart_order_id" to state.orderId,
+                    "status" to status
                 ))
                 continue
             }
 
-            forecastAutoBuyOrderStore.upsert(state.copy(status = brokerStatus.ifBlank { state.status }))
+            if (cancelRequired && ForecastAutoBuyPolicy.canCancelBeforeTrigger(status)) {
+                val reason = when {
+                    state.date != today -> "STALE_TRADING_DATE"
+                    cancelReason.isNotBlank() -> cancelReason
+                    forecast == null -> "FORECAST_MISSING"
+                    forecast.status != "ACTIVE" -> "FORECAST_NO_LONGER_ACTIVE"
+                    !forecast.executionEligible -> "AUTO_BUY_NOT_EXECUTION_ELIGIBLE"
+                    !settings.forecastAutoBuyEnabled -> "AUTO_BUY_DISABLED"
+                    !settings.armEffective -> "ARM_DISABLED"
+                    settings.safetyHalt -> "SAFETY_HALT"
+                    else -> "CANCEL_REQUIRED"
+                }
+                val cancelled = runCatching {
+                    apiFactory.groww.cancelSmartOrder(
+                        bearer(token),
+                        segment = "CASH",
+                        smartOrderType = ForecastAutoBuyPolicy.SMART_ORDER_TYPE,
+                        smartOrderId = state.orderId
+                    ).requirePayload("Cancel forecast entry GTT ${state.symbol}")
+                }.onFailure {
+                    auditLogger.log("FORECAST_AUTO_BUY", "GTT_CANCEL_ERROR", mapOf(
+                        "symbol" to state.symbol,
+                        "smart_order_id" to state.orderId,
+                        "reason" to reason,
+                        "message" to (it.message ?: it.javaClass.simpleName)
+                    ))
+                }.getOrNull()
+
+                if (cancelled != null) {
+                    forecastAutoBuyOrderStore.remove(state.date, state.symbol)
+                    auditLogger.log("FORECAST_AUTO_BUY", "GTT_CANCELLED", mapOf(
+                        "symbol" to state.symbol,
+                        "smart_order_id" to state.orderId,
+                        "reason" to reason,
+                        "status" to cancelled.status
+                    ))
+                    continue
+                }
+            }
+
+            if (cancelRequired && status == "TRIGGERED") {
+                auditLogger.log("FORECAST_AUTO_BUY", "GTT_ALREADY_TRIGGERED", mapOf(
+                    "symbol" to state.symbol,
+                    "smart_order_id" to state.orderId,
+                    "reason" to if (cancelReason.isNotBlank()) cancelReason else "EXECUTION_SWITCH_CHANGED",
+                    "note" to "Broker trigger already fired; waiting for terminal broker status"
+                ))
+            }
+
+            forecastAutoBuyOrderStore.upsert(state.copy(status = status.ifBlank { state.status }))
             pending++
         }
         return pending
     }
 
-    private suspend fun submitForecastLimitBuy(
+    private suspend fun submitForecastEntryGtt(
         token: String,
         row: LongForecastEntity,
         qty: Int,
         reference: String
-    ): OrderPayload {
+    ): SmartOrderPayload {
         require(qty > 0) { "Forecast auto-buy quantity is zero" }
         require(row.entryPrice.isFinite() && row.entryPrice > 0.0) { "Forecast entry price is invalid" }
+        require(row.targetPrice.isFinite() && row.targetPrice > row.entryPrice) { "Forecast target price is invalid" }
+
         val brokerStartedNs = SystemClock.elapsedRealtimeNanos()
         val placed = try {
-            apiFactory.groww.placeOrder(
+            apiFactory.groww.createGtt(
                 bearer(token),
-                OrderCreateRequest(
+                GttCreateRequest(
+                    referenceId = reference,
+                    smartOrderType = ForecastAutoBuyPolicy.SMART_ORDER_TYPE,
+                    segment = "CASH",
                     tradingSymbol = row.symbol,
                     quantity = qty,
-                    price = row.entryPrice,
-                    triggerPrice = 0.0,
-                    validity = "DAY",
+                    triggerPrice = fmt(row.entryPrice),
+                    triggerDirection = ForecastAutoBuyPolicy.TRIGGER_DIRECTION,
+                    order = GttOrder(
+                        orderType = ForecastAutoBuyPolicy.CHILD_ORDER_TYPE,
+                        price = null,
+                        transactionType = "BUY"
+                    ),
+                    productType = "CNC",
                     exchange = "NSE",
-                    segment = "CASH",
-                    product = "CNC",
-                    orderType = "LIMIT",
-                    transactionType = "BUY",
-                    orderReferenceId = reference
+                    duration = "DAY"
                 )
-            ).requirePayload("Forecast LIMIT BUY ${row.symbol}")
+            ).requirePayload("Forecast entry GTT ${row.symbol}")
         } catch (t: Throwable) {
-            val recovered = runCatching {
-                apiFactory.groww.orderStatusByReference(
-                    bearer(token),
-                    referenceId = reference,
-                    segment = "CASH"
-                ).requirePayload("Forecast LIMIT BUY reference recovery ${row.symbol}")
-            }.getOrNull()
-            recovered?.takeIf { it.growwOrderId.isNotBlank() } ?: throw t
+            recoverForecastEntryGttByReference(token, reference)
+                ?: throw t
         }
+
         val brokerAckLatencyMs =
             ((SystemClock.elapsedRealtimeNanos() - brokerStartedNs).coerceAtLeast(0L)) / 1_000_000L
         preferences.recordOrderLatency(0L, brokerAckLatencyMs)
-        auditLogger.log("EXECUTION_LATENCY", "FORECAST_LIMIT_ACK", mapOf(
+        auditLogger.log("EXECUTION_LATENCY", "FORECAST_GTT_ACK", mapOf(
             "symbol" to row.symbol,
             "broker_ack_ms" to brokerAckLatencyMs,
-            "fixed_entry_price" to row.entryPrice,
+            "fixed_entry_trigger" to row.entryPrice,
+            "trigger_direction" to ForecastAutoBuyPolicy.TRIGGER_DIRECTION,
+            "child_order_type" to ForecastAutoBuyPolicy.CHILD_ORDER_TYPE,
             "fixed_target_price" to row.targetPrice,
-            "order_type" to "LIMIT",
             "product" to "CNC"
         ))
         return placed
     }
 
-    private suspend fun cancelForecastAutoBuyIfOpen(
+    private suspend fun recoverForecastEntryGttByReference(
+        token: String,
+        reference: String
+    ): SmartOrderPayload? {
+        val statuses = listOf("ACTIVE", "TRIGGERED", "COMPLETED", "CANCELLED")
+        for (status in statuses) {
+            for (page in 0..4) {
+                val payload = runCatching {
+                    apiFactory.groww.listSmartOrders(
+                        bearer(token),
+                        segment = "CASH",
+                        smartOrderType = ForecastAutoBuyPolicy.SMART_ORDER_TYPE,
+                        status = status,
+                        page = page,
+                        pageSize = 50
+                    ).requirePayload("Recover forecast entry GTT by reference")
+                }.getOrNull() ?: break
+                payload.orders.firstOrNull { it.referenceId == reference }?.let { return it }
+                if (payload.orders.size < 50) break
+            }
+        }
+        return null
+    }
+
+    private suspend fun cancelForecastEntryGttIfActive(
         token: String,
         state: ForecastAutoBuyOrderState,
         reason: String
     ) {
         val status = runCatching {
-            apiFactory.groww.orderStatus(bearer(token), state.orderId)
-                .requirePayload("Forecast auto-buy duplicate status ${state.symbol}")
-        }.getOrNull() ?: return
-        if (isForecastAutoBuyTerminal(status.orderStatus)) return
-        runCatching {
-            apiFactory.groww.cancelOrder(
+            apiFactory.groww.smartOrderStatus(
                 bearer(token),
-                OrderCancelRequest(growwOrderId = state.orderId)
-            ).requirePayload("Cancel duplicate forecast auto-buy ${state.symbol}")
+                segment = "CASH",
+                smartOrderType = ForecastAutoBuyPolicy.SMART_ORDER_TYPE,
+                smartOrderId = state.orderId
+            ).requirePayload("Forecast auto-buy duplicate GTT status ${state.symbol}")
+        }.getOrNull() ?: return
+        if (!ForecastAutoBuyPolicy.canCancelBeforeTrigger(status.status)) return
+        runCatching {
+            apiFactory.groww.cancelSmartOrder(
+                bearer(token),
+                segment = "CASH",
+                smartOrderType = ForecastAutoBuyPolicy.SMART_ORDER_TYPE,
+                smartOrderId = state.orderId
+            ).requirePayload("Cancel duplicate forecast entry GTT ${state.symbol}")
         }.onSuccess {
-            auditLogger.log("FORECAST_AUTO_BUY", "DUPLICATE_PENDING_CANCELLED", mapOf(
+            auditLogger.log("FORECAST_AUTO_BUY", "DUPLICATE_GTT_CANCELLED", mapOf(
                 "symbol" to state.symbol,
-                "order_id" to state.orderId,
+                "smart_order_id" to state.orderId,
                 "reason" to reason
             ))
         }
     }
 
-    private suspend fun openFilledForecastAutoBuyPosition(
+    private suspend fun openCompletedForecastEntryGttPosition(
         state: ForecastAutoBuyOrderState,
         forecast: LongForecastEntity?,
-        broker: OrderPayload,
-        filledQuantity: Int
+        token: String
     ) {
         if (managedDao.openPositionForSymbol(state.symbol) != null) return
-        val actualFill = broker.averageFillPrice?.takeIf { it.isFinite() && it > 0.0 }
-            ?: state.fixedEntryPrice
+
+        // The forecast entry remains the strategy's immutable entry reference. Groww's smart-order
+        // response does not expose the child MARKET fill price. We record the broker's same-day debit
+        // price as diagnostic evidence when available, without changing the fixed forecast reference.
+        val observedBrokerFill = runCatching {
+            apiFactory.groww.positions(bearer(token), segment = "CASH")
+                .requirePayload("Forecast GTT fill position ${state.symbol}")
+                .positions
+                .firstOrNull { it.tradingSymbol.equals(state.symbol, true) }
+                ?.debitPrice
+                ?.takeIf { it.isFinite() && it > 0.0 }
+        }.getOrNull()
+
         val now = System.currentTimeMillis()
         val trailArmPct = SteppedTrailingPolicy.ARM_TRIGGER_PCT
         managedDao.insertPosition(
@@ -1916,14 +1978,14 @@ class TradingRepository @Inject constructor(
                 symbol = state.symbol,
                 product = "CNC",
                 side = "LONG",
-                quantity = filledQuantity,
-                entryPrice = actualFill,
+                quantity = state.quantity,
+                entryPrice = state.fixedEntryPrice,
                 stopPrice = null,
                 targetPrice = state.fixedTargetPrice,
                 strategy = buildString {
-                    append("Forecast auto-buy · fixed LIMIT entry ₹")
+                    append("Forecast auto-buy · fixed GTT UP trigger ₹")
                     append(fmt(state.fixedEntryPrice))
-                    append(" · fixed target ₹")
+                    append(" · MARKET child · fixed target ₹")
                     append(fmt(state.fixedTargetPrice))
                     forecast?.strategy?.takeIf { it.isNotBlank() }?.let { append(" · "); append(it) }
                     append(" · v7 fixed stepped trail 0.55→0.50 then +0.10%")
@@ -1934,9 +1996,9 @@ class TradingRepository @Inject constructor(
                 openOrderId = state.orderId,
                 openReferenceId = state.referenceId,
                 openedAtMs = now,
-                lastPrice = actualFill,
-                maxFavourablePrice = actualFill,
-                maxAdversePrice = actualFill,
+                lastPrice = state.fixedEntryPrice,
+                maxFavourablePrice = state.fixedEntryPrice,
+                maxAdversePrice = state.fixedEntryPrice,
                 lastEvaluatedAtMs = now,
                 trailingArmPct = trailArmPct,
                 trailingLastRatchetPrice = 0.0,
@@ -1944,27 +2006,100 @@ class TradingRepository @Inject constructor(
             )
         )
         brokerInventorySnapshot = null
-        auditLogger.log("FORECAST_AUTO_BUY", "FIXED_LIMIT_FILLED", mapOf(
+        auditLogger.log("FORECAST_AUTO_BUY", "ENTRY_GTT_COMPLETED", mapOf(
             "symbol" to state.symbol,
-            "order_id" to state.orderId,
-            "quantity" to filledQuantity,
-            "fixed_entry_limit" to state.fixedEntryPrice,
-            "actual_fill_price" to actualFill,
+            "smart_order_id" to state.orderId,
+            "quantity" to state.quantity,
+            "fixed_entry_trigger" to state.fixedEntryPrice,
+            "observed_broker_debit_price" to observedBrokerFill,
             "fixed_target_price" to state.fixedTargetPrice,
             "target_recalculated" to false,
             "trail_arm_trigger_pct" to trailArmPct
         ))
     }
 
-    private fun isForecastAutoBuyTerminal(status: String): Boolean =
-        status.uppercase(Locale.US) in setOf(
-            "REJECTED",
-            "FAILED",
-            "CANCELLED",
-            "EXECUTED",
-            "COMPLETED",
-            "DELIVERY_AWAITED"
+    private suspend fun reconcileLegacyForecastLimitOrder(
+        token: String,
+        state: ForecastAutoBuyOrderState,
+        reason: String
+    ) {
+        val broker = runCatching {
+            apiFactory.groww.orderStatus(bearer(token), state.orderId)
+                .requirePayload("Legacy forecast LIMIT status ${state.symbol}")
+        }.getOrNull() ?: return
+        var status = broker.orderStatus.uppercase(Locale.US)
+        var filled = (broker.filledQuantity ?: 0).coerceIn(0, state.quantity)
+
+        if (!ForecastAutoBuyPolicy.isTerminal(status) && filled < state.quantity) {
+            val cancelled = runCatching {
+                apiFactory.groww.cancelOrder(
+                    bearer(token),
+                    OrderCancelRequest(growwOrderId = state.orderId)
+                ).requirePayload("Cancel legacy forecast LIMIT ${state.symbol}")
+            }.getOrNull()
+            if (cancelled != null) {
+                delay(FORECAST_AUTO_BUY_CANCEL_RECHECK_MS)
+                val refreshed = runCatching {
+                    apiFactory.groww.orderStatus(bearer(token), state.orderId)
+                        .requirePayload("Legacy forecast LIMIT post-cancel ${state.symbol}")
+                }.getOrDefault(cancelled)
+                status = refreshed.orderStatus.uppercase(Locale.US)
+                filled = (refreshed.filledQuantity ?: filled).coerceIn(0, state.quantity)
+                if (filled > 0) {
+                    openLegacyForecastLimitFill(state, refreshed, filled)
+                }
+            }
+        } else if (filled > 0) {
+            openLegacyForecastLimitFill(state, broker, filled)
+        }
+
+        forecastAutoBuyOrderStore.remove(state.date, state.symbol)
+        auditLogger.log("FORECAST_AUTO_BUY", "LEGACY_LIMIT_RECONCILED", mapOf(
+            "symbol" to state.symbol,
+            "order_id" to state.orderId,
+            "filled_quantity" to filled,
+            "status" to status,
+            "reason" to reason.ifBlank { "MIGRATE_TO_GTT" }
+        ))
+    }
+
+    private suspend fun openLegacyForecastLimitFill(
+        state: ForecastAutoBuyOrderState,
+        broker: OrderPayload,
+        filledQuantity: Int
+    ) {
+        if (managedDao.openPositionForSymbol(state.symbol) != null) return
+        val actualFill = broker.averageFillPrice?.takeIf { it.isFinite() && it > 0.0 }
+            ?: state.fixedEntryPrice
+        val now = System.currentTimeMillis()
+        managedDao.insertPosition(
+            ManagedPositionEntity(
+                engine = ENGINE_FORECAST_HOLDING,
+                symbol = state.symbol,
+                product = "CNC",
+                side = "LONG",
+                quantity = filledQuantity,
+                entryPrice = actualFill,
+                stopPrice = null,
+                targetPrice = state.fixedTargetPrice,
+                strategy = "Migrated legacy forecast LIMIT fill · fixed target ₹${fmt(state.fixedTargetPrice)} · v7 fixed stepped trail 0.55→0.50 then +0.10%",
+                regime = "FORECAST_AUTO_BUY",
+                confidence = 1.0,
+                sourceEventId = null,
+                openOrderId = state.orderId,
+                openReferenceId = state.referenceId,
+                openedAtMs = now,
+                lastPrice = actualFill,
+                maxFavourablePrice = actualFill,
+                maxAdversePrice = actualFill,
+                lastEvaluatedAtMs = now,
+                trailingArmPct = SteppedTrailingPolicy.ARM_TRIGGER_PCT,
+                trailingLastRatchetPrice = 0.0,
+                smartOrderMode = HoldingSmartOrderPolicy.MODE_NONE
+            )
         )
+        brokerInventorySnapshot = null
+    }
 
     suspend fun pendingLongForecastNotifications(): List<ForecastDto> {
         val today = LocalDate.now(INDIA).toString()
