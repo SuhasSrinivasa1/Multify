@@ -2766,6 +2766,94 @@ class TradingRepository @Inject constructor(
         return submitted
     }
 
+    suspend fun reconcileFixedAutoBuyOrders(
+        forceCancel: Boolean = false,
+        cancelReason: String = ""
+    ): Int {
+        val today = LocalDate.now(INDIA).toString()
+        val states = fixedAutoBuyOrderStore.all()
+        if (states.isEmpty()) return 0
+        val token = ensureToken() ?: return states.count { !ForecastAutoBuyPolicy.isTerminal(it.status) }
+        val settings = preferences.settings.first()
+        val forecasts = fixedRecommendationStore.recommendations(today).associateBy { it.id }
+        var pending = 0
+
+        for (state in states) {
+            val existing = managedDao.openPosition(ENGINE_FIXED_HOLDING, state.symbol)
+            if (existing != null) {
+                cancelFixedEntryGttIfActive(token, state, "FIXED_HOLDING_ALREADY_EXISTS")
+                fixedAutoBuyOrderStore.remove(state.date, state.symbol)
+                continue
+            }
+            val broker = runCatching {
+                apiFactory.groww.smartOrderStatus(
+                    bearer(token), segment = "CASH", smartOrderType = ForecastAutoBuyPolicy.SMART_ORDER_TYPE,
+                    smartOrderId = state.orderId
+                ).requirePayload("Fixed auto-buy GTT status ${state.symbol}")
+            }.onFailure {
+                auditLogger.log("FIXED_AUTO_BUY", "GTT_STATUS_ERROR", mapOf(
+                    "symbol" to state.symbol,
+                    "smart_order_id" to state.orderId,
+                    "message" to (it.message ?: it.javaClass.simpleName)
+                ))
+            }.getOrNull()
+            if (broker == null) { pending++; continue }
+
+            val row = if (state.date == today) forecasts[state.forecastId] else null
+            val cancelRequired = ForecastAutoBuyPolicy.shouldCancel(
+                stateDate = state.date,
+                today = today,
+                autoBuyEnabled = settings.fixedAutoBuyEnabled,
+                armEffective = settings.armEffective,
+                safetyHalt = settings.safetyHalt,
+                forecastActive = row?.status == "ACTIVE",
+                executionEligible = row?.executionEligible == true,
+                forceCancel = forceCancel
+            )
+            val status = broker.status.uppercase(Locale.US)
+            if (ForecastAutoBuyPolicy.isCompleted(status)) {
+                openCompletedFixedEntryGttPosition(state, row, token)
+                fixedAutoBuyOrderStore.remove(state.date, state.symbol)
+                continue
+            }
+            if (ForecastAutoBuyPolicy.isTerminal(status)) {
+                fixedAutoBuyOrderStore.remove(state.date, state.symbol)
+                continue
+            }
+            if (cancelRequired && ForecastAutoBuyPolicy.canCancelBeforeTrigger(status)) {
+                val reason = when {
+                    state.date != today -> "STALE_TRADING_DATE"
+                    cancelReason.isNotBlank() -> cancelReason
+                    row == null -> "FIXED_RECOMMENDATION_MISSING"
+                    row.status != "ACTIVE" -> "FIXED_RECOMMENDATION_NO_LONGER_ACTIVE"
+                    !row.executionEligible -> "FIXED_NOT_EXECUTION_ELIGIBLE"
+                    !settings.fixedAutoBuyEnabled -> "FIXED_AUTO_BUY_DISABLED"
+                    !settings.armEffective -> "ARM_DISABLED"
+                    settings.safetyHalt -> "SAFETY_HALT"
+                    else -> "CANCEL_REQUIRED"
+                }
+                val cancelled = runCatching {
+                    apiFactory.groww.cancelSmartOrder(
+                        bearer(token), segment = "CASH", smartOrderType = ForecastAutoBuyPolicy.SMART_ORDER_TYPE,
+                        smartOrderId = state.orderId
+                    ).requirePayload("Cancel Fixed entry GTT ${state.symbol}")
+                }.getOrNull()
+                if (cancelled != null) {
+                    fixedAutoBuyOrderStore.remove(state.date, state.symbol)
+                    auditLogger.log("FIXED_AUTO_BUY", "GTT_CANCELLED", mapOf(
+                        "symbol" to state.symbol,
+                        "smart_order_id" to state.orderId,
+                        "reason" to reason
+                    ))
+                    continue
+                }
+            }
+            fixedAutoBuyOrderStore.upsert(state.copy(status = status.ifBlank { state.status }))
+            pending++
+        }
+        return pending
+    }
+
     suspend fun pendingLongForecastNotifications(): List<ForecastDto> {
         val today = LocalDate.now(INDIA).toString()
         val rows = learningDao.pendingLongForecastNotifications(today)
