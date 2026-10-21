@@ -22,6 +22,7 @@ data class AppSettings(
     val holdingBudgetRupees: Long = 200_000L,
     val armEnabled: Boolean = false,
     val forecastAutoBuyEnabled: Boolean = false,
+    val fixedAutoBuyEnabled: Boolean = false,
     val onboardingComplete: Boolean = false,
     val brokerAuthenticated: Boolean = false,
     val authenticatedAtMs: Long = 0L,
@@ -56,6 +57,7 @@ class AppPreferences @Inject constructor(
         val holdingBudgetRupees = longPreferencesKey("daily_budget_rupees")
         val armEnabled = booleanPreferencesKey("live_execution_enabled")
         val forecastAutoBuyEnabled = booleanPreferencesKey("forecast_auto_buy_enabled")
+        val fixedAutoBuyEnabled = booleanPreferencesKey("fixed_auto_buy_enabled")
         val onboardingComplete = booleanPreferencesKey("onboarding_complete")
         val brokerAuthenticated = booleanPreferencesKey("broker_authenticated")
         val authenticatedAtMs = longPreferencesKey("authenticated_at_ms")
@@ -127,6 +129,10 @@ class AppPreferences @Inject constructor(
         context.dataStore.edit { it[Keys.forecastAutoBuyEnabled] = value }
     }
 
+    suspend fun setFixedAutoBuy(value: Boolean) {
+        context.dataStore.edit { it[Keys.fixedAutoBuyEnabled] = value }
+    }
+
     suspend fun setSafetyHalt(value: Boolean) {
         context.dataStore.edit {
             it[Keys.safetyHalt] = value
@@ -177,6 +183,7 @@ class AppPreferences @Inject constructor(
         holdingBudgetRupees = (this[Keys.holdingBudgetRupees] ?: 200_000L).coerceIn(10_000L, 200_000L),
         armEnabled = this[Keys.armEnabled] ?: false,
         forecastAutoBuyEnabled = this[Keys.forecastAutoBuyEnabled] ?: false,
+        fixedAutoBuyEnabled = this[Keys.fixedAutoBuyEnabled] ?: false,
         onboardingComplete = this[Keys.onboardingComplete] ?: false,
         brokerAuthenticated = this[Keys.brokerAuthenticated] ?: false,
         authenticatedAtMs = this[Keys.authenticatedAtMs] ?: 0L,
