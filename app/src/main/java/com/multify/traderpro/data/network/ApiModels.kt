@@ -32,6 +32,7 @@ data class ExecutionStatsDto(
 
 data class PositionDto(
     val symbol: String = "",
+    val engine: String = "",
     val quantity: Int = 0,
     val averagePrice: Double = 0.0,
     val ltp: Double? = null,
@@ -74,11 +75,25 @@ data class DashboardDto(
     val learning: LearningStatsDto = LearningStatsDto(),
     val forecastLearning: ForecastLearningStatsDto = ForecastLearningStatsDto(),
     val forecasts: List<ForecastDto> = emptyList(),
+    val fixedForecasts: List<ForecastDto> = emptyList(),
     val forecastChampions: List<ForecastChampionDto> = emptyList(),
     val research: ResearchDto = ResearchDto(),
     val health: EngineHealthDto = EngineHealthDto(),
+    val fixedHealth: EngineHealthDto = EngineHealthDto(),
+    val fixedSnapshot: FixedSnapshotDto = FixedSnapshotDto(),
     val positions: List<PositionDto> = emptyList(),
     val recentDecisions: List<RecentDecisionDto> = emptyList()
+)
+
+data class FixedSnapshotDto(
+    val snapshotId: String = "",
+    val sourceVersion: String = "",
+    val frozenAtMs: Long = 0L,
+    val sha256: String = "",
+    val learningCalls: Int = 0,
+    val historicalForecasts: Int = 0,
+    val researchSnapshots: Int = 0,
+    val champions: Int = 0
 )
 
 data class LearningStatsDto(
