@@ -2,7 +2,7 @@ package com.multify.traderpro.engine
 
 import kotlin.math.ln
 
-data class FactorPoint(
+data class FixedFactorPoint(
     val name: String,
     val family: String,
     val score: Double,
@@ -17,7 +17,7 @@ data class FixedFactorFamilyScore(
 )
 
 data class FixedMultifyFactorModel(
-    val factors: List<FactorPoint>,
+    val factors: List<FixedFactorPoint>,
     val families: List<FixedFactorFamilyScore>,
     val dominantFamily: String,
     val consensusScore: Double,
@@ -47,7 +47,7 @@ object FixedMultifyFactorFamilies {
         fun boolScore(v: Boolean?): Double = when (v) { true -> 1.0; false -> -1.0; null -> 0.0 }
         fun centered01(v: Double?): Double = v?.takeIf { it.isFinite() }?.let { ((it - 0.5) * 2.0).coerceIn(-1.0, 1.0) } ?: 0.0
         fun raw(name: String, family: String, value: Double?, score: Double) =
-            FactorPoint(name, family, score.coerceIn(-1.0, 1.0), value?.takeIf { it.isFinite() })
+            FixedFactorPoint(name, family, score.coerceIn(-1.0, 1.0), value?.takeIf { it.isFinite() })
 
         val factors = buildList {
             add(raw("day_change_pct", MOMENTUM_TREND, f.dayChangePct, signScaled(f.dayChangePct, 2.5)))
