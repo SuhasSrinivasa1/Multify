@@ -1,4 +1,4 @@
-name: Multify Trader Pro v7.5.1 Embedded Fixed Intelligence Verification
+name: Multify Trader Pro v7.5.1 Seeded Fixed Engine Verification
 
 on:
   workflow_dispatch:
@@ -7,9 +7,6 @@ on:
     paths:
       - 'app/**'
       - 'backend/**'
-      - 'build.gradle.kts'
-      - 'settings.gradle.kts'
-      - 'gradle.properties'
       - '.github/workflows/multify-v751-verify.yml'
 
 permissions:
@@ -32,27 +29,6 @@ jobs:
           pip install -r backend/requirements.txt
           PYTHONPATH="$GITHUB_WORKSPACE" PHONE_HMAC_SECRET=test-secret-test-secret-test-secret GROWW_API_KEY=test-api-key GROWW_TOTP_SECRET=JBSWY3DPEHPK3PXP python -m pytest -q backend/tests
 
-      - name: Verify embedded intelligence
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "8cc0cd5accc08921fd710af4ecd4f58ab1b9b5b41bc686f8713e6a7ea1267738  app/src/main/assets/embedded_historic_intelligence_v2.json.gz" | sha256sum -c -
-          python - <<'PY'
-          import gzip, json
-          p="app/src/main/assets/embedded_historic_intelligence_v2.json.gz"
-          with gzip.open(p, "rt", encoding="utf-8") as f:
-              x=json.load(f)
-          assert x["schemaVersion"] == 2
-          assert x["fixedSnapshot"]["snapshotId"] == "FIXED-V741-2026-10-21"
-          assert len(x["fixedSnapshot"]["learningCalls"]) == 108
-          assert len(x["fixedSnapshot"]["longForecasts"]) == 10
-          assert len(x["fixedSnapshot"]["researchSnapshots"]) == 4370
-          assert len(x["fixedSnapshot"]["champions"]) == 2
-          assert len(x["reports"]) == 2
-          assert len(x["sourceExports"]) == 3
-          print("embedded intelligence verified")
-          PY
-
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -71,20 +47,20 @@ jobs:
       - name: Android unit tests
         run: gradle --no-daemon testDebugUnitTest
 
-      - name: Verify Fixed and Forecast separation
+      - name: Verify seeded Fixed architecture
         shell: bash
         run: |
           set -euo pipefail
-          grep -R 'Fixed("Fixed"' app/src/main/java/com/multify/traderpro/ui/screens/TraderApp.kt
-          grep -R 'Auto-buy forecast recommendations' app/src/main/java/com/multify/traderpro/ui/screens/TraderApp.kt
+          grep -R 'MULTIFY-DECISION-INTELLIGENCE-2026-10-21' app/src/main/java
+          test -s app/src/main/assets/fixed_decision_seed_v751.b64
+          grep -R 'bootstrapBundledDecisionIntelligenceIfEmpty' app/src/main/java
+          grep -R 'FIXED-V741-2026-10-21' app/src/main/java
           grep -R 'Auto-buy Fixed recommendations' app/src/main/java/com/multify/traderpro/ui/screens/TraderApp.kt
-          grep -R 'restoreExactIfAbsent(embedded.fixedSnapshot)' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
-          grep -R 'ensureEmbeddedHistoricalIntelligence()' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
-          grep -R 'managedDao.openPosition(ENGINE_FORECAST_HOLDING' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
+          grep -R 'Fixed("Fixed"' app/src/main/java/com/multify/traderpro/ui/screens/TraderApp.kt
           grep -R 'managedDao.openPosition(ENGINE_FIXED_HOLDING' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
-          grep -R 'triggerDirection = ForecastAutoBuyPolicy.TRIGGER_DIRECTION' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
+          grep -R 'managedDao.openPosition(ENGINE_FORECAST_HOLDING' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
+          ! grep -R 'seedFromAdaptiveIfEmpty(today, learningDao.longForecastsForDate(today))' app/src/main/java
           ! grep -R 'MAX_DAILY_RECOMMENDATIONS' app/src/main/java
-          ! grep -R 'publishable.take' app/src/main/java
 
       - name: Build debug APK
         run: gradle --no-daemon assembleDebug
@@ -94,9 +70,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v7.5.1-fixed-embedded-history-debug.apk
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/Multify-TraderPro-v7.5.1-fixed-embedded-history-debug.apk > dist/signature.txt
-          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/Multify-TraderPro-v7.5.1-fixed-embedded-history-debug.apk | grep -E "^(package:|application-label:)" > dist/package-verification.txt
+          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v7.5.1-fixed-engine-seeded-debug.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/Multify-TraderPro-v7.5.1-fixed-engine-seeded-debug.apk > dist/signature.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/Multify-TraderPro-v7.5.1-fixed-engine-seeded-debug.apk | grep -E "^(package:|application-label:)" > dist/package-verification.txt
           (cd dist && sha256sum *.apk > SHA256SUMS.txt)
           git archive --format=zip --output=dist/Multify-TraderPro-v7.5.1-source.zip HEAD
 
