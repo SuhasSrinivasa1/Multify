@@ -1417,6 +1417,355 @@ class TradingRepository @Inject constructor(
         return all.map { it.toForecastDto() }
     }
 
+    suspend fun generateFixedForecasts(force: Boolean = false): List<ForecastDto> {
+        val snapshot = ensureFixedEngineSnapshot()
+        val now = ZonedDateTime.now(INDIA)
+        val today = now.toLocalDate().toString()
+        val existing = fixedRecommendationStore.recommendations(today)
+        if (now.dayOfWeek.value >= 6 || now.toLocalTime() < LocalTime.of(9, 15) || now.toLocalTime() > LocalTime.of(15, 0)) {
+            return existing.map { it.toDto() }
+        }
+        val nowMs = System.currentTimeMillis()
+        if (!force && nowMs - lastFixedScanAtMs < FIXED_V741_FORECAST_SCAN_INTERVAL_MS) {
+            return existing.map { it.toDto() }
+        }
+        val token = ensureToken() ?: return existing.map { it.toDto() }
+        lastFixedScanAtMs = nowMs
+
+        val calls = snapshot.payload.learningCalls.filter { it.action.equals("BUY", true) }
+        val recentDates = calls.map { it.callDate }.distinct().sortedDescending().take(30).toSet()
+        val rolling = calls.filter { it.callDate in recentDates }
+        val frequency = rolling.groupingBy { it.symbol }.eachCount()
+        val recentSymbols = frequency.entries.sortedByDescending { it.value }.take(12).map { it.key }
+        val dnaSymbols = FixedMultifyReverseEngineering.positiveCases.map { it.symbol }
+        val master = nseSymbols.symbols()
+
+        val discoveryPass = if (master.isEmpty()) {
+            MarketDiscoveryPass(emptyList(), false, 0.0, false, 0)
+        } else {
+            discoverFixedMarketWideCandidates(token, master, today)
+        }
+        val discoveredSymbols = discoveryPass.symbols
+
+        val slot = (now.hour * 60 + now.minute) / 30
+        val rotating = if (master.isEmpty()) emptyList() else {
+            val seed = kotlin.math.abs(today.hashCode() + slot * 977)
+            (0 until min(FIXED_V741_DISCOVERY_ROTATING_FALLBACK, master.size)).map { i ->
+                master[Math.floorMod(seed + i * 131, master.size)]
+            }
+        }
+        val universe = (discoveredSymbols + dnaSymbols + recentSymbols + rotating)
+            .distinct()
+            .take(FIXED_V741_DETAILED_FORECAST_UNIVERSE_LIMIT)
+        val evaluated = mutableListOf<Pair<String, FixedStrategyEvaluation>>()
+        for (symbol in universe) {
+            val evaluation = runCatching { fixedForecastEvaluation(symbol, token) }
+                .onFailure {
+                    auditLogger.log("FIXED_RESEARCH", "EVALUATION_ERROR", mapOf(
+                        "symbol" to symbol,
+                        "message" to (it.message ?: it.javaClass.simpleName)
+                    ))
+                }
+                .getOrNull() ?: continue
+            if (evaluation.features.ltp < 10.0) continue
+            evaluated += symbol to evaluation
+            delay(FIXED_V741_FORECAST_SYMBOL_PACING_MS)
+        }
+
+        val breadth = evaluated.mapNotNull { it.second.features.dayChangePct }
+            .takeIf { it.isNotEmpty() }?.average() ?: 0.0
+        val marketRegime = when {
+            breadth >= .50 -> "BREADTH_BULL"
+            breadth <= -.50 -> "BREADTH_WEAK"
+            else -> "BREADTH_NEUTRAL"
+        }
+        val champions = snapshot.payload.champions.associateBy { it.key }
+        val learnedAverage = fixedSnapshotMultifyMfeAverage(snapshot)
+        val priorForecasts = snapshot.payload.longForecasts.filter {
+            it.forecastDate < today && it.status in setOf("TARGET_HIT", "MISSED") &&
+                FixedPositiveCloseForecastPolicy.isPositiveClose(it.entryPrice, it.lastPrice)
+        }
+        val priorMfe = priorForecasts.map { it.maxFavourablePct }
+            .filter { it.isFinite() && it >= 0.0 && it < 25.0 }
+        val targetPct = FixedForecastQualityPolicy.adaptiveTargetPct(learnedAverage, priorMfe)
+
+        val have = existing.map { it.symbol }.toSet()
+        val priorTodayResearch = fixedRecommendationStore.observations(today)
+            .filter { it.scanAtMs < nowMs && nowMs - it.scanAtMs <= FIXED_V741_PRIMARY_CONFIRMATION_WINDOW_MS }
+        val priorResearchDates = snapshot.payload.researchSnapshots
+            .map { it.researchDate }.distinct().filter { it < today }.sortedDescending()
+            .take(FIXED_V741_RESEARCH_SESSION_GOAL).toSet()
+        val priorResearch = snapshot.payload.researchSnapshots
+            .filter {
+                it.researchDate in priorResearchDates && it.outcomeUpdatedAtMs != null &&
+                    FixedPositiveCloseForecastPolicy.isPositiveResearchClose(it.outcomeClosePct)
+            }
+            .groupBy { it.researchDate + "|" + it.symbol }
+            .mapNotNull { (_, rows) -> rows.minByOrNull { it.scanAtMs } }
+
+        fun researchEvidenceBonus(evaluation: FixedStrategyEvaluation): Double {
+            val xs = priorResearch.filter {
+                it.regime == evaluation.regime && it.strategy == evaluation.strategy
+            }
+            if (xs.size < FIXED_V741_MIN_RESEARCH_EVIDENCE_ROWS) return 0.0
+            val hitRate = xs.count { it.outcomeTargetHit == true }.toDouble() / xs.size
+            val avgMfe = xs.mapNotNull { it.outcomeMfePct }.takeIf { it.isNotEmpty() }?.average() ?: 0.0
+            val hitComponent = (hitRate - 0.50) * 0.14
+            val mfeComponent = if (targetPct > 0.0)
+                (((avgMfe - targetPct) / targetPct).coerceIn(-1.0, 1.0)) * 0.04
+            else 0.0
+            return (hitComponent + mfeComponent).coerceIn(-0.08, 0.10)
+        }
+
+        val ranked = evaluated.map { row ->
+            val quality = FixedForecastQualityPolicy.evaluate(row.second, targetPct, marketRegime)
+            val factorModel = FixedMultifyFactorFamilies.evaluate(row.second, marketRegime)
+            val key = fixedChampionKey(marketRegime, row.second.regime, row.second.strategy)
+            val champion = champions[key]
+            val championWinRate = champion?.takeIf { it.sampleCount > 0 }?.let { it.wins.toDouble() / it.sampleCount } ?: 0.0
+            val championBonus = when {
+                champion?.frozen == true && championWinRate >= .75 -> .08
+                champion != null && champion.sampleCount >= 3 && championWinRate >= .75 -> .04
+                else -> 0.0
+            }
+            val frequencyBonus = min(.04, (frequency[row.first] ?: 0) * .004)
+            val dnaBonus = if (row.first in dnaSymbols) .08 else 0.0
+            val qualityBonus = FixedForecastQualityPolicy.rankingBonus(row.second, quality.volatilityCapacityPct, targetPct, quality.tier)
+            val researchBonus = researchEvidenceBonus(row.second)
+            val familyBonus = FixedMultifyFactorFamilies.rankingBonus(factorModel)
+            FixedCandidate(
+                symbol = row.first,
+                evaluation = row.second,
+                quality = quality,
+                factorModel = factorModel,
+                score = (
+                    row.second.confidence +
+                        row.second.directionalScore.coerceAtLeast(0.0) * 0.10 +
+                        championBonus + frequencyBonus + dnaBonus + qualityBonus + researchBonus + familyBonus
+                    ).coerceIn(0.01, .99),
+                championKey = key
+            )
+        }.sortedWith(
+            compareByDescending<FixedCandidate> {
+                when (it.quality.tier) { "PRIMARY" -> 3; "SECONDARY" -> 2; else -> 1 }
+            }.thenByDescending { it.score }
+        )
+
+        fixedRecommendationStore.appendObservations(
+            ranked.take(FIXED_V741_RESEARCH_CAPTURE_TOP_N).map { item ->
+                FixedScanObservation(
+                    recommendationDate = today,
+                    scanAtMs = nowMs,
+                    symbol = item.symbol,
+                    qualityTier = item.quality.tier,
+                    publishEligible = item.quality.publishEligible,
+                    executionEligible = item.quality.executionEligible
+                )
+            }
+        )
+
+        val unseen = ranked.filter { it.symbol !in have }
+        fun priorPrimaryHits(symbol: String): Int = priorTodayResearch.asSequence()
+            .filter {
+                it.symbol.equals(symbol, true) &&
+                    it.qualityTier == "PRIMARY" &&
+                    it.publishEligible &&
+                    it.executionEligible
+            }
+            .map { it.scanAtMs }
+            .distinct()
+            .count()
+
+        val publishable = unseen.filter { item ->
+            val currentPrimary = item.quality.tier == "PRIMARY" &&
+                item.quality.publishEligible && item.quality.executionEligible
+            FixedForecastPublicationPolicy.isReady(
+                discoveryBaselineReady = discoveryPass.baselineReady,
+                currentPrimary = currentPrimary,
+                discoveredMarketWide = item.symbol in discoveredSymbols,
+                priorPrimaryHits = priorPrimaryHits(item.symbol)
+            )
+        }
+
+        publishable.forEachIndexed { index, item ->
+            val price = item.evaluation.features.ltp
+            fixedRecommendationStore.upsert(
+                FixedRecommendationRecord(
+                    id = FixedRecommendationStore.fixedId(today, item.symbol),
+                    recommendationDate = today,
+                    rank = existing.size + index + 1,
+                    symbol = item.symbol,
+                    entryPrice = price,
+                    targetPct = targetPct,
+                    targetPrice = price * (1.0 + targetPct / 100.0),
+                    confidence = item.evaluation.confidence,
+                    score = item.score,
+                    strategy = item.evaluation.strategy,
+                    regime = item.evaluation.regime,
+                    marketRegime = marketRegime,
+                    championKey = item.championKey,
+                    reason = "Frozen ${FixedEngineSnapshotStore.SNAPSHOT_ID} · " + item.quality.reason + " · " + item.evaluation.reason +
+                        " · family " + item.factorModel.dominantFamily +
+                        " · family consensus " + fmt(item.factorModel.consensusScore * 100.0) + "%" +
+                        " · capacity " + fmt(item.quality.volatilityCapacityPct) + "% for " + fmt(targetPct) + "% target",
+                    generatedAtMs = nowMs,
+                    lastPrice = price,
+                    lastObservedAtMs = nowMs,
+                    qualityTier = item.quality.tier,
+                    executionEligible = item.quality.executionEligible
+                )
+            )
+        }
+
+        val all = fixedRecommendationStore.recommendations(today)
+        val tierCounts = ranked.groupingBy { it.quality.tier }.eachCount()
+        auditLogger.log("FIXED_ENGINE", "LONG_SCAN_TIERED", mapOf(
+            "snapshot_id" to snapshot.payload.snapshotId,
+            "snapshot_sha256" to snapshot.sha256,
+            "date" to today,
+            "evaluated" to evaluated.size,
+            "primary" to (tierCounts["PRIMARY"] ?: 0),
+            "secondary" to (tierCounts["SECONDARY"] ?: 0),
+            "research" to (tierCounts["RESEARCH"] ?: 0),
+            "published_count" to all.size,
+            "daily_recommendation_cap" to "NONE",
+            "newly_publishable_count" to publishable.size,
+            "target_pct" to targetPct,
+            "frozen_multify_mfe_avg_pct" to learnedAverage,
+            "breadth_pct" to breadth,
+            "market_regime" to marketRegime,
+            "discovery_baseline_ready" to discoveryPass.baselineReady,
+            "discovery_coverage_pct" to discoveryPass.coverageRatio * 100.0,
+            "arm_effective" to preferences.settings.first().armEffective,
+            "learning_enabled" to false,
+            "publishable_after_confirmation" to publishable.size
+        ))
+        return all.map { it.toDto() }
+    }
+
+    private fun fixedSnapshotMultifyMfeAverage(snapshot: FixedEngineSnapshot): Double {
+        val calls = snapshot.payload.learningCalls.filter {
+            it.action.equals("BUY", true) && it.multifyMfePct != null
+        }
+        val dates = calls.map { it.callDate }.distinct().sortedDescending().take(30).toSet()
+        val values = calls.filter { it.callDate in dates }.mapNotNull { it.multifyMfePct }
+            .filter { it.isFinite() && it >= 0.0 && it < 25.0 }
+        return FixedAdaptiveLearningMath.rollingMean(values, 0.0)
+    }
+
+    private suspend fun fixedForecastEvaluation(symbol: String, token: String): FixedStrategyEvaluation {
+        val now = ZonedDateTime.now(INDIA)
+        val start = now.minusDays(4).toLocalDate().atTime(9, 15).format(HIST_FORMAT)
+        val end = now.toLocalDateTime().format(HIST_FORMAT)
+        val quote = apiFactory.groww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Fixed quote $symbol")
+        val historical = apiFactory.groww.historicalCandles(
+            bearer(token), growwSymbol = "NSE-$symbol", startTime = start, endTime = end, candleInterval = "15minute"
+        ).requirePayload("Fixed forecast candles $symbol")
+        require(historical.candles.size >= 5) { "Insufficient fixed forecast candles" }
+        val features = FixedLocalStrategyEngine.buildFeatures(quote, historical, 15)
+        val signal = ParsedSignal(SignalType.TRADE_RELEASE, symbol = symbol, rawText = "fixed-forecast", confidence = 1.0)
+        return FixedLocalStrategyEngine.evaluateLong(signal, features, includeEventPrior = false)
+    }
+
+    private suspend fun discoverFixedMarketWideCandidates(
+        token: String,
+        master: List<String>,
+        today: String
+    ): MarketDiscoveryPass {
+        fixedMarketDiscoveryStateStore.seedIfEmpty(today, marketDiscoveryStateStore.load(today))
+        val distinctMaster = master.distinct()
+        val persisted = fixedMarketDiscoveryStateStore.load(today)
+        val previous = persisted?.previousLtps.orEmpty()
+        val sessionOpen = persisted?.sessionOpenLtps.orEmpty()
+        val restored = persisted != null
+        val current = linkedMapOf<String, Double>()
+        var batchErrors = 0
+        var consecutiveFailures = 0
+        var abortedForNetwork = false
+        val chunks = distinctMaster.chunked(50)
+
+        for ((index, chunk) in chunks.withIndex()) {
+            val payload = fetchFixedDiscoveryLtpBatch(token, chunk, index)
+            if (payload == null) {
+                batchErrors++
+                consecutiveFailures++
+                if (consecutiveFailures >= FIXED_V741_DISCOVERY_CONSECUTIVE_FAILURE_ABORT) {
+                    abortedForNetwork = true
+                    break
+                }
+            } else {
+                consecutiveFailures = 0
+                payload.forEach { (key, value) ->
+                    if (value.isFinite() && value >= 10.0) {
+                        current[key.removePrefix("NSE_").uppercase(Locale.US)] = value
+                    }
+                }
+            }
+            if (index + 1 < chunks.size) delay(FIXED_V741_DISCOVERY_BATCH_PACING_MS)
+        }
+
+        val denominator = distinctMaster.size.coerceAtLeast(1)
+        val coverageRatio = current.size.toDouble() / denominator.toDouble()
+        val previousCoverageRatio = previous.size.toDouble() / denominator.toDouble()
+        val baselineReady = previousCoverageRatio >= FIXED_V741_MIN_DISCOVERY_COVERAGE_RATIO &&
+            coverageRatio >= FIXED_V741_MIN_DISCOVERY_COVERAGE_RATIO && !abortedForNetwork
+
+        val ranked = if (baselineReady) {
+            FixedMarketDiscoveryPolicy.rank(
+                currentLtps = current,
+                previousLtps = previous,
+                sessionOpenLtps = sessionOpen,
+                limit = FIXED_V741_DISCOVERY_DYNAMIC_LIMIT
+            )
+        } else emptyList()
+
+        if (coverageRatio >= FIXED_V741_MIN_DISCOVERY_COVERAGE_RATIO && !abortedForNetwork) {
+            val mergedSessionOpen = sessionOpen.toMutableMap()
+            current.forEach { (symbol, ltp) -> mergedSessionOpen.putIfAbsent(symbol, ltp) }
+            fixedMarketDiscoveryStateStore.save(today, mergedSessionOpen, current)
+        }
+        fixedMarketDiscoveryStateStore.recordHealth(today, coverageRatio, batchErrors, abortedForNetwork, baselineReady)
+        preferences.recordMarketData()
+        auditLogger.log("FIXED_DISCOVERY", "MARKET_WIDE_SCAN", mapOf(
+            "snapshot_id" to FixedEngineSnapshotStore.SNAPSHOT_ID,
+            "master_count" to distinctMaster.size,
+            "ltp_coverage" to current.size,
+            "coverage_pct" to coverageRatio * 100.0,
+            "batch_errors" to batchErrors,
+            "aborted_for_network" to abortedForNetwork,
+            "baseline_ready" to baselineReady,
+            "state_restored" to restored,
+            "selected" to ranked.size
+        ))
+        return MarketDiscoveryPass(ranked.map { it.symbol }, baselineReady, coverageRatio, restored, batchErrors)
+    }
+
+    private suspend fun fetchFixedDiscoveryLtpBatch(
+        token: String,
+        chunk: List<String>,
+        batchIndex: Int
+    ): Map<String, Double>? {
+        var lastFailure: Throwable? = null
+        for (attempt in 0 until FIXED_V741_DISCOVERY_BATCH_ATTEMPTS) {
+            try {
+                val exchangeSymbols = chunk.joinToString(",") { "NSE_$it" }
+                return apiFactory.groww.ltp(bearer(token), exchangeSymbols = exchangeSymbols)
+                    .requirePayload("Fixed market-wide discovery LTP")
+            } catch (t: Throwable) {
+                lastFailure = t
+                val transient = t is IOException || (t is HttpException && (t.code() == 429 || t.code() >= 500))
+                if (!transient || attempt + 1 >= FIXED_V741_DISCOVERY_BATCH_ATTEMPTS) break
+                delay(if (t is HttpException && t.code() == 429) 1_250L else FIXED_V741_DISCOVERY_RETRY_BACKOFF_MS)
+            }
+        }
+        auditLogger.log("FIXED_DISCOVERY", "LTP_BATCH_ERROR", mapOf(
+            "batch_index" to batchIndex,
+            "batch_size" to chunk.size,
+            "message" to (lastFailure?.message ?: lastFailure?.javaClass?.simpleName ?: "unknown")
+        ))
+        return null
+    }
+
     private suspend fun captureForecastResearchScan(
         date: String,
         scanAtMs: Long,
