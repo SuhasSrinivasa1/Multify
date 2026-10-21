@@ -3,6 +3,7 @@ package com.multify.traderpro.data.repository
 import android.content.Context
 import android.net.Uri
 import android.os.SystemClock
+import android.util.Base64
 import com.google.gson.GsonBuilder
 import com.google.gson.JsonParser
 import com.multify.traderpro.BuildConfig
@@ -106,6 +107,7 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.zip.ZipEntry
+import java.util.zip.GZIPInputStream
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 import javax.inject.Inject
@@ -331,7 +333,103 @@ class TradingRepository @Inject constructor(
         return payload
     }
 
+    private suspend fun bootstrapBundledDecisionIntelligenceIfEmpty(): Boolean {
+        val existingCalls = learningDao.allCalls()
+        val existingForecasts = learningDao.allLongForecasts()
+        val existingResearch = learningDao.allForecastResearch()
+        val existingChampions = learningDao.allForecastChampions()
+        if (existingCalls.isNotEmpty() || existingForecasts.isNotEmpty() || existingResearch.isNotEmpty() || existingChampions.isNotEmpty()) {
+            return false
+        }
+
+        val encoded = appContext.assets.open(BUNDLED_DECISION_SEED_ASSET)
+            .bufferedReader().use { it.readText() }.trim()
+        require(encoded.isNotBlank()) { "Bundled decision-intelligence seed is empty" }
+        val json = GZIPInputStream(ByteArrayInputStream(Base64.decode(encoded, Base64.DEFAULT)))
+            .bufferedReader(Charsets.UTF_8).use { it.readText() }
+        val root = JsonParser.parseString(json).asJsonObject
+        require(root.get("seedId")?.asString == BUNDLED_DECISION_SEED_ID) {
+            "Bundled decision-intelligence seed id mismatch"
+        }
+
+        var calls = 0
+        root.getAsJsonArray("learningCalls")?.forEach { node ->
+            val x = node.asJsonObject
+            val callDate = x.get("date")?.takeUnless { it.isJsonNull }?.asString ?: return@forEach
+            val symbol = x.get("symbol")?.takeUnless { it.isJsonNull }?.asString?.uppercase(Locale.US) ?: return@forEach
+            val entry = x.get("entry_price")?.takeUnless { it.isJsonNull }?.asDouble ?: return@forEach
+            if (!entry.isFinite() || entry <= 0.0) return@forEach
+            if (learningDao.callForDateSymbolAction(callDate, symbol, "BUY") != null) return@forEach
+            learningDao.insertCall(
+                LearningCallEntity(
+                    callDate = callDate,
+                    symbol = symbol,
+                    source = x.get("source")?.takeUnless { it.isJsonNull }?.asString ?: "BUNDLED_PRIOR_LOG",
+                    action = "BUY",
+                    entryPrice = entry,
+                    targetPrice = x.get("target_price")?.takeUnless { it.isJsonNull }?.asDouble,
+                    targetPct = x.get("target_pct")?.takeUnless { it.isJsonNull }?.asDouble,
+                    multifyExitPrice = x.get("exit_price")?.takeUnless { it.isJsonNull }?.asDouble,
+                    longRealizedPct = x.get("long_return_pct")?.takeUnless { it.isJsonNull }?.asDouble,
+                    multifyMaxPrice = x.get("multify_max_price")?.takeUnless { it.isJsonNull }?.asDouble,
+                    multifyMfePct = x.get("multify_mfe_pct")?.takeUnless { it.isJsonNull }?.asDouble,
+                    updatedAtMs = System.currentTimeMillis()
+                )
+            )
+            calls++
+        }
+
+        val gson = GsonBuilder().disableHtmlEscaping().create()
+        var forecasts = 0
+        root.getAsJsonArray("longForecasts")?.let { rows ->
+            gson.fromJson(rows, Array<LongForecastEntity>::class.java).orEmpty().forEach { row ->
+                if (row.forecastDate.isBlank() || row.symbol.isBlank() || row.entryPrice <= 0.0) return@forEach
+                val existing = learningDao.longForecastsForDate(row.forecastDate)
+                    .firstOrNull { it.symbol.equals(row.symbol, true) }
+                learningDao.upsertLongForecast(
+                    row.copy(
+                        id = existing?.id ?: 0,
+                        symbol = row.symbol.uppercase(Locale.US),
+                        notified = true
+                    )
+                )
+                forecasts++
+            }
+        }
+
+        var champions = 0
+        root.getAsJsonArray("champions")?.let { rows ->
+            gson.fromJson(rows, Array<ForecastChampionEntity>::class.java).orEmpty().forEach { row ->
+                if (row.key.isBlank()) return@forEach
+                learningDao.upsertForecastChampion(row)
+                champions++
+            }
+        }
+
+        var reports = 0
+        root.getAsJsonArray("researchReports")?.let { rows ->
+            gson.fromJson(rows, Array<com.multify.traderpro.data.local.ResearchReportEntity>::class.java).orEmpty().forEach { row ->
+                if (row.reportDate.isBlank()) return@forEach
+                learningDao.insertResearchReport(row.copy(id = 0))
+                reports++
+            }
+        }
+
+        historicalSeedEnsured = false
+        auditLogger.log("MIGRATION", "BUNDLED_DECISION_INTELLIGENCE_IMPORTED", mapOf(
+            "seed_id" to BUNDLED_DECISION_SEED_ID,
+            "learning_calls" to calls,
+            "historical_forecasts" to forecasts,
+            "champions" to champions,
+            "research_reports" to reports,
+            "research_observations_excluded" to "diagnostic-only rows had no completed outcomes in uploaded logs",
+            "fresh_install_only" to true
+        ))
+        return true
+    }
+
     internal suspend fun ensureFixedEngineSnapshot(): FixedEngineSnapshot {
+        bootstrapBundledDecisionIntelligenceIfEmpty()
         var snapshot = fixedEngineSnapshotStore.loadOrNull()
         if (snapshot == null) {
             val beforeCalls = learningDao.allCalls()
@@ -5021,6 +5119,8 @@ class TradingRepository @Inject constructor(
         private const val SMART_ORDER_PRICE_EPSILON = 0.001
         private const val RECOVERY_NET_PROFIT_RUPEES = 100.0
         private const val MULTIFY_PACKAGE = "com.multyfi.invest"
+        private const val BUNDLED_DECISION_SEED_ASSET = "fixed_decision_seed_v751.b64"
+        private const val BUNDLED_DECISION_SEED_ID = "MULTIFY-DECISION-INTELLIGENCE-2026-10-21"
         private const val UPLOADED_THREE_MONTH_REALIZED_PCT = 0.49019417475728155
         private const val DEFAULT_LONG_REALIZED_PCT = 0.33
         const val ENGINE_MULTIFY_HOLDING = "MULTIFY_HOLDING"
