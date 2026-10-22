@@ -1,4 +1,4 @@
-name: Multify Trader Pro v7.5.8 S24 Adaptive Fixed Scan Verification
+name: Multify Trader Pro v7.5.8 S24 Adaptive Fixed Scan Final Verification
 
 on:
   workflow_dispatch:
