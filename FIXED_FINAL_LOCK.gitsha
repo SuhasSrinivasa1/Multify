@@ -11,4 +11,4 @@ b5bbb3b2855eec7e3e8646cf575cec2b2c05e93e  app/src/main/java/com/multify/traderpr
 0e35a89bf9bd45fdf3a5fca63ce27901458ea2bd  app/src/main/java/com/multify/traderpro/data/repository/FixedEngineSnapshotStore.kt
 e9b1187311753dc5896edaeac74350e1bc106d0b  app/src/main/java/com/multify/traderpro/data/repository/FixedRecommendationStore.kt
 abdfa1cb94cb8f4f5452edfb22d4a00d67c9a3e0  app/src/main/java/com/multify/traderpro/data/repository/FixedMarketDiscoveryStateStore.kt
-REGION eed3986f865173fe2aca22c0d2af5053373cc479  app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
+REGION c32c9bd83b772a0cc898e703ac349ea05951f130  app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
