@@ -1,4 +1,4 @@
-name: Multify Trader Pro v7.5.7 Fixed Low-Latency Scan Verification
+name: Multify Trader Pro v7.5.8 S24 Adaptive Fixed Scan Verification
 
 on:
   workflow_dispatch:
@@ -74,8 +74,10 @@ jobs:
           grep -R 'ARM_TRIGGER_PCT = 0.55' app/src/main/java/com/multify/traderpro/engine/SteppedTrailingPolicy.kt
           grep -R 'INITIAL_STOP_GAIN_PCT = 0.50' app/src/main/java/com/multify/traderpro/engine/SteppedTrailingPolicy.kt
           grep -R 'STEP_PCT = 0.10' app/src/main/java/com/multify/traderpro/engine/SteppedTrailingPolicy.kt
-          grep -R 'FIXED_V741_DETAILED_EVALUATION_CONCURRENCY = 4' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
-          grep -R 'universe.chunked(FIXED_V741_DETAILED_EVALUATION_CONCURRENCY)' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
+          grep -R 'HIGH_END_CONCURRENCY = 6' app/src/main/java/com/multify/traderpro/engine/FixedScanPerformancePolicy.kt
+          grep -R 'HIGH_END_MIN_PROCESSORS = 8' app/src/main/java/com/multify/traderpro/engine/FixedScanPerformancePolicy.kt
+          grep -R 'FixedScanPerformancePolicy.evaluationConcurrency(availableProcessors)' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
+          grep -R 'universe.chunked(fixedEvaluationConcurrency)' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
           ! grep -R 'MAX_DAILY_RECOMMENDATIONS' app/src/main/java
 
           python - <<'PY'
@@ -128,10 +130,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v7.5.7-fixed-low-latency-scan-debug.apk
+          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v7.5.8-fixed-s24-adaptive-debug.apk
           python - <<'PY'
           import gzip, hashlib, zipfile
-          apk = "dist/Multify-TraderPro-v7.5.7-fixed-low-latency-scan-debug.apk"
+          apk = "dist/Multify-TraderPro-v7.5.8-fixed-s24-adaptive-debug.apk"
           expected_json = "c5d23a7d14ef413c25f63d43672d8729c77469c589e1c4e36dd2f209ec7f304b"
           expected_gzip = "8cc0cd5accc08921fd710af4ecd4f58ab1b9b5b41bc686f8713e6a7ea1267738"
           with zipfile.ZipFile(apk) as z:
@@ -149,13 +151,13 @@ jobs:
               assert payload.startswith(b'{"schemaVersion":2'), "Embedded historic intelligence JSON is malformed"
           print("Embedded historic intelligence APK asset: checksum verified")
           PY
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/Multify-TraderPro-v7.5.7-fixed-low-latency-scan-debug.apk > dist/signature.txt
-          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/Multify-TraderPro-v7.5.7-fixed-low-latency-scan-debug.apk | grep -E "^(package:|application-label:)" > dist/package-verification.txt
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/Multify-TraderPro-v7.5.8-fixed-s24-adaptive-debug.apk > dist/signature.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/Multify-TraderPro-v7.5.8-fixed-s24-adaptive-debug.apk | grep -E "^(package:|application-label:)" > dist/package-verification.txt
           (cd dist && sha256sum *.apk > SHA256SUMS.txt)
-          git archive --format=zip --output=dist/Multify-TraderPro-v7.5.7-source.zip HEAD
+          git archive --format=zip --output=dist/Multify-TraderPro-v7.5.8-source.zip HEAD
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Multify-TraderPro-v7.5.7-fixed-low-latency-verified
+          name: Multify-TraderPro-v7.5.8-fixed-s24-adaptive-verified
           path: dist/
           if-no-files-found: error
