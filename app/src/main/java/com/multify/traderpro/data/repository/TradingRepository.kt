@@ -1589,21 +1589,35 @@ class TradingRepository @Inject constructor(
         val universe = (discoveredSymbols + dnaSymbols + recentSymbols + rotating)
             .distinct()
             .take(FIXED_V741_DETAILED_FORECAST_UNIVERSE_LIMIT)
-        val evaluated = mutableListOf<Pair<String, FixedStrategyEvaluation>>()
-        for (symbol in universe) {
-            val evaluation = runCatching { fixedForecastEvaluation(symbol, token) }
-                .onFailure {
-                    auditLogger.log("FIXED_RESEARCH", "EVALUATION_ERROR", mapOf(
-                        "symbol" to symbol,
-                        "message" to (it.message ?: it.javaClass.simpleName)
-                    ))
+        // Preserve the exact v7.4.1 universe, evaluation formulas, breadth and ranking inputs,
+        // but fetch independent symbol evaluations in small bounded batches. Reconstruct results in
+        // original universe order so this is a latency-only change, not a selection/ranking change.
+        val evaluatedBySymbol = linkedMapOf<String, FixedStrategyEvaluation>()
+        for (batch in universe.chunked(FIXED_V741_DETAILED_EVALUATION_CONCURRENCY)) {
+            val results = coroutineScope {
+                batch.map { symbol ->
+                    async {
+                        val evaluation = runCatching { fixedForecastEvaluation(symbol, token) }
+                            .onFailure {
+                                auditLogger.log("FIXED_RESEARCH", "EVALUATION_ERROR", mapOf(
+                                    "symbol" to symbol,
+                                    "message" to (it.message ?: it.javaClass.simpleName)
+                                ))
+                            }
+                            .getOrNull()
+                        symbol to evaluation
+                    }
+                }.awaitAll()
+            }
+            results.forEach { (symbol, evaluation) ->
+                if (evaluation != null && evaluation.features.ltp >= 10.0) {
+                    evaluatedBySymbol[symbol] = evaluation
                 }
-                .getOrNull() ?: continue
-            // Keep the v7.4.1 model universe intact. The >₹100 rule is a publication/execution
-            // overlay only; filtering here would alter breadth, family weights and candidate rank.
-            if (evaluation.features.ltp < 10.0) continue
-            evaluated += symbol to evaluation
+            }
             delay(FIXED_V741_FORECAST_SYMBOL_PACING_MS)
+        }
+        val evaluated = universe.mapNotNull { symbol ->
+            evaluatedBySymbol[symbol]?.let { symbol to it }
         }
 
         val breadth = evaluated.mapNotNull { it.second.features.dayChangePct }
@@ -5006,6 +5020,7 @@ class TradingRepository @Inject constructor(
         private const val FIXED_MIN_STOCK_PRICE_RUPEES = 100.0
         private const val FIXED_V741_FORECAST_SCAN_INTERVAL_MS = 5L * 60L * 1000L
         private const val FIXED_V741_FORECAST_SYMBOL_PACING_MS = 150L
+        private const val FIXED_V741_DETAILED_EVALUATION_CONCURRENCY = 4
         private const val FIXED_V741_PRIMARY_CONFIRMATION_WINDOW_MS = 20L * 60L * 1000L
         private const val FIXED_V741_DETAILED_FORECAST_UNIVERSE_LIMIT = 48
         private const val FIXED_V741_DISCOVERY_DYNAMIC_LIMIT = 28
