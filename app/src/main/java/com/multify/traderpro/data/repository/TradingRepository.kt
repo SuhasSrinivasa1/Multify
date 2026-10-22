@@ -1526,8 +1526,6 @@ class TradingRepository @Inject constructor(
             "arm_effective" to preferences.settings.first().armEffective,
             "forecasting_independent_of_arm" to true,
             "publishable_after_confirmation" to publishable.size,
-            "available_processors" to availableProcessors,
-            "evaluation_concurrency" to fixedEvaluationConcurrency,
             "publication_suppressed_until_discovery_ready" to !discoveryPass.baselineReady,
             "top_candidates" to ranked.take(5).map {
                 mapOf("symbol" to it.symbol, "tier" to it.quality.tier, "score" to it.score,
@@ -1787,7 +1785,9 @@ class TradingRepository @Inject constructor(
             "discovery_coverage_pct" to discoveryPass.coverageRatio * 100.0,
             "arm_effective" to preferences.settings.first().armEffective,
             "learning_enabled" to false,
-            "publishable_after_confirmation" to publishable.size
+            "publishable_after_confirmation" to publishable.size,
+            "available_processors" to availableProcessors,
+            "evaluation_concurrency" to fixedEvaluationConcurrency
         ))
         return all.map { it.toDto() }
     }
