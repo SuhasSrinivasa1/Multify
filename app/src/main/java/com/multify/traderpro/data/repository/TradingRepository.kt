@@ -3735,7 +3735,7 @@ class TradingRepository @Inject constructor(
 
             val quantityChanged = existing.quantity != quantity
             val basisChanged = abs(existing.entryPrice - averagePrice) > PORTFOLIO_AVERAGE_PRICE_EPSILON
-            if (!quantityChanged && !basisChanged) continue
+            if (!quantityChanged && !basisChanged) return@forEach
 
             var working = existing
             if (!working.smartOrderId.isNullOrBlank()) {
