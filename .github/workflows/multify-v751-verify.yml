@@ -1,4 +1,4 @@
-name: Multify Trader Pro v7.5.5 Fixed Reference UI Verification
+name: Multify Trader Pro v7.5.6 Embedded Asset Loader Verification
 
 on:
   workflow_dispatch:
@@ -55,6 +55,8 @@ jobs:
           set -euo pipefail
           test -s app/src/main/assets/embedded_historic_intelligence_v2.json.gz
           grep -R 'class EmbeddedHistoricalIntelligenceStore' app/src/main/java
+          grep -R 'ASSET_CANDIDATES' app/src/main/java/com/multify/traderpro/data/repository/EmbeddedHistoricalIntelligenceStore.kt
+          grep -R 'Embedded Multify intelligence checksum mismatch' app/src/main/java/com/multify/traderpro/data/repository/EmbeddedHistoricalIntelligenceStore.kt
           grep -R 'FIXED-V741-20261021-190239-FINAL' app/src/main/java
           grep -R 'd807204a6d5d71a69f45ef4d21d7ef63063b85b56d401a6795e8f265a9f393fe' app/src/main/java
           grep -R 'CANONICAL_LEARNING_CALLS = 107' app/src/main/java
@@ -124,14 +126,34 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v7.5.5-fixed-reference-ui-debug.apk
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/Multify-TraderPro-v7.5.5-fixed-reference-ui-debug.apk > dist/signature.txt
-          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/Multify-TraderPro-v7.5.5-fixed-reference-ui-debug.apk | grep -E "^(package:|application-label:)" > dist/package-verification.txt
+          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v7.5.6-fixed-asset-loader-debug.apk
+          python - <<'PY'
+          import gzip, hashlib, zipfile
+          apk = "dist/Multify-TraderPro-v7.5.6-fixed-asset-loader-debug.apk"
+          expected_json = "c5d23a7d14ef413c25f63d43672d8729c77469c589e1c4e36dd2f209ec7f304b"
+          expected_gzip = "8cc0cd5accc08921fd710af4ecd4f58ab1b9b5b41bc686f8713e6a7ea1267738"
+          with zipfile.ZipFile(apk) as z:
+              names = set(z.namelist())
+              if "assets/embedded_historic_intelligence_v2.json" in names:
+                  payload = z.read("assets/embedded_historic_intelligence_v2.json")
+                  assert hashlib.sha256(payload).hexdigest() == expected_json, "Packaged JSON asset hash mismatch"
+              elif "assets/embedded_historic_intelligence_v2.json.gz" in names:
+                  packed = z.read("assets/embedded_historic_intelligence_v2.json.gz")
+                  assert hashlib.sha256(packed).hexdigest() == expected_gzip, "Packaged gzip asset hash mismatch"
+                  payload = gzip.decompress(packed)
+                  assert hashlib.sha256(payload).hexdigest() == expected_json, "Inflated JSON asset hash mismatch"
+              else:
+                  raise AssertionError("Embedded historic intelligence asset missing from APK")
+              assert payload.startswith(b'{"schemaVersion":2'), "Embedded historic intelligence JSON is malformed"
+          print("Embedded historic intelligence APK asset: checksum verified")
+          PY
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/Multify-TraderPro-v7.5.6-fixed-asset-loader-debug.apk > dist/signature.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/Multify-TraderPro-v7.5.6-fixed-asset-loader-debug.apk | grep -E "^(package:|application-label:)" > dist/package-verification.txt
           (cd dist && sha256sum *.apk > SHA256SUMS.txt)
-          git archive --format=zip --output=dist/Multify-TraderPro-v7.5.5-source.zip HEAD
+          git archive --format=zip --output=dist/Multify-TraderPro-v7.5.6-source.zip HEAD
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Multify-TraderPro-v7.5.5-fixed-reference-verified
+          name: Multify-TraderPro-v7.5.6-fixed-asset-loader-verified
           path: dist/
           if-no-files-found: error
