@@ -5,7 +5,6 @@ import com.google.gson.GsonBuilder
 import com.multify.traderpro.data.local.ResearchReportEntity
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.ByteArrayInputStream
-import java.io.ByteArrayOutputStream
 import java.security.MessageDigest
 import java.util.zip.GZIPInputStream
 import javax.inject.Inject
@@ -22,8 +21,9 @@ internal data class EmbeddedHistoricalIntelligencePayload(
 /**
  * Read-only bundle assembled from every Multify diagnostic export available when v7.5.1 was built.
  *
- * The payload is split into binary asset parts only to keep repository/build tooling reliable.
- * At runtime the parts are concatenated, SHA-256 verified, gunzipped, then parsed.
+ * Android's asset packaging can inflate a .gz asset and expose it under the filename without
+ * the .gz suffix. Runtime therefore accepts either the verified raw JSON asset or the original
+ * verified gzip asset, then parses the exact same canonical payload.
  */
 @Singleton
 class EmbeddedHistoricalIntelligenceStore @Inject constructor(
@@ -35,18 +35,35 @@ class EmbeddedHistoricalIntelligenceStore @Inject constructor(
     internal fun load(): EmbeddedHistoricalIntelligencePayload {
         cached?.let { return it }
 
-        val compressed = ByteArrayOutputStream()
-        PARTS.forEach { name ->
-            context.assets.open(name).use { it.copyTo(compressed) }
-        }
-        val bytes = compressed.toByteArray()
-        require(sha256(bytes) == COMPRESSED_SHA256) {
-            "Embedded Multify intelligence checksum mismatch"
-        }
+        var verifiedJson: ByteArray? = null
+        var assetFound = false
+        for (name in ASSET_CANDIDATES) {
+            val bytes = runCatching {
+                context.assets.open(name).use { it.readBytes() }
+            }.getOrNull() ?: continue
+            assetFound = true
 
-        val jsonBytes = GZIPInputStream(ByteArrayInputStream(bytes)).use { it.readBytes() }
-        require(sha256(jsonBytes) == JSON_SHA256) {
-            "Embedded Multify intelligence JSON checksum mismatch"
+            when (sha256(bytes)) {
+                JSON_SHA256 -> {
+                    // Android packaging inflated the source .json.gz and stripped its suffix.
+                    verifiedJson = bytes
+                    break
+                }
+                COMPRESSED_SHA256 -> {
+                    val inflated = GZIPInputStream(ByteArrayInputStream(bytes)).use { it.readBytes() }
+                    require(sha256(inflated) == JSON_SHA256) {
+                        "Embedded Multify intelligence JSON checksum mismatch"
+                    }
+                    verifiedJson = inflated
+                    break
+                }
+            }
+        }
+        require(assetFound) {
+            "Embedded Multify intelligence asset missing (checked " + ASSET_CANDIDATES.joinToString() + ")"
+        }
+        val jsonBytes = requireNotNull(verifiedJson) {
+            "Embedded Multify intelligence checksum mismatch"
         }
 
         val payload = GsonBuilder().disableHtmlEscaping().create()
@@ -77,6 +94,9 @@ class EmbeddedHistoricalIntelligenceStore @Inject constructor(
         const val COMPRESSED_SHA256 = "8cc0cd5accc08921fd710af4ecd4f58ab1b9b5b41bc686f8713e6a7ea1267738"
         const val JSON_SHA256 = "c5d23a7d14ef413c25f63d43672d8729c77469c589e1c4e36dd2f209ec7f304b"
 
-        val PARTS = listOf("embedded_historic_intelligence_v2.json.gz")
+        val ASSET_CANDIDATES = listOf(
+            "embedded_historic_intelligence_v2.json",
+            "embedded_historic_intelligence_v2.json.gz"
+        )
     }
 }
