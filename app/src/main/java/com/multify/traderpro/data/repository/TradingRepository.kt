@@ -36,6 +36,7 @@ import com.multify.traderpro.data.network.GttOrder
 import com.multify.traderpro.data.network.GrowwApiFactory
 import com.multify.traderpro.data.network.GrowwHolding
 import com.multify.traderpro.data.network.GrowwPosition
+import com.multify.traderpro.data.network.SmartOrderPayload
 import com.multify.traderpro.data.network.LearningStatsDto
 import com.multify.traderpro.data.network.OrderCancelRequest
 import com.multify.traderpro.data.network.OrderCreateRequest
@@ -160,7 +161,10 @@ class TradingRepository @Inject constructor(
     private var lastForecastOutcomeMonitorAtMs = 0L
     private var lastFixedOutcomeMonitorAtMs = 0L
     private var brokerInventorySnapshot: BrokerInventorySnapshot? = null
+    @Volatile private var activeGttSnapshot: ActiveGttSnapshot? = null
     private var lastClosedSessionReconcileAtMs = 0L
+    private val lastPortfolioConflictAuditAtMs = ConcurrentHashMap<String, Long>()
+    private val recentlyClosedSymbolsAtMs = ConcurrentHashMap<String, Long>()
     private var lastArmHotAuditAtMs = 0L
     private var lastMfeBackfillAtMs = 0L
     private var lastArmHotAuditBalance = Double.NaN
@@ -210,6 +214,11 @@ class TradingRepository @Inject constructor(
     private data class BrokerInventorySnapshot(
         val holdings: Map<String, GrowwHolding>,
         val positions: Map<String, GrowwPosition>,
+        val atMs: Long
+    )
+
+    private data class ActiveGttSnapshot(
+        val bySymbol: Map<String, List<SmartOrderPayload>>,
         val atMs: Long
     )
 
@@ -3532,6 +3541,7 @@ class TradingRepository @Inject constructor(
         recordExternalClose(position, removedQty, exit, exitReason)
         brokerInventorySnapshot = null
         if (visibleQty <= 0) {
+            recentlyClosedSymbolsAtMs[position.symbol.uppercase(Locale.US)] = System.currentTimeMillis()
             runCatching { cancelKnownPositionGtt(token, position.copy(smartOrderStatus = smartStatus), "POSITION_CLOSED", clearIfTerminal = true) }
             managedDao.deletePosition(position.id)
             lastTrailStateAuditAtMs.remove(position.id)
@@ -3594,20 +3604,242 @@ class TradingRepository @Inject constructor(
             )
         )
     }
+    private suspend fun activeGttsBySymbol(token: String, force: Boolean = false): Map<String, List<SmartOrderPayload>> {
+        val now = System.currentTimeMillis()
+        activeGttSnapshot?.takeIf { !force && now - it.atMs < ACTIVE_GTT_REFRESH_MS }?.let { return it.bySymbol }
+
+        val all = mutableListOf<SmartOrderPayload>()
+        var complete = false
+        for (page in 0 until MAX_ACTIVE_GTT_PAGES) {
+            val orders = apiFactory.groww.listSmartOrders(
+                bearer(token),
+                segment = "CASH",
+                smartOrderType = "GTT",
+                status = "ACTIVE",
+                page = page,
+                pageSize = ACTIVE_GTT_PAGE_SIZE
+            ).requirePayload("Active Groww GTT list").orders
+            all += orders
+            if (orders.size < ACTIVE_GTT_PAGE_SIZE) {
+                complete = true
+                break
+            }
+        }
+        check(complete) { "Active Groww GTT list exceeded the safe pagination limit; portfolio import paused to avoid duplicate sell orders" }
+        val grouped = all.filter { it.tradingSymbol.isNotBlank() }
+            .groupBy { it.tradingSymbol.uppercase(Locale.US) }
+        activeGttSnapshot = ActiveGttSnapshot(grouped, now)
+        return grouped
+    }
+
+    private fun logPortfolioConflict(symbol: String, message: String, extra: Map<String, Any?> = emptyMap()) {
+        val now = System.currentTimeMillis()
+        val last = lastPortfolioConflictAuditAtMs[symbol] ?: 0L
+        if (now - last < PORTFOLIO_CONFLICT_AUDIT_INTERVAL_MS) return
+        lastPortfolioConflictAuditAtMs[symbol] = now
+        auditLogger.log("PORTFOLIO_MONITOR", "EXISTING_GTT_CONFLICT", mapOf(
+            "symbol" to symbol,
+            "message" to message
+        ) + extra)
+    }
+
+    private suspend fun syncPortfolioHoldings(
+        token: String,
+        inventory: BrokerInventorySnapshot,
+        activeGtts: Map<String, List<SmartOrderPayload>>
+    ): Set<String> {
+        val blockedSymbols = mutableSetOf<String>()
+        val now = System.currentTimeMillis()
+        val existingBySymbol = managedDao.openPositions().groupBy { it.symbol.uppercase(Locale.US) }
+
+        inventory.holdings.values.forEach { holding ->
+            val symbol = holding.tradingSymbol.trim().uppercase(Locale.US)
+            val quantity = holding.quantity.coerceAtLeast(0)
+            val averagePrice = holding.averagePrice
+            if (symbol.isBlank() || quantity <= 0) return@forEach
+            if (!averagePrice.isFinite() || averagePrice <= 0.0) {
+                logPortfolioConflict(symbol, "Broker holding has no valid average price; refusing to invent a trailing-stop basis.")
+                blockedSymbols += symbol
+                return@forEach
+            }
+
+            val existingRows = existingBySymbol[symbol].orEmpty()
+            if (existingRows.size > 1) {
+                blockedSymbols += symbol
+                logPortfolioConflict(symbol, "Multiple local managed records exist for this stock; refusing to merge quantities automatically.", mapOf(
+                    "local_position_ids" to existingRows.map { it.id },
+                    "broker_quantity" to quantity
+                ))
+                return@forEach
+            }
+            val existing = existingRows.singleOrNull()
+            val activeForSymbol = activeGtts[symbol].orEmpty()
+            val conflictingOrders = activeForSymbol.filter { order ->
+                existing?.smartOrderId.isNullOrBlank() || order.smartOrderId != existing?.smartOrderId
+            }
+            if (conflictingOrders.isNotEmpty()) {
+                blockedSymbols += symbol
+                logPortfolioConflict(symbol, "A broker-side active GTT already exists outside the local position record. It is left untouched to prevent duplicate sell orders.", mapOf(
+                    "broker_quantity" to quantity,
+                    "local_position_id" to existing?.id,
+                    "local_gtt_id" to existing?.smartOrderId,
+                    "active_gtt_ids" to conflictingOrders.map { it.smartOrderId },
+                    "active_gtt_directions" to conflictingOrders.map { it.triggerDirection },
+                    "active_gtt_quantities" to conflictingOrders.map { it.quantity }
+                ))
+                return@forEach
+            }
+
+            if (existing == null) {
+                val closedAt = recentlyClosedSymbolsAtMs[symbol]
+                if (closedAt != null) {
+                    if (now - closedAt < PORTFOLIO_REIMPORT_COOLDOWN_MS) return@forEach
+                    recentlyClosedSymbolsAtMs.remove(symbol, closedAt)
+                }
+                val insertedId = managedDao.insertPosition(
+                    ManagedPositionEntity(
+                        engine = ENGINE_PORTFOLIO_HOLDING,
+                        symbol = symbol,
+                        product = "CNC",
+                        side = "LONG",
+                        quantity = quantity,
+                        entryPrice = averagePrice,
+                        stopPrice = null,
+                        targetPrice = null,
+                        strategy = "Existing Groww portfolio holding · shared fixed stepped trailing sell logic",
+                        regime = "PORTFOLIO_LONG",
+                        confidence = 1.0,
+                        sourceEventId = null,
+                        openOrderId = "EXTERNAL_GROWW_HOLDING",
+                        openReferenceId = stableRef("PFH", "$symbol-${holding.isin}"),
+                        openedAtMs = now,
+                        lastPrice = averagePrice,
+                        maxFavourablePrice = averagePrice,
+                        maxAdversePrice = averagePrice,
+                        lastEvaluatedAtMs = now,
+                        trailingArmPct = SteppedTrailingPolicy.ARM_TRIGGER_PCT,
+                        trailingLastRatchetPrice = 0.0,
+                        smartOrderMode = HoldingSmartOrderPolicy.MODE_NONE
+                    )
+                )
+                auditLogger.log("PORTFOLIO_MONITOR", "EXISTING_HOLDING_IMPORTED", mapOf(
+                    "symbol" to symbol,
+                    "position_id" to insertedId,
+                    "quantity" to quantity,
+                    "average_price" to averagePrice,
+                    "existing_active_gtt" to false,
+                    "sell_logic" to "shared_fixed_stepped_trailing_and_overnight_recovery"
+                ))
+                continue
+            }
+
+            val quantityChanged = existing.quantity != quantity
+            val basisChanged = abs(existing.entryPrice - averagePrice) > PORTFOLIO_AVERAGE_PRICE_EPSILON
+            if (!quantityChanged && !basisChanged) continue
+
+            var working = existing
+            if (!working.smartOrderId.isNullOrBlank()) {
+                working = cancelKnownPositionGtt(token, working, "PORTFOLIO_QUANTITY_OR_COST_BASIS_CHANGED", clearIfTerminal = false)
+                if (!working.smartOrderId.isNullOrBlank()) {
+                    blockedSymbols += symbol
+                    logPortfolioConflict(symbol, "Could not safely cancel the old GTT before rebasing portfolio quantity/cost basis.", mapOf(
+                        "position_id" to existing.id,
+                        "old_quantity" to existing.quantity,
+                        "broker_quantity" to quantity,
+                        "old_average_price" to existing.entryPrice,
+                        "broker_average_price" to averagePrice,
+                        "gtt_id" to working.smartOrderId,
+                        "gtt_status" to working.smartOrderStatus
+                    ))
+                    return@forEach
+                }
+            }
+
+            val referencePrice = working.lastPrice.takeIf { it.isFinite() && it > 0.0 } ?: averagePrice
+            val updated = working.copy(
+                quantity = quantity,
+                entryPrice = averagePrice,
+                stopPrice = null,
+                targetPrice = null,
+                strategy = if (working.strategy.contains("aggregated Groww portfolio", ignoreCase = true)) working.strategy
+                    else working.strategy + " · aggregated Groww portfolio",
+                maxFavourablePrice = max(averagePrice, referencePrice),
+                maxAdversePrice = min(averagePrice, referencePrice),
+                openedAtMs = now,
+                lastEvaluatedAtMs = now,
+                trailingArmPct = SteppedTrailingPolicy.ARM_TRIGGER_PCT,
+                trailingLastRatchetPrice = 0.0,
+                smartOrderId = null,
+                smartOrderMode = HoldingSmartOrderPolicy.MODE_NONE,
+                smartOrderTriggerPrice = null,
+                smartOrderDirection = null,
+                smartOrderStatus = null,
+                smartOrderUpdatedAtMs = now
+            )
+            managedDao.updatePosition(updated)
+            lastTrailStateAuditAtMs.remove(updated.id)
+            lastSmartOrderStatusAtMs.remove(updated.id)
+            auditLogger.log("PORTFOLIO_MONITOR", "HOLDING_REBASED_TO_BROKER_PORTFOLIO", mapOf(
+                "symbol" to symbol,
+                "position_id" to updated.id,
+                "old_quantity" to existing.quantity,
+                "broker_quantity" to quantity,
+                "old_average_price" to existing.entryPrice,
+                "broker_average_price" to averagePrice,
+                "old_gtt_cancelled" to !existing.smartOrderId.isNullOrBlank()
+            ))
+        }
+        return blockedSymbols
+    }
+
+    private suspend fun portfolioMonitorCount(inventory: BrokerInventorySnapshot? = brokerInventorySnapshot): Int {
+        val localSymbols = managedDao.openPositions().map { it.symbol.uppercase(Locale.US) }
+        val brokerSymbols = inventory?.holdings?.values
+            ?.filter { it.quantity > 0 && it.tradingSymbol.isNotBlank() }
+            ?.map { it.tradingSymbol.uppercase(Locale.US) }
+            .orEmpty()
+        return (localSymbols + brokerSymbols).distinct().size
+    }
+
     suspend fun monitorManagedPositions(): Int {
-        val open = managedDao.openPositions()
-        if (open.isEmpty()) return 0
-        val token = ensureToken() ?: return open.size
+        val token = ensureToken() ?: return portfolioMonitorCount()
         val marketOpen = marketSession() == "OPEN"
         val now = System.currentTimeMillis()
-        if (!marketOpen && now - lastClosedSessionReconcileAtMs < CLOSED_SESSION_RECONCILE_MS) return open.size
+        if (!marketOpen && now - lastClosedSessionReconcileAtMs < CLOSED_SESSION_RECONCILE_MS) {
+            return portfolioMonitorCount()
+        }
         if (!marketOpen) lastClosedSessionReconcileAtMs = now
 
+        val inventory = runCatching { brokerInventory(token, force = !marketOpen) }
+            .onFailure {
+                auditLogger.log("PORTFOLIO_MONITOR", "BROKER_INVENTORY_ERROR", mapOf(
+                    "message" to (it.message ?: it.javaClass.simpleName)
+                ))
+            }
+            .getOrElse { return portfolioMonitorCount() }
+
+        val blockedSymbols = mutableSetOf<String>()
+        val activeGttsResult = runCatching { activeGttsBySymbol(token) }
+        if (activeGttsResult.isSuccess) {
+            blockedSymbols += syncPortfolioHoldings(token, inventory, activeGttsResult.getOrThrow())
+        } else {
+            val error = activeGttsResult.exceptionOrNull()
+            auditLogger.log("PORTFOLIO_MONITOR", "ACTIVE_GTT_DISCOVERY_ERROR", mapOf(
+                "message" to (error?.message ?: error?.javaClass?.simpleName ?: "Active GTT discovery failed"),
+                "note" to "New portfolio positions will not be adopted until active broker orders can be checked safely."
+            ))
+            // If broker GTT discovery is unavailable, do not create/modify sell orders for an
+            // unprotected local row: an externally created GTT might already cover the same shares.
+            managedDao.openPositions().filter { it.smartOrderId.isNullOrBlank() }
+                .forEach { blockedSymbols += it.symbol.uppercase(Locale.US) }
+        }
+
+        val open = managedDao.openPositions()
         val reconciled = mutableListOf<ManagedPositionEntity>()
         for (position in open) {
             try {
                 if (position.side != "LONG") {
-                    if (marketOpen) closeLegacyNonLong(token, position)
+                    if (marketOpen && position.symbol.uppercase(Locale.US) !in blockedSymbols) closeLegacyNonLong(token, position)
                     continue
                 }
                 val afterGtt = finalizeCompletedGttIfNeeded(token, position) ?: continue
@@ -3623,10 +3855,32 @@ class TradingRepository @Inject constructor(
             }
         }
 
+        val marks = if (reconciled.isNotEmpty()) runCatching { batchManagedLtps(token, reconciled) }
+            .onFailure {
+                auditLogger.log("MARKET_DATA", "BATCH_LTP_ERROR", mapOf(
+                    "symbols" to reconciled.map { it.symbol },
+                    "message" to (it.message ?: it.javaClass.simpleName)
+                ))
+            }.getOrDefault(emptyMap()) else emptyMap()
+
+        val unpricedSymbols = reconciled.filter { marks[it.symbol.uppercase(Locale.US)] == null }
+            .map { it.symbol.uppercase(Locale.US) }
+        blockedSymbols += unpricedSymbols
+        unpricedSymbols.forEach { symbol ->
+            logPortfolioConflict(symbol, "Fresh LTP unavailable; this pass will not create or adjust sell orders using a stale price.")
+        }
+
+        val marked = reconciled.map { position ->
+            val ltp = marks[position.symbol.uppercase(Locale.US)]
+            if (ltp != null && ltp.isFinite() && ltp > 0.0 && abs(ltp - position.lastPrice) > 1e-9) {
+                position.copy(lastPrice = ltp, lastEvaluatedAtMs = System.currentTimeMillis()).also {
+                    managedDao.updatePosition(it)
+                }
+            } else position
+        }
+
         if (!marketOpen) {
-            // Strict v7.1 rule: never sell merely because the stock is down. Any surviving CNC
-            // holding transitions to one server-side recovery GTT targeting ₹100 estimated net.
-            reconciled.forEach { position ->
+            marked.filterNot { it.symbol.uppercase(Locale.US) in blockedSymbols }.forEach { position ->
                 runCatching { ensureOvernightRecoveryGtt(token, position) }
                     .onFailure {
                         auditLogger.log("GTT", "RECOVERY_GTT_SETUP_ERROR", mapOf(
@@ -3635,10 +3889,13 @@ class TradingRepository @Inject constructor(
                         ))
                     }
             }
-            return managedDao.openPositions().size
+            return portfolioMonitorCount(inventory)
         }
 
-        val recoveryPositions = reconciled.filter { it.smartOrderMode == HoldingSmartOrderPolicy.MODE_RECOVERY_GTT }
+        val recoveryPositions = marked.filter {
+            it.smartOrderMode == HoldingSmartOrderPolicy.MODE_RECOVERY_GTT &&
+                it.symbol.uppercase(Locale.US) !in blockedSymbols
+        }
         coroutineScope {
             recoveryPositions.map { position ->
                 async {
@@ -3653,21 +3910,16 @@ class TradingRepository @Inject constructor(
             }.awaitAll()
         }
 
-        val liveTrailing = reconciled.filter { it.smartOrderMode != HoldingSmartOrderPolicy.MODE_RECOVERY_GTT }
+        val liveTrailing = marked.filter {
+            it.smartOrderMode != HoldingSmartOrderPolicy.MODE_RECOVERY_GTT &&
+                it.symbol.uppercase(Locale.US) !in blockedSymbols
+        }
         if (liveTrailing.isNotEmpty()) {
-            val ltps = runCatching { batchManagedLtps(token, liveTrailing) }
-                .onFailure {
-                    auditLogger.log("MARKET_DATA", "BATCH_LTP_ERROR", mapOf(
-                        "symbols" to liveTrailing.map { it.symbol },
-                        "message" to (it.message ?: it.javaClass.simpleName)
-                    ))
-                }.getOrDefault(emptyMap())
-
             coroutineScope {
                 liveTrailing.map { position ->
                     async {
                         try {
-                            val ltp = ltps[position.symbol.uppercase(Locale.US)] ?: position.lastPrice
+                            val ltp = marks[position.symbol.uppercase(Locale.US)] ?: position.lastPrice
                             monitorLongHolding(position, token, ltp)
                         } catch (cancelled: CancellationException) {
                             throw cancelled
@@ -3682,7 +3934,7 @@ class TradingRepository @Inject constructor(
                 }.awaitAll()
             }
         }
-        return managedDao.openPositions().size
+        return portfolioMonitorCount(inventory)
     }
 
     private suspend fun batchManagedLtps(
@@ -3874,7 +4126,7 @@ class TradingRepository @Inject constructor(
         direction: String,
         mode: String
     ): ManagedPositionEntity {
-        require(position.side == "LONG" && position.product == "CNC") { "GTT protection is only for app-owned CNC LONG holdings" }
+        require(position.side == "LONG" && position.product == "CNC") { "GTT protection is only for tracked CNC LONG holdings" }
         require(direction in setOf("UP", "DOWN"))
         require(mode in setOf(HoldingSmartOrderPolicy.MODE_TRAILING_GTT, HoldingSmartOrderPolicy.MODE_RECOVERY_GTT))
         require(position.smartOrderId.isNullOrBlank()) { "Refusing to create a second GTT for ${position.symbol}" }
@@ -3896,6 +4148,7 @@ class TradingRepository @Inject constructor(
             )
         ).requirePayload("Create GTT ${position.symbol}")
         require(payload.smartOrderId.isNotBlank()) { "Groww did not return a GTT id for ${position.symbol}" }
+        activeGttSnapshot = null
         val now = System.currentTimeMillis()
         val updated = position.copy(
             smartOrderId = payload.smartOrderId,
@@ -3949,6 +4202,7 @@ class TradingRepository @Inject constructor(
                 order = postTriggerOrder
             )
         ).requirePayload("Modify GTT ${position.symbol}")
+        activeGttSnapshot = null
         val now = System.currentTimeMillis()
         val updated = position.copy(
             smartOrderMode = mode,
@@ -4028,6 +4282,7 @@ class TradingRepository @Inject constructor(
         }
         recordExternalClose(refreshed, refreshed.quantity, exit, reason)
         runCatching { cancelKnownPositionGtt(token, refreshed, "GTT_COMPLETED_CLEANUP", clearIfTerminal = true) }
+        recentlyClosedSymbolsAtMs[refreshed.symbol.uppercase(Locale.US)] = System.currentTimeMillis()
         managedDao.deletePosition(refreshed.id)
         brokerInventorySnapshot = null
         lastTrailStateAuditAtMs.remove(refreshed.id)
@@ -4052,6 +4307,7 @@ class TradingRepository @Inject constructor(
         clearIfTerminal: Boolean
     ): ManagedPositionEntity {
         val id = position.smartOrderId ?: return position
+        activeGttSnapshot = null
         val statusPayload = runCatching {
             apiFactory.groww.smartOrderStatus(
                 bearer(token), segment = "CASH", smartOrderType = "GTT", smartOrderId = id
@@ -4378,6 +4634,7 @@ class TradingRepository @Inject constructor(
             openedAtMs = local.openedAtMs, closedAtMs = System.currentTimeMillis()
         )
         managedDao.insertTrade(trade)
+        recentlyClosedSymbolsAtMs[local.symbol.uppercase(Locale.US)] = System.currentTimeMillis()
         managedDao.deletePosition(local.id)
         closePositionMutexes.remove(local.id, closeMutex)
         lastTrailStateAuditAtMs.remove(local.id)
@@ -4400,7 +4657,7 @@ class TradingRepository @Inject constructor(
         reference: String,
         notificationStartedNs: Long? = null
     ): OrderPayload {
-        require(position.side == "LONG") { "Only app-owned LONG holdings may be sold" }
+        require(position.side == "LONG") { "Only tracked LONG holdings may be sold" }
         require(position.product == "CNC") { "Only CNC holdings may be sold by the long-only engine" }
         return submitMarketOrder(token, position.symbol, "SELL", position.quantity, "CNC", reference, notificationStartedNs)
     }
@@ -5073,6 +5330,12 @@ class TradingRepository @Inject constructor(
         private const val ARM_HOT_STATE_MAX_AGE_MS = 45_000L
         private const val EXECUTION_SAMPLE_LIMIT = 30
         private const val BROKER_INVENTORY_REFRESH_MS = 5_000L
+        private const val ACTIVE_GTT_REFRESH_MS = 30_000L
+        private const val ACTIVE_GTT_PAGE_SIZE = 50
+        private const val MAX_ACTIVE_GTT_PAGES = 20
+        private const val PORTFOLIO_AVERAGE_PRICE_EPSILON = 0.005
+        private const val PORTFOLIO_CONFLICT_AUDIT_INTERVAL_MS = 60_000L
+        private const val PORTFOLIO_REIMPORT_COOLDOWN_MS = 120_000L
         private const val CLOSED_SESSION_RECONCILE_MS = 60_000L
         private const val TRAIL_STATE_LOG_INTERVAL_MS = 5_000L
         private const val SMART_ORDER_STATUS_REFRESH_MS = 15_000L
@@ -5084,5 +5347,6 @@ class TradingRepository @Inject constructor(
         const val ENGINE_MULTIFY_HOLDING = "MULTIFY_HOLDING"
         const val ENGINE_FORECAST_HOLDING = "FORECAST_HOLDING"
         const val ENGINE_FIXED_HOLDING = "FIXED_HOLDING"
+        const val ENGINE_PORTFOLIO_HOLDING = "PORTFOLIO_HOLDING"
     }
 }

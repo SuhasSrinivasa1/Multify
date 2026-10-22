@@ -198,6 +198,7 @@ class TradingEngineService : Service() {
                         when {
                             !regularSession -> CLOSED_SESSION_LOOP_INTERVAL_MS
                             !managedMonitorSucceeded -> POSITION_MONITOR_ERROR_RETRY_MS
+                            managedCount > 1 -> PORTFOLIO_POSITION_LOOP_INTERVAL_MS
                             managedCount > 0 -> POSITION_LOOP_INTERVAL_MS
                             forecastOutcomeCount > 0 || fixedOutcomeCount > 0 -> FORECAST_LOOP_INTERVAL_MS
                             else -> IDLE_LOOP_INTERVAL_MS
@@ -327,6 +328,7 @@ class TradingEngineService : Service() {
         private const val FOREGROUND_NOTIFICATION_ID = 68090
         private const val HEARTBEAT_INTERVAL_MS = 15_000L
         private const val POSITION_LOOP_INTERVAL_MS = 350L
+        private const val PORTFOLIO_POSITION_LOOP_INTERVAL_MS = 1_000L
         private const val POSITION_MONITOR_ERROR_RETRY_MS = 1_000L
         private const val FORECAST_LOOP_INTERVAL_MS = 5_000L
         private const val IDLE_LOOP_INTERVAL_MS = 10_000L
