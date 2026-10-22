@@ -72,6 +72,7 @@ import com.multify.traderpro.engine.FixedMultifyFactorFamilies
 import com.multify.traderpro.engine.FixedMultifyFactorModel
 import com.multify.traderpro.engine.FixedMultifyReverseEngineering
 import com.multify.traderpro.engine.FixedPositiveCloseForecastPolicy
+import com.multify.traderpro.engine.FixedScanPerformancePolicy
 import com.multify.traderpro.engine.FixedStrategyEvaluation
 import com.multify.traderpro.engine.GrowwDeliveryCostPolicy
 import com.multify.traderpro.engine.HoldingSmartOrderPolicy
@@ -1525,6 +1526,8 @@ class TradingRepository @Inject constructor(
             "arm_effective" to preferences.settings.first().armEffective,
             "forecasting_independent_of_arm" to true,
             "publishable_after_confirmation" to publishable.size,
+            "available_processors" to availableProcessors,
+            "evaluation_concurrency" to fixedEvaluationConcurrency,
             "publication_suppressed_until_discovery_ready" to !discoveryPass.baselineReady,
             "top_candidates" to ranked.take(5).map {
                 mapOf("symbol" to it.symbol, "tier" to it.quality.tier, "score" to it.score,
@@ -1592,8 +1595,11 @@ class TradingRepository @Inject constructor(
         // Preserve the exact v7.4.1 universe, evaluation formulas, breadth and ranking inputs,
         // but fetch independent symbol evaluations in small bounded batches. Reconstruct results in
         // original universe order so this is a latency-only change, not a selection/ranking change.
+        val availableProcessors = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
+        val fixedEvaluationConcurrency =
+            FixedScanPerformancePolicy.evaluationConcurrency(availableProcessors)
         val evaluatedBySymbol = linkedMapOf<String, FixedStrategyEvaluation>()
-        for (batch in universe.chunked(FIXED_V741_DETAILED_EVALUATION_CONCURRENCY)) {
+        for (batch in universe.chunked(fixedEvaluationConcurrency)) {
             val results = coroutineScope {
                 batch.map { symbol ->
                     async {
@@ -5020,7 +5026,6 @@ class TradingRepository @Inject constructor(
         private const val FIXED_MIN_STOCK_PRICE_RUPEES = 100.0
         private const val FIXED_V741_FORECAST_SCAN_INTERVAL_MS = 5L * 60L * 1000L
         private const val FIXED_V741_FORECAST_SYMBOL_PACING_MS = 150L
-        private const val FIXED_V741_DETAILED_EVALUATION_CONCURRENCY = 4
         private const val FIXED_V741_PRIMARY_CONFIRMATION_WINDOW_MS = 20L * 60L * 1000L
         private const val FIXED_V741_DETAILED_FORECAST_UNIVERSE_LIMIT = 48
         private const val FIXED_V741_DISCOVERY_DYNAMIC_LIMIT = 28
