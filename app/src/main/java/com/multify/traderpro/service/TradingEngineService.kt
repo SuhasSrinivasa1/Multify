@@ -7,6 +7,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.os.IBinder
+import android.os.PowerManager
 import androidx.core.content.ContextCompat
 import androidx.core.app.NotificationCompat
 import com.multify.traderpro.R
@@ -36,12 +37,15 @@ class TradingEngineService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var engineJob: Job? = null
+    private var positionMonitoringWakeLock: PowerManager.WakeLock? = null
     private var lastAfterHoursResearchAtMs = 0L
 
     override fun onCreate() {
         super.onCreate()
         createChannels()
         startForeground(FOREGROUND_NOTIFICATION_ID, engineNotification("Starting production engine…"))
+        // Keep the CPU awake until the first successful pass confirms whether holdings need monitoring.
+        updatePositionMonitoringWakeLock(true, "INITIAL_POSITION_DISCOVERY")
         startEngineLoop()
     }
 
@@ -83,6 +87,7 @@ class TradingEngineService : Service() {
     }
 
     override fun onDestroy() {
+        updatePositionMonitoringWakeLock(false, "SERVICE_DESTROYED")
         engineJob?.cancel()
         scope.cancel()
         auditLogger.log("RUNTIME", "FOREGROUND_ENGINE_DESTROYED")
@@ -100,6 +105,7 @@ class TradingEngineService : Service() {
                 .onFailure { auditLogger.log("RUNTIME", "FIXED_SNAPSHOT_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
             runCatching { repository.ensureHistoricalSeed() }
             var lastHeartbeatAtMs = 0L
+            var lastKnownManagedCount = 0
             while (isActive) {
                 try {
                     val nowMs = System.currentTimeMillis()
@@ -116,12 +122,30 @@ class TradingEngineService : Service() {
                     runCatching { repository.reconcileFixedAutoBuyOrders() }
                         .onFailure { auditLogger.log("RUNTIME", "FIXED_AUTO_BUY_RECONCILE_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
 
-                    val managedCount = runCatching { repository.monitorManagedPositions() }
-                        .onFailure {
-                            if (it !is CancellationException) {
-                                auditLogger.log("RUNTIME", "MANAGED_MONITOR_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName)))
-                            }
-                        }.getOrDefault(0)
+                    val managedMonitorResult = runCatching { repository.monitorManagedPositions() }
+                    val managedMonitorFailure = managedMonitorResult.exceptionOrNull()
+                    val managedMonitorSucceeded = managedMonitorFailure == null
+                    val managedCount = if (managedMonitorSucceeded) {
+                        managedMonitorResult.getOrThrow().coerceAtLeast(0).also { count ->
+                            lastKnownManagedCount = count
+                            updatePositionMonitoringWakeLock(
+                                shouldHold = count > 0,
+                                reason = if (count > 0) "ACTIVE_MANAGED_HOLDINGS" else "NO_OPEN_MANAGED_HOLDINGS"
+                            )
+                        }
+                    } else {
+                        if (managedMonitorFailure is CancellationException) throw managedMonitorFailure
+                        // The position state is unknown after a monitor failure. Acquire/retain the
+                        // wake lock and retry quickly rather than treating the error as zero holdings.
+                        updatePositionMonitoringWakeLock(true, "MONITOR_ERROR_UNKNOWN_POSITION_STATE")
+                        auditLogger.log("RUNTIME", "MANAGED_MONITOR_ERROR", mapOf(
+                            "type" to (managedMonitorFailure?.javaClass?.simpleName ?: "UnknownError"),
+                            "message" to (managedMonitorFailure?.message ?: "Managed position monitor failed"),
+                            "last_known_managed_count" to lastKnownManagedCount,
+                            "wake_lock_held" to (positionMonitoringWakeLock?.isHeld == true)
+                        ))
+                        lastKnownManagedCount
+                    }
 
                     val forecastOutcomeCount = runCatching { repository.monitorForecastOutcomes() }
                         .onFailure {
@@ -166,13 +190,14 @@ class TradingEngineService : Service() {
                             .onFailure { auditLogger.log("RUNTIME", "AFTER_HOURS_RESEARCH_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
                     }
 
-                    updateForegroundNotification(managedCount, forecastOutcomeCount, fixedOutcomeCount)
+                    updateForegroundNotification(managedCount, forecastOutcomeCount, fixedOutcomeCount, managedMonitorSucceeded)
                     val regularSession = now.dayOfWeek.value < 6 &&
                         now.toLocalTime() >= LocalTime.of(9, 15) &&
                         now.toLocalTime() < LocalTime.of(15, 30)
                     delay(
                         when {
                             !regularSession -> CLOSED_SESSION_LOOP_INTERVAL_MS
+                            !managedMonitorSucceeded -> POSITION_MONITOR_ERROR_RETRY_MS
                             managedCount > 0 -> POSITION_LOOP_INTERVAL_MS
                             forecastOutcomeCount > 0 || fixedOutcomeCount > 0 -> FORECAST_LOOP_INTERVAL_MS
                             else -> IDLE_LOOP_INTERVAL_MS
@@ -213,9 +238,56 @@ class TradingEngineService : Service() {
         manager.notify((f.symbol.hashCode() xor f.generatedAtMs.toInt()).and(Int.MAX_VALUE), notification)
     }
 
-    private fun updateForegroundNotification(managedCount: Int, forecastOutcomeCount: Int, fixedOutcomeCount: Int) {
-        val text = "Production engine active · " + managedCount + " holdings · " +
-            forecastOutcomeCount + " adaptive + " + fixedOutcomeCount + " fixed outcomes"
+    private fun updatePositionMonitoringWakeLock(shouldHold: Boolean, reason: String) {
+        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+        if (shouldHold) {
+            val wakeLock = positionMonitoringWakeLock ?: powerManager.newWakeLock(
+                PowerManager.PARTIAL_WAKE_LOCK,
+                "$packageName:PositionMonitoring"
+            ).apply { setReferenceCounted(false) }.also { positionMonitoringWakeLock = it }
+            if (!wakeLock.isHeld) {
+                runCatching { wakeLock.acquire() }
+                    .onSuccess {
+                        auditLogger.log("RUNTIME", "POSITION_WAKE_LOCK_ACQUIRED", mapOf("reason" to reason))
+                    }
+                    .onFailure {
+                        auditLogger.log("RUNTIME", "POSITION_WAKE_LOCK_ACQUIRE_FAILED", mapOf(
+                            "reason" to reason,
+                            "message" to (it.message ?: it.javaClass.simpleName)
+                        ))
+                    }
+            }
+        } else {
+            val wakeLock = positionMonitoringWakeLock
+            if (wakeLock?.isHeld == true) {
+                runCatching { wakeLock.release() }
+                    .onSuccess {
+                        auditLogger.log("RUNTIME", "POSITION_WAKE_LOCK_RELEASED", mapOf("reason" to reason))
+                    }
+                    .onFailure {
+                        auditLogger.log("RUNTIME", "POSITION_WAKE_LOCK_RELEASE_FAILED", mapOf(
+                            "reason" to reason,
+                            "message" to (it.message ?: it.javaClass.simpleName)
+                        ))
+                    }
+            }
+        }
+    }
+
+    private fun updateForegroundNotification(
+        managedCount: Int,
+        forecastOutcomeCount: Int,
+        fixedOutcomeCount: Int,
+        managedMonitorSucceeded: Boolean
+    ) {
+        val monitorStatus = when {
+            !managedMonitorSucceeded -> "Monitor error · $managedCount last-known holding(s) · " +
+                if (positionMonitoringWakeLock?.isHeld == true) "CPU awake; retrying" else "CPU wake lock unavailable"
+            managedCount <= 0 -> "No open holdings"
+            positionMonitoringWakeLock?.isHeld == true -> "Monitoring $managedCount holding(s) · CPU awake"
+            else -> "Monitoring $managedCount holding(s) · CPU wake lock unavailable"
+        }
+        val text = monitorStatus + " · " + forecastOutcomeCount + " adaptive + " + fixedOutcomeCount + " fixed outcomes"
         getSystemService(NotificationManager::class.java)
             .notify(FOREGROUND_NOTIFICATION_ID, engineNotification(text))
     }
@@ -255,6 +327,7 @@ class TradingEngineService : Service() {
         private const val FOREGROUND_NOTIFICATION_ID = 68090
         private const val HEARTBEAT_INTERVAL_MS = 15_000L
         private const val POSITION_LOOP_INTERVAL_MS = 350L
+        private const val POSITION_MONITOR_ERROR_RETRY_MS = 1_000L
         private const val FORECAST_LOOP_INTERVAL_MS = 5_000L
         private const val IDLE_LOOP_INTERVAL_MS = 10_000L
         private const val CLOSED_SESSION_LOOP_INTERVAL_MS = 60_000L

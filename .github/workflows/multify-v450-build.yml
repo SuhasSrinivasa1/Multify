@@ -4,7 +4,6 @@ name: Multify Trader Pro v7.3.0 Resilient Forecast Build
 
 on:
   workflow_dispatch:
-  push:
     branches: [ main ]
     paths:
       - 'app/**'
