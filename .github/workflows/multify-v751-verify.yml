@@ -10,7 +10,7 @@ on:
       - '.github/workflows/multify-v751-verify.yml'
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   verify-debug:
@@ -187,3 +187,27 @@ jobs:
           name: Multify-TraderPro-v7.5.9-continuous-monitor-verified
           path: dist/
           if-no-files-found: error
+
+      - name: Publish verified APK release
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="v7.5.9-continuous-monitor"
+          TITLE="Multify Trader Pro v7.5.9 Continuous Holding Monitor"
+          ASSETS=(
+            "dist/Multify-TraderPro-v7.5.9-continuous-monitor-debug.apk"
+            "dist/Multify-TraderPro-v7.5.9-source.zip"
+            "dist/SHA256SUMS.txt"
+            "dist/signature.txt"
+            "dist/package-verification.txt"
+          )
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${ASSETS[@]}" --clobber
+          else
+            gh release create "$TAG" --target "$GITHUB_SHA" --title "$TITLE" \
+              --notes "Verified APK with continuous app-owned holding monitoring and CPU wake-lock protection. Check signature.txt before installing over an existing build." \
+              "${ASSETS[@]}"
+          fi
