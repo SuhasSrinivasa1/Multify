@@ -3730,7 +3730,7 @@ class TradingRepository @Inject constructor(
                     "existing_active_gtt" to false,
                     "sell_logic" to "shared_fixed_stepped_trailing_and_overnight_recovery"
                 ))
-                continue
+                return@forEach
             }
 
             val quantityChanged = existing.quantity != quantity
