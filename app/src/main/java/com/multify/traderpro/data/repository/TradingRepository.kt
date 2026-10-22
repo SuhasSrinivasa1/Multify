@@ -36,7 +36,6 @@ import com.multify.traderpro.data.network.GttOrder
 import com.multify.traderpro.data.network.GrowwApiFactory
 import com.multify.traderpro.data.network.GrowwHolding
 import com.multify.traderpro.data.network.GrowwPosition
-import com.multify.traderpro.data.network.SmartOrderPayload
 import com.multify.traderpro.data.network.LearningStatsDto
 import com.multify.traderpro.data.network.OrderCancelRequest
 import com.multify.traderpro.data.network.OrderCreateRequest
