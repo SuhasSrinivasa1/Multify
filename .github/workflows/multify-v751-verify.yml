@@ -159,7 +159,7 @@ jobs:
           cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v7.5.9-continuous-monitor-debug.apk
           python - <<'PY'
           import gzip, hashlib, zipfile
-          apk = "dist/Multify-TraderPro-v7.5.8-fixed-s24-adaptive-debug.apk"
+          apk = "dist/Multify-TraderPro-v7.5.9-continuous-monitor-debug.apk"
           expected_json = "c5d23a7d14ef413c25f63d43672d8729c77469c589e1c4e36dd2f209ec7f304b"
           expected_gzip = "8cc0cd5accc08921fd710af4ecd4f58ab1b9b5b41bc686f8713e6a7ea1267738"
           with zipfile.ZipFile(apk) as z:
@@ -177,8 +177,8 @@ jobs:
               assert payload.startswith(b'{"schemaVersion":2'), "Embedded historic intelligence JSON is malformed"
           print("Embedded historic intelligence APK asset: checksum verified")
           PY
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/Multify-TraderPro-v7.5.8-fixed-s24-adaptive-debug.apk > dist/signature.txt
-          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/Multify-TraderPro-v7.5.8-fixed-s24-adaptive-debug.apk | grep -E "^(package:|application-label:)" > dist/package-verification.txt
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/Multify-TraderPro-v7.5.9-continuous-monitor-debug.apk > dist/signature.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/Multify-TraderPro-v7.5.9-continuous-monitor-debug.apk | grep -E "^(package:|application-label:)" > dist/package-verification.txt
           (cd dist && sha256sum *.apk > SHA256SUMS.txt)
           git archive --format=zip --output=dist/Multify-TraderPro-v7.5.9-source.zip HEAD
 
