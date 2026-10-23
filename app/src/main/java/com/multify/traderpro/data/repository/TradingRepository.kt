@@ -1803,7 +1803,12 @@ class TradingRepository @Inject constructor(
         val learned = learningStats()
         val priorForecasts = learningDao.allLongForecasts().filter {
             it.forecastDate < today && it.status in setOf("TARGET_HIT", "MISSED") &&
-                PositiveCloseForecastPolicy.isPositiveClose(it.entryPrice, it.lastPrice)
+                ForecastUniversalPositiveEvidencePolicy.qualifies(
+                    realizedPct = null,
+                    closePct = if (it.entryPrice > 0.0) (it.lastPrice / it.entryPrice - 1.0) * 100.0 else null,
+                    maxFavourablePct = it.maxFavourablePct,
+                    targetHit = it.status == "TARGET_HIT"
+                )
         }
         val priorMfe = priorForecasts.map { it.maxFavourablePct }
             .filter { it.isFinite() && it >= 0.0 && it < 25.0 }
@@ -1814,13 +1819,18 @@ class TradingRepository @Inject constructor(
             .filter { it.scanAtMs < nowMs && nowMs - it.scanAtMs <= PRIMARY_CONFIRMATION_WINDOW_MS }
         val priorResearchDates = learningDao.forecastResearchDates()
             .filter { it < today }
-            .take(RESEARCH_SESSION_GOAL)
+            .take(30)
             .toSet()
         val priorResearch = if (priorResearchDates.isEmpty()) emptyList() else {
             learningDao.allForecastResearch()
                 .filter {
                     it.researchDate in priorResearchDates && it.outcomeUpdatedAtMs != null &&
-                        PositiveCloseForecastPolicy.isPositiveResearchClose(it.outcomeClosePct)
+                        ForecastUniversalPositiveEvidencePolicy.qualifies(
+                            realizedPct = null,
+                            closePct = it.outcomeClosePct,
+                            maxFavourablePct = it.outcomeMfePct ?: 0.0,
+                            targetHit = it.outcomeTargetHit == true
+                        )
                 }
                 .groupBy { it.researchDate + "|" + it.symbol }
                 .mapNotNull { (_, rows) -> rows.minByOrNull { it.scanAtMs } }
@@ -1833,12 +1843,14 @@ class TradingRepository @Inject constructor(
             if (xs.size < MIN_RESEARCH_EVIDENCE_ROWS) return 0.0
             val hitRate = xs.count { it.outcomeTargetHit == true }.toDouble() / xs.size
             val avgMfe = xs.mapNotNull { it.outcomeMfePct }.takeIf { it.isNotEmpty() }?.average() ?: 0.0
-            val hitComponent = (hitRate - 0.50) * 0.14
+            val hitComponent = ((hitRate - 0.50) * 0.14).coerceAtLeast(0.0)
             val mfeComponent = if (targetPct > 0.0)
-                (((avgMfe - targetPct) / targetPct).coerceIn(-1.0, 1.0)) * 0.04
+                ((((avgMfe - targetPct) / targetPct).coerceIn(-1.0, 1.0)) * 0.04).coerceAtLeast(0.0)
             else 0.0
-            return (hitComponent + mfeComponent).coerceIn(-0.08, 0.10)
+            return (hitComponent + mfeComponent).coerceIn(0.0, 0.10)
         }
+
+        val universalPositiveEvidence = universalPositiveEvidenceCases(today)
 
         val ranked = evaluated.map { row ->
             val baseQuality = ForecastQualityPolicy.evaluate(row.second, targetPct, marketRegime)
@@ -1878,6 +1890,17 @@ class TradingRepository @Inject constructor(
             val multifyPositiveBonus = ForecastMultifyPositiveTransferPolicy.rankingBonus(
                 row.first, multifyPositiveTransfer
             )
+            val universalEvidenceBonus = ForecastUniversalPositiveEvidencePolicy.rankingBonus(
+                symbol = row.first,
+                strategy = row.second.strategy,
+                regime = row.second.regime,
+                marketRegime = marketRegime,
+                sectorRegime = "UNAVAILABLE",
+                capBucket = ForecastUniversalPositiveEvidencePolicy.capBucket(row.second.features.marketCap),
+                timeBucket = ForecastUniversalPositiveEvidencePolicy.timeBucket(nowMs),
+                dominantFamily = factorModel.dominantFamily,
+                evidence = universalPositiveEvidence
+            )
             ForecastCandidate(
                 symbol = row.first,
                 evaluation = row.second,
@@ -1887,7 +1910,7 @@ class TradingRepository @Inject constructor(
                     row.second.confidence +
                     row.second.directionalScore.coerceAtLeast(0.0) * 0.10 +
                     championBonus + frequencyBonus + dnaBonus + qualityBonus + researchBonus + familyBonus +
-                    fixedPositiveBonus + multifyPositiveBonus
+                    fixedPositiveBonus + multifyPositiveBonus + universalEvidenceBonus
                 ).coerceIn(0.01, .99),
                 championKey = key,
                 targetPct = candidateTargetPct
@@ -1991,6 +2014,9 @@ class TradingRepository @Inject constructor(
             "multify_positive_transfer_cases" to multifyPositiveTransfer.size,
             "multify_positive_transfer_symbols" to multifyPositiveSymbols.distinct().size,
             "positive_transfer_only" to true,
+            "universal_positive_evidence_rows" to universalPositiveEvidence.size,
+            "universal_positive_sources" to universalPositiveEvidence.groupingBy { it.source }.eachCount(),
+            "universal_evidence_negative_penalties" to false,
             "live_forecast_unlocked" to liveForecastReady,
             "live_forecast_completed_sessions" to completedCalibrationSessions,
             "live_forecast_session_goal" to MarketPriorityPolicy.LIVE_FORECAST_UNLOCK_SESSIONS,
