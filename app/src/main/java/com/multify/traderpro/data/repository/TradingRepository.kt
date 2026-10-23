@@ -3941,37 +3941,54 @@ class TradingRepository @Inject constructor(
         }
 
         if (!marketOpen) {
-            marked.filterNot { it.symbol.uppercase(Locale.US) in blockedSymbols }.forEach { position ->
-                runCatching { ensureOvernightRecoveryGtt(token, position) }
-                    .onFailure {
-                        auditLogger.log("GTT", "RECOVERY_GTT_SETUP_ERROR", mapOf(
-                            "symbol" to position.symbol,
-                            "message" to (it.message ?: it.javaClass.simpleName)
-                        ))
-                    }
-            }
+            // Preserve the live trailing state across sessions. Do not replace an armed trailing
+            // GTT with the legacy ₹100 recovery target at day-end. If the trail has not armed yet,
+            // the holding simply remains unarmed until live market data resumes next session.
+            auditLogger.log("GTT", "OVERNIGHT_TRAIL_PRESERVED", mapOf(
+                "tracked_holdings" to marked.size,
+                "armed_trailing_gtts" to marked.count { it.smartOrderMode == HoldingSmartOrderPolicy.MODE_TRAILING_GTT },
+                "legacy_recovery_rows" to marked.count { it.smartOrderMode == HoldingSmartOrderPolicy.MODE_RECOVERY_GTT }
+            ))
             return portfolioMonitorCount(inventory)
         }
 
-        val recoveryPositions = marked.filter {
-            it.smartOrderMode == HoldingSmartOrderPolicy.MODE_RECOVERY_GTT &&
-                it.symbol.uppercase(Locale.US) !in blockedSymbols
-        }
-        coroutineScope {
-            recoveryPositions.map { position ->
+        // One-time migration for positions left in the legacy recovery mode by older builds.
+        // Cancel that recovery GTT first; only a successfully cleared row is handed back to the
+        // shared trailing monitor, preventing duplicate SELL orders.
+        val trailingCandidates = coroutineScope {
+            marked.map { position ->
                 async {
-                    runCatching { maintainRecoveryGtt(token, position) }
-                        .onFailure {
-                            auditLogger.log("GTT", "RECOVERY_GTT_MAINTAIN_ERROR", mapOf(
-                                "symbol" to position.symbol,
-                                "message" to (it.message ?: it.javaClass.simpleName)
-                            ))
-                        }
+                    if (position.smartOrderMode != HoldingSmartOrderPolicy.MODE_RECOVERY_GTT ||
+                        position.symbol.uppercase(Locale.US) in blockedSymbols
+                    ) return@async position
+
+                    val migrated = runCatching {
+                        cancelKnownPositionGtt(
+                            token,
+                            position,
+                            "RESTORE_PERSISTENT_TRAILING_FROM_LEGACY_RECOVERY",
+                            clearIfTerminal = false
+                        )
+                    }.onFailure {
+                        auditLogger.log("GTT", "RECOVERY_TO_TRAIL_MIGRATION_ERROR", mapOf(
+                            "symbol" to position.symbol,
+                            "message" to (it.message ?: it.javaClass.simpleName)
+                        ))
+                    }.getOrDefault(position)
+
+                    if (migrated.smartOrderId == null) {
+                        auditLogger.log("GTT", "RECOVERY_TO_TRAIL_MIGRATED", mapOf(
+                            "symbol" to migrated.symbol,
+                            "high_water" to migrated.maxFavourablePrice,
+                            "entry" to migrated.entryPrice
+                        ))
+                    }
+                    migrated
                 }
             }.awaitAll()
         }
 
-        val liveTrailing = marked.filter {
+        val liveTrailing = trailingCandidates.filter {
             it.smartOrderMode != HoldingSmartOrderPolicy.MODE_RECOVERY_GTT &&
                 it.symbol.uppercase(Locale.US) !in blockedSymbols
         }
