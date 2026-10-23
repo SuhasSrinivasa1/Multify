@@ -9,7 +9,7 @@ package com.multify.traderpro.engine
  */
 object FixedScanPerformancePolicy {
     const val DEFAULT_CONCURRENCY = 4
-    const val HIGH_END_CONCURRENCY = 6
+    const val HIGH_END_CONCURRENCY = 4
     const val HIGH_END_MIN_PROCESSORS = 8
 
     fun evaluationConcurrency(availableProcessors: Int): Int =
