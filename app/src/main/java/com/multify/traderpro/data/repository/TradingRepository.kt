@@ -4234,7 +4234,12 @@ class TradingRepository @Inject constructor(
         val completed = learningDao.allLongForecasts().filter {
             it.marketRegime == row.marketRegime && it.regime == row.regime &&
                 it.strategy == row.strategy && it.status in setOf("TARGET_HIT", "MISSED") &&
-                PositiveCloseForecastPolicy.isPositiveClose(it.entryPrice, it.lastPrice)
+                ForecastUniversalPositiveEvidencePolicy.qualifies(
+                    realizedPct = null,
+                    closePct = if (it.entryPrice > 0.0) (it.lastPrice / it.entryPrice - 1.0) * 100.0 else null,
+                    maxFavourablePct = it.maxFavourablePct,
+                    targetHit = it.status == "TARGET_HIT"
+                )
         }
         if (completed.isEmpty()) return
         val wins = completed.count { it.status == "TARGET_HIT" }
