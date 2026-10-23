@@ -172,6 +172,8 @@ class TradingRepository @Inject constructor(
     private val forecastAutoBuySubmissionMutex = Mutex()
     private val fixedAutoBuySubmissionMutex = Mutex()
     private val embeddedHistoricalSeedMutex = Mutex()
+    private val bulkMarketDataMutex = Mutex()
+    private var nextBulkMarketDataAtElapsedMs = 0L
     private val lastTrailStateAuditAtMs = ConcurrentHashMap<Long, Long>()
     private val lastSmartOrderStatusAtMs = ConcurrentHashMap<Long, Long>()
 
@@ -807,6 +809,15 @@ class TradingRepository @Inject constructor(
             armHotState = null
         }
         auditLogger.log("SETTINGS", if (enabled) "ARM_ENABLED" else "ARM_DISABLED")
+    }
+
+    suspend fun setForecastScannerEnabled(enabled: Boolean) {
+        preferences.setForecastScannerEnabled(enabled)
+        auditLogger.log(
+            "SETTINGS",
+            if (enabled) "FORECAST_SCANNER_ENABLED" else "FORECAST_SCANNER_PAUSED",
+            mapOf("fixed_priority_default" to true, "background_market_data_enabled" to enabled)
+        )
     }
 
     suspend fun setForecastAutoBuy(enabled: Boolean) {
@@ -1906,8 +1917,10 @@ class TradingRepository @Inject constructor(
         for (attempt in 0 until FIXED_V741_DISCOVERY_BATCH_ATTEMPTS) {
             try {
                 val exchangeSymbols = chunk.joinToString(",") { "NSE_$it" }
-                return apiFactory.groww.ltp(bearer(token), exchangeSymbols = exchangeSymbols)
-                    .requirePayload("Fixed market-wide discovery LTP")
+                return withBulkMarketDataSlot {
+                    apiFactory.groww.ltp(bearer(token), exchangeSymbols = exchangeSymbols)
+                        .requirePayload("Fixed market-wide discovery LTP")
+                }
             } catch (t: Throwable) {
                 lastFailure = t
                 val transient = t is IOException || (t is HttpException && (t.code() == 429 || t.code() >= 500))
@@ -2157,10 +2170,12 @@ class TradingRepository @Inject constructor(
         for (attempt in 0 until DISCOVERY_BATCH_ATTEMPTS) {
             try {
                 val exchangeSymbols = chunk.joinToString(",") { "NSE_$it" }
-                return apiFactory.groww.ltp(
-                    bearer(token),
-                    exchangeSymbols = exchangeSymbols
-                ).requirePayload("Market-wide discovery LTP")
+                return withBulkMarketDataSlot {
+                    apiFactory.groww.ltp(
+                        bearer(token),
+                        exchangeSymbols = exchangeSymbols
+                    ).requirePayload("Market-wide discovery LTP")
+                }
             } catch (t: Throwable) {
                 lastFailure = t
                 if (!isTransientMarketDataFailure(t) || attempt + 1 >= DISCOVERY_BATCH_ATTEMPTS) break
@@ -2177,6 +2192,24 @@ class TradingRepository @Inject constructor(
 
     private fun isTransientMarketDataFailure(t: Throwable): Boolean =
         t is IOException || (t is HttpException && (t.code() == 429 || t.code() >= 500))
+
+    private suspend fun <T> withBulkMarketDataSlot(block: suspend () -> T): T =
+        bulkMarketDataMutex.withLock {
+            val now = SystemClock.elapsedRealtime()
+            val waitMs = (nextBulkMarketDataAtElapsedMs - now).coerceAtLeast(0L)
+            if (waitMs > 0L) delay(waitMs)
+            try {
+                block().also {
+                    nextBulkMarketDataAtElapsedMs =
+                        SystemClock.elapsedRealtime() + BULK_MARKET_DATA_MIN_GAP_MS
+                }
+            } catch (t: Throwable) {
+                nextBulkMarketDataAtElapsedMs = SystemClock.elapsedRealtime() +
+                    if (t is HttpException && t.code() == 429) BULK_MARKET_DATA_429_COOLDOWN_MS
+                    else BULK_MARKET_DATA_MIN_GAP_MS
+                throw t
+            }
+        }
 
     private suspend fun forecastEvaluation(symbol: String, token: String): StrategyEvaluation {
         val now = ZonedDateTime.now(INDIA)
@@ -3943,10 +3976,12 @@ class TradingRepository @Inject constructor(
         val result = linkedMapOf<String, Double>()
         positions.map { it.symbol.uppercase(Locale.US) }.distinct().chunked(50).forEach { chunk ->
             val exchangeSymbols = chunk.joinToString(",") { "NSE_$it" }
-            val payload = apiFactory.groww.ltp(
-                bearer(token),
-                exchangeSymbols = exchangeSymbols
-            ).requirePayload("Batch holding LTP")
+            val payload = withBulkMarketDataSlot {
+                apiFactory.groww.ltp(
+                    bearer(token),
+                    exchangeSymbols = exchangeSymbols
+                ).requirePayload("Batch holding LTP")
+            }
             payload.forEach { (key, value) ->
                 if (value.isFinite() && value > 0.0) {
                     result[key.removePrefix("NSE_").uppercase(Locale.US)] = value
@@ -5328,6 +5363,8 @@ class TradingRepository @Inject constructor(
         private const val ARM_HOT_AUDIT_INTERVAL_MS = 15L * 60L * 1000L
         private const val ARM_HOT_STATE_MAX_AGE_MS = 45_000L
         private const val EXECUTION_SAMPLE_LIMIT = 30
+        private const val BULK_MARKET_DATA_MIN_GAP_MS = 300L
+        private const val BULK_MARKET_DATA_429_COOLDOWN_MS = 1_500L
         private const val BROKER_INVENTORY_REFRESH_MS = 5_000L
         private const val ACTIVE_GTT_REFRESH_MS = 30_000L
         private const val ACTIVE_GTT_PAGE_SIZE = 50
