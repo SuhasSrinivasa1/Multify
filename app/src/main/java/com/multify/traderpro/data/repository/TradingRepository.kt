@@ -857,10 +857,27 @@ class TradingRepository @Inject constructor(
 
     suspend fun setForecastScannerEnabled(enabled: Boolean) {
         preferences.setForecastScannerEnabled(enabled)
+        if (!enabled) {
+            preferences.setForecastAutoBuy(false)
+            runCatching {
+                reconcileForecastAutoBuyOrders(
+                    forceCancel = true,
+                    cancelReason = "FORECAST_SCANNER_PAUSED_FOR_FIXED_PRIORITY"
+                )
+            }.onFailure {
+                auditLogger.log("FORECAST_AUTO_BUY", "PAUSE_CANCEL_ERROR", mapOf(
+                    "message" to (it.message ?: it.javaClass.simpleName)
+                ))
+            }
+        }
         auditLogger.log(
             "SETTINGS",
             if (enabled) "FORECAST_SCANNER_ENABLED" else "FORECAST_SCANNER_PAUSED",
-            mapOf("fixed_priority_default" to true, "background_market_data_enabled" to enabled)
+            mapOf(
+                "fixed_priority_default" to true,
+                "background_market_data_enabled" to enabled,
+                "forecast_auto_buy_forced_off_when_paused" to !enabled
+            )
         )
     }
 
