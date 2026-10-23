@@ -20,7 +20,11 @@ object GrowwApiUsageLedger {
         val hardPerMinuteLimit: Int?,
         val totalRequests: Long,
         val rateLimitResponses: Long,
-        val networkMs: Long
+        val networkMs: Long,
+        val permitWaitCount: Long,
+        val permitWaitMs: Long,
+        val maxPermitWaitMs: Long,
+        val lastRateLimitAtMs: Long
     ) {
         val minuteHeadroom: Int get() = (appPerMinuteLimit - usedLastMinute).coerceAtLeast(0)
         val minuteUtilizationPct: Int get() =
@@ -43,7 +47,11 @@ object GrowwApiUsageLedger {
         val minute: ArrayDeque<Long> = ArrayDeque(),
         var totalRequests: Long = 0,
         var rateLimitResponses: Long = 0,
-        var networkMs: Long = 0
+        var networkMs: Long = 0,
+        var permitWaitCount: Long = 0,
+        var permitWaitMs: Long = 0,
+        var maxPermitWaitMs: Long = 0,
+        var lastRateLimitAtMs: Long = 0
     )
 
     private val lock = Any()
@@ -64,7 +72,18 @@ object GrowwApiUsageLedger {
     fun recordResponse(category: Category, elapsedMs: Long, code: Int) = synchronized(lock) {
         val state = states.getValue(category)
         state.networkMs += elapsedMs.coerceAtLeast(0L)
-        if (code == 429) state.rateLimitResponses++
+        if (code == 429) {
+            state.rateLimitResponses++
+            state.lastRateLimitAtMs = System.currentTimeMillis()
+        }
+    }
+
+    fun recordPermitWait(category: Category, waitMs: Long) = synchronized(lock) {
+        if (waitMs <= 0L) return@synchronized
+        val state = states.getValue(category)
+        state.permitWaitCount++
+        state.permitWaitMs += waitMs
+        state.maxPermitWaitMs = maxOf(state.maxPermitWaitMs, waitMs)
     }
 
     fun recordCacheHit() { cacheHits.incrementAndGet() }
@@ -87,7 +106,11 @@ object GrowwApiUsageLedger {
                 hardPerMinuteLimit = hardLimits(category).second,
                 totalRequests = state.totalRequests,
                 rateLimitResponses = state.rateLimitResponses,
-                networkMs = state.networkMs
+                networkMs = state.networkMs,
+                permitWaitCount = state.permitWaitCount,
+                permitWaitMs = state.permitWaitMs,
+                maxPermitWaitMs = state.maxPermitWaitMs,
+                lastRateLimitAtMs = state.lastRateLimitAtMs
             )
         })
     }
