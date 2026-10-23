@@ -308,22 +308,6 @@ private fun ExecutionScreen(
                 accent = MaterialTheme.colorScheme.secondary
             )
         }
-        item {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .45f)),
-                shape = RoundedCornerShape(18.dp)
-            ) {
-                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("Market-hours priority", fontWeight = FontWeight.SemiBold)
-                    Text(
-                        "Fixed scanning has priority. Forecast background scanning is paused by default. " +
-                            "Portfolio sell/trailing protection remains independent and is never disabled by this screen.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-        }
     }
 }
 
