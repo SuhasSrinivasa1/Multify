@@ -103,6 +103,7 @@ data class LearningStatsDto(
     val rollingTradingDays: Int = 0,
     val rollingCalls: Int = 0,
     val longAveragePct: Double = 0.0,
+    val todayAveragePct: Double = 0.0,
     val longMedianPct: Double = 0.0,
     val longTrimmedMeanPct: Double = 0.0,
     val longEwmaPct: Double = 0.0,
