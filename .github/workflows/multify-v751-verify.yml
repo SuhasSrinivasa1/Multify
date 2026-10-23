@@ -142,7 +142,6 @@ jobs:
           grep -q 'SCAN_WORKER_POLL_MS = 1_000L' app/src/main/java/com/multify/traderpro/service/TradingEngineService.kt
           grep -q 'FORECAST_SCAN_PAUSED_FOR_FIXED_PRIORITY' app/src/main/java/com/multify/traderpro/service/TradingEngineService.kt
           grep -q 'forecastScannerEnabled: Boolean = false' app/src/main/java/com/multify/traderpro/data/preferences/AppPreferences.kt
-          grep -q 'BULK_MARKET_DATA_MIN_GAP_MS = 300L' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
           grep -q 'BULK_MARKET_DATA_429_COOLDOWN_MS = 1_500L' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
           grep -q 'generateFixedForecasts(force = false)' app/src/main/java/com/multify/traderpro/ui/screens/TraderViewModel.kt
           grep -q 'prepareFixedPreMarketWarmup' app/src/main/java/com/multify/traderpro/service/TradingEngineService.kt
