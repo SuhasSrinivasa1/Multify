@@ -15,10 +15,11 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         PriceObservationEntity::class,
         LongForecastEntity::class,
         ForecastResearchEntity::class,
+        ForecastPositiveEvidenceEntity::class,
         ForecastChampionEntity::class,
         ResearchReportEntity::class
     ],
-    version = 14,
+    version = 15,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -285,6 +286,49 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL("CREATE INDEX index_managed_positions_engine_symbol_status ON managed_positions(engine,symbol,status)")
                 db.execSQL("CREATE INDEX index_managed_positions_product_symbol_status ON managed_positions(product,symbol,status)")
                 db.execSQL("CREATE INDEX index_managed_positions_openedAtMs ON managed_positions(openedAtMs)")
+            }
+        }
+
+
+        val MIGRATION_14_15 = object : Migration(14, 15) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("""CREATE TABLE forecast_positive_evidence (
+                    evidenceKey TEXT PRIMARY KEY NOT NULL,
+                    source TEXT NOT NULL,
+                    evidenceDate TEXT NOT NULL,
+                    eventAtMs INTEGER NOT NULL,
+                    symbol TEXT NOT NULL,
+                    strategy TEXT NOT NULL,
+                    regime TEXT NOT NULL,
+                    marketRegime TEXT NOT NULL,
+                    sectorRegime TEXT NOT NULL,
+                    capBucket TEXT NOT NULL,
+                    timeBucket TEXT NOT NULL,
+                    dominantFamily TEXT NOT NULL,
+                    familyConsensus REAL NOT NULL,
+                    momentumFamilyScore REAL NOT NULL,
+                    participationFamilyScore REAL NOT NULL,
+                    structureFamilyScore REAL NOT NULL,
+                    factorJson TEXT NOT NULL,
+                    voteJson TEXT NOT NULL,
+                    entryPrice REAL NOT NULL,
+                    targetPct REAL,
+                    maxFavourablePct REAL NOT NULL,
+                    maxAdversePct REAL NOT NULL,
+                    closePct REAL,
+                    realizedPct REAL,
+                    protectedTrailPct REAL,
+                    trailArmed INTEGER NOT NULL,
+                    targetHit INTEGER NOT NULL,
+                    positiveReason TEXT NOT NULL,
+                    qualityTier TEXT NOT NULL,
+                    reconstructionQuality TEXT NOT NULL,
+                    updatedAtMs INTEGER NOT NULL
+                )""")
+                db.execSQL("CREATE INDEX index_forecast_positive_evidence_source_evidenceDate ON forecast_positive_evidence(source,evidenceDate)")
+                db.execSQL("CREATE INDEX index_forecast_positive_evidence_marketRegime_regime_strategy ON forecast_positive_evidence(marketRegime,regime,strategy)")
+                db.execSQL("CREATE INDEX index_forecast_positive_evidence_capBucket_dominantFamily ON forecast_positive_evidence(capBucket,dominantFamily)")
+                db.execSQL("CREATE INDEX index_forecast_positive_evidence_symbol_evidenceDate ON forecast_positive_evidence(symbol,evidenceDate)")
             }
         }
 
