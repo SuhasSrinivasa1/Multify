@@ -1,4 +1,4 @@
-name: Multify Trader Pro v7.6.4 Persistent Trailing Verification
+name: Multify Trader Pro v7.6.5 Fixed Production Priority Verification
 
 on:
   workflow_dispatch:
@@ -150,8 +150,14 @@ jobs:
           grep -q '"market_data_scanned" to false' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
           grep -q 'OVERNIGHT_TRAIL_PRESERVED' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
           grep -q 'RESTORE_PERSISTENT_TRAILING_FROM_LEGACY_RECOVERY' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
-          grep -q 'versionCode = 764' app/build.gradle.kts
-          grep -q 'versionName = "7.6.4-persistent-trailing"' app/build.gradle.kts
+          grep -q 'BULK_MARKET_DATA_MIN_GAP_MS = 210L' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
+          grep -q 'suspend fun refreshDashboardLocal()' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
+          grep -q 'Fixed outcome tracking is diagnostic only' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
+          grep -q 'todayAveragePct = todayAverage' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
+          grep -q 'repository.refreshDashboardLocal()' app/src/main/java/com/multify/traderpro/ui/screens/TraderViewModel.kt
+          grep -q 'Production averages' app/src/main/java/com/multify/traderpro/ui/screens/TraderApp.kt
+          grep -q 'versionCode = 765' app/build.gradle.kts
+          grep -q 'versionName = "7.6.5-fixed-production-priority"' app/build.gradle.kts
 
       - name: Restore stable app signing key when configured
         shell: bash
@@ -177,10 +183,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v7.6.4-persistent-trailing-debug.apk
+          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v7.6.5-fixed-production-priority-debug.apk
           python - <<'PY'
           import gzip, hashlib, zipfile
-          apk = "dist/Multify-TraderPro-v7.6.4-persistent-trailing-debug.apk"
+          apk = "dist/Multify-TraderPro-v7.6.5-fixed-production-priority-debug.apk"
           expected_json = "c5d23a7d14ef413c25f63d43672d8729c77469c589e1c4e36dd2f209ec7f304b"
           expected_gzip = "8cc0cd5accc08921fd710af4ecd4f58ab1b9b5b41bc686f8713e6a7ea1267738"
           with zipfile.ZipFile(apk) as z:
@@ -198,14 +204,14 @@ jobs:
               assert payload.startswith(b'{"schemaVersion":2'), "Embedded historic intelligence JSON is malformed"
           print("Embedded historic intelligence APK asset: checksum verified")
           PY
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/Multify-TraderPro-v7.6.4-persistent-trailing-debug.apk > dist/signature.txt
-          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/Multify-TraderPro-v7.6.4-persistent-trailing-debug.apk | grep -E "^(package:|application-label:)" > dist/package-verification.txt
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/Multify-TraderPro-v7.6.5-fixed-production-priority-debug.apk > dist/signature.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/Multify-TraderPro-v7.6.5-fixed-production-priority-debug.apk | grep -E "^(package:|application-label:)" > dist/package-verification.txt
           (cd dist && sha256sum *.apk > SHA256SUMS.txt)
-          git archive --format=zip --output=dist/Multify-TraderPro-v7.6.4-source.zip HEAD
+          git archive --format=zip --output=dist/Multify-TraderPro-v7.6.5-source.zip HEAD
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Multify-TraderPro-v7.6.4-persistent-trailing-verified
+          name: Multify-TraderPro-v7.6.5-fixed-production-priority-verified
           path: dist/
           if-no-files-found: error
 
@@ -216,11 +222,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          TAG="v7.6.4-persistent-trailing"
-          TITLE="Multify Trader Pro v7.6.4 Persistent Trailing"
+          TAG="v7.6.5-fixed-production-priority"
+          TITLE="Multify Trader Pro v7.6.5 Fixed Production Priority"
           ASSETS=(
-            "dist/Multify-TraderPro-v7.6.4-persistent-trailing-debug.apk"
-            "dist/Multify-TraderPro-v7.6.4-source.zip"
+            "dist/Multify-TraderPro-v7.6.5-fixed-production-priority-debug.apk"
+            "dist/Multify-TraderPro-v7.6.5-source.zip"
             "dist/SHA256SUMS.txt"
             "dist/signature.txt"
             "dist/package-verification.txt"
@@ -229,6 +235,6 @@ jobs:
             gh release upload "$TAG" "${ASSETS[@]}" --clobber
           else
             gh release create "$TAG" --target "$GITHUB_SHA" --title "$TITLE" \
-              --notes "Verified APK with 09:00 IST Fixed pre-market warmup, first price-based Fixed scan at 09:15 IST, Forecast paused by default, portfolio-wide sell monitoring, and persistent stepped trailing across sessions. Frozen Fixed recommendation logic is unchanged." \
+              --notes "Verified APK with local-only Execution metrics, ~95% REST live-data governor, Fixed-priority market-hours API scheduling, Forecast paused by default, portfolio-wide persistent trailing sell protection, and unchanged frozen Fixed recommendation logic." \
               "${ASSETS[@]}"
           fi
