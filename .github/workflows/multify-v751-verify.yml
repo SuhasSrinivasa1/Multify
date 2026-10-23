@@ -1,4 +1,4 @@
-name: Multify Trader Pro v7.6.0 Portfolio-Wide Sell Monitor Verification
+name: Multify Trader Pro v7.6.1 Fixed Parallel Entry Verification
 
 on:
   workflow_dispatch:
@@ -134,8 +134,14 @@ jobs:
           grep -q 'EXISTING_HOLDING_IMPORTED' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
           grep -q 'ACTIVE_GTT_DISCOVERY_ERROR' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
           grep -q 'PORTFOLIO_REIMPORT_COOLDOWN_MS = 120_000L' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
-          grep -q 'versionCode = 760' app/build.gradle.kts
-          grep -q 'versionName = "7.6.0-portfolio-monitor"' app/build.gradle.kts
+          grep -q 'private fun startPositionMonitorWorker()' app/src/main/java/com/multify/traderpro/service/TradingEngineService.kt
+          grep -q 'private fun startFixedScanWorker()' app/src/main/java/com/multify/traderpro/service/TradingEngineService.kt
+          grep -q 'private fun startForecastScanWorker()' app/src/main/java/com/multify/traderpro/service/TradingEngineService.kt
+          grep -q '"fixed_not_blocked_by_forecast" to true' app/src/main/java/com/multify/traderpro/service/TradingEngineService.kt
+          grep -q '"forecast_blocking_ms" to 0' app/src/main/java/com/multify/traderpro/service/TradingEngineService.kt
+          grep -q 'SCAN_WORKER_POLL_MS = 1_000L' app/src/main/java/com/multify/traderpro/service/TradingEngineService.kt
+          grep -q 'versionCode = 761' app/build.gradle.kts
+          grep -q 'versionName = "7.6.1-fixed-parallel-entry"' app/build.gradle.kts
 
       - name: Restore stable app signing key when configured
         shell: bash
@@ -161,10 +167,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v7.6.0-portfolio-monitor-debug.apk
+          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v7.6.1-fixed-parallel-entry-debug.apk
           python - <<'PY'
           import gzip, hashlib, zipfile
-          apk = "dist/Multify-TraderPro-v7.6.0-portfolio-monitor-debug.apk"
+          apk = "dist/Multify-TraderPro-v7.6.1-fixed-parallel-entry-debug.apk"
           expected_json = "c5d23a7d14ef413c25f63d43672d8729c77469c589e1c4e36dd2f209ec7f304b"
           expected_gzip = "8cc0cd5accc08921fd710af4ecd4f58ab1b9b5b41bc686f8713e6a7ea1267738"
           with zipfile.ZipFile(apk) as z:
@@ -182,14 +188,14 @@ jobs:
               assert payload.startswith(b'{"schemaVersion":2'), "Embedded historic intelligence JSON is malformed"
           print("Embedded historic intelligence APK asset: checksum verified")
           PY
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/Multify-TraderPro-v7.6.0-portfolio-monitor-debug.apk > dist/signature.txt
-          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/Multify-TraderPro-v7.6.0-portfolio-monitor-debug.apk | grep -E "^(package:|application-label:)" > dist/package-verification.txt
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/Multify-TraderPro-v7.6.1-fixed-parallel-entry-debug.apk > dist/signature.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/Multify-TraderPro-v7.6.1-fixed-parallel-entry-debug.apk | grep -E "^(package:|application-label:)" > dist/package-verification.txt
           (cd dist && sha256sum *.apk > SHA256SUMS.txt)
-          git archive --format=zip --output=dist/Multify-TraderPro-v7.6.0-source.zip HEAD
+          git archive --format=zip --output=dist/Multify-TraderPro-v7.6.1-source.zip HEAD
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Multify-TraderPro-v7.6.0-portfolio-monitor-verified
+          name: Multify-TraderPro-v7.6.1-fixed-parallel-entry-verified
           path: dist/
           if-no-files-found: error
 
@@ -200,11 +206,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          TAG="v7.6.0-portfolio-monitor"
-          TITLE="Multify Trader Pro v7.6.0 Portfolio-Wide Sell Monitor"
+          TAG="v7.6.1-fixed-parallel-entry"
+          TITLE="Multify Trader Pro v7.6.1 Fixed Parallel Entry"
           ASSETS=(
-            "dist/Multify-TraderPro-v7.6.0-portfolio-monitor-debug.apk"
-            "dist/Multify-TraderPro-v7.6.0-source.zip"
+            "dist/Multify-TraderPro-v7.6.1-fixed-parallel-entry-debug.apk"
+            "dist/Multify-TraderPro-v7.6.1-source.zip"
             "dist/SHA256SUMS.txt"
             "dist/signature.txt"
             "dist/package-verification.txt"
@@ -213,6 +219,6 @@ jobs:
             gh release upload "$TAG" "${ASSETS[@]}" --clobber
           else
             gh release create "$TAG" --target "$GITHUB_SHA" --title "$TITLE" \
-              --notes "Verified APK with portfolio-wide Groww holding discovery, shared stepped trailing/recovery sell logic, active-GTT conflict checks and CPU wake-lock monitoring. Check signature.txt before installing over an existing build." \
+              --notes "Verified APK with Fixed scanning independent of adaptive Forecast, dedicated position monitoring, portfolio-wide sell protection, and unchanged frozen Fixed decision logic. Check signature.txt before installing over an existing build." \
               "${ASSETS[@]}"
           fi

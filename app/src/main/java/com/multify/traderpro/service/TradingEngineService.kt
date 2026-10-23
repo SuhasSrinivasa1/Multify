@@ -37,7 +37,12 @@ class TradingEngineService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var engineJob: Job? = null
+    private var positionMonitorJob: Job? = null
+    private var fixedScanJob: Job? = null
+    private var forecastScanJob: Job? = null
     private var positionMonitoringWakeLock: PowerManager.WakeLock? = null
+    @Volatile private var lastKnownManagedCount = 0
+    @Volatile private var lastManagedMonitorSucceeded = true
     private var lastAfterHoursResearchAtMs = 0L
 
     override fun onCreate() {
@@ -88,6 +93,9 @@ class TradingEngineService : Service() {
 
     override fun onDestroy() {
         updatePositionMonitoringWakeLock(false, "SERVICE_DESTROYED")
+        positionMonitorJob?.cancel()
+        fixedScanJob?.cancel()
+        forecastScanJob?.cancel()
         engineJob?.cancel()
         scope.cancel()
         auditLogger.log("RUNTIME", "FOREGROUND_ENGINE_DESTROYED")
@@ -97,15 +105,23 @@ class TradingEngineService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     private fun startEngineLoop() {
+        startPositionMonitorWorker()
+        startFixedScanWorker()
+        startForecastScanWorker()
         if (engineJob?.isActive == true) return
         engineJob = scope.launch {
-            auditLogger.log("RUNTIME", "FOREGROUND_ENGINE_STARTED")
-            // Capture the immutable Fixed reference state before v7.5 performs any adaptive writes.
+            auditLogger.log("RUNTIME", "FOREGROUND_ENGINE_STARTED", mapOf(
+                "position_monitor_independent" to true,
+                "fixed_scan_independent" to true,
+                "forecast_scan_independent" to true,
+                "fixed_not_blocked_by_forecast" to true
+            ))
+            // Capture the immutable Fixed reference state before adaptive writes.
             runCatching { repository.ensureFixedEngineSnapshot() }
                 .onFailure { auditLogger.log("RUNTIME", "FIXED_SNAPSHOT_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
             runCatching { repository.ensureHistoricalSeed() }
+
             var lastHeartbeatAtMs = 0L
-            var lastKnownManagedCount = 0
             while (isActive) {
                 try {
                     val nowMs = System.currentTimeMillis()
@@ -122,31 +138,6 @@ class TradingEngineService : Service() {
                     runCatching { repository.reconcileFixedAutoBuyOrders() }
                         .onFailure { auditLogger.log("RUNTIME", "FIXED_AUTO_BUY_RECONCILE_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
 
-                    val managedMonitorResult = runCatching { repository.monitorManagedPositions() }
-                    val managedMonitorFailure = managedMonitorResult.exceptionOrNull()
-                    val managedMonitorSucceeded = managedMonitorFailure == null
-                    val managedCount = if (managedMonitorSucceeded) {
-                        managedMonitorResult.getOrThrow().coerceAtLeast(0).also { count ->
-                            lastKnownManagedCount = count
-                            updatePositionMonitoringWakeLock(
-                                shouldHold = count > 0,
-                                reason = if (count > 0) "ACTIVE_MANAGED_HOLDINGS" else "NO_OPEN_MANAGED_HOLDINGS"
-                            )
-                        }
-                    } else {
-                        if (managedMonitorFailure is CancellationException) throw managedMonitorFailure
-                        // The position state is unknown after a monitor failure. Acquire/retain the
-                        // wake lock and retry quickly rather than treating the error as zero holdings.
-                        updatePositionMonitoringWakeLock(true, "MONITOR_ERROR_UNKNOWN_POSITION_STATE")
-                        auditLogger.log("RUNTIME", "MANAGED_MONITOR_ERROR", mapOf(
-                            "type" to (managedMonitorFailure?.javaClass?.simpleName ?: "UnknownError"),
-                            "message" to (managedMonitorFailure?.message ?: "Managed position monitor failed"),
-                            "last_known_managed_count" to lastKnownManagedCount,
-                            "wake_lock_held" to (positionMonitoringWakeLock?.isHeld == true)
-                        ))
-                        lastKnownManagedCount
-                    }
-
                     val forecastOutcomeCount = runCatching { repository.monitorForecastOutcomes() }
                         .onFailure {
                             if (it !is CancellationException) {
@@ -161,26 +152,12 @@ class TradingEngineService : Service() {
                             }
                         }.getOrDefault(0)
 
-                    val now = ZonedDateTime.now(INDIA)
-                    if (now.dayOfWeek.value < 6 &&
-                        now.toLocalTime() >= LocalTime.of(9, 15) &&
-                        now.toLocalTime() <= LocalTime.of(15, 0)
-                    ) {
-                        runCatching { repository.generateDailyForecasts(false) }
-                            .onFailure { auditLogger.log("RUNTIME", "FORECAST_SCAN_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
-                        runCatching { repository.generateFixedForecasts(false) }
-                            .onFailure { auditLogger.log("RUNTIME", "FIXED_SCAN_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
-                        // Adaptive Forecast and immutable Fixed execution are independent under the same ARM master switch.
-                        runCatching { repository.autoBuyForecastRecommendations() }
-                            .onFailure { auditLogger.log("RUNTIME", "FORECAST_AUTO_BUY_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
-                        runCatching { repository.autoBuyFixedRecommendations() }
-                            .onFailure { auditLogger.log("RUNTIME", "FIXED_AUTO_BUY_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
-                        runCatching { repository.pendingLongForecastNotifications() }
-                            .getOrDefault(emptyList())
-                            .filter { it.qualityTier == "PRIMARY" && it.executionEligible }
-                            .forEach(::notifyForecast)
-                    }
+                    runCatching { repository.pendingLongForecastNotifications() }
+                        .getOrDefault(emptyList())
+                        .filter { it.qualityTier == "PRIMARY" && it.executionEligible }
+                        .forEach(::notifyForecast)
 
+                    val now = ZonedDateTime.now(INDIA)
                     if (now.dayOfWeek.value < 6 &&
                         now.toLocalTime() >= LocalTime.of(15, 35) &&
                         nowMs - lastAfterHoursResearchAtMs >= AFTER_HOURS_RESEARCH_INTERVAL_MS
@@ -190,24 +167,171 @@ class TradingEngineService : Service() {
                             .onFailure { auditLogger.log("RUNTIME", "AFTER_HOURS_RESEARCH_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
                     }
 
-                    updateForegroundNotification(managedCount, forecastOutcomeCount, fixedOutcomeCount, managedMonitorSucceeded)
+                    updateForegroundNotification(
+                        lastKnownManagedCount,
+                        forecastOutcomeCount,
+                        fixedOutcomeCount,
+                        lastManagedMonitorSucceeded
+                    )
+                    delay(MAINTENANCE_LOOP_INTERVAL_MS)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (t: Throwable) {
+                    auditLogger.log("RUNTIME", "FOREGROUND_ENGINE_LOOP_ERROR", mapOf(
+                        "type" to t.javaClass.simpleName,
+                        "message" to (t.message ?: t.javaClass.simpleName)
+                    ))
+                    delay(ERROR_BACKOFF_MS)
+                }
+            }
+        }
+    }
+
+    private fun startPositionMonitorWorker() {
+        if (positionMonitorJob?.isActive == true) return
+        positionMonitorJob = scope.launch {
+            auditLogger.log("RUNTIME", "POSITION_MONITOR_WORKER_STARTED")
+            while (isActive) {
+                try {
+                    val result = runCatching { repository.monitorManagedPositions() }
+                    val failure = result.exceptionOrNull()
+                    val succeeded = failure == null
+                    lastManagedMonitorSucceeded = succeeded
+                    if (succeeded) {
+                        val count = result.getOrThrow().coerceAtLeast(0)
+                        lastKnownManagedCount = count
+                        updatePositionMonitoringWakeLock(
+                            shouldHold = count > 0,
+                            reason = if (count > 0) "ACTIVE_MANAGED_HOLDINGS" else "NO_OPEN_MANAGED_HOLDINGS"
+                        )
+                    } else {
+                        if (failure is CancellationException) throw failure
+                        updatePositionMonitoringWakeLock(true, "MONITOR_ERROR_UNKNOWN_POSITION_STATE")
+                        auditLogger.log("RUNTIME", "MANAGED_MONITOR_ERROR", mapOf(
+                            "type" to (failure?.javaClass?.simpleName ?: "UnknownError"),
+                            "message" to (failure?.message ?: "Managed position monitor failed"),
+                            "last_known_managed_count" to lastKnownManagedCount,
+                            "wake_lock_held" to (positionMonitoringWakeLock?.isHeld == true)
+                        ))
+                    }
+
+                    val now = ZonedDateTime.now(INDIA)
                     val regularSession = now.dayOfWeek.value < 6 &&
                         now.toLocalTime() >= LocalTime.of(9, 15) &&
                         now.toLocalTime() < LocalTime.of(15, 30)
                     delay(
                         when {
                             !regularSession -> CLOSED_SESSION_LOOP_INTERVAL_MS
-                            !managedMonitorSucceeded -> POSITION_MONITOR_ERROR_RETRY_MS
-                            managedCount > 1 -> PORTFOLIO_POSITION_LOOP_INTERVAL_MS
-                            managedCount > 0 -> POSITION_LOOP_INTERVAL_MS
-                            forecastOutcomeCount > 0 || fixedOutcomeCount > 0 -> FORECAST_LOOP_INTERVAL_MS
-                            else -> IDLE_LOOP_INTERVAL_MS
+                            !succeeded -> POSITION_MONITOR_ERROR_RETRY_MS
+                            lastKnownManagedCount > 1 -> PORTFOLIO_POSITION_LOOP_INTERVAL_MS
+                            lastKnownManagedCount > 0 -> POSITION_LOOP_INTERVAL_MS
+                            else -> IDLE_POSITION_LOOP_INTERVAL_MS
                         }
                     )
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (t: Throwable) {
-                    auditLogger.log("RUNTIME", "FOREGROUND_ENGINE_LOOP_ERROR", mapOf(
+                    lastManagedMonitorSucceeded = false
+                    updatePositionMonitoringWakeLock(true, "POSITION_WORKER_ERROR")
+                    auditLogger.log("RUNTIME", "POSITION_MONITOR_WORKER_ERROR", mapOf(
+                        "type" to t.javaClass.simpleName,
+                        "message" to (t.message ?: t.javaClass.simpleName)
+                    ))
+                    delay(POSITION_MONITOR_ERROR_RETRY_MS)
+                }
+            }
+        }
+    }
+
+    private fun startFixedScanWorker() {
+        if (fixedScanJob?.isActive == true) return
+        fixedScanJob = scope.launch {
+            auditLogger.log("RUNTIME", "FIXED_SCAN_WORKER_STARTED", mapOf(
+                "priority" to "INDEPENDENT",
+                "blocked_by_adaptive_forecast" to false
+            ))
+            while (isActive) {
+                try {
+                    val now = ZonedDateTime.now(INDIA)
+                    if (now.dayOfWeek.value < 6 &&
+                        now.toLocalTime() >= LocalTime.of(9, 15) &&
+                        now.toLocalTime() < LocalTime.of(15, 30)
+                    ) {
+                        val startedAt = System.currentTimeMillis()
+                        runCatching { repository.generateFixedForecasts(false) }
+                            .onFailure {
+                                if (it !is CancellationException) {
+                                    auditLogger.log("RUNTIME", "FIXED_SCAN_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName)))
+                                }
+                            }
+                        val elapsed = System.currentTimeMillis() - startedAt
+                        if (elapsed >= SCAN_DURATION_AUDIT_THRESHOLD_MS) {
+                            auditLogger.log("RUNTIME", "FIXED_SCAN_DURATION", mapOf(
+                                "elapsed_ms" to elapsed,
+                                "parallel_scheduler" to true,
+                                "forecast_blocking_ms" to 0
+                            ))
+                        }
+                        runCatching { repository.autoBuyFixedRecommendations() }
+                            .onFailure {
+                                if (it !is CancellationException) {
+                                    auditLogger.log("RUNTIME", "FIXED_AUTO_BUY_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName)))
+                                }
+                            }
+                    }
+                    delay(SCAN_WORKER_POLL_MS)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (t: Throwable) {
+                    auditLogger.log("RUNTIME", "FIXED_SCAN_WORKER_ERROR", mapOf(
+                        "type" to t.javaClass.simpleName,
+                        "message" to (t.message ?: t.javaClass.simpleName)
+                    ))
+                    delay(ERROR_BACKOFF_MS)
+                }
+            }
+        }
+    }
+
+    private fun startForecastScanWorker() {
+        if (forecastScanJob?.isActive == true) return
+        forecastScanJob = scope.launch {
+            auditLogger.log("RUNTIME", "FORECAST_SCAN_WORKER_STARTED", mapOf(
+                "parallel_with_fixed" to true
+            ))
+            while (isActive) {
+                try {
+                    val now = ZonedDateTime.now(INDIA)
+                    if (now.dayOfWeek.value < 6 &&
+                        now.toLocalTime() >= LocalTime.of(9, 15) &&
+                        now.toLocalTime() <= LocalTime.of(15, 0)
+                    ) {
+                        val startedAt = System.currentTimeMillis()
+                        runCatching { repository.generateDailyForecasts(false) }
+                            .onFailure {
+                                if (it !is CancellationException) {
+                                    auditLogger.log("RUNTIME", "FORECAST_SCAN_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName)))
+                                }
+                            }
+                        val elapsed = System.currentTimeMillis() - startedAt
+                        if (elapsed >= SCAN_DURATION_AUDIT_THRESHOLD_MS) {
+                            auditLogger.log("RUNTIME", "FORECAST_SCAN_DURATION", mapOf(
+                                "elapsed_ms" to elapsed,
+                                "parallel_scheduler" to true
+                            ))
+                        }
+                        runCatching { repository.autoBuyForecastRecommendations() }
+                            .onFailure {
+                                if (it !is CancellationException) {
+                                    auditLogger.log("RUNTIME", "FORECAST_AUTO_BUY_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName)))
+                                }
+                            }
+                    }
+                    delay(SCAN_WORKER_POLL_MS)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (t: Throwable) {
+                    auditLogger.log("RUNTIME", "FORECAST_SCAN_WORKER_ERROR", mapOf(
                         "type" to t.javaClass.simpleName,
                         "message" to (t.message ?: t.javaClass.simpleName)
                     ))
@@ -330,8 +454,10 @@ class TradingEngineService : Service() {
         private const val POSITION_LOOP_INTERVAL_MS = 350L
         private const val PORTFOLIO_POSITION_LOOP_INTERVAL_MS = 1_000L
         private const val POSITION_MONITOR_ERROR_RETRY_MS = 1_000L
-        private const val FORECAST_LOOP_INTERVAL_MS = 5_000L
-        private const val IDLE_LOOP_INTERVAL_MS = 10_000L
+        private const val IDLE_POSITION_LOOP_INTERVAL_MS = 5_000L
+        private const val SCAN_WORKER_POLL_MS = 1_000L
+        private const val SCAN_DURATION_AUDIT_THRESHOLD_MS = 2_000L
+        private const val MAINTENANCE_LOOP_INTERVAL_MS = 5_000L
         private const val CLOSED_SESSION_LOOP_INTERVAL_MS = 60_000L
         private const val ERROR_BACKOFF_MS = 10_000L
         private const val AFTER_HOURS_RESEARCH_INTERVAL_MS = 15L * 60L * 1000L
