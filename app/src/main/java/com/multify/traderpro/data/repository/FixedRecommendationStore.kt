@@ -82,6 +82,10 @@ class FixedRecommendationStore @Inject constructor(
         load().recommendations.filter { it.recommendationDate == date }.sortedBy { it.rank }
 
     @Synchronized
+    internal fun allRecommendations(): List<FixedRecommendationRecord> =
+        load().recommendations.sortedWith(compareBy<FixedRecommendationRecord> { it.recommendationDate }.thenBy { it.rank })
+
+    @Synchronized
     internal fun observations(date: String): List<FixedScanObservation> =
         load().observations.filter { it.recommendationDate == date }.sortedBy { it.scanAtMs }
 
