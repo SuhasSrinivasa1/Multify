@@ -103,6 +103,9 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -160,6 +163,9 @@ class TradingRepository @Inject constructor(
     private val fixedMarketDiscoveryStateStore: FixedMarketDiscoveryStateStore,
     @ApplicationContext private val appContext: Context
 ) {
+    private val _fixedDeliveryEvents = MutableSharedFlow<Long>(extraBufferCapacity = 8)
+    val fixedDeliveryEvents: SharedFlow<Long> = _fixedDeliveryEvents.asSharedFlow()
+
     val settings: Flow<AppSettings> = preferences.settings
     val recentEvents: Flow<List<SignalEventEntity>> = dao.observeRecent(100)
 
@@ -1527,6 +1533,7 @@ class TradingRepository @Inject constructor(
                         "order_before_notification" to true,
                         "fixed_formula_changed" to false
                     ))
+                    _fixedDeliveryEvents.tryEmit(System.currentTimeMillis())
                 }
                 scanned
             } finally {
@@ -4045,7 +4052,7 @@ class TradingRepository @Inject constructor(
                 "fresh_margin_preserved" to true,
                 "fixed_formula_changed" to false
             ))
-            auditLogger.log("FIXED_AUTO_BUY", "ENTRY_MARKET_FILLED", mapOf(
+            auditLogger.logAsync("FIXED_AUTO_BUY", "ENTRY_MARKET_FILLED", mapOf(
                 "symbol" to row.symbol,
                 "order_id" to order.growwOrderId,
                 "reference" to reference,
