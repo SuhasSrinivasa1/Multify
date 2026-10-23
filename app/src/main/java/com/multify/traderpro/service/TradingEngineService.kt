@@ -134,9 +134,9 @@ class TradingEngineService : Service() {
                     runCatching { repository.maintainArmHotPath() }
                         .onFailure { auditLogger.log("RUNTIME", "ARM_HOT_PATH_MAINTAIN_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
 
-                    runCatching { repository.reconcileForecastAutoBuyOrders() }
+                    runCatching { repository.reconcileForecastAutoBuyOrders(true, "DIRECT_MARKET_MIGRATION") }
                         .onFailure { auditLogger.log("RUNTIME", "FORECAST_AUTO_BUY_RECONCILE_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
-                    runCatching { repository.reconcileFixedAutoBuyOrders() }
+                    runCatching { repository.reconcileFixedAutoBuyOrders(true, "DIRECT_MARKET_MIGRATION") }
                         .onFailure { auditLogger.log("RUNTIME", "FIXED_AUTO_BUY_RECONCILE_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
 
                     val forecastOutcomeCount = runCatching { repository.monitorForecastOutcomes() }
@@ -248,7 +248,7 @@ class TradingEngineService : Service() {
         if (fixedScanJob?.isActive == true) return
         fixedScanJob = scope.launch {
             auditLogger.log("RUNTIME", "FIXED_SCAN_WORKER_STARTED", mapOf(
-                "priority" to "INDEPENDENT",
+                "priority" to "FIXED_FIRST",
                 "blocked_by_adaptive_forecast" to false
             ))
             while (isActive) {
@@ -272,7 +272,7 @@ class TradingEngineService : Service() {
                         now.toLocalTime() < LocalTime.of(15, 30)
                     ) {
                         val startedAt = System.currentTimeMillis()
-                        runCatching { repository.generateFixedForecasts(false) }
+                        runCatching { repository.runFixedPriorityCycle() }
                             .onFailure {
                                 if (it !is CancellationException) {
                                     auditLogger.log("RUNTIME", "FIXED_SCAN_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName)))
@@ -286,12 +286,7 @@ class TradingEngineService : Service() {
                                 "forecast_blocking_ms" to 0
                             ))
                         }
-                        runCatching { repository.autoBuyFixedRecommendations() }
-                            .onFailure {
-                                if (it !is CancellationException) {
-                                    auditLogger.log("RUNTIME", "FIXED_AUTO_BUY_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName)))
-                                }
-                            }
+                        // Fixed auto-buy executes inside the same priority cycle.
                     }
                     delay(SCAN_WORKER_POLL_MS)
                 } catch (cancelled: CancellationException) {
@@ -311,8 +306,8 @@ class TradingEngineService : Service() {
         if (forecastScanJob?.isActive == true) return
         forecastScanJob = scope.launch {
             auditLogger.log("RUNTIME", "FORECAST_SCAN_WORKER_STARTED", mapOf(
-                "parallel_with_fixed" to true,
-                "default_state" to "PAUSED_FOR_FIXED_PRIORITY"
+                "parallel_with_fixed" to false,
+                "default_state" to "OPPORTUNISTIC_FIXED_PRIORITY"
             ))
             var pausedAuditEmitted = false
             while (isActive) {
@@ -333,7 +328,7 @@ class TradingEngineService : Service() {
                         now.toLocalTime() <= LocalTime.of(15, 0)
                     ) {
                         val startedAt = System.currentTimeMillis()
-                        runCatching { repository.generateDailyForecasts(false) }
+                        runCatching { repository.runForecastOpportunisticCycle() }
                             .onFailure {
                                 if (it !is CancellationException) {
                                     auditLogger.log("RUNTIME", "FORECAST_SCAN_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName)))
@@ -346,12 +341,7 @@ class TradingEngineService : Service() {
                                 "parallel_scheduler" to true
                             ))
                         }
-                        runCatching { repository.autoBuyForecastRecommendations() }
-                            .onFailure {
-                                if (it !is CancellationException) {
-                                    auditLogger.log("RUNTIME", "FORECAST_AUTO_BUY_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName)))
-                                }
-                            }
+                        // Forecast auto-buy executes only inside the opportunistic cycle.
                     }
                     delay(SCAN_WORKER_POLL_MS)
                 } catch (cancelled: CancellationException) {
@@ -477,7 +467,7 @@ class TradingEngineService : Service() {
         private const val FORECAST_CHANNEL_ID = "forecast_opportunities"
         private const val FOREGROUND_NOTIFICATION_ID = 68090
         private const val HEARTBEAT_INTERVAL_MS = 15_000L
-        private const val POSITION_LOOP_INTERVAL_MS = 350L
+        private const val POSITION_LOOP_INTERVAL_MS = 1_000L
         private const val PORTFOLIO_POSITION_LOOP_INTERVAL_MS = 1_000L
         private const val POSITION_MONITOR_ERROR_RETRY_MS = 1_000L
         private const val IDLE_POSITION_LOOP_INTERVAL_MS = 5_000L

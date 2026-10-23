@@ -58,6 +58,8 @@ import com.multify.traderpro.engine.AdaptiveLearningMath
 import com.multify.traderpro.engine.CashAwareCncSizing
 import com.multify.traderpro.engine.ExecutionTelemetryMath
 import com.multify.traderpro.engine.ForecastAutoBuyPolicy
+import com.multify.traderpro.engine.ForecastFixedPositiveTransferPolicy
+import com.multify.traderpro.engine.FixedPositiveTransferCase
 import com.multify.traderpro.engine.ForecastQualityDecision
 import com.multify.traderpro.engine.ForecastQualityPolicy
 import com.multify.traderpro.engine.ForecastPublicationPolicy
@@ -173,6 +175,8 @@ class TradingRepository @Inject constructor(
     private val closePositionMutexes = ConcurrentHashMap<Long, Mutex>()
     private val forecastAutoBuySubmissionMutex = Mutex()
     private val fixedAutoBuySubmissionMutex = Mutex()
+    private val scanApiCycleMutex = Mutex()
+    @Volatile private var fixedApiPriorityRequested = false
     private val embeddedHistoricalSeedMutex = Mutex()
     private val bulkMarketDataMutex = Mutex()
     private var nextBulkMarketDataAtElapsedMs = 0L
@@ -1480,6 +1484,71 @@ class TradingRepository @Inject constructor(
         return id
     }
 
+    suspend fun runFixedPriorityCycle(): Boolean {
+        fixedApiPriorityRequested = true
+        return scanApiCycleMutex.withLock {
+            try {
+                val previousScanAtMs = lastFixedScanAtMs
+                generateFixedForecasts(false)
+                if (lastFixedScanAtMs != previousScanAtMs) autoBuyFixedRecommendations()
+                true
+            } finally {
+                fixedApiPriorityRequested = false
+            }
+        }
+    }
+
+    suspend fun runForecastOpportunisticCycle(): Boolean {
+        if (fixedApiPriorityRequested) return false
+        if (!scanApiCycleMutex.tryLock()) return false
+        return try {
+            if (fixedApiPriorityRequested) return false
+            val previousScanAtMs = lastForecastScanAtMs
+            generateDailyForecasts(false)
+            if (!fixedApiPriorityRequested && lastForecastScanAtMs != previousScanAtMs) {
+                autoBuyForecastRecommendations()
+            }
+            true
+        } finally {
+            scanApiCycleMutex.unlock()
+        }
+    }
+
+    private fun fixedPositiveTransferCases(beforeDate: String): List<FixedPositiveTransferCase> {
+        val raw = appContext
+            .getSharedPreferences("fixed_recommendations_v75", Context.MODE_PRIVATE)
+            .getString("state", null)
+            ?: return emptyList()
+        val root = runCatching { JsonParser.parseString(raw).asJsonObject }.getOrNull() ?: return emptyList()
+        val rows = root.getAsJsonArray("recommendations") ?: return emptyList()
+        val parsed = rows.mapNotNull { element ->
+            runCatching {
+                val x = element.asJsonObject
+                val date = x.get("recommendationDate")?.asString.orEmpty()
+                if (date.isBlank() || date >= beforeDate) return@runCatching null
+                val entry = x.get("entryPrice")?.asDouble ?: return@runCatching null
+                val last = x.get("lastPrice")?.asDouble ?: return@runCatching null
+                val observedAt = x.get("lastObservedAtMs")?.asLong ?: 0L
+                val generatedAt = x.get("generatedAtMs")?.asLong ?: 0L
+                if (!entry.isFinite() || entry <= 0.0 || !last.isFinite() || last <= entry || observedAt <= generatedAt) {
+                    return@runCatching null
+                }
+                Triple(
+                    date,
+                    FixedPositiveTransferCase(
+                        symbol = x.get("symbol")?.asString.orEmpty().uppercase(Locale.US),
+                        strategy = x.get("strategy")?.asString.orEmpty(),
+                        regime = x.get("regime")?.asString.orEmpty(),
+                        marketRegime = x.get("marketRegime")?.asString.orEmpty(),
+                        closeGainPct = (last / entry - 1.0) * 100.0
+                    ),
+                    observedAt
+                )
+            }.getOrNull()
+        }
+        val dates = parsed.map { it.first }.distinct().sortedDescending().take(30).toSet()
+        return parsed.filter { it.first in dates }.sortedByDescending { it.third }.map { it.second }
+    }
     suspend fun generateDailyForecasts(force: Boolean = false): List<ForecastDto> {
         runCatching { ensureFixedEngineSnapshot() }
         ensureHistoricalSeed()
@@ -1499,7 +1568,9 @@ class TradingRepository @Inject constructor(
         val rolling = calls.filter { it.callDate in recentDates }
         val frequency = rolling.groupingBy { it.symbol }.eachCount()
         val recentSymbols = frequency.entries.sortedByDescending { it.value }.take(12).map { it.key }
-        val dnaSymbols = MultifyReverseEngineering.positiveCases.map { it.symbol }
+        val fixedPositiveTransfer = fixedPositiveTransferCases(today)
+        val fixedPositiveSymbols = fixedPositiveTransfer.map { it.symbol }
+        val dnaSymbols = (fixedPositiveSymbols + MultifyReverseEngineering.positiveCases.map { it.symbol }).distinct()
         val master = nseSymbols.symbols()
 
         // v7.3 persists broad discovery state across Android process death. A truly cold pass is
@@ -1523,6 +1594,10 @@ class TradingRepository @Inject constructor(
             .take(DETAILED_FORECAST_UNIVERSE_LIMIT)
         val evaluated = mutableListOf<Pair<String, StrategyEvaluation>>()
         for (symbol in universe) {
+            if (fixedApiPriorityRequested) {
+                auditLogger.log("FORECAST", "YIELD_TO_FIXED_PRIORITY", mapOf("stage" to "detailed_evaluation"))
+                break
+            }
             val evaluation = runCatching { forecastEvaluation(symbol, token) }
                 .onFailure {
                     auditLogger.log("FORECAST_RESEARCH", "EVALUATION_ERROR", mapOf(
@@ -1600,6 +1675,9 @@ class TradingRepository @Inject constructor(
             val qualityBonus = ForecastQualityPolicy.rankingBonus(row.second, quality.volatilityCapacityPct, targetPct, quality.tier)
             val researchBonus = researchEvidenceBonus(row.second)
             val familyBonus = MultifyFactorFamilies.rankingBonus(factorModel)
+            val fixedPositiveBonus = ForecastFixedPositiveTransferPolicy.rankingBonus(
+                row.first, row.second.strategy, row.second.regime, marketRegime, fixedPositiveTransfer
+            )
             ForecastCandidate(
                 symbol = row.first,
                 evaluation = row.second,
@@ -1608,7 +1686,8 @@ class TradingRepository @Inject constructor(
                 score = (
                     row.second.confidence +
                     row.second.directionalScore.coerceAtLeast(0.0) * 0.10 +
-                    championBonus + frequencyBonus + dnaBonus + qualityBonus + researchBonus + familyBonus
+                    championBonus + frequencyBonus + dnaBonus + qualityBonus + researchBonus + familyBonus +
+                    fixedPositiveBonus
                 ).coerceIn(0.01, .99),
                 championKey = key
             )
@@ -1701,6 +1780,9 @@ class TradingRepository @Inject constructor(
             "market_regime" to marketRegime,
             "prior_research_sessions" to priorResearchDates.size,
             "prior_research_rows" to priorResearch.size,
+            "fixed_positive_transfer_cases" to fixedPositiveTransfer.size,
+            "fixed_positive_transfer_symbols" to fixedPositiveSymbols.distinct().size,
+            "positive_transfer_only" to true,
             "research_capture_allowed" to researchCaptureAllowed,
             "research_sessions_captured" to capturedResearchDates.size,
             "research_session_goal" to RESEARCH_SESSION_GOAL,
@@ -2246,6 +2328,10 @@ class TradingRepository @Inject constructor(
         val chunks = distinctMaster.chunked(50)
 
         for ((index, chunk) in chunks.withIndex()) {
+            if (fixedApiPriorityRequested) {
+                auditLogger.log("FORECAST_DISCOVERY", "YIELD_TO_FIXED_PRIORITY", mapOf("batch_index" to index))
+                break
+            }
             val payload = fetchDiscoveryLtpBatch(token, chunk, index)
             if (payload == null) {
                 batchErrors++
@@ -2344,7 +2430,7 @@ class TradingRepository @Inject constructor(
         for (attempt in 0 until DISCOVERY_BATCH_ATTEMPTS) {
             try {
                 val exchangeSymbols = chunk.joinToString(",") { "NSE_$it" }
-                return withBulkMarketDataSlot {
+                return withFixedLiveDataSlot {
                     apiFactory.groww.ltp(
                         bearer(token),
                         exchangeSymbols = exchangeSymbols
@@ -2462,10 +2548,14 @@ class TradingRepository @Inject constructor(
         val now = ZonedDateTime.now(INDIA)
         val start = now.minusDays(4).toLocalDate().atTime(9,15).format(HIST_FORMAT)
         val end = now.toLocalDateTime().format(HIST_FORMAT)
-        val quote = apiFactory.groww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Quote $symbol")
-        val historical = apiFactory.groww.historicalCandles(
-            bearer(token), growwSymbol = "NSE-$symbol", startTime = start, endTime = end, candleInterval = "15minute"
-        ).requirePayload("Forecast candles $symbol")
+        val quote = withFixedLiveDataSlot {
+            apiFactory.groww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Quote $symbol")
+        }
+        val historical = withFixedHistoricalDataSlot {
+            apiFactory.groww.historicalCandles(
+                bearer(token), growwSymbol = "NSE-$symbol", startTime = start, endTime = end, candleInterval = "15minute"
+            ).requirePayload("Forecast candles $symbol")
+        }
         require(historical.candles.size >= 5) { "Insufficient forecast candles" }
         val features = LocalStrategyEngine.buildFeatures(quote, historical, 15)
         val signal = ParsedSignal(SignalType.TRADE_RELEASE, symbol = symbol, rawText = "forecast", confidence = 1.0)
@@ -2483,7 +2573,7 @@ class TradingRepository @Inject constructor(
             .firstOrNull { it.symbol.equals(symbol, true) } ?: error("No active LONG recommendation for $symbol")
         val pendingAuto = forecastAutoBuyOrderStore.forSymbol(today, row.symbol)
         if (pendingAuto != null && !ForecastAutoBuyPolicy.isTerminal(pendingAuto.status)) {
-            return "Auto-buy GTT is already pending for ${row.symbol} at fixed entry trigger ₹${fmt(pendingAuto.fixedEntryPrice)}; duplicate manual BUY blocked"
+            return "Legacy Forecast entry order is still being migrated for ${row.symbol}; duplicate BUY blocked"
         }
         require(row.status == "ACTIVE") { "$symbol forecast is no longer active" }
         require(row.executionEligible) { "$symbol is ${row.qualityTier}; only PRIMARY forecast setups can place a real forecast BUY" }
@@ -2491,7 +2581,9 @@ class TradingRepository @Inject constructor(
         if (managedDao.openPosition(ENGINE_FORECAST_HOLDING, row.symbol) != null) {
             return "${row.symbol} already has a Forecast holding; duplicate Forecast BUY blocked"
         }
-        val quote = apiFactory.groww.quote(bearer(token), tradingSymbol = row.symbol).requirePayload("Quote ${row.symbol}")
+        val quote = withFixedLiveDataSlot {
+            apiFactory.groww.quote(bearer(token), tradingSymbol = row.symbol).requirePayload("Quote ${row.symbol}")
+        }
         val ltp = quote.lastPrice ?: error("Groww quote has no LTP")
         val margin = apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin")
         val available = (margin.equity?.cncBalanceAvailable ?: margin.clearCash).coerceAtLeast(0.0)
@@ -2536,10 +2628,8 @@ class TradingRepository @Inject constructor(
     }
 
     /**
-     * Forecast auto-buy uses the immutable published forecast entry as a Groww GTT trigger.
-     * Direction is UP and the post-trigger order is MARKET, so a falling stock does not get bought
-     * merely because it trades down through the forecast entry. The published target stays fixed.
-     * ARM remains the master execution switch.
+     * Forecast auto-buy is direct execution. Each eligible PRIMARY row is sent as a CNC MARKET
+     * BUY using the fresh quote and actual fill logic already used by executeForecast().
      */
     suspend fun autoBuyForecastRecommendations(): Int =
         forecastAutoBuySubmissionMutex.withLock { autoBuyForecastRecommendationsLocked() }
@@ -2549,117 +2639,32 @@ class TradingRepository @Inject constructor(
         if (now.dayOfWeek.value >= 6 || marketSession() != "OPEN") return 0
         val settings = preferences.settings.first()
         if (!settings.forecastAutoBuyEnabled || !settings.armEffective || settings.safetyHalt) return 0
-        preArmGuard(settings)
-        val token = ensureToken() ?: return 0
         val today = now.toLocalDate().toString()
-
-        reconcileForecastAutoBuyOrders()
-
         val rows = learningDao.longForecastsForDate(today)
-            .filter {
-                it.status == "ACTIVE" &&
-                    it.executionEligible &&
-                    it.qualityTier == "PRIMARY"
-            }
+            .filter { it.status == "ACTIVE" && it.executionEligible && it.qualityTier == "PRIMARY" }
             .sortedBy { it.generatedAtMs }
-
         var submitted = 0
         for (row in rows) {
-            val liveSettings = preferences.settings.first()
-            if (!liveSettings.forecastAutoBuyEnabled || !liveSettings.armEffective || liveSettings.safetyHalt) break
+            if (fixedApiPriorityRequested) break
+            val live = preferences.settings.first()
+            if (!live.forecastAutoBuyEnabled || !live.armEffective || live.safetyHalt) break
             if (managedDao.openPosition(ENGINE_FORECAST_HOLDING, row.symbol) != null) continue
             if (forecastAutoBuyOrderStore.forSymbol(today, row.symbol) != null) continue
-
-            val margin = runCatching {
-                apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin")
-            }.onFailure {
-                auditLogger.log("FORECAST_AUTO_BUY", "MARGIN_ERROR", mapOf(
-                    "symbol" to row.symbol,
-                    "message" to (it.message ?: it.javaClass.simpleName)
-                ))
-            }.getOrNull() ?: continue
-            val available = (margin.equity?.cncBalanceAvailable ?: margin.clearCash).coerceAtLeast(0.0)
-            val sizing = CashAwareCncSizing.sizeStrictBudget(
-                liveSettings.holdingBudgetRupees.toDouble(),
-                available,
-                row.entryPrice
-            )
-            if (sizing.quantity <= 0) {
-                auditLogger.log("FORECAST_AUTO_BUY", "SKIPPED_NO_CASH", mapOf(
-                    "symbol" to row.symbol,
-                    "fixed_entry_trigger" to row.entryPrice,
-                    "fixed_target_price" to row.targetPrice,
-                    "available_cnc" to available,
-                    "configured_budget" to liveSettings.holdingBudgetRupees
-                ))
-                continue
+            val ok = runCatching { executeForecast(row.symbol) }
+                .onFailure {
+                    auditLogger.log("FORECAST_AUTO_BUY", "DIRECT_MARKET_BUY_ERROR", mapOf(
+                        "symbol" to row.symbol,
+                        "message" to (it.message ?: it.javaClass.simpleName)
+                    ))
+                }.isSuccess
+            if (ok) {
+                submitted++
+                auditLogger.log("FORECAST_AUTO_BUY", "ENTRY_MARKET_FILLED", mapOf("symbol" to row.symbol))
             }
-
-            val executionSettings = preferences.settings.first()
-            if (!executionSettings.forecastAutoBuyEnabled || !executionSettings.armEffective || executionSettings.safetyHalt) break
-
-            val reference = stableRef("FAG", "${row.forecastDate}-${row.id}-${row.symbol}")
-            val placedAtMs = System.currentTimeMillis()
-            val gtt = runCatching {
-                submitForecastEntryGtt(
-                    token = token,
-                    row = row,
-                    qty = sizing.quantity,
-                    reference = reference
-                )
-            }.onFailure {
-                auditLogger.log("FORECAST_AUTO_BUY", "GTT_SUBMIT_ERROR", mapOf(
-                    "symbol" to row.symbol,
-                    "reference" to reference,
-                    "fixed_entry_trigger" to row.entryPrice,
-                    "fixed_target_price" to row.targetPrice,
-                    "message" to (it.message ?: it.javaClass.simpleName)
-                ))
-            }.getOrNull() ?: continue
-
-            val smartOrderId = gtt.smartOrderId
-            if (smartOrderId.isBlank()) {
-                auditLogger.log("FORECAST_AUTO_BUY", "GTT_ACK_MISSING_ID", mapOf(
-                    "symbol" to row.symbol,
-                    "reference" to reference
-                ))
-                continue
-            }
-            forecastAutoBuyOrderStore.upsert(
-                ForecastAutoBuyOrderState(
-                    date = today,
-                    forecastId = row.id,
-                    symbol = row.symbol,
-                    orderId = smartOrderId,
-                    referenceId = reference,
-                    quantity = sizing.quantity,
-                    fixedEntryPrice = row.entryPrice,
-                    fixedTargetPrice = row.targetPrice,
-                    placedAtMs = placedAtMs,
-                    status = gtt.status.ifBlank { "ACTIVE" },
-                    brokerKind = ForecastAutoBuyPolicy.BROKER_KIND_GTT
-                )
-            )
-            auditLogger.log("FORECAST_AUTO_BUY", "ENTRY_GTT_SUBMITTED", mapOf(
-                "symbol" to row.symbol,
-                "smart_order_id" to smartOrderId,
-                "reference" to reference,
-                "quantity" to sizing.quantity,
-                "fixed_entry_trigger" to row.entryPrice,
-                "trigger_direction" to ForecastAutoBuyPolicy.TRIGGER_DIRECTION,
-                "child_order_type" to ForecastAutoBuyPolicy.CHILD_ORDER_TYPE,
-                "fixed_target_price" to row.targetPrice,
-                "broker_status" to gtt.status,
-                "arm_effective" to executionSettings.armEffective
-            ))
-            submitted++
             delay(FORECAST_AUTO_BUY_ORDER_PACING_MS)
         }
-
-        if (submitted > 0) reconcileForecastAutoBuyOrders()
         return submitted
     }
-
     suspend fun reconcileForecastAutoBuyOrders(
         forceCancel: Boolean = false,
         cancelReason: String = ""
@@ -3056,8 +3061,7 @@ class TradingRepository @Inject constructor(
         val row = fixedRecommendationStore.recommendations(today)
             .firstOrNull { it.symbol.equals(symbol, true) } ?: error("No active Fixed recommendation for $symbol")
 
-        // v7.6.7 migration safety: retire any pre-upgrade Fixed entry GTT before a direct market BUY.
-        reconcileFixedAutoBuyOrders(forceCancel = true, cancelReason = "DIRECT_MARKET_ENTRY")
+        // Legacy entry GTTs migrate in the maintenance worker, never on the BUY hot path.
         val pendingLegacy = fixedAutoBuyOrderStore.forSymbol(today, row.symbol)
         if (pendingLegacy != null && !ForecastAutoBuyPolicy.isTerminal(pendingLegacy.status)) {
             return "Legacy Fixed entry GTT is still being reconciled for ${row.symbol}; no duplicate BUY was sent"
@@ -3138,8 +3142,7 @@ class TradingRepository @Inject constructor(
         val token = ensureToken() ?: return 0
         val today = now.toLocalDate().toString()
 
-        // v7.6.7 migration safety: do not let a legacy entry GTT coexist with direct Fixed auto-buy.
-        reconcileFixedAutoBuyOrders(forceCancel = true, cancelReason = "DIRECT_MARKET_MIGRATION")
+        // Legacy entry GTTs migrate in the maintenance worker; normal direct buys do no pre-order broker reconciliation.
         val rows = fixedRecommendationStore.recommendations(today)
             .filter {
                 it.status == "ACTIVE" &&
@@ -3602,10 +3605,12 @@ class TradingRepository @Inject constructor(
             var lastFailure: Throwable? = null
             for (attempt in 0 until FORECAST_OUTCOME_BATCH_ATTEMPTS) {
                 try {
-                    payload = apiFactory.groww.ltp(
-                        bearer(token),
-                        exchangeSymbols = chunk.joinToString(",") { "NSE_$it" }
-                    ).requirePayload("Forecast outcome batch LTP")
+                    payload = withFixedLiveDataSlot {
+                        apiFactory.groww.ltp(
+                            bearer(token),
+                            exchangeSymbols = chunk.joinToString(",") { "NSE_$it" }
+                        ).requirePayload("Forecast outcome batch LTP")
+                    }
                     break
                 } catch (t: Throwable) {
                     lastFailure = t
@@ -5052,16 +5057,34 @@ class TradingRepository @Inject constructor(
         val dispatchPrepMicros = notificationStartedNs?.let { ((dispatchStartedNs - it).coerceAtLeast(0L)) / 1_000L } ?: 0L
         val submittedAtMs = System.currentTimeMillis()
         val brokerStartedNs = SystemClock.elapsedRealtimeNanos()
-        val response = apiFactory.groww.placeOrder(
-            bearer(token),
-            OrderCreateRequest(
-                tradingSymbol = symbol,
-                quantity = qty,
-                product = product,
-                transactionType = transaction,
-                orderReferenceId = reference
-            )
-        ).requirePayload("Place $transaction $symbol")
+        val response = try {
+            apiFactory.groww.placeOrder(
+                bearer(token),
+                OrderCreateRequest(
+                    tradingSymbol = symbol,
+                    quantity = qty,
+                    product = product,
+                    transactionType = transaction,
+                    orderReferenceId = reference
+                )
+            ).requirePayload("Place $transaction $symbol")
+        } catch (original: Throwable) {
+            val recovered = runCatching {
+                apiFactory.groww.orderStatusByReference(
+                    bearer(token),
+                    referenceId = reference
+                ).requirePayload("Recover $transaction $symbol by reference")
+            }.getOrNull()
+            if (recovered == null) throw original
+            auditLogger.log("EXECUTION", "ORDER_RECOVERED_BY_REFERENCE", mapOf(
+                "symbol" to symbol,
+                "transaction" to transaction,
+                "reference" to reference,
+                "order_id" to recovered.growwOrderId,
+                "status" to recovered.orderStatus
+            ))
+            recovered
+        }
         val brokerAckLatencyMs = ((SystemClock.elapsedRealtimeNanos() - brokerStartedNs).coerceAtLeast(0L)) / 1_000_000L
         preferences.recordOrderLatency(dispatchPrepMicros, brokerAckLatencyMs)
         auditLogger.log("EXECUTION_LATENCY", "ORDER_ACK", mapOf(
@@ -5073,44 +5096,54 @@ class TradingRepository @Inject constructor(
         ))
         val id = response.growwOrderId
         require(id.isNotBlank()) { "Groww did not return an order ID" }
+
+        suspend fun acceptFilled(status: OrderPayload): OrderPayload {
+            val filledAtMs = System.currentTimeMillis()
+            val totalExecutionMs = ((SystemClock.elapsedRealtimeNanos() - brokerStartedNs).coerceAtLeast(0L)) / 1_000_000L
+            if (product == "CNC" && transaction in setOf("BUY", "SELL") && !reference.startsWith("LGC")) {
+                managedDao.insertExecutionSample(
+                    ExecutionSampleEntity(
+                        transactionType = transaction,
+                        symbol = symbol,
+                        quantity = qty,
+                        product = product,
+                        orderId = id,
+                        submittedAtMs = submittedAtMs,
+                        filledAtMs = filledAtMs,
+                        totalExecutionMs = totalExecutionMs,
+                        appDispatchMicros = dispatchPrepMicros,
+                        brokerAckMs = brokerAckLatencyMs
+                    )
+                )
+            }
+            brokerInventorySnapshot = null
+            auditLogger.log("EXECUTION_LATENCY", "ORDER_FILLED", mapOf(
+                "symbol" to symbol,
+                "transaction" to transaction,
+                "total_execution_ms" to totalExecutionMs,
+                "broker_ack_ms" to brokerAckLatencyMs
+            ))
+            return status.copy(growwOrderId = id, orderReferenceId = reference)
+        }
+
+        if (response.orderStatus.equals("EXECUTED", true) || (response.filledQuantity ?: 0) >= qty) {
+            return acceptFilled(response)
+        }
+        if (response.orderStatus.uppercase(Locale.US) in setOf("REJECTED", "FAILED", "CANCELLED")) {
+            error("Groww order ${response.orderStatus}: ${response.remark.orEmpty()}")
+        }
         repeat(10) {
             delay(450)
             val status = apiFactory.groww.orderStatus(bearer(token), id).requirePayload("Order status")
             if (status.orderStatus.equals("EXECUTED", true) || (status.filledQuantity ?: 0) >= qty) {
-                val filledAtMs = System.currentTimeMillis()
-                val totalExecutionMs = ((SystemClock.elapsedRealtimeNanos() - brokerStartedNs).coerceAtLeast(0L)) / 1_000_000L
-                if (product == "CNC" && transaction in setOf("BUY", "SELL") && !reference.startsWith("LGC")) {
-                    managedDao.insertExecutionSample(
-                        ExecutionSampleEntity(
-                            transactionType = transaction,
-                            symbol = symbol,
-                            quantity = qty,
-                            product = product,
-                            orderId = id,
-                            submittedAtMs = submittedAtMs,
-                            filledAtMs = filledAtMs,
-                            totalExecutionMs = totalExecutionMs,
-                            appDispatchMicros = dispatchPrepMicros,
-                            brokerAckMs = brokerAckLatencyMs
-                        )
-                    )
-                }
-                brokerInventorySnapshot = null
-                auditLogger.log("EXECUTION_LATENCY", "ORDER_FILLED", mapOf(
-                    "symbol" to symbol,
-                    "transaction" to transaction,
-                    "total_execution_ms" to totalExecutionMs,
-                    "broker_ack_ms" to brokerAckLatencyMs
-                ))
-                return status.copy(growwOrderId = id, orderReferenceId = reference)
+                return acceptFilled(status)
             }
-            if (status.orderStatus.equals("REJECTED", true) || status.orderStatus.equals("FAILED", true) || status.orderStatus.equals("CANCELLED", true)) {
+            if (status.orderStatus.uppercase(Locale.US) in setOf("REJECTED", "FAILED", "CANCELLED")) {
                 error("Groww order ${status.orderStatus}: ${status.remark.orEmpty()}")
             }
         }
-        error("Groww order $id was not confirmed filled; no duplicate retry was attempted")
+        error("Groww order $id was not confirmed filled; deterministic reference $reference prevents duplicate resubmission")
     }
-
     private data class Snapshot(
         val summary: DaySummaryDto,
         val positions: List<PositionDto>,

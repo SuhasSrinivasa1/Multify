@@ -555,7 +555,7 @@ private fun ForecastScreen(
                         if (!state.settings.forecastScannerEnabled)
                             "Background Forecast discovery/evaluation is paused, so it consumes no live scanning capacity. Fixed and portfolio sell monitoring continue normally."
                         else if (state.settings.armEffective && state.settings.forecastAutoBuyEnabled)
-                            "Learning and forecasting are running. ARM and Forecast Auto-buy are ON; new confirmed PRIMARY rows create fixed-entry UP-trigger GTT buys automatically."
+                            "Forecast uses spare API capacity after Fixed and sell protection. ARM and Forecast Auto-buy are ON; new confirmed PRIMARY rows use direct CNC MARKET BUY execution."
                         else if (state.settings.armEffective)
                             "Learning and forecasting are running. ARM is ON; forecast recommendations remain manual unless Forecast Auto-buy is enabled in Settings."
                         else
@@ -628,7 +628,7 @@ private fun ForecastScreen(
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
                     Text("Multify DNA", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                     Text(
-                        "The reverse-engineering ledger captures 40 observable factors grouped into three fixed families: Momentum/Trend, Participation/Liquidity and Structure/Context. Market regime changes family weights. Only prior positive-close outcomes become forecast ranking examples; negative/flat outcomes remain diagnostics.",
+                        "Forecast keeps the 40 observable factors and three families, then adds one-way transfer learning from prior positive Fixed outcomes. Only profitable Fixed close outcomes become ranking prototypes; negative/flat Fixed outcomes add no bonus. Fixed never reads this feedback.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -952,7 +952,7 @@ private fun SettingsScreen(
                         Column(Modifier.weight(1f)) {
                             Text("Forecast background scanner", fontWeight = FontWeight.SemiBold)
                             Text(
-                                "Default OFF for Fixed priority. When paused, Forecast makes no background discovery/evaluation requests, leaving API capacity for Fixed and the always-on portfolio sell monitor.",
+                                "Default ON, but opportunistic. Forecast consumes API capacity only while the Fixed-priority scan cycle is idle; sell protection and Fixed always take precedence.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -971,7 +971,7 @@ private fun SettingsScreen(
                         Column(Modifier.weight(1f)) {
                             Text("Auto-buy forecast recommendations", fontWeight = FontWeight.SemiBold)
                             Text(
-                                "When enabled, every new confirmed PRIMARY forecast creates a Groww CNC GTT at the published entry price with trigger direction UP. When that fixed trigger is crossed upward, Groww sends a MARKET BUY. The published target price stays fixed. ARM must also be ON.",
+                                "When enabled, every new confirmed PRIMARY forecast gets an immediate Groww CNC MARKET BUY. The actual fill becomes the holding/trailing anchor and the same forecast target percentage is applied from that fill. ARM must also be ON.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -1019,7 +1019,7 @@ private fun SettingsScreen(
                         }
                     )
                     Text(
-                        "Forecast and Fixed are independent. The same symbol may be recommended and owned by both engines. Fixed uses the frozen v7.4.1 snapshot and never learns from future Forecast or Multify outcomes.",
+                        "Fixed remains immutable. Forecast may read prior positive Fixed outcomes one-way to improve ranking, but Forecast can never write into Fixed or change its v7.4.1 rules. The same symbol may still be owned independently by both engines.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
