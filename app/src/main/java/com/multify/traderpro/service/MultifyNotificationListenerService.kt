@@ -18,6 +18,7 @@ import com.multify.traderpro.R
 import com.multify.traderpro.data.local.SignalEventDao
 import com.multify.traderpro.data.local.SignalEventEntity
 import com.multify.traderpro.data.logging.AuditLogger
+import com.multify.traderpro.data.network.GrowwApiUsageLedger
 import com.multify.traderpro.data.repository.TradingRepository
 import com.multify.traderpro.domain.NotificationParser
 import com.multify.traderpro.domain.SignalType
@@ -134,6 +135,7 @@ class MultifyNotificationListenerService : NotificationListenerService() {
             if (id <= 0L) return@launch
 
             val processStarted = System.currentTimeMillis()
+            val usageBefore = GrowwApiUsageLedger.snapshot()
             val processed = runCatching {
                 repository.processEvent(
                     eventId = id,
@@ -141,6 +143,36 @@ class MultifyNotificationListenerService : NotificationListenerService() {
                     notificationStartedNs = if (latencyCritical) notificationStartedNs else null
                 )
             }
+            val processCompletedAt = System.currentTimeMillis()
+            val usageAfter = GrowwApiUsageLedger.snapshot()
+            fun delta(category: GrowwApiUsageLedger.Category, selector: (GrowwApiUsageLedger.CategorySnapshot) -> Long): Long {
+                val before = usageBefore.categories.first { it.category == category }
+                val after = usageAfter.categories.first { it.category == category }
+                return (selector(after) - selector(before)).coerceAtLeast(0L)
+            }
+            auditLogger.logAsync("EXECUTION_LATENCY", "MULTIFY_PIPELINE_PROFILE", mapOf(
+                "event_id" to id,
+                "signal_type" to parsed.type.name,
+                "symbol" to parsed.symbol,
+                "notification_posted_to_received_ms" to (receivedAtMs - sbn.postTime).coerceAtLeast(0L),
+                "received_to_process_start_ms" to (processStarted - receivedAtMs).coerceAtLeast(0L),
+                "processing_ms" to (processCompletedAt - processStarted).coerceAtLeast(0L),
+                "notification_posted_to_complete_ms" to (processCompletedAt - sbn.postTime).coerceAtLeast(0L),
+                "latency_critical" to latencyCritical,
+                "processed_ok" to processed.isSuccess,
+                "live_network_requests" to delta(GrowwApiUsageLedger.Category.LIVE_DATA) { it.totalRequests },
+                "order_network_requests" to delta(GrowwApiUsageLedger.Category.ORDERS) { it.totalRequests },
+                "non_trading_network_requests" to delta(GrowwApiUsageLedger.Category.NON_TRADING) { it.totalRequests },
+                "live_429s" to delta(GrowwApiUsageLedger.Category.LIVE_DATA) { it.rateLimitResponses },
+                "order_429s" to delta(GrowwApiUsageLedger.Category.ORDERS) { it.rateLimitResponses },
+                "non_trading_429s" to delta(GrowwApiUsageLedger.Category.NON_TRADING) { it.rateLimitResponses },
+                "governor_wait_ms" to (
+                    delta(GrowwApiUsageLedger.Category.LIVE_DATA) { it.permitWaitMs } +
+                    delta(GrowwApiUsageLedger.Category.ORDERS) { it.permitWaitMs } +
+                    delta(GrowwApiUsageLedger.Category.NON_TRADING) { it.permitWaitMs }
+                )
+            ))
+
             if (processed.isFailure) {
                 val error = processed.exceptionOrNull()
                 val message = error?.message ?: error?.javaClass?.simpleName ?: "Unknown processing failure"
