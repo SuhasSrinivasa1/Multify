@@ -5,9 +5,9 @@ import org.junit.Test
 
 class FixedScanPerformancePolicyTest {
     @Test
-    fun highEndEightCoreDeviceUsesFourWayConcurrency() {
+    fun highEndEightCoreDeviceUsesEightWayConcurrency() {
         assertEquals(
-            4,
+            8,
             FixedScanPerformancePolicy.evaluationConcurrency(8)
         )
     }
