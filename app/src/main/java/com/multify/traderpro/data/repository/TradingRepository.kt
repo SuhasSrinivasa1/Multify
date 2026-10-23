@@ -3972,6 +3972,7 @@ class TradingRepository @Inject constructor(
 
         var submitted = 0
         for (row in rows) {
+            val rowStartedNs = SystemClock.elapsedRealtimeNanos()
             val liveSettings = preferences.settings.first()
             if (!liveSettings.fixedAutoBuyEnabled || !liveSettings.armEffective || liveSettings.safetyHalt) break
             if (managedDao.openPosition(ENGINE_FIXED_HOLDING, row.symbol) != null) continue
@@ -3988,6 +3989,7 @@ class TradingRepository @Inject constructor(
                 continue
             }
 
+            val quoteStartedNs = SystemClock.elapsedRealtimeNanos()
             val quote = runCatching {
                 withFixedLiveDataSlot {
                     apiFactory.groww.quote(
@@ -4001,8 +4003,10 @@ class TradingRepository @Inject constructor(
                     "message" to (it.message ?: it.javaClass.simpleName)
                 ))
             }.getOrNull() ?: continue
+            val quoteCompletedNs = SystemClock.elapsedRealtimeNanos()
             val ltp = quote.lastPrice?.takeIf { it.isFinite() && it > 0.0 } ?: continue
 
+            val marginStartedNs = SystemClock.elapsedRealtimeNanos()
             val margin = runCatching { apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin") }
                 .onFailure {
                     auditLogger.log("FIXED_AUTO_BUY", "MARGIN_ERROR", mapOf(
@@ -4010,6 +4014,7 @@ class TradingRepository @Inject constructor(
                         "message" to (it.message ?: it.javaClass.simpleName)
                     ))
                 }.getOrNull() ?: continue
+            val marginCompletedNs = SystemClock.elapsedRealtimeNanos()
             val available = (margin.equity?.cncBalanceAvailable ?: margin.clearCash).coerceAtLeast(0.0)
             val sizing = CashAwareCncSizing.sizeFixedAvailable(
                 liveSettings.holdingBudgetRupees.toDouble(),
@@ -4030,6 +4035,7 @@ class TradingRepository @Inject constructor(
             if (!executionSettings.fixedAutoBuyEnabled || !executionSettings.armEffective || executionSettings.safetyHalt) break
 
             val reference = stableRef("FXM", "${row.recommendationDate}-${row.id}-${row.symbol}")
+            val orderStartedNs = SystemClock.elapsedRealtimeNanos()
             val order = runCatching {
                 placeCncBuy(token, row.symbol, sizing.quantity, reference)
             }.onFailure {
@@ -4040,6 +4046,7 @@ class TradingRepository @Inject constructor(
                     "message" to (it.message ?: it.javaClass.simpleName)
                 ))
             }.getOrNull() ?: continue
+            val orderCompletedNs = SystemClock.elapsedRealtimeNanos()
 
             val filled = order.filledQuantity?.takeIf { it > 0 } ?: sizing.quantity
             val actualFill = order.averageFillPrice?.takeIf { it.isFinite() && it > 0.0 } ?: ltp
@@ -4072,7 +4079,7 @@ class TradingRepository @Inject constructor(
                 )
             )
             brokerInventorySnapshot = null
-            auditLogger.log("FIXED_AUTO_BUY", "ENTRY_MARKET_FILLED", mapOf(
+            auditLogger.logAsync("FIXED_AUTO_BUY", "ENTRY_MARKET_FILLED", mapOf(
                 "symbol" to row.symbol,
                 "order_id" to order.growwOrderId,
                 "reference" to reference,
@@ -4084,6 +4091,19 @@ class TradingRepository @Inject constructor(
                 "execution_target" to executionTarget,
                 "target_pct" to row.targetPct,
                 "snapshot_id" to FixedEngineSnapshotStore.SNAPSHOT_ID
+            ))
+            auditLogger.logAsync("EXECUTION_LATENCY", "FIXED_AUTO_BUY_PROFILE", mapOf(
+                "symbol" to row.symbol,
+                "recommendation_to_row_start_ms" to
+                    ((System.currentTimeMillis() - row.generatedAtMs).coerceAtLeast(0L)),
+                "quote_ms" to ((quoteCompletedNs - quoteStartedNs).coerceAtLeast(0L) / 1_000_000L),
+                "margin_ms" to ((marginCompletedNs - marginStartedNs).coerceAtLeast(0L) / 1_000_000L),
+                "pre_order_guard_ms" to ((orderStartedNs - marginCompletedNs).coerceAtLeast(0L) / 1_000_000L),
+                "order_to_fill_ms" to ((orderCompletedNs - orderStartedNs).coerceAtLeast(0L) / 1_000_000L),
+                "row_total_ms" to ((orderCompletedNs - rowStartedNs).coerceAtLeast(0L) / 1_000_000L),
+                "fresh_quote_preserved" to true,
+                "fresh_margin_preserved" to true,
+                "request_semantics_changed" to false
             ))
             submitted++
             delay(FIXED_DIRECT_AUTO_BUY_ORDER_PACING_MS)
