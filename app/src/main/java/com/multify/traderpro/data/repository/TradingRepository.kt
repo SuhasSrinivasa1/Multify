@@ -2820,19 +2820,48 @@ class TradingRepository @Inject constructor(
                 )
             }
 
-        fixedRecommendationStore.allRecommendations().forEach { row ->
-            val closePct = if (row.entryPrice > 0.0 && row.lastPrice.isFinite())
+        var fixedOutcomeReplays = 0
+        for (row in fixedRecommendationStore.allRecommendations()) {
+            val key = "FIXED|${row.recommendationDate}|${row.generatedAtMs}|${row.symbol.uppercase(Locale.US)}"
+            if (key in existingKeys) continue
+
+            var mfePct = row.maxFavourablePct
+            var maePct = row.maxAdversePct
+            var closePct: Double? = if (row.entryPrice > 0.0 && row.lastPrice.isFinite())
                 (row.lastPrice / row.entryPrice - 1.0) * 100.0 else null
+            var targetHit = row.status == "TARGET_HIT"
+            var outcomeQuality = "FIXED_STORED_OUTCOME"
+
+            if (row.generatedAtMs > 0L && fixedOutcomeReplays < UNIVERSAL_EVIDENCE_FIXED_REPLAY_BATCH) {
+                val replay = replayOutcomeToSessionClose(
+                    symbol = row.symbol,
+                    entryPrice = row.entryPrice,
+                    atMs = row.generatedAtMs,
+                    targetPct = row.targetPct,
+                    token = token
+                )
+                if (replay != null) {
+                    mfePct = replay.mfePct
+                    maePct = replay.maePct
+                    closePct = replay.closePct
+                    targetHit = replay.targetHit
+                    outcomeQuality = "AFTER_HOURS_FIXED_OUTCOME_REPLAY"
+                    fixedOutcomeReplays++
+                    delay(UNIVERSAL_EVIDENCE_REPLAY_SYMBOL_PACING_MS)
+                }
+            }
+
             if (!ForecastUniversalPositiveEvidencePolicy.qualifies(
                     realizedPct = null,
                     closePct = closePct,
-                    maxFavourablePct = row.maxFavourablePct,
-                    targetHit = row.status == "TARGET_HIT"
+                    maxFavourablePct = mfePct,
+                    targetHit = targetHit
                 )
-            ) return@forEach
+            ) continue
+
             val near = nearestResearchSnapshot(researchRows, row.recommendationDate, row.symbol, row.generatedAtMs)
             upsert(
-                key = "FIXED|${row.recommendationDate}|${row.generatedAtMs}|${row.symbol.uppercase(Locale.US)}",
+                key = key,
                 source = "FIXED",
                 date = row.recommendationDate,
                 atMs = row.generatedAtMs,
@@ -2845,13 +2874,13 @@ class TradingRepository @Inject constructor(
                 voteJson = near?.voteJson ?: "[]",
                 entryPrice = row.entryPrice,
                 targetPct = row.targetPct,
-                mfePct = row.maxFavourablePct,
-                maePct = row.maxAdversePct,
+                mfePct = mfePct,
+                maePct = maePct,
                 closePct = closePct,
                 realizedPct = null,
-                targetHit = row.status == "TARGET_HIT",
+                targetHit = targetHit,
                 qualityTier = row.qualityTier,
-                reconstructionQuality = if (near != null) "NEARBY_FORECAST_SNAPSHOT" else "FIXED_OUTCOME_CONTEXT_ONLY"
+                reconstructionQuality = if (near != null) "NEARBY_FORECAST_SNAPSHOT+$outcomeQuality" else outcomeQuality
             )
         }
 
