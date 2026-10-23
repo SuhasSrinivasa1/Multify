@@ -23,6 +23,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import java.time.LocalTime
 import java.time.ZoneId
@@ -297,10 +298,22 @@ class TradingEngineService : Service() {
         if (forecastScanJob?.isActive == true) return
         forecastScanJob = scope.launch {
             auditLogger.log("RUNTIME", "FORECAST_SCAN_WORKER_STARTED", mapOf(
-                "parallel_with_fixed" to true
+                "parallel_with_fixed" to true,
+                "default_state" to "PAUSED_FOR_FIXED_PRIORITY"
             ))
+            var pausedAuditEmitted = false
             while (isActive) {
                 try {
+                    val forecastEnabled = repository.settings.first().forecastScannerEnabled
+                    if (!forecastEnabled) {
+                        if (!pausedAuditEmitted) {
+                            auditLogger.log("RUNTIME", "FORECAST_SCAN_PAUSED_FOR_FIXED_PRIORITY")
+                            pausedAuditEmitted = true
+                        }
+                        delay(FORECAST_PAUSED_POLL_MS)
+                        continue
+                    }
+                    pausedAuditEmitted = false
                     val now = ZonedDateTime.now(INDIA)
                     if (now.dayOfWeek.value < 6 &&
                         now.toLocalTime() >= LocalTime.of(9, 15) &&
@@ -456,6 +469,7 @@ class TradingEngineService : Service() {
         private const val POSITION_MONITOR_ERROR_RETRY_MS = 1_000L
         private const val IDLE_POSITION_LOOP_INTERVAL_MS = 5_000L
         private const val SCAN_WORKER_POLL_MS = 1_000L
+        private const val FORECAST_PAUSED_POLL_MS = 5_000L
         private const val SCAN_DURATION_AUDIT_THRESHOLD_MS = 2_000L
         private const val MAINTENANCE_LOOP_INTERVAL_MS = 5_000L
         private const val CLOSED_SESSION_LOOP_INTERVAL_MS = 60_000L
