@@ -1,4 +1,4 @@
-name: Multify Trader Pro v7.7.2 Universal Positive Replay Verification
+name: Multify Trader Pro v7.7.3 Fixed Delivery Latency Verification
 
 on:
   workflow_dispatch:
@@ -103,6 +103,26 @@ jobs:
           actual_region = subprocess.check_output(["git", "hash-object", "--stdin"], input=region, text=True).strip()
           expected_region = next(x.split()[1] for x in manifest if x.startswith("REGION "))
           assert actual_region == expected_region, f"Final Fixed coordinator region changed: {actual_region} != {expected_region}"
+
+          # v7.7.3 intentionally keeps v7.7.2 Fixed market-data/input semantics byte-identical.
+          input_lock = Path("FIXED_INPUT_SEMANTICS_V772.gitsha").read_text().splitlines()
+          for line in input_lock:
+              line = line.strip()
+              if not line or line.startswith("#"):
+                  continue
+              expected, path = line.split(None, 1)
+              actual = subprocess.check_output(["git", "hash-object", path], text=True).strip()
+              assert actual == expected, f"Fixed input semantics changed: {path}: {actual} != {expected}"
+
+          # Presentation delivery must remain strictly after the unchanged scan and auto-buy call.
+          repo_text = Path("app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt").read_text()
+          method_start = repo_text.index("suspend fun runFixedPriorityCycleDetailed()")
+          method_end = repo_text.index("suspend fun runForecastOpportunisticCycle()", method_start)
+          delivery_region = repo_text[method_start:method_end]
+          scan_i = delivery_region.index("generateFixedForecasts(false)")
+          buy_i = delivery_region.index("autoBuyFixedRecommendations()")
+          emit_i = delivery_region.index("_fixedDeliveryEvents.tryEmit(result)")
+          assert scan_i < buy_i < emit_i, "Fixed presentation event is not strictly after scan and auto-buy"
 
           pairs = [
               ("LocalStrategyEngine.kt", "FixedLocalStrategyEngine.kt"),
@@ -221,8 +241,15 @@ jobs:
           grep -q 'forecast_positive_evidence.json' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
           grep -q 'MIN_DISTINCT_DAYS = 3' app/src/main/java/com/multify/traderpro/engine/ForecastUniversalPositiveEvidencePolicy.kt
           grep -q 'MIN_DISTINCT_SYMBOLS = 3' app/src/main/java/com/multify/traderpro/engine/ForecastUniversalPositiveEvidencePolicy.kt
-          grep -q 'versionCode = 772' app/build.gradle.kts
-          grep -q 'versionName = "7.7.2-universal-positive-replay"' app/build.gradle.kts
+          grep -q 'runFixedPriorityCycleDetailed' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
+          grep -q 'FIXED_CRITICAL_PATH_PROFILE' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
+          grep -q 'FIXED_AUTO_BUY_PROFILE' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
+          grep -q 'FIXED_DELIVERY_NOTIFICATION' app/src/main/java/com/multify/traderpro/service/TradingEngineService.kt
+          grep -q 'FIXED_CHANNEL_ID = "fixed_recommendations"' app/src/main/java/com/multify/traderpro/service/TradingEngineService.kt
+          grep -q 'repository.fixedDeliveryEvents.collect' app/src/main/java/com/multify/traderpro/ui/screens/TraderViewModel.kt
+          grep -q '"cache_freshness_changed" to false' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
+          grep -q 'versionCode = 773' app/build.gradle.kts
+          grep -q 'versionName = "7.7.3-fixed-delivery-latency"' app/build.gradle.kts
 
       - name: Restore stable app signing key when configured
         shell: bash
@@ -248,10 +275,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v7.7.2-universal-positive-replay-debug.apk
+          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v7.7.3-fixed-delivery-latency-debug.apk
           python - <<'PY'
           import gzip, hashlib, zipfile
-          apk = "dist/Multify-TraderPro-v7.7.2-universal-positive-replay-debug.apk"
+          apk = "dist/Multify-TraderPro-v7.7.3-fixed-delivery-latency-debug.apk"
           expected_json = "c5d23a7d14ef413c25f63d43672d8729c77469c589e1c4e36dd2f209ec7f304b"
           expected_gzip = "8cc0cd5accc08921fd710af4ecd4f58ab1b9b5b41bc686f8713e6a7ea1267738"
           with zipfile.ZipFile(apk) as z:
@@ -269,15 +296,15 @@ jobs:
               assert payload.startswith(b'{"schemaVersion":2'), "Embedded historic intelligence JSON is malformed"
           print("Embedded historic intelligence APK asset: checksum verified")
           PY
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/Multify-TraderPro-v7.7.2-universal-positive-replay-debug.apk > dist/signature.txt
-          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/Multify-TraderPro-v7.7.2-universal-positive-replay-debug.apk | grep -E "^(package:|application-label:)" > dist/package-verification.txt
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/Multify-TraderPro-v7.7.3-fixed-delivery-latency-debug.apk > dist/signature.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/Multify-TraderPro-v7.7.3-fixed-delivery-latency-debug.apk | grep -E "^(package:|application-label:)" > dist/package-verification.txt
           (cd dist && sha256sum *.apk > SHA256SUMS.txt)
-          git archive --format=zip --output=dist/Multify-TraderPro-v7.7.2-source.zip HEAD
+          git archive --format=zip --output=dist/Multify-TraderPro-v7.7.3-source.zip HEAD
           if [ -d app/schemas ]; then cp -a app/schemas dist/room-schemas; fi
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Multify-TraderPro-v7.7.2-universal-positive-replay-verified
+          name: Multify-TraderPro-v7.7.3-fixed-delivery-latency-verified
           path: dist/
           if-no-files-found: error
 
@@ -288,11 +315,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          TAG="v7.7.2-universal-positive-replay"
-          TITLE="Multify Trader Pro v7.7.2 Universal Positive Replay"
+          TAG="v7.7.3-fixed-delivery-latency"
+          TITLE="Multify Trader Pro v7.7.3 Fixed Delivery Latency"
           ASSETS=(
-            "dist/Multify-TraderPro-v7.7.2-universal-positive-replay-debug.apk"
-            "dist/Multify-TraderPro-v7.7.2-source.zip"
+            "dist/Multify-TraderPro-v7.7.3-fixed-delivery-latency-debug.apk"
+            "dist/Multify-TraderPro-v7.7.3-source.zip"
             "dist/SHA256SUMS.txt"
             "dist/signature.txt"
             "dist/package-verification.txt"
@@ -301,6 +328,6 @@ jobs:
             gh release upload "$TAG" "${ASSETS[@]}" --clobber
           else
             gh release create "$TAG" --target "$GITHUB_SHA" --title "$TITLE" \
-              --notes "Verified APK with byte-for-byte unchanged frozen Fixed logic and shared stepped trailing architecture, plus after-hours universal positive Forecast evidence from Fixed, Multify and Forecast with trail-protected target misses, mature context gating, and replay diagnostics." \
+              --notes "Verified APK with byte-for-byte unchanged frozen Fixed logic and shared stepped trailing architecture. v7.7.3 keeps v7.7.2 market-data/cache/request/concurrency semantics locked, prioritizes Fixed auto-buy before presentation, adds immediate post-auto-buy Fixed notifications/UI delivery, and adds nonblocking Fixed critical-path latency telemetry." \
               "${ASSETS[@]}"
           fi
