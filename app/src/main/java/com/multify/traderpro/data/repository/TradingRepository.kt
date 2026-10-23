@@ -1624,6 +1624,59 @@ class TradingRepository @Inject constructor(
         return warmed > 0
     }
 
+    private data class AdaptiveFixedEvidenceRecord(
+        val recommendationDate: String,
+        val symbol: String,
+        val entryPrice: Double,
+        val targetPct: Double,
+        val strategy: String,
+        val regime: String,
+        val marketRegime: String,
+        val generatedAtMs: Long,
+        val status: String,
+        val lastPrice: Double,
+        val maxFavourablePct: Double,
+        val maxAdversePct: Double,
+        val qualityTier: String
+    )
+
+    /**
+     * Adaptive Forecast reads a copy of the persisted Fixed recommendation state directly.
+     * The byte-locked FixedRecommendationStore is intentionally not modified or extended.
+     */
+    private fun adaptiveFixedEvidenceRecords(): List<AdaptiveFixedEvidenceRecord> {
+        val raw = appContext
+            .getSharedPreferences("fixed_recommendations_v75", Context.MODE_PRIVATE)
+            .getString("state", null)
+            ?: return emptyList()
+        val root = runCatching { JsonParser.parseString(raw).asJsonObject }.getOrNull() ?: return emptyList()
+        val rows = root.getAsJsonArray("recommendations") ?: return emptyList()
+        return rows.mapNotNull { element ->
+            runCatching {
+                val x = element.asJsonObject
+                val date = x.get("recommendationDate")?.asString.orEmpty()
+                val symbol = x.get("symbol")?.asString.orEmpty().uppercase(Locale.US)
+                val entry = x.get("entryPrice")?.asDouble ?: return@runCatching null
+                if (date.isBlank() || symbol.isBlank() || !entry.isFinite() || entry <= 0.0) return@runCatching null
+                AdaptiveFixedEvidenceRecord(
+                    recommendationDate = date,
+                    symbol = symbol,
+                    entryPrice = entry,
+                    targetPct = x.get("targetPct")?.asDouble ?: 0.0,
+                    strategy = x.get("strategy")?.asString.orEmpty(),
+                    regime = x.get("regime")?.asString.orEmpty(),
+                    marketRegime = x.get("marketRegime")?.asString.orEmpty(),
+                    generatedAtMs = x.get("generatedAtMs")?.asLong ?: 0L,
+                    status = x.get("status")?.asString ?: "ACTIVE",
+                    lastPrice = x.get("lastPrice")?.asDouble ?: entry,
+                    maxFavourablePct = x.get("maxFavourablePct")?.asDouble ?: 0.0,
+                    maxAdversePct = x.get("maxAdversePct")?.asDouble ?: 0.0,
+                    qualityTier = x.get("qualityTier")?.asString ?: "PRIMARY"
+                )
+            }.getOrNull()
+        }.sortedWith(compareBy<AdaptiveFixedEvidenceRecord> { it.recommendationDate }.thenBy { it.generatedAtMs })
+    }
+
     private fun fixedPositiveTransferCases(beforeDate: String): List<FixedPositiveTransferCase> {
         val raw = appContext
             .getSharedPreferences("fixed_recommendations_v75", Context.MODE_PRIVATE)
