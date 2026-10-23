@@ -2548,6 +2548,354 @@ class TradingRepository @Inject constructor(
         ))
     }
 
+    private data class EvidenceFeatureSummary(
+        val dominantFamily: String = "UNKNOWN",
+        val familyConsensus: Double = 0.0,
+        val momentum: Double = 0.0,
+        val participation: Double = 0.0,
+        val structure: Double = 0.0,
+        val marketCap: Double? = null
+    )
+
+    private fun evidenceFeatureSummary(featureJson: String): EvidenceFeatureSummary {
+        if (featureJson.isBlank() || featureJson == "{}") return EvidenceFeatureSummary()
+        return runCatching {
+            val root = JsonParser.parseString(featureJson).asJsonObject
+            val families = root.getAsJsonObject("family_scores")
+            EvidenceFeatureSummary(
+                dominantFamily = root.get("dominant_family")?.takeUnless { it.isJsonNull }?.asString ?: "UNKNOWN",
+                familyConsensus = root.get("family_consensus")?.takeUnless { it.isJsonNull }?.asDouble ?: 0.0,
+                momentum = families?.get("MOMENTUM_TREND")?.takeUnless { it.isJsonNull }?.asDouble ?: 0.0,
+                participation = families?.get("PARTICIPATION_LIQUIDITY")?.takeUnless { it.isJsonNull }?.asDouble ?: 0.0,
+                structure = families?.get("STRUCTURE_CONTEXT")?.takeUnless { it.isJsonNull }?.asDouble ?: 0.0,
+                marketCap = root.get("market_cap")?.takeUnless { it.isJsonNull }?.asDouble
+            )
+        }.getOrDefault(EvidenceFeatureSummary())
+    }
+
+    private fun nearestResearchSnapshot(
+        rows: List<ForecastResearchEntity>,
+        date: String,
+        symbol: String,
+        atMs: Long
+    ): ForecastResearchEntity? = rows.asSequence()
+        .filter { it.researchDate == date && it.symbol.equals(symbol, true) }
+        .filter { kotlin.math.abs(it.scanAtMs - atMs) <= UNIVERSAL_EVIDENCE_NEAREST_SNAPSHOT_MS }
+        .minByOrNull { kotlin.math.abs(it.scanAtMs - atMs) }
+
+    private suspend fun replayMultifyEvaluation(
+        call: LearningCallEntity,
+        token: String,
+        nearbyMarketRegime: String
+    ): Pair<StrategyEvaluation, String>? {
+        if (call.buyAtMs <= 0L || call.entryPrice <= 0.0) return null
+        val at = Instant.ofEpochMilli(call.buyAtMs).atZone(INDIA)
+        val start = at.minusDays(4).toLocalDate().atTime(9, 15).format(HIST_FORMAT)
+        val end = at.toLocalDateTime().format(HIST_FORMAT)
+        val historical = runCatching {
+            apiFactory.groww.historicalCandles(
+                bearer(token),
+                growwSymbol = "NSE-${call.symbol}",
+                startTime = start,
+                endTime = end,
+                candleInterval = "5minute"
+            ).requirePayload("Multify after-hours replay ${call.symbol}")
+        }.getOrNull() ?: return null
+
+        val eligible = historical.candles.filter { candle ->
+            val ts = candle.firstOrNull()?.let(::researchCandleTimestampMs) ?: return@filter true
+            ts <= call.buyAtMs
+        }
+        if (eligible.size < 20) return null
+
+        data class ReplayBar(val atMs: Long, val close: Double)
+        val bars = eligible.mapNotNull { candle ->
+            if (candle.size < 5) return@mapNotNull null
+            val ts = researchCandleTimestampMs(candle[0]) ?: return@mapNotNull null
+            val close = runCatching { candle[4].asDouble }.getOrNull() ?: return@mapNotNull null
+            ReplayBar(ts, close)
+        }.sortedBy { it.atMs }
+        val lastClose = bars.lastOrNull()?.close ?: call.entryPrice
+        val callDate = at.toLocalDate()
+        val previousSessionClose = bars
+            .filter { Instant.ofEpochMilli(it.atMs).atZone(INDIA).toLocalDate() < callDate }
+            .maxByOrNull { it.atMs }
+            ?.close
+        val dayChangePct = previousSessionClose?.takeIf { it > 0.0 }?.let { (lastClose / it - 1.0) * 100.0 }
+
+        val currentQuote = runCatching {
+            apiFactory.groww.quote(bearer(token), tradingSymbol = call.symbol)
+                .requirePayload("Multify replay context ${call.symbol}")
+        }.getOrNull()
+        val syntheticQuote = QuotePayload(
+            lastPrice = lastClose,
+            dayChangePct = dayChangePct,
+            marketCap = currentQuote?.marketCap,
+            week52High = currentQuote?.week52High,
+            week52Low = currentQuote?.week52Low
+        )
+        val replayHistorical = HistoricalPayload(
+            candles = eligible,
+            startTime = historical.startTime,
+            endTime = historical.endTime,
+            intervalInMinutes = 5
+        )
+        val features = runCatching { LocalStrategyEngine.buildFeatures(syntheticQuote, replayHistorical, 5) }.getOrNull()
+            ?: return null
+        val signal = ParsedSignal(
+            type = SignalType.TRADE_RELEASE,
+            symbol = call.symbol,
+            target = call.targetPrice,
+            rawText = "AFTER_HOURS_MULTIFY_REPLAY",
+            confidence = 1.0
+        )
+        val evaluation = LocalStrategyEngine.evaluateLong(signal, features, includeEventPrior = false)
+        return evaluation to nearbyMarketRegime
+    }
+
+    private suspend fun refreshUniversalPositiveEvidence(token: String): Int {
+        val researchRows = learningDao.allForecastResearch()
+        val existingKeys = learningDao.allForecastPositiveEvidence().map { it.evidenceKey }.toMutableSet()
+        var inserted = 0
+        var forecastInserted = 0
+        var fixedInserted = 0
+        var multifyInserted = 0
+
+        suspend fun upsert(
+            key: String,
+            source: String,
+            date: String,
+            atMs: Long,
+            symbol: String,
+            strategy: String,
+            regime: String,
+            marketRegime: String,
+            sectorRegime: String,
+            featureJson: String,
+            voteJson: String,
+            entryPrice: Double,
+            targetPct: Double?,
+            mfePct: Double,
+            maePct: Double,
+            closePct: Double?,
+            realizedPct: Double?,
+            targetHit: Boolean,
+            qualityTier: String,
+            reconstructionQuality: String
+        ) {
+            if (key in existingKeys) return
+            if (!ForecastUniversalPositiveEvidencePolicy.qualifies(realizedPct, closePct, mfePct, targetHit)) return
+            val summary = evidenceFeatureSummary(featureJson)
+            val protected = ForecastUniversalPositiveEvidencePolicy.protectedTrailPct(mfePct)
+            learningDao.upsertForecastPositiveEvidence(
+                ForecastPositiveEvidenceEntity(
+                    evidenceKey = key,
+                    source = source,
+                    evidenceDate = date,
+                    eventAtMs = atMs,
+                    symbol = symbol.uppercase(Locale.US),
+                    strategy = strategy.ifBlank { "UNKNOWN" },
+                    regime = regime.ifBlank { "UNKNOWN" },
+                    marketRegime = marketRegime.ifBlank { "UNKNOWN" },
+                    sectorRegime = sectorRegime.ifBlank { "UNAVAILABLE" },
+                    capBucket = ForecastUniversalPositiveEvidencePolicy.capBucket(summary.marketCap),
+                    timeBucket = ForecastUniversalPositiveEvidencePolicy.timeBucket(atMs),
+                    dominantFamily = summary.dominantFamily,
+                    familyConsensus = summary.familyConsensus,
+                    momentumFamilyScore = summary.momentum,
+                    participationFamilyScore = summary.participation,
+                    structureFamilyScore = summary.structure,
+                    factorJson = featureJson.ifBlank { "{}" },
+                    voteJson = voteJson.ifBlank { "[]" },
+                    entryPrice = entryPrice,
+                    targetPct = targetPct,
+                    maxFavourablePct = mfePct,
+                    maxAdversePct = maePct,
+                    closePct = closePct,
+                    realizedPct = realizedPct,
+                    protectedTrailPct = protected,
+                    trailArmed = protected != null,
+                    targetHit = targetHit,
+                    positiveReason = ForecastUniversalPositiveEvidencePolicy.positiveReason(
+                        realizedPct, closePct, mfePct, targetHit
+                    ),
+                    qualityTier = qualityTier,
+                    reconstructionQuality = reconstructionQuality,
+                    updatedAtMs = System.currentTimeMillis()
+                )
+            )
+            existingKeys += key
+            inserted++
+            when (source) {
+                "FORECAST" -> forecastInserted++
+                "FIXED" -> fixedInserted++
+                "MULTIFY" -> multifyInserted++
+            }
+        }
+
+        researchRows.asSequence()
+            .filter { it.outcomeUpdatedAtMs != null }
+            .forEach { row ->
+                upsert(
+                    key = "FORECAST|${row.researchDate}|${row.scanAtMs}|${row.symbol.uppercase(Locale.US)}",
+                    source = "FORECAST",
+                    date = row.researchDate,
+                    atMs = row.scanAtMs,
+                    symbol = row.symbol,
+                    strategy = row.strategy,
+                    regime = row.regime,
+                    marketRegime = row.marketRegime,
+                    sectorRegime = "UNAVAILABLE",
+                    featureJson = row.featureJson,
+                    voteJson = row.voteJson,
+                    entryPrice = row.entryPrice,
+                    targetPct = row.targetPct,
+                    mfePct = row.outcomeMfePct ?: 0.0,
+                    maePct = row.outcomeMaePct ?: 0.0,
+                    closePct = row.outcomeClosePct,
+                    realizedPct = null,
+                    targetHit = row.outcomeTargetHit == true,
+                    qualityTier = row.qualityTier,
+                    reconstructionQuality = "LIVE_FORECAST_SNAPSHOT"
+                )
+            }
+
+        fixedRecommendationStore.allRecommendations().forEach { row ->
+            val closePct = if (row.entryPrice > 0.0 && row.lastPrice.isFinite())
+                (row.lastPrice / row.entryPrice - 1.0) * 100.0 else null
+            if (!ForecastUniversalPositiveEvidencePolicy.qualifies(
+                    realizedPct = null,
+                    closePct = closePct,
+                    maxFavourablePct = row.maxFavourablePct,
+                    targetHit = row.status == "TARGET_HIT"
+                )
+            ) return@forEach
+            val near = nearestResearchSnapshot(researchRows, row.recommendationDate, row.symbol, row.generatedAtMs)
+            upsert(
+                key = "FIXED|${row.recommendationDate}|${row.generatedAtMs}|${row.symbol.uppercase(Locale.US)}",
+                source = "FIXED",
+                date = row.recommendationDate,
+                atMs = row.generatedAtMs,
+                symbol = row.symbol,
+                strategy = row.strategy,
+                regime = row.regime,
+                marketRegime = row.marketRegime,
+                sectorRegime = "UNAVAILABLE",
+                featureJson = near?.featureJson ?: "{}",
+                voteJson = near?.voteJson ?: "[]",
+                entryPrice = row.entryPrice,
+                targetPct = row.targetPct,
+                mfePct = row.maxFavourablePct,
+                maePct = row.maxAdversePct,
+                closePct = closePct,
+                realizedPct = null,
+                targetHit = row.status == "TARGET_HIT",
+                qualityTier = row.qualityTier,
+                reconstructionQuality = if (near != null) "NEARBY_FORECAST_SNAPSHOT" else "FIXED_OUTCOME_CONTEXT_ONLY"
+            )
+        }
+
+        val allCalls = learningDao.allCalls()
+        val rollingCallDates = allCalls
+            .filter { it.action.equals("BUY", true) }
+            .map { it.callDate }.distinct().sortedDescending().take(30).toSet()
+        allCalls.asSequence()
+            .filter {
+                it.action.equals("BUY", true) && it.callDate in rollingCallDates &&
+                    it.buyAtMs > 0L && it.entryPrice > 0.0
+            }
+            .forEach { call ->
+                val mfe = call.multifyMfePct ?: 0.0
+                val realized = call.longRealizedPct
+                if (!ForecastUniversalPositiveEvidencePolicy.qualifies(realized, realized, mfe, false)) return@forEach
+                val key = "MULTIFY|${call.callDate}|${call.buyAtMs}|${call.symbol.uppercase(Locale.US)}"
+                if (key in existingKeys) return@forEach
+                val near = nearestResearchSnapshot(researchRows, call.callDate, call.symbol, call.buyAtMs)
+                if (near != null) {
+                    upsert(
+                        key = key,
+                        source = "MULTIFY",
+                        date = call.callDate,
+                        atMs = call.buyAtMs,
+                        symbol = call.symbol,
+                        strategy = near.strategy,
+                        regime = near.regime,
+                        marketRegime = near.marketRegime,
+                        sectorRegime = "UNAVAILABLE",
+                        featureJson = near.featureJson,
+                        voteJson = near.voteJson,
+                        entryPrice = call.entryPrice,
+                        targetPct = call.targetPct,
+                        mfePct = mfe,
+                        maePct = near.outcomeMaePct ?: 0.0,
+                        closePct = realized,
+                        realizedPct = realized,
+                        targetHit = call.targetPct?.let { mfe + 1e-9 >= it } == true,
+                        qualityTier = near.qualityTier,
+                        reconstructionQuality = "NEARBY_FORECAST_SNAPSHOT"
+                    )
+                } else {
+                    val replay = replayMultifyEvaluation(call, token, "BREADTH_UNKNOWN") ?: return@forEach
+                    val evaluation = replay.first
+                    val marketRegime = replay.second
+                    val factorModel = MultifyFactorFamilies.evaluate(evaluation, marketRegime)
+                    val featureJson = researchGson.toJson(
+                        researchFeatureMap(evaluation, factorModel) + mapOf(
+                            "replay_reconstruction" to true,
+                            "live_only_order_book_fields_available" to false,
+                            "source" to "MULTIFY"
+                        )
+                    )
+                    val voteJson = researchGson.toJson(
+                        evaluation.votes.map { mapOf("name" to it.name, "score" to it.score, "note" to it.note) }
+                    )
+                    upsert(
+                        key = key,
+                        source = "MULTIFY",
+                        date = call.callDate,
+                        atMs = call.buyAtMs,
+                        symbol = call.symbol,
+                        strategy = evaluation.strategy,
+                        regime = evaluation.regime,
+                        marketRegime = marketRegime,
+                        sectorRegime = "UNAVAILABLE",
+                        featureJson = featureJson,
+                        voteJson = voteJson,
+                        entryPrice = call.entryPrice,
+                        targetPct = call.targetPct,
+                        mfePct = mfe,
+                        maePct = 0.0,
+                        closePct = realized,
+                        realizedPct = realized,
+                        targetHit = call.targetPct?.let { mfe + 1e-9 >= it } == true,
+                        qualityTier = "MULTIFY_POSITIVE",
+                        reconstructionQuality = "AFTER_HOURS_HISTORICAL_REPLAY"
+                    )
+                    delay(UNIVERSAL_EVIDENCE_REPLAY_SYMBOL_PACING_MS)
+                }
+            }
+
+        val completedReplay = researchRows.filter { it.outcomeUpdatedAtMs != null }
+        val replayPositive = completedReplay.count {
+            ForecastUniversalPositiveEvidencePolicy.qualifies(
+                null, it.outcomeClosePct, it.outcomeMfePct ?: 0.0, it.outcomeTargetHit == true
+            )
+        }
+        auditLogger.logAsync("FORECAST_REPLAY", "UNIVERSAL_POSITIVE_EVIDENCE_REFRESH", mapOf(
+            "inserted_total" to inserted,
+            "forecast_inserted" to forecastInserted,
+            "fixed_inserted" to fixedInserted,
+            "multify_inserted" to multifyInserted,
+            "completed_forecast_replay_rows" to completedReplay.size,
+            "positive_forecast_replay_rows" to replayPositive,
+            "diagnostic_only_forecast_rows" to (completedReplay.size - replayPositive).coerceAtLeast(0),
+            "negative_examples_change_weights" to false,
+            "fixed_formula_changed" to false,
+            "trail_policy_changed" to false
+        ))
+        return inserted
+    }
+
     private suspend fun discoverMarketWideCandidates(
         token: String,
         master: List<String>,
