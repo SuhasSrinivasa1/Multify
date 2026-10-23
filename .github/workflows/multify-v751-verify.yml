@@ -104,6 +104,16 @@ jobs:
           expected_region = next(x.split()[1] for x in manifest if x.startswith("REGION "))
           assert actual_region == expected_region, f"Final Fixed coordinator region changed: {actual_region} != {expected_region}"
 
+          # v7.7.3 changes delivery only; v7.7.2 Fixed market-data semantics stay byte-identical.
+          input_lock = Path("FIXED_INPUT_SEMANTICS_V772.gitsha").read_text().splitlines()
+          for line in input_lock:
+              line = line.strip()
+              if not line or line.startswith("#"):
+                  continue
+              expected, path = line.split(None, 1)
+              actual = subprocess.check_output(["git", "hash-object", path], text=True).strip()
+              assert actual == expected, f"Fixed input semantics changed: {path}: {actual} != {expected}"
+
           pairs = [
               ("LocalStrategyEngine.kt", "FixedLocalStrategyEngine.kt"),
               ("ForecastQualityPolicy.kt", "FixedForecastQualityPolicy.kt"),
@@ -224,6 +234,9 @@ jobs:
           grep -q 'FIXED_PRIORITY_PHASE_PROFILE' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
           grep -q 'ENTRY_LATENCY_PROFILE' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
           grep -q 'FIXED_NOTIFICATION_POSTED' app/src/main/java/com/multify/traderpro/service/TradingEngineService.kt
+          grep -q '_fixedDeliveryEvents.tryEmit' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
+          grep -q 'repository.fixedDeliveryEvents.collect' app/src/main/java/com/multify/traderpro/ui/screens/TraderViewModel.kt
+          grep -q 'logAsync("FIXED_AUTO_BUY", "ENTRY_MARKET_FILLED"' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
           grep -q 'notifyNewFixedRecommendationsAfterOrderPath' app/src/main/java/com/multify/traderpro/service/TradingEngineService.kt
           grep -q 'FIXED_CHANNEL_ID = "fixed_buy_recommendations_v773"' app/src/main/java/com/multify/traderpro/service/TradingEngineService.kt
           grep -q 'HISTORICAL_15M_TTL_MS = 22_000L' app/src/main/java/com/multify/traderpro/data/network/GrowwHotDataCacheInterceptor.kt
@@ -236,8 +249,15 @@ jobs:
           cycle = repo[repo.index("suspend fun runFixedPriorityCycle"):repo.index("suspend fun runForecastOpportunisticCycle")]
           assert cycle.index("generateFixedForecasts(false)") < cycle.index("autoBuyFixedRecommendations()")
           worker = svc[svc.index("private fun startFixedScanWorker()"):svc.index("private fun startForecastScanWorker()")]
-          assert worker.index("repository.runFixedPriorityCycle()") < worker.index("notifyNewFixedRecommendationsAfterOrderPath()")
-          print("Fixed order-first notification ordering verified")
+          run_i = worker.index("repository.runFixedPriorityCycle()")
+          notify_i = worker.index("notifyNewFixedRecommendationsAfterOrderPath()", run_i)
+          launch_i = worker.rfind("scope.launch {", run_i, notify_i)
+          assert run_i < launch_i < notify_i, "Fixed notification is not asynchronously launched after priority cycle"
+          repo_cycle = repo[repo.index("suspend fun runFixedPriorityCycle"):repo.index("suspend fun runForecastOpportunisticCycle")]
+          buy_i = repo_cycle.index("autoBuyFixedRecommendations()")
+          emit_i = repo_cycle.index("_fixedDeliveryEvents.tryEmit")
+          assert buy_i < emit_i, "Fixed UI delivery event is emitted before auto-buy"
+          print("Fixed order-first asynchronous notification/UI ordering verified")
           PY
           grep -q 'versionCode = 773' app/build.gradle.kts
           grep -q 'versionName = "7.7.3-order-first-fixed-notify"' app/build.gradle.kts
