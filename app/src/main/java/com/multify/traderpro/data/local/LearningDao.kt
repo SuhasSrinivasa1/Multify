@@ -93,6 +93,18 @@ interface LearningDao {
     suspend fun markForecastResearchMultifyMatch(date: String, symbol: String, eventId: Long, atMs: Long)
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertForecastPositiveEvidence(item: ForecastPositiveEvidenceEntity)
+
+    @Query("SELECT * FROM forecast_positive_evidence ORDER BY eventAtMs ASC")
+    suspend fun allForecastPositiveEvidence(): List<ForecastPositiveEvidenceEntity>
+
+    @Query("SELECT * FROM forecast_positive_evidence WHERE evidenceDate=:date ORDER BY eventAtMs ASC")
+    suspend fun forecastPositiveEvidenceForDate(date: String): List<ForecastPositiveEvidenceEntity>
+
+    @Query("SELECT * FROM forecast_positive_evidence WHERE evidenceKey=:key LIMIT 1")
+    suspend fun forecastPositiveEvidence(key: String): ForecastPositiveEvidenceEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertForecastChampion(item: ForecastChampionEntity)
 
     @Query("SELECT * FROM forecast_champions ORDER BY frozen DESC, wins DESC, sampleCount DESC")
