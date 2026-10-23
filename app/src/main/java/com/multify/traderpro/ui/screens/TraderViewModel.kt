@@ -72,7 +72,7 @@ class TraderViewModel @Inject constructor(
     fun refresh(silent: Boolean = false) {
         viewModelScope.launch {
             if (!silent) remote.value = remote.value.copy(loading = true, error = null, message = null)
-            runCatching { repository.refreshDashboard() }
+            runCatching { repository.refreshDashboardLocal() }
                 .onSuccess { remote.value = RemoteState(dashboard = it, message = if (silent) null else "Broker state refreshed") }
                 .onFailure { remote.value = remote.value.copy(loading = false, error = it.userMessage()) }
         }
