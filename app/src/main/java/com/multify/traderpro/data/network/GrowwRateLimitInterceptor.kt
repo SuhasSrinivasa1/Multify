@@ -8,7 +8,6 @@ import java.util.ArrayDeque
 import java.util.EnumMap
 
 internal class GrowwRateLimitInterceptor : Interceptor {
-    private enum class Bucket { AUTH, ORDERS, LIVE_DATA, NON_TRADING, HISTORICAL }
     private data class Limits(val perSecond: Int, val perMinute: Int)
     private data class State(
         val second: ArrayDeque<Long> = ArrayDeque(),
@@ -17,33 +16,36 @@ internal class GrowwRateLimitInterceptor : Interceptor {
     )
 
     private val lock = Any()
-    private val states = EnumMap<Bucket, State>(Bucket::class.java).apply {
-        Bucket.values().forEach { put(it, State()) }
+    private val states = EnumMap<GrowwApiUsageLedger.Category, State>(GrowwApiUsageLedger.Category::class.java).apply {
+        GrowwApiUsageLedger.Category.values().forEach { put(it, State()) }
     }
 
     override fun intercept(chain: Interceptor.Chain): Response {
         val request = chain.request()
-        val bucket = classify(request.method, request.url.encodedPath)
-        awaitPermit(bucket)
+        val category = classify(request.method, request.url.encodedPath)
+        awaitPermit(category)
+        val started = SystemClock.elapsedRealtime()
         val response = chain.proceed(request)
+        GrowwApiUsageLedger.recordResponse(category, SystemClock.elapsedRealtime() - started, response.code)
         if (response.code == 429) {
+            val retryAfterMs = parseRetryAfterMs(response.header("Retry-After"))
             synchronized(lock) {
-                val state = states.getValue(bucket)
+                val state = states.getValue(category)
                 state.cooldownUntilMs = maxOf(
                     state.cooldownUntilMs,
-                    SystemClock.elapsedRealtime() + GrowwApiBudgetPolicy.RATE_LIMIT_COOLDOWN_MS
+                    SystemClock.elapsedRealtime() + maxOf(GrowwApiBudgetPolicy.RATE_LIMIT_COOLDOWN_MS, retryAfterMs)
                 )
             }
         }
         return response
     }
 
-    private fun awaitPermit(bucket: Bucket) {
-        val limits = limits(bucket)
+    private fun awaitPermit(category: GrowwApiUsageLedger.Category) {
+        val limits = limits(category)
         while (true) {
             val waitMs = synchronized(lock) {
                 val now = SystemClock.elapsedRealtime()
-                val state = states.getValue(bucket)
+                val state = states.getValue(category)
                 prune(state.second, now - 1_000L)
                 prune(state.minute, now - 60_000L)
                 val cooldownWait = (state.cooldownUntilMs - now).coerceAtLeast(0L)
@@ -55,6 +57,7 @@ internal class GrowwRateLimitInterceptor : Interceptor {
                 if (wait <= 0L) {
                     state.second.addLast(now)
                     state.minute.addLast(now)
+                    GrowwApiUsageLedger.recordRequest(category, now)
                     0L
                 } else wait
             }
@@ -67,24 +70,29 @@ internal class GrowwRateLimitInterceptor : Interceptor {
         while (queue.isNotEmpty() && queue.peekFirst() <= cutoff) queue.removeFirst()
     }
 
-    private fun limits(bucket: Bucket): Limits = when (bucket) {
-        Bucket.AUTH -> Limits(GrowwApiBudgetPolicy.APP_AUTH_PER_SECOND, GrowwApiBudgetPolicy.APP_AUTH_PER_MINUTE)
-        Bucket.ORDERS -> Limits(GrowwApiBudgetPolicy.APP_ORDER_PER_SECOND, GrowwApiBudgetPolicy.APP_ORDER_PER_MINUTE)
-        Bucket.LIVE_DATA -> Limits(GrowwApiBudgetPolicy.APP_LIVE_DATA_PER_SECOND, GrowwApiBudgetPolicy.APP_LIVE_DATA_PER_MINUTE)
-        Bucket.NON_TRADING -> Limits(GrowwApiBudgetPolicy.APP_NON_TRADING_PER_SECOND, GrowwApiBudgetPolicy.APP_NON_TRADING_PER_MINUTE)
-        Bucket.HISTORICAL -> Limits(GrowwApiBudgetPolicy.APP_HISTORICAL_PER_SECOND, GrowwApiBudgetPolicy.APP_HISTORICAL_PER_MINUTE)
+    private fun limits(category: GrowwApiUsageLedger.Category): Limits = when (category) {
+        GrowwApiUsageLedger.Category.AUTH -> Limits(GrowwApiBudgetPolicy.APP_AUTH_PER_SECOND, GrowwApiBudgetPolicy.APP_AUTH_PER_MINUTE)
+        GrowwApiUsageLedger.Category.ORDERS -> Limits(GrowwApiBudgetPolicy.APP_ORDER_PER_SECOND, GrowwApiBudgetPolicy.APP_ORDER_PER_MINUTE)
+        GrowwApiUsageLedger.Category.LIVE_DATA -> Limits(GrowwApiBudgetPolicy.APP_LIVE_DATA_PER_SECOND, GrowwApiBudgetPolicy.APP_LIVE_DATA_PER_MINUTE)
+        GrowwApiUsageLedger.Category.NON_TRADING -> Limits(GrowwApiBudgetPolicy.APP_NON_TRADING_PER_SECOND, GrowwApiBudgetPolicy.APP_NON_TRADING_PER_MINUTE)
+        GrowwApiUsageLedger.Category.HISTORICAL -> Limits(GrowwApiBudgetPolicy.APP_HISTORICAL_PER_SECOND, GrowwApiBudgetPolicy.APP_HISTORICAL_PER_MINUTE)
     }
 
-    private fun classify(method: String, path: String): Bucket = when {
-        path == "/v1/token/api/access" -> Bucket.AUTH
-        path.startsWith("/v1/live-data/") -> Bucket.LIVE_DATA
-        path.startsWith("/v1/historical/") -> Bucket.HISTORICAL
+    private fun classify(method: String, path: String): GrowwApiUsageLedger.Category = when {
+        path == "/v1/token/api/access" -> GrowwApiUsageLedger.Category.AUTH
+        path.startsWith("/v1/live-data/") -> GrowwApiUsageLedger.Category.LIVE_DATA
+        path.startsWith("/v1/historical/") -> GrowwApiUsageLedger.Category.HISTORICAL
         method in setOf("POST", "PUT", "DELETE") &&
             (path.startsWith("/v1/order/create") ||
                 path.startsWith("/v1/order/cancel") ||
                 path.startsWith("/v1/order-advance/create") ||
                 path.startsWith("/v1/order-advance/modify") ||
-                path.startsWith("/v1/order-advance/cancel")) -> Bucket.ORDERS
-        else -> Bucket.NON_TRADING
+                path.startsWith("/v1/order-advance/cancel")) -> GrowwApiUsageLedger.Category.ORDERS
+        else -> GrowwApiUsageLedger.Category.NON_TRADING
+    }
+
+    private fun parseRetryAfterMs(raw: String?): Long {
+        val seconds = raw?.trim()?.toLongOrNull() ?: return 0L
+        return (seconds.coerceIn(0L, 120L) * 1_000L)
     }
 }
