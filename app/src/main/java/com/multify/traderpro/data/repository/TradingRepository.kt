@@ -2874,7 +2874,7 @@ class TradingRepository @Inject constructor(
             }
 
         var fixedOutcomeReplays = 0
-        for (row in fixedRecommendationStore.allRecommendations()) {
+        for (row in adaptiveFixedEvidenceRecords()) {
             val key = "FIXED|${row.recommendationDate}|${row.generatedAtMs}|${row.symbol.uppercase(Locale.US)}"
             if (key in existingKeys) continue
 
