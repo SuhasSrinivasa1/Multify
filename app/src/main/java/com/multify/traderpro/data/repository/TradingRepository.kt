@@ -2838,7 +2838,7 @@ class TradingRepository @Inject constructor(
             .sortedBy { it.generatedAtMs }
         var submitted = 0
         for (row in rows) {
-            if (fixedApiPriorityRequested) break
+            if (fixedApiPriorityRequested || marketCriticalTradeInFlight) break
             val live = preferences.settings.first()
             if (!live.forecastAutoBuyEnabled || !live.armEffective || live.safetyHalt) break
             if (managedDao.openPosition(ENGINE_FORECAST_HOLDING, row.symbol) != null) continue
