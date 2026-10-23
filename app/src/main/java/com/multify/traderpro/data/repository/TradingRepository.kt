@@ -550,10 +550,7 @@ class TradingRepository @Inject constructor(
 
         val today = LocalDate.now(INDIA).toString()
         val todayRows = all.filter { it.forecastDate == today }
-        val researchSessions = learningDao.forecastResearchDates()
-            .filter { it >= V7_RESEARCH_COHORT_START_DATE }
-            .take(RESEARCH_SESSION_GOAL)
-            .size
+        val researchSessions = forecastCalibrationDates().size
         return ForecastLearningStatsDto(
             rollingTradingDays = keepDates.size,
             completedForecasts = rollingLearning.size,
@@ -1659,6 +1656,46 @@ class TradingRepository @Inject constructor(
         val dates = parsed.map { it.first }.distinct().sortedDescending().take(30).toSet()
         return parsed.filter { it.first in dates }.sortedByDescending { it.third }.map { it.second }
     }
+
+    private suspend fun multifyPositiveTransferCases(beforeDate: String): List<MultifyPositiveTransferCase> {
+        val positives = learningDao.allCalls().filter {
+            it.action.equals("BUY", true) &&
+                it.callDate < beforeDate &&
+                (it.longRealizedPct ?: 0.0) > 0.0 &&
+                (it.multifyMfePct ?: 0.0) > 0.0
+        }
+        val dates = positives.map { it.callDate }.distinct().sortedDescending().take(30).toSet()
+        return positives.filter { it.callDate in dates }.map {
+            MultifyPositiveTransferCase(
+                symbol = it.symbol.uppercase(Locale.US),
+                realizedPct = it.longRealizedPct ?: 0.0,
+                maxFavourablePct = it.multifyMfePct ?: 0.0
+            )
+        }
+    }
+
+    private fun forecastCalibrationDates(): Set<String> =
+        appContext.getSharedPreferences(FORECAST_CALIBRATION_PREFS, Context.MODE_PRIVATE)
+            .getStringSet(FORECAST_CALIBRATION_DATES_KEY, emptySet())
+            ?.toSet()
+            .orEmpty()
+
+    private fun markForecastCalibrationSessionComplete(date: String) {
+        val prefs = appContext.getSharedPreferences(FORECAST_CALIBRATION_PREFS, Context.MODE_PRIVATE)
+        val dates = prefs.getStringSet(FORECAST_CALIBRATION_DATES_KEY, emptySet())?.toMutableSet() ?: mutableSetOf()
+        if (dates.add(date)) {
+            prefs.edit().putStringSet(FORECAST_CALIBRATION_DATES_KEY, dates).apply()
+            auditLogger.log("FORECAST", "CALIBRATION_SESSION_COMPLETED", mapOf(
+                "date" to date,
+                "completed_sessions" to dates.size,
+                "goal" to MarketPriorityPolicy.LIVE_FORECAST_UNLOCK_SESSIONS
+            ))
+        }
+    }
+
+    suspend fun forecastLiveUnlocked(): Boolean =
+        MarketPriorityPolicy.liveForecastUnlocked(forecastCalibrationDates().size)
+
     suspend fun generateDailyForecasts(force: Boolean = false): List<ForecastDto> {
         runCatching { ensureFixedEngineSnapshot() }
         ensureHistoricalSeed()
@@ -1676,11 +1713,17 @@ class TradingRepository @Inject constructor(
         val calls = learningDao.allCalls().filter { it.action.equals("BUY", true) }
         val recentDates = calls.map { it.callDate }.distinct().sortedDescending().take(30).toSet()
         val rolling = calls.filter { it.callDate in recentDates }
-        val frequency = rolling.groupingBy { it.symbol }.eachCount()
+        val multifyPositiveTransfer = multifyPositiveTransferCases(today)
+        val multifyPositiveSymbols = multifyPositiveTransfer.map { it.symbol }
+        val frequency = multifyPositiveSymbols.groupingBy { it }.eachCount()
         val recentSymbols = frequency.entries.sortedByDescending { it.value }.take(12).map { it.key }
         val fixedPositiveTransfer = fixedPositiveTransferCases(today)
         val fixedPositiveSymbols = fixedPositiveTransfer.map { it.symbol }
-        val dnaSymbols = (fixedPositiveSymbols + MultifyReverseEngineering.positiveCases.map { it.symbol }).distinct()
+        val dnaSymbols = (
+            fixedPositiveSymbols +
+                multifyPositiveSymbols +
+                MultifyReverseEngineering.positiveCases.map { it.symbol }
+            ).distinct()
         val master = nseSymbols.symbols()
 
         // v7.3 persists broad discovery state across Android process death. A truly cold pass is
@@ -1804,6 +1847,9 @@ class TradingRepository @Inject constructor(
             val fixedPositiveBonus = ForecastFixedPositiveTransferPolicy.rankingBonus(
                 row.first, row.second.strategy, row.second.regime, marketRegime, fixedPositiveTransfer
             )
+            val multifyPositiveBonus = ForecastMultifyPositiveTransferPolicy.rankingBonus(
+                row.first, multifyPositiveTransfer
+            )
             ForecastCandidate(
                 symbol = row.first,
                 evaluation = row.second,
@@ -1813,7 +1859,7 @@ class TradingRepository @Inject constructor(
                     row.second.confidence +
                     row.second.directionalScore.coerceAtLeast(0.0) * 0.10 +
                     championBonus + frequencyBonus + dnaBonus + qualityBonus + researchBonus + familyBonus +
-                    fixedPositiveBonus
+                    fixedPositiveBonus + multifyPositiveBonus
                 ).coerceIn(0.01, .99),
                 championKey = key,
                 targetPct = candidateTargetPct
@@ -1826,9 +1872,9 @@ class TradingRepository @Inject constructor(
 
         val capturedResearchDates = learningDao.forecastResearchDates()
             .filter { it >= V7_RESEARCH_COHORT_START_DATE }
-        val researchCaptureAllowed =
-            today >= V7_RESEARCH_COHORT_START_DATE &&
-            (today in capturedResearchDates || capturedResearchDates.size < RESEARCH_SESSION_GOAL)
+        // Shadow research continues after the five-session live unlock so Forecast can keep
+        // improving from positive outcomes. API-heavy outcome backfill stays after market hours.
+        val researchCaptureAllowed = today >= V7_RESEARCH_COHORT_START_DATE
         if (researchCaptureAllowed) {
             captureForecastResearchScan(today, nowMs, marketRegime, targetPct, ranked.take(RESEARCH_CAPTURE_TOP_N))
         }
@@ -1848,7 +1894,9 @@ class TradingRepository @Inject constructor(
             .distinct()
             .count()
 
-        val publishable = unseen.filter { item ->
+        val completedCalibrationSessions = forecastCalibrationDates().size
+        val liveForecastReady = MarketPriorityPolicy.liveForecastUnlocked(completedCalibrationSessions)
+        val publishable = if (liveForecastReady) unseen.filter { item ->
             val currentPrimary =
                 item.quality.tier == "PRIMARY" && item.quality.publishEligible && item.quality.executionEligible
             ForecastPublicationPolicy.isReady(
@@ -1857,7 +1905,7 @@ class TradingRepository @Inject constructor(
                 discoveredMarketWide = item.symbol in discoveredSymbols,
                 priorPrimaryHits = priorPrimaryHits(item.symbol)
             )
-        }
+        } else emptyList()
 
         publishable.forEachIndexed { index, item ->
             val price = item.evaluation.features.ltp
@@ -1912,7 +1960,12 @@ class TradingRepository @Inject constructor(
             "prior_research_rows" to priorResearch.size,
             "fixed_positive_transfer_cases" to fixedPositiveTransfer.size,
             "fixed_positive_transfer_symbols" to fixedPositiveSymbols.distinct().size,
+            "multify_positive_transfer_cases" to multifyPositiveTransfer.size,
+            "multify_positive_transfer_symbols" to multifyPositiveSymbols.distinct().size,
             "positive_transfer_only" to true,
+            "live_forecast_unlocked" to liveForecastReady,
+            "live_forecast_completed_sessions" to completedCalibrationSessions,
+            "live_forecast_session_goal" to MarketPriorityPolicy.LIVE_FORECAST_UNLOCK_SESSIONS,
             "research_capture_allowed" to researchCaptureAllowed,
             "research_sessions_captured" to capturedResearchDates.size,
             "research_session_goal" to RESEARCH_SESSION_GOAL,
@@ -2560,7 +2613,7 @@ class TradingRepository @Inject constructor(
         for (attempt in 0 until DISCOVERY_BATCH_ATTEMPTS) {
             try {
                 val exchangeSymbols = chunk.joinToString(",") { "NSE_$it" }
-                return withFixedLiveDataSlot {
+                return withForecastLiveDataSlot {
                     apiFactory.groww.ltp(
                         bearer(token),
                         exchangeSymbols = exchangeSymbols
@@ -2674,14 +2727,24 @@ class TradingRepository @Inject constructor(
             }
         }
 
+    private suspend fun <T> withForecastLiveDataSlot(block: suspend () -> T): T {
+        if (!forecastMarketCapacityAvailable()) error("Forecast yielded to market priority")
+        return withFixedLiveDataSlot(block)
+    }
+
+    private suspend fun <T> withForecastHistoricalDataSlot(block: suspend () -> T): T {
+        if (!forecastMarketCapacityAvailable()) error("Forecast yielded to market priority")
+        return withFixedHistoricalDataSlot(block)
+    }
+
     private suspend fun forecastEvaluation(symbol: String, token: String): StrategyEvaluation {
         val now = ZonedDateTime.now(INDIA)
         val start = now.minusDays(4).toLocalDate().atTime(9,15).format(HIST_FORMAT)
         val end = now.toLocalDateTime().format(HIST_FORMAT)
-        val quote = withFixedLiveDataSlot {
+        val quote = withForecastLiveDataSlot {
             apiFactory.groww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Quote $symbol")
         }
-        val historical = withFixedHistoricalDataSlot {
+        val historical = withForecastHistoricalDataSlot {
             apiFactory.groww.historicalCandles(
                 bearer(token), growwSymbol = "NSE-$symbol", startTime = start, endTime = end, candleInterval = "15minute"
             ).requirePayload("Forecast candles $symbol")
@@ -3735,7 +3798,7 @@ class TradingRepository @Inject constructor(
             var lastFailure: Throwable? = null
             for (attempt in 0 until FORECAST_OUTCOME_BATCH_ATTEMPTS) {
                 try {
-                    payload = withFixedLiveDataSlot {
+                    payload = withForecastLiveDataSlot {
                         apiFactory.groww.ltp(
                             bearer(token),
                             exchangeSymbols = chunk.joinToString(",") { "NSE_$it" }
@@ -3913,8 +3976,17 @@ class TradingRepository @Inject constructor(
                 runCatching { backfillForecastResearchOutcomes(incompleteDate, token) }.getOrDefault(0)
             } else 0
         } else 0
+        val todayCalibrationUpdated = if (token != null && learningDao.forecastResearchForDate(today).isNotEmpty()) {
+            runCatching { backfillForecastResearchOutcomes(today, token) }.getOrDefault(0)
+        } else 0
+        val todayCompletedResearchRows = learningDao.forecastResearchForDate(today)
+            .count { it.outcomeUpdatedAtMs != null }
+        if (todayCompletedResearchRows >= FORECAST_CALIBRATION_MIN_COMPLETED_ROWS) {
+            markForecastCalibrationSessionComplete(today)
+        }
+
         val existing = learningDao.latestResearchReport()
-        if (!force && existing?.reportDate == today && researchUpdated == 0) {
+        if (!force && existing?.reportDate == today && researchUpdated == 0 && todayCalibrationUpdated == 0) {
             return ResearchDto(existing.reportDate, existing.title, existing.summary)
         }
 
@@ -3951,7 +4023,7 @@ class TradingRepository @Inject constructor(
             )
             append("Today's average target: ${fmt(avgTarget)}% with a hard 1.00% floor. ")
             append("Published target hits: $wins/${forecasts.size}. ")
-            append("Five-session reverse-engineering capture: ${forecastLearning.researchSessionsCaptured}/${forecastLearning.researchSessionGoal}. ")
+            append("Five-session live calibration: ${forecastLearning.researchSessionsCaptured}/${forecastLearning.researchSessionGoal}. ")
             append(tierSummary("PRIMARY")).append(". ")
             append(tierSummary("SECONDARY")).append(". ")
             append(tierSummary("RESEARCH")).append(". ")
@@ -5915,6 +5987,9 @@ class TradingRepository @Inject constructor(
         private const val MAX_RESTORE_ENTRY_BYTES = 32L * 1024L * 1024L
         private const val MAX_RESTORE_TOTAL_BYTES = 64L * 1024L * 1024L
         private const val RESEARCH_SESSION_GOAL = 5
+        private const val FORECAST_CALIBRATION_MIN_COMPLETED_ROWS = 5
+        private const val FORECAST_CALIBRATION_PREFS = "forecast_v770_live_calibration"
+        private const val FORECAST_CALIBRATION_DATES_KEY = "completed_session_dates"
         private const val V7_RESEARCH_COHORT_START_DATE = "2026-10-19"
         private const val MIN_RESEARCH_EVIDENCE_ROWS = 4
         private const val MFE_BACKFILL_INTERVAL_MS = 5L * 60L * 1000L
