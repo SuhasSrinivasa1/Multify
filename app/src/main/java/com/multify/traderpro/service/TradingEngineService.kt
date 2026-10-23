@@ -432,7 +432,9 @@ class TradingEngineService : Service() {
                                 "forecast_blocking_ms" to 0
                             ))
                         }
-                        // Fixed auto-buy executes inside the same priority cycle.
+                        // runFixedPriorityCycle returns only after Fixed auto-buy has been attempted.
+                        // Presentation therefore remains strictly behind the order path.
+                        if (scanned) notifyNewFixedRecommendationsAfterOrderPath()
                     }
                     delay(SCAN_WORKER_POLL_MS)
                 } catch (cancelled: CancellationException) {
@@ -526,6 +528,65 @@ class TradingEngineService : Service() {
                 }
             }
         }
+    }
+
+    private fun notifyNewFixedRecommendationsAfterOrderPath() {
+        val rows = repository.fixedRecommendationsForNotification()
+        if (rows.isEmpty()) return
+        val prefs = getSharedPreferences(FIXED_NOTIFICATION_PREFS, Context.MODE_PRIVATE)
+        val today = ZonedDateTime.now(INDIA).toLocalDate().toString()
+        val storedDate = prefs.getString(FIXED_NOTIFICATION_DATE_KEY, "").orEmpty()
+        val seen = if (storedDate == today) {
+            prefs.getStringSet(FIXED_NOTIFICATION_KEYS_KEY, emptySet())?.toMutableSet() ?: mutableSetOf()
+        } else {
+            mutableSetOf()
+        }
+
+        var changed = storedDate != today
+        rows.forEach { row ->
+            val key = "${row.symbol.uppercase(Locale.US)}|${row.generatedAtMs}"
+            if (!seen.add(key)) return@forEach
+            changed = true
+            notifyFixed(row)
+        }
+        if (changed) {
+            prefs.edit()
+                .putString(FIXED_NOTIFICATION_DATE_KEY, today)
+                .putStringSet(FIXED_NOTIFICATION_KEYS_KEY, seen)
+                .apply()
+        }
+    }
+
+    private fun notifyFixed(f: ForecastDto) {
+        val manager = getSystemService(NotificationManager::class.java)
+        val postedAtMs = System.currentTimeMillis()
+        val message = buildString {
+            append("PRIMARY · entry ₹")
+            append(String.format(Locale.US, "%.2f", f.entryPrice))
+            append(" · target +")
+            append(String.format(Locale.US, "%.2f", f.targetPct))
+            append("% · ")
+            append(String.format(Locale.US, "%.0f%% confidence", f.confidence * 100.0))
+            append(" · auto-buy path processed first")
+        }
+        val notification = NotificationCompat.Builder(this, FIXED_CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_stat_trader)
+            .setContentTitle("Fixed BUY · " + f.symbol)
+            .setContentText(message)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(message + "\n" + f.reason))
+            .setAutoCancel(true)
+            .setCategory(NotificationCompat.CATEGORY_RECOMMENDATION)
+            .build()
+        manager.notify((f.symbol.hashCode() xor f.generatedAtMs.toInt() xor FIXED_NOTIFICATION_ID_SALT).and(Int.MAX_VALUE), notification)
+        auditLogger.logAsync("EXECUTION_LATENCY", "FIXED_NOTIFICATION_POSTED", mapOf(
+            "symbol" to f.symbol,
+            "recommendation_generated_at_ms" to f.generatedAtMs,
+            "notification_posted_at_ms" to postedAtMs,
+            "recommendation_to_notification_ms" to (postedAtMs - f.generatedAtMs).coerceAtLeast(0L),
+            "posted_after_fixed_priority_cycle" to true,
+            "posted_after_auto_buy_attempt" to true,
+            "fixed_formula_changed" to false
+        ))
     }
 
     private fun notifyForecast(f: ForecastDto) {
@@ -626,6 +687,13 @@ class TradingEngineService : Service() {
         )
         manager.createNotificationChannel(
             NotificationChannel(
+                FIXED_CHANNEL_ID,
+                "Fixed BUY recommendations",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply { description = "Frozen Fixed PRIMARY recommendations, posted only after the Fixed auto-buy path has been processed." }
+        )
+        manager.createNotificationChannel(
+            NotificationChannel(
                 FORECAST_CHANNEL_ID,
                 "Forecast opportunities",
                 NotificationManager.IMPORTANCE_DEFAULT
@@ -636,7 +704,12 @@ class TradingEngineService : Service() {
     companion object {
         private val INDIA = ZoneId.of("Asia/Kolkata")
         private const val ENGINE_CHANNEL_ID = "production_engine"
+        private const val FIXED_CHANNEL_ID = "fixed_buy_recommendations_v773"
         private const val FORECAST_CHANNEL_ID = "forecast_opportunities"
+        private const val FIXED_NOTIFICATION_PREFS = "fixed_notification_v773"
+        private const val FIXED_NOTIFICATION_DATE_KEY = "date"
+        private const val FIXED_NOTIFICATION_KEYS_KEY = "keys"
+        private const val FIXED_NOTIFICATION_ID_SALT = 0x773
         private const val FOREGROUND_NOTIFICATION_ID = 68090
         private const val HEARTBEAT_INTERVAL_MS = 15_000L
         private const val API_USAGE_AUDIT_INTERVAL_MS = 30_000L
