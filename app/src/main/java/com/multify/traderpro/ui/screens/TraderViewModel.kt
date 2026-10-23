@@ -121,6 +121,24 @@ class TraderViewModel @Inject constructor(
         }
     }
 
+    fun setForecastScannerEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            remote.value = remote.value.copy(loading = true, error = null, message = null)
+            runCatching { repository.setForecastScannerEnabled(enabled) }
+                .onSuccess {
+                    remote.value = remote.value.copy(
+                        loading = false,
+                        message = if (enabled)
+                            "Forecast background scanning enabled · Fixed and sell monitoring remain active"
+                        else
+                            "Forecast background scanning paused · Fixed has market-data priority"
+                    )
+                    refresh(silent = true)
+                }
+                .onFailure { remote.value = remote.value.copy(loading = false, error = it.userMessage()) }
+        }
+    }
+
     fun setForecastAutoBuy(enabled: Boolean) {
         viewModelScope.launch {
             remote.value = remote.value.copy(loading = true, error = null, message = null)
@@ -182,6 +200,9 @@ class TraderViewModel @Inject constructor(
         viewModelScope.launch {
             remote.value = remote.value.copy(loading = true, error = null, message = null)
             runCatching {
+                check(repository.settings.first().forecastScannerEnabled) {
+                    "Forecast scanner is paused for Fixed priority. Enable it in Settings before refreshing Forecast."
+                }
                 val rows = repository.generateDailyForecasts(force = true)
                 repository.autoBuyForecastRecommendations()
                 rows
@@ -198,7 +219,9 @@ class TraderViewModel @Inject constructor(
         viewModelScope.launch {
             remote.value = remote.value.copy(loading = true, error = null, message = null)
             runCatching {
-                val rows = repository.generateFixedForecasts(force = true)
+                // Keep the repository's 5-minute anti-overlap gate. Forced overlapping scans caused
+                // repeated Groww 429 throttling in the v7.6.1 S24 Ultra diagnostic log.
+                val rows = repository.generateFixedForecasts(force = false)
                 repository.autoBuyFixedRecommendations()
                 rows
             }.onSuccess { rows ->
