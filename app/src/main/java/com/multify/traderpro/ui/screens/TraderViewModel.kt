@@ -165,7 +165,7 @@ class TraderViewModel @Inject constructor(
                     remote.value = remote.value.copy(
                         loading = false,
                         message = if (enabled)
-                            "Fixed auto-buy enabled · immutable Fixed recommendations use GTT UP entry triggers · ARM required"
+                            "Fixed auto-buy enabled · immutable Fixed recommendations use direct MARKET BUY · ARM required"
                         else
                             "Fixed auto-buy disabled · active untriggered Fixed entry GTTs are being cancelled"
                     )
@@ -219,7 +219,7 @@ class TraderViewModel @Inject constructor(
         viewModelScope.launch {
             remote.value = remote.value.copy(loading = true, error = null, message = null)
             runCatching {
-                // Keep the repository's 5-minute anti-overlap gate. Forced overlapping scans caused
+                // Keep the repository's frozen 150-second anti-overlap gate. Forced overlapping scans caused
                 // repeated Groww 429 throttling in the v7.6.1 S24 Ultra diagnostic log.
                 val rows = repository.generateFixedForecasts(force = false)
                 repository.autoBuyFixedRecommendations()
