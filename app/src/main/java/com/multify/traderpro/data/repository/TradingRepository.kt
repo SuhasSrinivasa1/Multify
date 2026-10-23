@@ -6138,6 +6138,7 @@ class TradingRepository @Inject constructor(
         val executionSamples = managedDao.allExecutionSamples()
         val priceObservations = learningDao.allObservations()
         val forecastResearch = learningDao.allForecastResearch()
+        val positiveEvidence = learningDao.allForecastPositiveEvidence()
         val calls = learningDao.allCalls().filter { it.action.equals("BUY", true) }.map {
             mapOf(
                 "date" to it.callDate,
@@ -6191,6 +6192,7 @@ class TradingRepository @Inject constructor(
                 add("execution_samples.json", executionSamples)
                 add("signal_price_observations.json", priceObservations)
                 add("forecast_research_snapshots.json", forecastResearch)
+                add("forecast_positive_evidence.json", positiveEvidence)
                 add("long_learning.json", calls)
                 add("long_forecasts.json", forecasts)
                 add("long_champions.json", champions)
@@ -6207,13 +6209,15 @@ class TradingRepository @Inject constructor(
                     "trailing_profile_event" to "TRAILING_MONITOR_PROFILE",
                     "multify_pipeline_event" to "MULTIFY_PIPELINE_PROFILE",
                     "broker_rate_limit_event" to "HTTP_429",
-                    "client_governor_wait_event" to "CLIENT_GOVERNOR_WAIT"
+                    "client_governor_wait_event" to "CLIENT_GOVERNOR_WAIT",
+                    "forecast_replay_event" to "UNIVERSAL_POSITIVE_EVIDENCE_REFRESH",
+                    "positive_evidence_file" to "forecast_positive_evidence.json"
                 ))
                 fixedSnapshot?.let { add("fixed_engine_snapshot.json", it.payload) }
                 addText("system_audit.jsonl", auditLogger.readAll())
             }
         } ?: error("Unable to open export destination")
-        return LogExportResult(if (fixedSnapshot != null) 18 else 17, signals.size, trades.size)
+        return LogExportResult(if (fixedSnapshot != null) 19 else 18, signals.size, trades.size)
     }
 
     suspend fun shouldCapturePackage(packageName: String): Boolean {
