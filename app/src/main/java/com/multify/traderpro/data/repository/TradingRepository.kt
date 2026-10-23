@@ -3055,16 +3055,21 @@ class TradingRepository @Inject constructor(
         val today = now.toLocalDate().toString()
         val row = fixedRecommendationStore.recommendations(today)
             .firstOrNull { it.symbol.equals(symbol, true) } ?: error("No active Fixed recommendation for $symbol")
-        val pendingAuto = fixedAutoBuyOrderStore.forSymbol(today, row.symbol)
-        if (pendingAuto != null && !ForecastAutoBuyPolicy.isTerminal(pendingAuto.status)) {
-            return "Fixed auto-buy GTT is already pending for ${row.symbol} at ₹${fmt(pendingAuto.fixedEntryPrice)}"
+
+        // v7.6.7 migration safety: retire any pre-upgrade Fixed entry GTT before a direct market BUY.
+        reconcileFixedAutoBuyOrders(forceCancel = true, cancelReason = "DIRECT_MARKET_ENTRY")
+        val pendingLegacy = fixedAutoBuyOrderStore.forSymbol(today, row.symbol)
+        if (pendingLegacy != null && !ForecastAutoBuyPolicy.isTerminal(pendingLegacy.status)) {
+            return "Legacy Fixed entry GTT is still being reconciled for ${row.symbol}; no duplicate BUY was sent"
         }
+
         require(row.status == "ACTIVE") { "$symbol Fixed recommendation is no longer active" }
         require(row.entryPrice > FIXED_MIN_STOCK_PRICE_RUPEES) { "Fixed only executes recommendations above ₹${fmt(FIXED_MIN_STOCK_PRICE_RUPEES)}" }
         require(row.executionEligible && row.qualityTier == "PRIMARY") { "Only PRIMARY Fixed recommendations can place a real BUY" }
         if (managedDao.openPosition(ENGINE_FIXED_HOLDING, row.symbol) != null) {
             return "${row.symbol} already has a Fixed holding; duplicate Fixed BUY blocked"
         }
+
         val quote = withFixedLiveDataSlot {
             apiFactory.groww.quote(bearer(token), tradingSymbol = row.symbol).requirePayload("Quote ${row.symbol}")
         }
@@ -3073,10 +3078,12 @@ class TradingRepository @Inject constructor(
         val available = (margin.equity?.cncBalanceAvailable ?: margin.clearCash).coerceAtLeast(0.0)
         val sizing = CashAwareCncSizing.sizeFixedAvailable(settings.holdingBudgetRupees.toDouble(), available, ltp)
         require(sizing.quantity > 0) { "Fixed BUY skipped: remaining CNC cash cannot fund one buffered share of ${row.symbol}" }
-        val ref = stableRef("FXH", "${row.id}-${row.symbol}")
+
+        val ref = stableRef("FXH", "${row.recommendationDate}-${row.id}-${row.symbol}")
         val order = placeCncBuy(token, row.symbol, sizing.quantity, ref)
         val filled = order.filledQuantity?.takeIf { it > 0 } ?: sizing.quantity
-        val actualFill = order.averageFillPrice?.takeIf { it > 0.0 } ?: ltp
+        val actualFill = order.averageFillPrice?.takeIf { it.isFinite() && it > 0.0 } ?: ltp
+        val executionTarget = actualFill * (1.0 + row.targetPct / 100.0)
         val nowMs = System.currentTimeMillis()
         managedDao.insertPosition(
             ManagedPositionEntity(
@@ -3085,19 +3092,19 @@ class TradingRepository @Inject constructor(
                 product = "CNC",
                 side = "LONG",
                 quantity = filled,
-                entryPrice = row.entryPrice,
+                entryPrice = actualFill,
                 stopPrice = null,
-                targetPrice = row.targetPrice,
-                strategy = "Fixed ${FixedEngineSnapshotStore.SNAPSHOT_ID} manual BUY · broker fill ₹${fmt(actualFill)} · ${row.strategy} · v7 stepped trail 0.55→0.50 then +0.10%",
+                targetPrice = executionTarget,
+                strategy = "Fixed ${FixedEngineSnapshotStore.SNAPSHOT_ID} manual direct MARKET BUY · published entry ₹${fmt(row.entryPrice)} · broker fill ₹${fmt(actualFill)} · execution target ₹${fmt(executionTarget)} · ${row.strategy} · v7 stepped trail 0.55→0.50 then +0.10%",
                 regime = row.regime,
                 confidence = row.confidence,
                 sourceEventId = null,
                 openOrderId = order.growwOrderId,
                 openReferenceId = ref,
                 openedAtMs = nowMs,
-                lastPrice = row.entryPrice,
-                maxFavourablePrice = row.entryPrice,
-                maxAdversePrice = row.entryPrice,
+                lastPrice = actualFill,
+                maxFavourablePrice = actualFill,
+                maxAdversePrice = actualFill,
                 lastEvaluatedAtMs = nowMs,
                 trailingArmPct = SteppedTrailingPolicy.ARM_TRIGGER_PCT,
                 trailingLastRatchetPrice = 0.0,
@@ -3108,14 +3115,16 @@ class TradingRepository @Inject constructor(
         auditLogger.log("FIXED_ENGINE", "LONG_HOLDING_OPENED", mapOf(
             "symbol" to row.symbol,
             "quantity" to filled,
-            "fixed_entry_reference" to row.entryPrice,
+            "published_entry" to row.entryPrice,
             "broker_fill" to actualFill,
-            "fixed_target" to row.targetPrice,
+            "published_target" to row.targetPrice,
+            "execution_target" to executionTarget,
+            "target_pct" to row.targetPct,
+            "entry_order_type" to "MARKET",
             "snapshot_id" to FixedEngineSnapshotStore.SNAPSHOT_ID
         ))
-        return "Fixed BUY ${row.symbol} opened · qty $filled · entry reference ₹${fmt(row.entryPrice)} · target ₹${fmt(row.targetPrice)}"
+        return "Fixed BUY ${row.symbol} opened · qty $filled · fill ₹${fmt(actualFill)} · target ₹${fmt(executionTarget)}"
     }
-
     suspend fun autoBuyFixedRecommendations(): Int =
         fixedAutoBuySubmissionMutex.withLock { autoBuyFixedRecommendationsLocked() }
 
@@ -3129,7 +3138,8 @@ class TradingRepository @Inject constructor(
         val token = ensureToken() ?: return 0
         val today = now.toLocalDate().toString()
 
-        reconcileFixedAutoBuyOrders()
+        // v7.6.7 migration safety: do not let a legacy entry GTT coexist with direct Fixed auto-buy.
+        reconcileFixedAutoBuyOrders(forceCancel = true, cancelReason = "DIRECT_MARKET_MIGRATION")
         val rows = fixedRecommendationStore.recommendations(today)
             .filter {
                 it.status == "ACTIVE" &&
@@ -3144,7 +3154,33 @@ class TradingRepository @Inject constructor(
             val liveSettings = preferences.settings.first()
             if (!liveSettings.fixedAutoBuyEnabled || !liveSettings.armEffective || liveSettings.safetyHalt) break
             if (managedDao.openPosition(ENGINE_FIXED_HOLDING, row.symbol) != null) continue
-            if (fixedAutoBuyOrderStore.forSymbol(today, row.symbol) != null) continue
+
+            // If broker reconciliation cannot prove an old entry GTT is gone, skip only this symbol
+            // rather than risk a duplicate position. Other recommendations in the same scan continue.
+            val pendingLegacy = fixedAutoBuyOrderStore.forSymbol(today, row.symbol)
+            if (pendingLegacy != null && !ForecastAutoBuyPolicy.isTerminal(pendingLegacy.status)) {
+                auditLogger.log("FIXED_AUTO_BUY", "DIRECT_BUY_BLOCKED_BY_LEGACY_GTT", mapOf(
+                    "symbol" to row.symbol,
+                    "smart_order_id" to pendingLegacy.orderId,
+                    "status" to pendingLegacy.status
+                ))
+                continue
+            }
+
+            val quote = runCatching {
+                withFixedLiveDataSlot {
+                    apiFactory.groww.quote(
+                        bearer(token),
+                        tradingSymbol = row.symbol
+                    ).requirePayload("Fixed direct quote ${row.symbol}")
+                }
+            }.onFailure {
+                auditLogger.log("FIXED_AUTO_BUY", "DIRECT_QUOTE_ERROR", mapOf(
+                    "symbol" to row.symbol,
+                    "message" to (it.message ?: it.javaClass.simpleName)
+                ))
+            }.getOrNull() ?: continue
+            val ltp = quote.lastPrice?.takeIf { it.isFinite() && it > 0.0 } ?: continue
 
             val margin = runCatching { apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin") }
                 .onFailure {
@@ -3154,64 +3190,85 @@ class TradingRepository @Inject constructor(
                     ))
                 }.getOrNull() ?: continue
             val available = (margin.equity?.cncBalanceAvailable ?: margin.clearCash).coerceAtLeast(0.0)
-            val sizing = CashAwareCncSizing.sizeFixedAvailable(liveSettings.holdingBudgetRupees.toDouble(), available, row.entryPrice)
+            val sizing = CashAwareCncSizing.sizeFixedAvailable(
+                liveSettings.holdingBudgetRupees.toDouble(),
+                available,
+                ltp
+            )
             if (sizing.quantity <= 0) {
                 auditLogger.log("FIXED_AUTO_BUY", "SKIPPED_NO_CASH", mapOf(
                     "symbol" to row.symbol,
-                    "fixed_entry_trigger" to row.entryPrice,
-                    "fixed_target_price" to row.targetPrice,
+                    "published_entry" to row.entryPrice,
+                    "fresh_ltp" to ltp,
                     "available_cnc" to available
                 ))
                 continue
             }
+
             val executionSettings = preferences.settings.first()
             if (!executionSettings.fixedAutoBuyEnabled || !executionSettings.armEffective || executionSettings.safetyHalt) break
 
-            val reference = stableRef("FXG", "${row.recommendationDate}-${row.id}-${row.symbol}")
-            val placedAtMs = System.currentTimeMillis()
-            val gtt = runCatching {
-                submitFixedEntryGtt(token, row, sizing.quantity, reference)
+            val reference = stableRef("FXM", "${row.recommendationDate}-${row.id}-${row.symbol}")
+            val order = runCatching {
+                placeCncBuy(token, row.symbol, sizing.quantity, reference)
             }.onFailure {
-                auditLogger.log("FIXED_AUTO_BUY", "GTT_SUBMIT_ERROR", mapOf(
+                auditLogger.log("FIXED_AUTO_BUY", "MARKET_BUY_ERROR", mapOf(
                     "symbol" to row.symbol,
                     "reference" to reference,
+                    "fresh_ltp" to ltp,
                     "message" to (it.message ?: it.javaClass.simpleName)
                 ))
             }.getOrNull() ?: continue
 
-            if (gtt.smartOrderId.isBlank()) continue
-            fixedAutoBuyOrderStore.upsert(
-                ForecastAutoBuyOrderState(
-                    date = today,
-                    forecastId = row.id,
+            val filled = order.filledQuantity?.takeIf { it > 0 } ?: sizing.quantity
+            val actualFill = order.averageFillPrice?.takeIf { it.isFinite() && it > 0.0 } ?: ltp
+            val executionTarget = actualFill * (1.0 + row.targetPct / 100.0)
+            val openedAtMs = System.currentTimeMillis()
+            managedDao.insertPosition(
+                ManagedPositionEntity(
+                    engine = ENGINE_FIXED_HOLDING,
                     symbol = row.symbol,
-                    orderId = gtt.smartOrderId,
-                    referenceId = reference,
-                    quantity = sizing.quantity,
-                    fixedEntryPrice = row.entryPrice,
-                    fixedTargetPrice = row.targetPrice,
-                    placedAtMs = placedAtMs,
-                    status = gtt.status.ifBlank { "ACTIVE" },
-                    brokerKind = ForecastAutoBuyPolicy.BROKER_KIND_GTT
+                    product = "CNC",
+                    side = "LONG",
+                    quantity = filled,
+                    entryPrice = actualFill,
+                    stopPrice = null,
+                    targetPrice = executionTarget,
+                    strategy = "Fixed ${FixedEngineSnapshotStore.SNAPSHOT_ID} auto-buy · direct MARKET · published entry ₹${fmt(row.entryPrice)} · fill ₹${fmt(actualFill)} · execution target ₹${fmt(executionTarget)} · ${row.strategy} · v7 stepped trail 0.55→0.50 then +0.10%",
+                    regime = row.regime,
+                    confidence = row.confidence,
+                    sourceEventId = null,
+                    openOrderId = order.growwOrderId,
+                    openReferenceId = reference,
+                    openedAtMs = openedAtMs,
+                    lastPrice = actualFill,
+                    maxFavourablePrice = actualFill,
+                    maxAdversePrice = actualFill,
+                    lastEvaluatedAtMs = openedAtMs,
+                    trailingArmPct = SteppedTrailingPolicy.ARM_TRIGGER_PCT,
+                    trailingLastRatchetPrice = 0.0,
+                    smartOrderMode = HoldingSmartOrderPolicy.MODE_NONE
                 )
             )
-            auditLogger.log("FIXED_AUTO_BUY", "ENTRY_GTT_SUBMITTED", mapOf(
+            brokerInventorySnapshot = null
+            auditLogger.log("FIXED_AUTO_BUY", "ENTRY_MARKET_FILLED", mapOf(
                 "symbol" to row.symbol,
-                "smart_order_id" to gtt.smartOrderId,
-                "quantity" to sizing.quantity,
-                "fixed_entry_trigger" to row.entryPrice,
-                "trigger_direction" to ForecastAutoBuyPolicy.TRIGGER_DIRECTION,
-                "child_order_type" to ForecastAutoBuyPolicy.CHILD_ORDER_TYPE,
-                "fixed_target_price" to row.targetPrice,
+                "order_id" to order.growwOrderId,
+                "reference" to reference,
+                "quantity" to filled,
+                "fresh_ltp_before_order" to ltp,
+                "published_entry" to row.entryPrice,
+                "actual_fill" to actualFill,
+                "published_target" to row.targetPrice,
+                "execution_target" to executionTarget,
+                "target_pct" to row.targetPct,
                 "snapshot_id" to FixedEngineSnapshotStore.SNAPSHOT_ID
             ))
             submitted++
-            delay(FORECAST_AUTO_BUY_ORDER_PACING_MS)
+            delay(FIXED_DIRECT_AUTO_BUY_ORDER_PACING_MS)
         }
-        if (submitted > 0) reconcileFixedAutoBuyOrders()
         return submitted
     }
-
     suspend fun reconcileFixedAutoBuyOrders(
         forceCancel: Boolean = false,
         cancelReason: String = ""
@@ -3383,10 +3440,14 @@ class TradingRepository @Inject constructor(
         if (managedDao.openPosition(ENGINE_FIXED_HOLDING, state.symbol) != null) return
         val observedBrokerFill = runCatching {
             apiFactory.groww.positions(bearer(token), segment = "CASH")
-                .requirePayload("Fixed GTT fill position ${state.symbol}").positions
+                .requirePayload("Fixed legacy GTT fill position ${state.symbol}").positions
                 .firstOrNull { it.tradingSymbol.equals(state.symbol, true) }?.debitPrice
                 ?.takeIf { it.isFinite() && it > 0.0 }
         }.getOrNull()
+        val actualEntry = observedBrokerFill ?: state.fixedEntryPrice
+        val targetPct = row?.targetPct?.takeIf { it.isFinite() && it > 0.0 }
+            ?: (((state.fixedTargetPrice / state.fixedEntryPrice) - 1.0) * 100.0).coerceAtLeast(0.0)
+        val executionTarget = actualEntry * (1.0 + targetPct / 100.0)
         val now = System.currentTimeMillis()
         managedDao.insertPosition(
             ManagedPositionEntity(
@@ -3395,19 +3456,19 @@ class TradingRepository @Inject constructor(
                 product = "CNC",
                 side = "LONG",
                 quantity = state.quantity,
-                entryPrice = state.fixedEntryPrice,
+                entryPrice = actualEntry,
                 stopPrice = null,
-                targetPrice = state.fixedTargetPrice,
-                strategy = "Fixed ${FixedEngineSnapshotStore.SNAPSHOT_ID} auto-buy · GTT UP ₹${fmt(state.fixedEntryPrice)} · MARKET child · fixed target ₹${fmt(state.fixedTargetPrice)} · ${row?.strategy.orEmpty()} · v7 stepped trail 0.55→0.50 then +0.10%",
+                targetPrice = executionTarget,
+                strategy = "Fixed ${FixedEngineSnapshotStore.SNAPSHOT_ID} legacy GTT migrated · actual entry ₹${fmt(actualEntry)} · execution target ₹${fmt(executionTarget)} · ${row?.strategy.orEmpty()} · v7 stepped trail 0.55→0.50 then +0.10%",
                 regime = row?.regime ?: "FIXED_ENGINE",
                 confidence = row?.confidence ?: 1.0,
                 sourceEventId = null,
                 openOrderId = state.orderId,
                 openReferenceId = state.referenceId,
                 openedAtMs = now,
-                lastPrice = state.fixedEntryPrice,
-                maxFavourablePrice = state.fixedEntryPrice,
-                maxAdversePrice = state.fixedEntryPrice,
+                lastPrice = actualEntry,
+                maxFavourablePrice = actualEntry,
+                maxAdversePrice = actualEntry,
                 lastEvaluatedAtMs = now,
                 trailingArmPct = SteppedTrailingPolicy.ARM_TRIGGER_PCT,
                 trailingLastRatchetPrice = 0.0,
@@ -3415,17 +3476,18 @@ class TradingRepository @Inject constructor(
             )
         )
         brokerInventorySnapshot = null
-        auditLogger.log("FIXED_AUTO_BUY", "ENTRY_GTT_COMPLETED", mapOf(
+        auditLogger.log("FIXED_AUTO_BUY", "LEGACY_ENTRY_GTT_ADOPTED", mapOf(
             "symbol" to state.symbol,
             "smart_order_id" to state.orderId,
             "quantity" to state.quantity,
-            "fixed_entry_trigger" to state.fixedEntryPrice,
+            "published_entry" to state.fixedEntryPrice,
             "observed_broker_debit_price" to observedBrokerFill,
-            "fixed_target_price" to state.fixedTargetPrice,
+            "actual_entry" to actualEntry,
+            "published_target" to state.fixedTargetPrice,
+            "execution_target" to executionTarget,
             "snapshot_id" to FixedEngineSnapshotStore.SNAPSHOT_ID
         ))
     }
-
     suspend fun pendingLongForecastNotifications(): List<ForecastDto> {
         val today = LocalDate.now(INDIA).toString()
         val rows = learningDao.pendingLongForecastNotifications(today)
@@ -5642,10 +5704,11 @@ class TradingRepository @Inject constructor(
         private const val FORECAST_OUTCOME_RETRY_BACKOFF_MS = 750L
         private const val FORECAST_SYMBOL_PACING_MS = 150L
         private const val FORECAST_AUTO_BUY_ORDER_PACING_MS = 175L
+        private const val FIXED_DIRECT_AUTO_BUY_ORDER_PACING_MS = 175L
         private const val FORECAST_AUTO_BUY_CANCEL_RECHECK_MS = 300L
         private const val FIXED_MIN_STOCK_PRICE_RUPEES = 100.0
         private const val FIXED_PREMARKET_WARMUP_INTERVAL_MS = 5L * 60L * 1000L
-        private const val FIXED_V741_FORECAST_SCAN_INTERVAL_MS = 5L * 60L * 1000L
+        private const val FIXED_V741_FORECAST_SCAN_INTERVAL_MS = 150_000L
         private const val FIXED_V741_FORECAST_SYMBOL_PACING_MS = 150L
         private const val FIXED_V741_PRIMARY_CONFIRMATION_WINDOW_MS = 20L * 60L * 1000L
         private const val FIXED_V741_DETAILED_FORECAST_UNIVERSE_LIMIT = 48

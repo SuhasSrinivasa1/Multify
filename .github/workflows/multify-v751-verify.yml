@@ -1,4 +1,4 @@
-name: Multify Trader Pro v7.6.6 Fixed API Budget Verification
+name: Multify Trader Pro v7.6.7 Direct Auto Buy Verification
 
 on:
   workflow_dispatch:
@@ -164,8 +164,15 @@ jobs:
           grep -q 'label = "Multify Today Avg"' app/src/main/java/com/multify/traderpro/ui/screens/TraderApp.kt
           grep -q 'label = "Fixed Daily Avg"' app/src/main/java/com/multify/traderpro/ui/screens/TraderApp.kt
           ! grep -q 'Market-hours priority' app/src/main/java/com/multify/traderpro/ui/screens/TraderApp.kt
-          grep -q 'versionCode = 766' app/build.gradle.kts
-          grep -q 'versionName = "7.6.6-fixed-api-budget"' app/build.gradle.kts
+          grep -q 'FIXED_V741_FORECAST_SCAN_INTERVAL_MS = 150_000L' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
+          grep -q 'ENTRY_MARKET_FILLED' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
+          grep -q 'entryPrice = actualFill' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
+          grep -q 'FIXED_DIRECT_AUTO_BUY_ORDER_PACING_MS = 175L' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
+          ! grep -q 'New Fixed PRIMARY recommendations create independent GTT UP entry orders' app/src/main/java/com/multify/traderpro/ui/screens/TraderApp.kt
+          grep -q 'Every new Fixed PRIMARY recommendation is sent as its own direct CNC MARKET BUY' app/src/main/java/com/multify/traderpro/ui/screens/TraderApp.kt
+          grep -q 'android:largeHeap="true"' app/src/main/AndroidManifest.xml
+          grep -q 'versionCode = 767' app/build.gradle.kts
+          grep -q 'versionName = "7.6.7-direct-auto-buy"' app/build.gradle.kts
 
       - name: Restore stable app signing key when configured
         shell: bash
@@ -191,10 +198,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v7.6.6-fixed-api-budget-debug.apk
+          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v7.6.7-direct-auto-buy-debug.apk
           python - <<'PY'
           import gzip, hashlib, zipfile
-          apk = "dist/Multify-TraderPro-v7.6.6-fixed-api-budget-debug.apk"
+          apk = "dist/Multify-TraderPro-v7.6.7-direct-auto-buy-debug.apk"
           expected_json = "c5d23a7d14ef413c25f63d43672d8729c77469c589e1c4e36dd2f209ec7f304b"
           expected_gzip = "8cc0cd5accc08921fd710af4ecd4f58ab1b9b5b41bc686f8713e6a7ea1267738"
           with zipfile.ZipFile(apk) as z:
@@ -212,14 +219,14 @@ jobs:
               assert payload.startswith(b'{"schemaVersion":2'), "Embedded historic intelligence JSON is malformed"
           print("Embedded historic intelligence APK asset: checksum verified")
           PY
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/Multify-TraderPro-v7.6.6-fixed-api-budget-debug.apk > dist/signature.txt
-          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/Multify-TraderPro-v7.6.6-fixed-api-budget-debug.apk | grep -E "^(package:|application-label:)" > dist/package-verification.txt
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/Multify-TraderPro-v7.6.7-direct-auto-buy-debug.apk > dist/signature.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/Multify-TraderPro-v7.6.7-direct-auto-buy-debug.apk | grep -E "^(package:|application-label:)" > dist/package-verification.txt
           (cd dist && sha256sum *.apk > SHA256SUMS.txt)
-          git archive --format=zip --output=dist/Multify-TraderPro-v7.6.6-source.zip HEAD
+          git archive --format=zip --output=dist/Multify-TraderPro-v7.6.7-source.zip HEAD
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Multify-TraderPro-v7.6.6-fixed-api-budget-verified
+          name: Multify-TraderPro-v7.6.7-direct-auto-buy-verified
           path: dist/
           if-no-files-found: error
 
@@ -230,11 +237,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          TAG="v7.6.6-fixed-api-budget"
-          TITLE="Multify Trader Pro v7.6.6 Fixed API Budget"
+          TAG="v7.6.7-direct-auto-buy"
+          TITLE="Multify Trader Pro v7.6.7 Direct Auto Buy"
           ASSETS=(
-            "dist/Multify-TraderPro-v7.6.6-fixed-api-budget-debug.apk"
-            "dist/Multify-TraderPro-v7.6.6-source.zip"
+            "dist/Multify-TraderPro-v7.6.7-direct-auto-buy-debug.apk"
+            "dist/Multify-TraderPro-v7.6.7-source.zip"
             "dist/SHA256SUMS.txt"
             "dist/signature.txt"
             "dist/package-verification.txt"
@@ -243,6 +250,6 @@ jobs:
             gh release upload "$TAG" "${ASSETS[@]}" --clobber
           else
             gh release create "$TAG" --target "$GITHUB_SHA" --title "$TITLE" \
-              --notes "Verified APK with local-only Execution metrics, ~95% REST live-data governor, Fixed-priority market-hours API scheduling, Forecast paused by default, portfolio-wide persistent trailing sell protection, and unchanged frozen Fixed recommendation logic." \
+              --notes "Verified APK with unchanged frozen Fixed recommendation logic, 2.5-minute Fixed scan gate, direct Fixed CNC market auto-buy, actual-fill target/trailing anchoring, legacy Fixed entry-GTT reconciliation, larger Android heap headroom, existing API-budget governors, and unchanged portfolio-wide persistent trailing sell protection." \
               "${ASSETS[@]}"
           fi

@@ -717,7 +717,7 @@ private fun FixedScreen(
                     )
                     Text(
                         if (state.settings.armEffective && state.settings.fixedAutoBuyEnabled)
-                            "ARM and Fixed Auto-buy are ON. New Fixed PRIMARY recommendations create independent GTT UP entry orders."
+                            "ARM and Fixed Auto-buy are ON. Every new Fixed PRIMARY recommendation is sent as its own direct CNC MARKET BUY."
                         else if (state.settings.armEffective)
                             "ARM is ON. Fixed recommendations remain manual unless Fixed Auto-buy is enabled in Settings."
                         else
@@ -991,7 +991,7 @@ private fun SettingsScreen(
                         }
                     )
                     Text(
-                        "Entry control: fixed published GTT trigger with direction UP. A stock falling through the entry does not trigger the BUY; the trigger must be crossed upward. The broker fill can differ slightly because the child order is MARKET. The published target reference is never recalculated.",
+                        "Entry control: no Fixed entry GTT. Auto-buy uses a fresh quote for sizing and sends a direct CNC MARKET BUY immediately. The actual broker fill becomes the holding average and trailing anchor; the live execution target keeps the frozen recommendation target percentage but is anchored to that actual fill.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -1000,7 +1000,7 @@ private fun SettingsScreen(
                         Column(Modifier.weight(1f)) {
                             Text("Auto-buy Fixed recommendations", fontWeight = FontWeight.SemiBold)
                             Text(
-                                "When enabled, every new PRIMARY recommendation from the immutable Fixed engine creates its own Groww CNC GTT at the Fixed entry price with trigger direction UP. The Fixed target stays unchanged. ARM must also be ON.",
+                                "When enabled, every new PRIMARY recommendation from the immutable Fixed engine gets its own Groww CNC MARKET BUY. Multiple recommendations from the same scan are processed independently. ARM must also be ON; available CNC cash and safety checks still apply.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
