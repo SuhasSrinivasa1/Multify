@@ -67,6 +67,16 @@ class TraderViewModel @Inject constructor(
                 if (repository.settings.first().brokerAuthenticated) refresh(silent = true)
             }
         }
+        viewModelScope.launch {
+            repository.fixedDeliveryEvents.collect {
+                // Presentation-only fast path. Fixed has already persisted the recommendation and
+                // completed its auto-buy attempt before this event is emitted.
+                runCatching { repository.refreshDashboardLocal() }
+                    .onSuccess { dashboard ->
+                        remote.value = remote.value.copy(dashboard = dashboard)
+                    }
+            }
+        }
     }
 
     fun refresh(silent: Boolean = false) {
