@@ -7,7 +7,7 @@ class FixedScanPerformancePolicyTest {
     @Test
     fun highEndEightCoreDeviceUsesFourWayConcurrency() {
         assertEquals(
-            6,
+            4,
             FixedScanPerformancePolicy.evaluationConcurrency(8)
         )
     }
