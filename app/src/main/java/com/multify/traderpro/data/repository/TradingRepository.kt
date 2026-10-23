@@ -34,6 +34,7 @@ import com.multify.traderpro.data.network.GttCreateRequest
 import com.multify.traderpro.data.network.GttModifyRequest
 import com.multify.traderpro.data.network.GttOrder
 import com.multify.traderpro.data.network.GrowwApiFactory
+import com.multify.traderpro.data.network.GrowwApiUsageLedger
 import com.multify.traderpro.data.network.GrowwHolding
 import com.multify.traderpro.data.network.GrowwPosition
 import com.multify.traderpro.data.network.LearningStatsDto
@@ -59,6 +60,8 @@ import com.multify.traderpro.engine.CashAwareCncSizing
 import com.multify.traderpro.engine.ExecutionTelemetryMath
 import com.multify.traderpro.engine.ForecastAutoBuyPolicy
 import com.multify.traderpro.engine.ForecastFixedPositiveTransferPolicy
+import com.multify.traderpro.engine.ForecastMultifyPositiveTransferPolicy
+import com.multify.traderpro.engine.MultifyPositiveTransferCase
 import com.multify.traderpro.engine.FixedPositiveTransferCase
 import com.multify.traderpro.engine.ForecastQualityDecision
 import com.multify.traderpro.engine.ForecastQualityPolicy
@@ -80,6 +83,7 @@ import com.multify.traderpro.engine.FixedStrategyEvaluation
 import com.multify.traderpro.engine.GrowwDeliveryCostPolicy
 import com.multify.traderpro.engine.GrowwApiBudgetPolicy
 import com.multify.traderpro.engine.HoldingSmartOrderPolicy
+import com.multify.traderpro.engine.MarketPriorityPolicy
 import com.multify.traderpro.engine.LocalStrategyEngine
 import com.multify.traderpro.engine.MarketDiscoveryPolicy
 import com.multify.traderpro.engine.MultifyFactorFamilies
@@ -179,6 +183,8 @@ class TradingRepository @Inject constructor(
     private val fixedAutoBuySubmissionMutex = Mutex()
     private val scanApiCycleMutex = Mutex()
     @Volatile private var fixedApiPriorityRequested = false
+    @Volatile private var marketCriticalTradeInFlight = false
+    @Volatile private var tradingRecoveryReady = false
     private val embeddedHistoricalSeedMutex = Mutex()
     private val bulkMarketDataMutex = Mutex()
     private var nextBulkMarketDataAtElapsedMs = 0L
@@ -797,6 +803,7 @@ class TradingRepository @Inject constructor(
     suspend fun setArm(enabled: Boolean) {
         if (enabled) {
             val s = preferences.settings.first()
+            require(tradingRecoveryReady) { "Wait for broker recovery and trailing protection reconciliation" }
             require(s.brokerAuthenticated) { "Authenticate Groww first" }
             require(s.staticIpMatched) { "Static IP verification failed" }
             require(s.brokerDdpiEnabled) { "DDPI is required for CNC holdings so the app can sell its own holdings later" }
@@ -1290,6 +1297,9 @@ class TradingRepository @Inject constructor(
             else -> Unit
         }
 
+        val marketCritical = parsed.type == SignalType.TRADE_RELEASE || parsed.type == SignalType.BOOK_PROFIT
+        if (marketCritical) marketCriticalTradeInFlight = true
+        try {
         val symbol = parsed.symbol
         if (!symbol.isNullOrBlank() && !nseSymbols.isKnown(symbol) && !nseSymbols.isStale()) {
             dao.updateForwarding(eventId, "IGNORED", "SYMBOL_NOT_IN_NSE_MASTER", "$symbol is not in the current NSE equity master.", null)
@@ -1312,8 +1322,7 @@ class TradingRepository @Inject constructor(
             return
         }
         if (parsed.type == SignalType.BOOK_PROFIT && closedLearningCall != null) {
-            runCatching { captureMultifyMfe(closedLearningCall!!, token) }
-                .onFailure { auditLogger.log("LEARNING", "MULTIFY_MFE_LIVE_ERROR", mapOf("symbol" to (symbol ?: ""), "message" to (it.message ?: it.javaClass.simpleName))) }
+            auditLogger.log("LEARNING", "MULTIFY_MFE_DEFERRED_AFTER_HOURS", mapOf("symbol" to (symbol ?: "")))
         }
         val settings = hot?.settings ?: preferences.settings.first()
         when (parsed.type) {
@@ -1327,6 +1336,9 @@ class TradingRepository @Inject constructor(
             }
             SignalType.BOOK_PROFIT -> handleMultifyExit(eventId, parsed, token, settings, notificationStartedNs)
             else -> Unit
+        }
+        } finally {
+            if (marketCritical) marketCriticalTradeInFlight = false
         }
     }
 
@@ -1503,18 +1515,53 @@ class TradingRepository @Inject constructor(
     }
 
     suspend fun runForecastOpportunisticCycle(): Boolean {
-        if (fixedApiPriorityRequested) return false
+        if (!forecastMarketCapacityAvailable()) return false
         if (!scanApiCycleMutex.tryLock()) return false
         return try {
-            if (fixedApiPriorityRequested) return false
+            if (!forecastMarketCapacityAvailable()) return false
             val previousScanAtMs = lastForecastScanAtMs
             generateDailyForecasts(false)
             val scanned = lastForecastScanAtMs != previousScanAtMs
-            if (!fixedApiPriorityRequested && scanned) autoBuyForecastRecommendations()
+            if (scanned && forecastLiveUnlocked() && forecastMarketCapacityAvailable()) {
+                autoBuyForecastRecommendations()
+            }
             scanned
         } finally {
             scanApiCycleMutex.unlock()
         }
+    }
+
+    fun setTradingRecoveryReady(ready: Boolean) {
+        tradingRecoveryReady = ready
+        auditLogger.log("RUNTIME", if (ready) "BROKER_RECOVERY_READY" else "BROKER_RECOVERY_PENDING")
+    }
+
+    fun isTradingRecoveryReady(): Boolean = tradingRecoveryReady
+
+    private fun millisUntilNextFixedScan(): Long {
+        val last = lastFixedScanAtMs
+        if (last <= 0L) return 0L
+        return (last + FIXED_V741_FORECAST_SCAN_INTERVAL_MS - System.currentTimeMillis()).coerceAtLeast(0L)
+    }
+
+    private fun forecastMarketCapacityAvailable(): Boolean {
+        if (fixedApiPriorityRequested || marketCriticalTradeInFlight) return false
+        val usage = GrowwApiUsageLedger.snapshot()
+        fun row(category: GrowwApiUsageLedger.Category) = usage.categories.first { it.category == category }
+        val live = row(GrowwApiUsageLedger.Category.LIVE_DATA)
+        val historical = row(GrowwApiUsageLedger.Category.HISTORICAL)
+        val nonTrading = row(GrowwApiUsageLedger.Category.NON_TRADING)
+        return MarketPriorityPolicy.canRunForecast(
+            fixedPriorityRequested = fixedApiPriorityRequested,
+            criticalTradeInFlight = marketCriticalTradeInFlight,
+            millisUntilNextFixed = millisUntilNextFixedScan(),
+            liveUsedPerMinute = live.usedLastMinute,
+            liveAppLimitPerMinute = live.appPerMinuteLimit,
+            historicalUsedPerMinute = historical.usedLastMinute,
+            historicalAppLimitPerMinute = historical.appPerMinuteLimit,
+            nonTradingUsedPerMinute = nonTrading.usedLastMinute,
+            nonTradingAppLimitPerMinute = nonTrading.appPerMinuteLimit
+        )
     }
 
     /**
@@ -5706,6 +5753,7 @@ class TradingRepository @Inject constructor(
     }
 
     private fun preArmGuard(settings: AppSettings) {
+        require(tradingRecoveryReady) { "Broker recovery is still reconciling holdings and trailing protection" }
         require(settings.armEffective) { "ARM is OFF" }
         require(settings.brokerAuthenticated) { "Groww is not authenticated" }
         require(settings.staticIpMatched) { "Static IP verification failed" }
