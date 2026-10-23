@@ -1640,7 +1640,11 @@ class TradingRepository @Inject constructor(
                 val last = x.get("lastPrice")?.asDouble ?: return@runCatching null
                 val observedAt = x.get("lastObservedAtMs")?.asLong ?: 0L
                 val generatedAt = x.get("generatedAtMs")?.asLong ?: 0L
-                if (!entry.isFinite() || entry <= 0.0 || !last.isFinite() || last <= entry || observedAt <= generatedAt) {
+                val mfe = x.get("maxFavourablePct")?.asDouble ?: 0.0
+                val closeGain = if (entry > 0.0 && last.isFinite()) (last / entry - 1.0) * 100.0 else Double.NaN
+                if (!entry.isFinite() || entry <= 0.0 || !last.isFinite() || observedAt <= generatedAt ||
+                    !ForecastUniversalPositiveEvidencePolicy.qualifies(null, closeGain, mfe, false)
+                ) {
                     return@runCatching null
                 }
                 Triple(
@@ -1650,8 +1654,8 @@ class TradingRepository @Inject constructor(
                         strategy = x.get("strategy")?.asString.orEmpty(),
                         regime = x.get("regime")?.asString.orEmpty(),
                         marketRegime = x.get("marketRegime")?.asString.orEmpty(),
-                        closeGainPct = (last / entry - 1.0) * 100.0,
-                        maxFavourablePct = x.get("maxFavourablePct")?.asDouble ?: 0.0
+                        closeGainPct = closeGain.coerceAtLeast(0.0),
+                        maxFavourablePct = mfe
                     ),
                     observedAt
                 )
@@ -1665,15 +1669,22 @@ class TradingRepository @Inject constructor(
         val positives = learningDao.allCalls().filter {
             it.action.equals("BUY", true) &&
                 it.callDate < beforeDate &&
-                (it.longRealizedPct ?: 0.0) > 0.0 &&
-                (it.multifyMfePct ?: 0.0) > 0.0
+                ForecastUniversalPositiveEvidencePolicy.qualifies(
+                    realizedPct = it.longRealizedPct,
+                    closePct = it.longRealizedPct,
+                    maxFavourablePct = it.multifyMfePct ?: 0.0,
+                    targetHit = false
+                )
         }
         val dates = positives.map { it.callDate }.distinct().sortedDescending().take(30).toSet()
         return positives.filter { it.callDate in dates }.map {
+            val mfe = it.multifyMfePct ?: 0.0
             MultifyPositiveTransferCase(
                 symbol = it.symbol.uppercase(Locale.US),
-                realizedPct = it.longRealizedPct ?: 0.0,
-                maxFavourablePct = it.multifyMfePct ?: 0.0
+                realizedPct = (it.longRealizedPct?.takeIf { pct -> pct > 0.0 }
+                    ?: ForecastUniversalPositiveEvidencePolicy.protectedTrailPct(mfe)
+                    ?: 0.0),
+                maxFavourablePct = mfe
             )
         }
     }
