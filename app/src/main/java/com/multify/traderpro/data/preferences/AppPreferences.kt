@@ -21,6 +21,7 @@ data class AppSettings(
     val packageFilter: String = "",
     val holdingBudgetRupees: Long = 200_000L,
     val armEnabled: Boolean = false,
+    val forecastScannerEnabled: Boolean = false,
     val forecastAutoBuyEnabled: Boolean = false,
     val fixedAutoBuyEnabled: Boolean = false,
     val onboardingComplete: Boolean = false,
@@ -56,6 +57,7 @@ class AppPreferences @Inject constructor(
         val packageFilter = stringPreferencesKey("package_filter")
         val holdingBudgetRupees = longPreferencesKey("daily_budget_rupees")
         val armEnabled = booleanPreferencesKey("live_execution_enabled")
+        val forecastScannerEnabled = booleanPreferencesKey("forecast_scanner_enabled")
         val forecastAutoBuyEnabled = booleanPreferencesKey("forecast_auto_buy_enabled")
         val fixedAutoBuyEnabled = booleanPreferencesKey("fixed_auto_buy_enabled")
         val onboardingComplete = booleanPreferencesKey("onboarding_complete")
@@ -125,6 +127,10 @@ class AppPreferences @Inject constructor(
         }
     }
 
+    suspend fun setForecastScannerEnabled(value: Boolean) {
+        context.dataStore.edit { it[Keys.forecastScannerEnabled] = value }
+    }
+
     suspend fun setForecastAutoBuy(value: Boolean) {
         context.dataStore.edit { it[Keys.forecastAutoBuyEnabled] = value }
     }
@@ -182,6 +188,7 @@ class AppPreferences @Inject constructor(
         packageFilter = this[Keys.packageFilter].orEmpty(),
         holdingBudgetRupees = (this[Keys.holdingBudgetRupees] ?: 200_000L).coerceIn(10_000L, 200_000L),
         armEnabled = this[Keys.armEnabled] ?: false,
+        forecastScannerEnabled = this[Keys.forecastScannerEnabled] ?: false,
         forecastAutoBuyEnabled = this[Keys.forecastAutoBuyEnabled] ?: false,
         fixedAutoBuyEnabled = this[Keys.fixedAutoBuyEnabled] ?: false,
         onboardingComplete = this[Keys.onboardingComplete] ?: false,
