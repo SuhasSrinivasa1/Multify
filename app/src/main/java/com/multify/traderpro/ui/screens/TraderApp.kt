@@ -192,6 +192,7 @@ fun TraderApp(viewModel: TraderViewModel = hiltViewModel()) {
                         if (state.settings.armEffective) viewModel.setArm(false) else showArmConfirm = true
                     },
                     onBudgetChanged = viewModel::setHoldingBudget,
+                    onForecastScannerChanged = viewModel::setForecastScannerEnabled,
                     onForecastAutoBuyChanged = viewModel::setForecastAutoBuy,
                     onFixedAutoBuyChanged = viewModel::setFixedAutoBuy,
                     onSubmitManualSignal = viewModel::submitManualSignal,
@@ -642,9 +643,15 @@ private fun ForecastScreen(
                 shape = RoundedCornerShape(20.dp)
             ) {
                 Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("Forecast engine · ACTIVE", fontWeight = FontWeight.SemiBold)
                     Text(
-                        if (state.settings.armEffective && state.settings.forecastAutoBuyEnabled)
+                        if (state.settings.forecastScannerEnabled) "Forecast engine · ACTIVE"
+                        else "Forecast engine · PAUSED FOR FIXED PRIORITY",
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        if (!state.settings.forecastScannerEnabled)
+                            "Background Forecast discovery/evaluation is paused, so it consumes no live scanning capacity. Fixed and portfolio sell monitoring continue normally."
+                        else if (state.settings.armEffective && state.settings.forecastAutoBuyEnabled)
                             "Learning and forecasting are running. ARM and Forecast Auto-buy are ON; new confirmed PRIMARY rows create fixed-entry UP-trigger GTT buys automatically."
                         else if (state.settings.armEffective)
                             "Learning and forecasting are running. ARM is ON; forecast recommendations remain manual unless Forecast Auto-buy is enabled in Settings."
@@ -701,7 +708,11 @@ private fun ForecastScreen(
         }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                Button(onClick = onGenerate, modifier = Modifier.weight(1f)) { Text("Refresh scanner") }
+                Button(
+                    onClick = onGenerate,
+                    modifier = Modifier.weight(1f),
+                    enabled = state.settings.forecastScannerEnabled
+                ) { Text(if (state.settings.forecastScannerEnabled) "Refresh scanner" else "Scanner paused") }
                 OutlinedButton(onClick = onResearch, modifier = Modifier.weight(1f)) { Text("Run research") }
             }
         }
@@ -955,6 +966,7 @@ private fun SettingsScreen(
     onAuthenticate: () -> Unit,
     onArmRequested: () -> Unit,
     onBudgetChanged: (Long) -> Unit,
+    onForecastScannerChanged: (Boolean) -> Unit,
     onForecastAutoBuyChanged: (Boolean) -> Unit,
     onFixedAutoBuyChanged: (Boolean) -> Unit,
     onSubmitManualSignal: (String, String, String) -> Unit,
@@ -1035,6 +1047,25 @@ private fun SettingsScreen(
                     HorizontalDivider()
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
+                            Text("Forecast background scanner", fontWeight = FontWeight.SemiBold)
+                            Text(
+                                "Default OFF for Fixed priority. When paused, Forecast makes no background discovery/evaluation requests, leaving API capacity for Fixed and the always-on portfolio sell monitor.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = state.settings.forecastScannerEnabled,
+                            onCheckedChange = onForecastScannerChanged
+                        )
+                    }
+                    KeyValueRow(
+                        "Forecast scanner",
+                        if (state.settings.forecastScannerEnabled) "ACTIVE" else "PAUSED · Fixed priority"
+                    )
+                    HorizontalDivider()
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
                             Text("Auto-buy forecast recommendations", fontWeight = FontWeight.SemiBold)
                             Text(
                                 "When enabled, every new confirmed PRIMARY forecast creates a Groww CNC GTT at the published entry price with trigger direction UP. When that fixed trigger is crossed upward, Groww sends a MARKET BUY. The published target price stays fixed. ARM must also be ON.",
@@ -1044,7 +1075,8 @@ private fun SettingsScreen(
                         }
                         Switch(
                             checked = state.settings.forecastAutoBuyEnabled,
-                            onCheckedChange = onForecastAutoBuyChanged
+                            onCheckedChange = onForecastAutoBuyChanged,
+                            enabled = state.settings.forecastScannerEnabled
                         )
                     }
                     KeyValueRow(
