@@ -4372,7 +4372,6 @@ class TradingRepository @Inject constructor(
         val researchUpdated = if (token != null) {
             val incompleteDate = learningDao.forecastResearchDates()
                 .filter { it >= V7_RESEARCH_COHORT_START_DATE }
-                .take(RESEARCH_SESSION_GOAL)
                 .firstOrNull { learningDao.pendingForecastResearchOutcomes(it).isNotEmpty() }
             if (incompleteDate != null) {
                 runCatching { backfillForecastResearchOutcomes(incompleteDate, token) }.getOrDefault(0)
@@ -4381,6 +4380,15 @@ class TradingRepository @Inject constructor(
         val todayCalibrationUpdated = if (token != null && learningDao.forecastResearchForDate(today).isNotEmpty()) {
             runCatching { backfillForecastResearchOutcomes(today, token) }.getOrDefault(0)
         } else 0
+        val universalEvidenceUpdated = if (token != null) {
+            runCatching { refreshUniversalPositiveEvidence(token) }
+                .onFailure {
+                    auditLogger.log("FORECAST_REPLAY", "UNIVERSAL_EVIDENCE_REFRESH_ERROR", mapOf(
+                        "message" to (it.message ?: it.javaClass.simpleName)
+                    ))
+                }
+                .getOrDefault(0)
+        } else 0
         val todayCompletedResearchRows = learningDao.forecastResearchForDate(today)
             .count { it.outcomeUpdatedAtMs != null }
         if (todayCompletedResearchRows >= FORECAST_CALIBRATION_MIN_COMPLETED_ROWS) {
@@ -4388,7 +4396,9 @@ class TradingRepository @Inject constructor(
         }
 
         val existing = learningDao.latestResearchReport()
-        if (!force && existing?.reportDate == today && researchUpdated == 0 && todayCalibrationUpdated == 0) {
+        if (!force && existing?.reportDate == today && researchUpdated == 0 &&
+            todayCalibrationUpdated == 0 && universalEvidenceUpdated == 0
+        ) {
             return ResearchDto(existing.reportDate, existing.title, existing.summary)
         }
 
@@ -4397,8 +4407,14 @@ class TradingRepository @Inject constructor(
         val forecasts = learningDao.longForecastsForDate(today)
         val snapshots = learningDao.forecastResearchForDate(today).filter { it.outcomeUpdatedAtMs != null }
         val positiveCloseSnapshots = snapshots.filter {
-            PositiveCloseForecastPolicy.isPositiveResearchClose(it.outcomeClosePct)
+            ForecastUniversalPositiveEvidencePolicy.qualifies(
+                realizedPct = null,
+                closePct = it.outcomeClosePct,
+                maxFavourablePct = it.outcomeMfePct ?: 0.0,
+                targetHit = it.outcomeTargetHit == true
+            )
         }
+        val universalEvidence = learningDao.forecastPositiveEvidenceForDate(today)
         val wins = forecasts.count { it.status == "TARGET_HIT" }
         val matched = forecasts.count { it.multifyMatched }
         val frozen = learningDao.allForecastChampions().count { it.frozen }
@@ -4426,12 +4442,13 @@ class TradingRepository @Inject constructor(
             append("Today's average target: ${fmt(avgTarget)}% with a hard 1.00% floor. ")
             append("Published target hits: $wins/${forecasts.size}. ")
             append("Five-session live calibration: ${forecastLearning.researchSessionsCaptured}/${forecastLearning.researchSessionGoal}. ")
+            append("Universal positive evidence today: ${universalEvidence.size} rows (Forecast/Fixed/Multify), with target misses still positive when the shared stepped trail armed/protected profit. ")
             append(tierSummary("PRIMARY")).append(". ")
             append(tierSummary("SECONDARY")).append(". ")
             append(tierSummary("RESEARCH")).append(". ")
             append("Multify later matched $matched/${forecasts.size} published symbols. ")
             append("Frozen LONG champions: $frozen. ")
-            append("Forecast learning is positive-close-only: negative/flat closes remain in diagnostics but never become ranking examples. ")
+            append("Forecast learning is positive-only: realized-positive, positive-close, target-hit, or common-trailing-protected cases may become evidence after maturity; negative/flat outcomes remain diagnostic and never become ranking penalties. ")
             append("Production execution remains PRIMARY-only while SECONDARY/RESEARCH rows collect evidence.")
         }
         val entity = com.multify.traderpro.data.local.ResearchReportEntity(
