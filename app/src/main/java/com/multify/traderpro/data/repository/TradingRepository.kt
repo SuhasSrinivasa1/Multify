@@ -75,6 +75,7 @@ import com.multify.traderpro.engine.FixedPositiveCloseForecastPolicy
 import com.multify.traderpro.engine.FixedScanPerformancePolicy
 import com.multify.traderpro.engine.FixedStrategyEvaluation
 import com.multify.traderpro.engine.GrowwDeliveryCostPolicy
+import com.multify.traderpro.engine.GrowwApiBudgetPolicy
 import com.multify.traderpro.engine.HoldingSmartOrderPolicy
 import com.multify.traderpro.engine.LocalStrategyEngine
 import com.multify.traderpro.engine.MarketDiscoveryPolicy
@@ -175,6 +176,14 @@ class TradingRepository @Inject constructor(
     private val embeddedHistoricalSeedMutex = Mutex()
     private val bulkMarketDataMutex = Mutex()
     private var nextBulkMarketDataAtElapsedMs = 0L
+    private val fixedLiveDataRateMutex = Mutex()
+    private val fixedLiveDataSecondWindowMs = mutableListOf<Long>()
+    private val fixedLiveDataMinuteWindowMs = mutableListOf<Long>()
+    private var fixedLiveDataCooldownUntilElapsedMs = 0L
+    private val fixedHistoricalDataMutex = Mutex()
+    private var nextFixedHistoricalAtElapsedMs = 0L
+    private var fixedHistoricalCooldownUntilElapsedMs = 0L
+    @Volatile private var activePortfolioMonitorCount = 0
     private val lastTrailStateAuditAtMs = ConcurrentHashMap<Long, Long>()
     private val lastSmartOrderStatusAtMs = ConcurrentHashMap<Long, Long>()
 
@@ -1969,12 +1978,14 @@ class TradingRepository @Inject constructor(
         val now = ZonedDateTime.now(INDIA)
         val start = now.minusDays(4).toLocalDate().atTime(9, 15).format(HIST_FORMAT)
         val end = now.toLocalDateTime().format(HIST_FORMAT)
-        val quote = withBulkMarketDataSlot {
+        val quote = withFixedLiveDataSlot {
             apiFactory.groww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Fixed quote $symbol")
         }
-        val historical = apiFactory.groww.historicalCandles(
-            bearer(token), growwSymbol = "NSE-$symbol", startTime = start, endTime = end, candleInterval = "15minute"
-        ).requirePayload("Fixed forecast candles $symbol")
+        val historical = withFixedHistoricalDataSlot {
+            apiFactory.groww.historicalCandles(
+                bearer(token), growwSymbol = "NSE-$symbol", startTime = start, endTime = end, candleInterval = "15minute"
+            ).requirePayload("Fixed forecast candles $symbol")
+        }
         require(historical.candles.size >= 5) { "Insufficient fixed forecast candles" }
         val features = FixedLocalStrategyEngine.buildFeatures(quote, historical, 15)
         val signal = ParsedSignal(SignalType.TRADE_RELEASE, symbol = symbol, rawText = "fixed-forecast", confidence = 1.0)
@@ -2063,7 +2074,7 @@ class TradingRepository @Inject constructor(
         for (attempt in 0 until FIXED_V741_DISCOVERY_BATCH_ATTEMPTS) {
             try {
                 val exchangeSymbols = chunk.joinToString(",") { "NSE_$it" }
-                return withBulkMarketDataSlot {
+                return withFixedLiveDataSlot {
                     apiFactory.groww.ltp(bearer(token), exchangeSymbols = exchangeSymbols)
                         .requirePayload("Fixed market-wide discovery LTP")
                 }
@@ -2353,6 +2364,79 @@ class TradingRepository @Inject constructor(
                 nextBulkMarketDataAtElapsedMs = SystemClock.elapsedRealtime() +
                     if (t is HttpException && t.code() == 429) BULK_MARKET_DATA_429_COOLDOWN_MS
                     else BULK_MARKET_DATA_MIN_GAP_MS
+                throw t
+            }
+        }
+
+    private suspend fun awaitFixedLiveDataSlot() {
+        while (true) {
+            var waitMs = 0L
+            val granted = fixedLiveDataRateMutex.withLock {
+                val now = SystemClock.elapsedRealtime()
+                fixedLiveDataSecondWindowMs.removeAll { now - it >= 1_000L }
+                fixedLiveDataMinuteWindowMs.removeAll { now - it >= 60_000L }
+
+                val hasOpenHoldings = activePortfolioMonitorCount > 0
+                val perSecond = GrowwApiBudgetPolicy.fixedLiveDataPerSecond(hasOpenHoldings)
+                val perMinute = GrowwApiBudgetPolicy.fixedLiveDataPerMinute(hasOpenHoldings)
+
+                val cooldownWait = (fixedLiveDataCooldownUntilElapsedMs - now).coerceAtLeast(0L)
+                val secondWait = if (fixedLiveDataSecondWindowMs.size >= perSecond) {
+                    (fixedLiveDataSecondWindowMs.first() + 1_000L - now).coerceAtLeast(1L)
+                } else 0L
+                val minuteWait = if (fixedLiveDataMinuteWindowMs.size >= perMinute) {
+                    (fixedLiveDataMinuteWindowMs.first() + 60_000L - now).coerceAtLeast(1L)
+                } else 0L
+
+                waitMs = maxOf(cooldownWait, secondWait, minuteWait)
+                if (waitMs <= 0L) {
+                    fixedLiveDataSecondWindowMs += now
+                    fixedLiveDataMinuteWindowMs += now
+                    true
+                } else false
+            }
+            if (granted) return
+            delay(waitMs.coerceAtLeast(10L))
+        }
+    }
+
+    private suspend fun <T> withFixedLiveDataSlot(block: suspend () -> T): T {
+        awaitFixedLiveDataSlot()
+        return try {
+            block()
+        } catch (t: Throwable) {
+            if (t is HttpException && t.code() == 429) {
+                fixedLiveDataRateMutex.withLock {
+                    fixedLiveDataCooldownUntilElapsedMs = max(
+                        fixedLiveDataCooldownUntilElapsedMs,
+                        SystemClock.elapsedRealtime() + GrowwApiBudgetPolicy.RATE_LIMIT_COOLDOWN_MS
+                    )
+                }
+            }
+            throw t
+        }
+    }
+
+    private suspend fun <T> withFixedHistoricalDataSlot(block: suspend () -> T): T =
+        fixedHistoricalDataMutex.withLock {
+            val now = SystemClock.elapsedRealtime()
+            val waitMs = max(
+                (nextFixedHistoricalAtElapsedMs - now).coerceAtLeast(0L),
+                (fixedHistoricalCooldownUntilElapsedMs - now).coerceAtLeast(0L)
+            )
+            if (waitMs > 0L) delay(waitMs)
+            try {
+                block().also {
+                    nextFixedHistoricalAtElapsedMs =
+                        SystemClock.elapsedRealtime() + GrowwApiBudgetPolicy.FIXED_HISTORICAL_MIN_GAP_MS
+                }
+            } catch (t: Throwable) {
+                if (t is HttpException && t.code() == 429) {
+                    fixedHistoricalCooldownUntilElapsedMs =
+                        SystemClock.elapsedRealtime() + GrowwApiBudgetPolicy.RATE_LIMIT_COOLDOWN_MS
+                }
+                nextFixedHistoricalAtElapsedMs =
+                    SystemClock.elapsedRealtime() + GrowwApiBudgetPolicy.FIXED_HISTORICAL_MIN_GAP_MS
                 throw t
             }
         }
@@ -2964,7 +3048,9 @@ class TradingRepository @Inject constructor(
         if (managedDao.openPosition(ENGINE_FIXED_HOLDING, row.symbol) != null) {
             return "${row.symbol} already has a Fixed holding; duplicate Fixed BUY blocked"
         }
-        val quote = apiFactory.groww.quote(bearer(token), tradingSymbol = row.symbol).requirePayload("Quote ${row.symbol}")
+        val quote = withFixedLiveDataSlot {
+            apiFactory.groww.quote(bearer(token), tradingSymbol = row.symbol).requirePayload("Quote ${row.symbol}")
+        }
         val ltp = quote.lastPrice ?: error("Groww quote has no LTP")
         val margin = apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin")
         val available = (margin.equity?.cncBalanceAvailable ?: margin.clearCash).coerceAtLeast(0.0)
@@ -3985,7 +4071,7 @@ class TradingRepository @Inject constructor(
             ?.filter { it.quantity > 0 && it.tradingSymbol.isNotBlank() }
             ?.map { it.tradingSymbol.uppercase(Locale.US) }
             .orEmpty()
-        return (localSymbols + brokerSymbols).distinct().size
+        return (localSymbols + brokerSymbols).distinct().size.also { activePortfolioMonitorCount = it }
     }
 
     suspend fun monitorManagedPositions(): Int {
