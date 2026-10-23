@@ -136,7 +136,7 @@ data class FixedPriorityCycleResult(
     val newRecommendations: List<ForecastDto> = emptyList(),
     val autoBuySubmitted: Int = 0,
     val decisionElapsedMs: Long = 0L,
-    val persistToAutoBuyStartMicros: Long = 0L,
+    val decisionToAutoBuyStartMicros: Long = 0L,
     val autoBuyElapsedMs: Long = 0L,
     val cycleElapsedMs: Long = 0L,
     val completedAtMs: Long = 0L
@@ -1541,7 +1541,7 @@ class TradingRepository @Inject constructor(
 
                 var autoBuySubmitted = 0
                 var autoBuyElapsedMs = 0L
-                var persistToAutoBuyStartMicros = 0L
+                var decisionToAutoBuyStartMicros = 0L
                 var newRecommendations = emptyList<ForecastDto>()
 
                 if (scanned) {
@@ -1551,7 +1551,7 @@ class TradingRepository @Inject constructor(
                         .map { it.toDto() }
 
                     val autoBuyStartedNs = SystemClock.elapsedRealtimeNanos()
-                    persistToAutoBuyStartMicros =
+                    decisionToAutoBuyStartMicros =
                         ((autoBuyStartedNs - decisionCompletedNs).coerceAtLeast(0L) / 1_000L)
                     autoBuySubmitted = autoBuyFixedRecommendations()
                     autoBuyElapsedMs =
@@ -1565,7 +1565,7 @@ class TradingRepository @Inject constructor(
                     autoBuySubmitted = autoBuySubmitted,
                     decisionElapsedMs =
                         ((decisionCompletedNs - decisionStartedNs).coerceAtLeast(0L) / 1_000_000L),
-                    persistToAutoBuyStartMicros = persistToAutoBuyStartMicros,
+                    decisionToAutoBuyStartMicros = decisionToAutoBuyStartMicros,
                     autoBuyElapsedMs = autoBuyElapsedMs,
                     cycleElapsedMs =
                         ((SystemClock.elapsedRealtimeNanos() - cycleStartedNs).coerceAtLeast(0L) / 1_000_000L),
@@ -1576,7 +1576,7 @@ class TradingRepository @Inject constructor(
                     auditLogger.logAsync("RUNTIME", "FIXED_CRITICAL_PATH_PROFILE", mapOf(
                         "cycle_started_at_ms" to cycleStartedAtMs,
                         "decision_elapsed_ms" to result.decisionElapsedMs,
-                        "persist_to_autobuy_start_micros" to result.persistToAutoBuyStartMicros,
+                        "decision_complete_to_autobuy_start_micros" to result.decisionToAutoBuyStartMicros,
                         "autobuy_elapsed_ms" to result.autoBuyElapsedMs,
                         "cycle_elapsed_ms" to result.cycleElapsedMs,
                         "new_recommendations" to result.newRecommendations.size,
@@ -3973,6 +3973,7 @@ class TradingRepository @Inject constructor(
         var submitted = 0
         for (row in rows) {
             val rowStartedNs = SystemClock.elapsedRealtimeNanos()
+            val rowStartedAtMs = System.currentTimeMillis()
             val liveSettings = preferences.settings.first()
             if (!liveSettings.fixedAutoBuyEnabled || !liveSettings.armEffective || liveSettings.safetyHalt) break
             if (managedDao.openPosition(ENGINE_FIXED_HOLDING, row.symbol) != null) continue
@@ -4095,7 +4096,7 @@ class TradingRepository @Inject constructor(
             auditLogger.logAsync("EXECUTION_LATENCY", "FIXED_AUTO_BUY_PROFILE", mapOf(
                 "symbol" to row.symbol,
                 "recommendation_to_row_start_ms" to
-                    ((System.currentTimeMillis() - row.generatedAtMs).coerceAtLeast(0L)),
+                    ((rowStartedAtMs - row.generatedAtMs).coerceAtLeast(0L)),
                 "quote_ms" to ((quoteCompletedNs - quoteStartedNs).coerceAtLeast(0L) / 1_000_000L),
                 "margin_ms" to ((marginCompletedNs - marginStartedNs).coerceAtLeast(0L) / 1_000_000L),
                 "pre_order_guard_ms" to ((orderStartedNs - marginCompletedNs).coerceAtLeast(0L) / 1_000_000L),
