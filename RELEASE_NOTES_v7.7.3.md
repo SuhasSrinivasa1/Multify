@@ -25,10 +25,12 @@ Order is therefore:
 
 This removes dependence on the dashboard's normal refresh cadence for user visibility without putting UI/presentation work in front of broker execution.
 
-Notifications are deduplicated per trading day and symbol/generated timestamp across service restarts.
+The repository also emits a nonblocking post-auto-buy delivery event. If the app UI is open, the ViewModel refreshes the dashboard immediately from local state; the existing 15-second polling loop remains only as a fallback.
+
+Notifications are deduplicated per trading day and symbol/generated timestamp across service restarts, and the notification task itself is launched asynchronously after the Fixed priority cycle returns.
 
 ## New low-overhead timing telemetry
-No new disk/JSON work is placed on the critical path; timing records use the async audit writer.
+No new disk/JSON work is placed on the critical path; timing records use the async audit writer. The successful Fixed ENTRY_MARKET_FILLED audit record is also queued asynchronously after the managed position has been persisted, reducing post-fill blocking before the next order pacing interval.
 
 New events:
 - `FIXED_PRIORITY_PHASE_PROFILE`
