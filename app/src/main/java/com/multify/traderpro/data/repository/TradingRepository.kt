@@ -62,6 +62,7 @@ import com.multify.traderpro.engine.ForecastFixedPositiveTransferPolicy
 import com.multify.traderpro.engine.FixedPositiveTransferCase
 import com.multify.traderpro.engine.ForecastQualityDecision
 import com.multify.traderpro.engine.ForecastQualityPolicy
+import com.multify.traderpro.engine.ForecastTargetExpansionPolicy
 import com.multify.traderpro.engine.ForecastPublicationPolicy
 import com.multify.traderpro.engine.FixedAdaptiveLearningMath
 import com.multify.traderpro.engine.FixedForecastPublicationPolicy
@@ -163,6 +164,7 @@ class TradingRepository @Inject constructor(
     private var lastForecastOutcomeMonitorAtMs = 0L
     private var lastFixedOutcomeMonitorAtMs = 0L
     private var lastFixedPreMarketWarmupAtMs = 0L
+    private var lastFixedHotPrewarmForDueAtMs = 0L
     private var brokerInventorySnapshot: BrokerInventorySnapshot? = null
     @Volatile private var activeGttSnapshot: ActiveGttSnapshot? = null
     private var lastClosedSessionReconcileAtMs = 0L
@@ -205,7 +207,8 @@ class TradingRepository @Inject constructor(
         val quality: ForecastQualityDecision,
         val factorModel: MultifyFactorModel,
         val score: Double,
-        val championKey: String
+        val championKey: String,
+        val targetPct: Double
     )
 
     private data class FixedCandidate(
@@ -1490,8 +1493,9 @@ class TradingRepository @Inject constructor(
             try {
                 val previousScanAtMs = lastFixedScanAtMs
                 generateFixedForecasts(false)
-                if (lastFixedScanAtMs != previousScanAtMs) autoBuyFixedRecommendations()
-                true
+                val scanned = lastFixedScanAtMs != previousScanAtMs
+                if (scanned) autoBuyFixedRecommendations()
+                scanned
             } finally {
                 fixedApiPriorityRequested = false
             }
@@ -1505,13 +1509,71 @@ class TradingRepository @Inject constructor(
             if (fixedApiPriorityRequested) return false
             val previousScanAtMs = lastForecastScanAtMs
             generateDailyForecasts(false)
-            if (!fixedApiPriorityRequested && lastForecastScanAtMs != previousScanAtMs) {
-                autoBuyForecastRecommendations()
-            }
-            true
+            val scanned = lastForecastScanAtMs != previousScanAtMs
+            if (!fixedApiPriorityRequested && scanned) autoBuyForecastRecommendations()
+            scanned
         } finally {
             scanApiCycleMutex.unlock()
         }
+    }
+
+    /**
+     * Prefetch the previous Fixed scan's detailed symbols shortly before the next 2.5-minute scan.
+     * This only warms the RAM HTTP cache; the frozen Fixed formula and its candidate construction
+     * are untouched. If a 15-minute boundary is crossed, the cache key changes and Fixed naturally
+     * falls back to fresh broker data.
+     */
+    suspend fun maintainFixedHotDataCache(): Boolean {
+        val now = ZonedDateTime.now(INDIA)
+        if (now.dayOfWeek.value >= 6 || now.toLocalTime() < LocalTime.of(9, 15) || now.toLocalTime() >= LocalTime.of(15, 30)) {
+            return false
+        }
+        val previousScanAt = lastFixedScanAtMs
+        if (previousScanAt <= 0L || fixedApiPriorityRequested) return false
+        val nextDueAt = previousScanAt + FIXED_V741_FORECAST_SCAN_INTERVAL_MS
+        val untilDueMs = nextDueAt - System.currentTimeMillis()
+        if (untilDueMs !in FIXED_HOT_PREWARM_MIN_LEAD_MS..FIXED_HOT_PREWARM_MAX_LEAD_MS) return false
+        if (lastFixedHotPrewarmForDueAtMs == nextDueAt) return false
+
+        val today = now.toLocalDate().toString()
+        val observations = fixedRecommendationStore.observations(today)
+        val latestScanAt = observations.maxOfOrNull { it.scanAtMs } ?: return false
+        val symbols = observations.asSequence()
+            .filter { it.scanAtMs == latestScanAt }
+            .map { it.symbol.uppercase(Locale.US) }
+            .distinct()
+            .take(FIXED_V741_RESEARCH_CAPTURE_TOP_N)
+            .toList()
+        if (symbols.isEmpty()) return false
+        val token = ensureToken() ?: return false
+        lastFixedHotPrewarmForDueAtMs = nextDueAt
+
+        val start = now.minusDays(4).toLocalDate().atTime(9, 15).format(HIST_FORMAT)
+        val end = now.toLocalDateTime().format(HIST_FORMAT)
+        var warmed = 0
+        for (batch in symbols.chunked(FIXED_HOT_PREWARM_CONCURRENCY)) {
+            if (fixedApiPriorityRequested) break
+            val results = coroutineScope {
+                batch.map { symbol ->
+                    async {
+                        runCatching {
+                            apiFactory.groww.historicalCandles(
+                                bearer(token), growwSymbol = "NSE-$symbol", startTime = start, endTime = end, candleInterval = "15minute"
+                            ).requirePayload("Fixed hot prewarm $symbol")
+                        }.isSuccess
+                    }
+                }.awaitAll()
+            }
+            warmed += results.count { it }
+        }
+        auditLogger.log("FIXED_ENGINE", "HOT_DATA_PREWARM", mapOf(
+            "symbols_requested" to symbols.size,
+            "symbols_warmed" to warmed,
+            "lead_ms" to untilDueMs,
+            "formula_changed" to false,
+            "cache_only_acceleration" to true
+        ))
+        return warmed > 0
     }
 
     private fun fixedPositiveTransferCases(beforeDate: String): List<FixedPositiveTransferCase> {
@@ -1540,7 +1602,8 @@ class TradingRepository @Inject constructor(
                         strategy = x.get("strategy")?.asString.orEmpty(),
                         regime = x.get("regime")?.asString.orEmpty(),
                         marketRegime = x.get("marketRegime")?.asString.orEmpty(),
-                        closeGainPct = (last / entry - 1.0) * 100.0
+                        closeGainPct = (last / entry - 1.0) * 100.0,
+                        maxFavourablePct = x.get("maxFavourablePct")?.asDouble ?: 0.0
                     ),
                     observedAt
                 )
@@ -1660,7 +1723,23 @@ class TradingRepository @Inject constructor(
         }
 
         val ranked = evaluated.map { row ->
-            val quality = ForecastQualityPolicy.evaluate(row.second, targetPct, marketRegime)
+            val baseQuality = ForecastQualityPolicy.evaluate(row.second, targetPct, marketRegime)
+            val expandedTargetPct = ForecastTargetExpansionPolicy.targetPct(
+                baseTargetPct = targetPct,
+                symbol = row.first,
+                strategy = row.second.strategy,
+                regime = row.second.regime,
+                marketRegime = marketRegime,
+                volatilityCapacityPct = baseQuality.volatilityCapacityPct,
+                positives = fixedPositiveTransfer
+            )
+            val expandedQuality = ForecastQualityPolicy.evaluate(row.second, expandedTargetPct, marketRegime)
+            val useExpandedTarget = expandedTargetPct > targetPct &&
+                expandedQuality.tier == baseQuality.tier &&
+                expandedQuality.publishEligible == baseQuality.publishEligible &&
+                expandedQuality.executionEligible == baseQuality.executionEligible
+            val candidateTargetPct = if (useExpandedTarget) expandedTargetPct else targetPct
+            val quality = if (useExpandedTarget) expandedQuality else baseQuality
             val factorModel = MultifyFactorFamilies.evaluate(row.second, marketRegime)
             val key = championKey(marketRegime, row.second.regime, row.second.strategy)
             val champion = champions[key]
@@ -1672,7 +1751,7 @@ class TradingRepository @Inject constructor(
             }
             val frequencyBonus = min(.04, (frequency[row.first] ?: 0) * .004)
             val dnaBonus = if (row.first in dnaSymbols) .08 else 0.0
-            val qualityBonus = ForecastQualityPolicy.rankingBonus(row.second, quality.volatilityCapacityPct, targetPct, quality.tier)
+            val qualityBonus = ForecastQualityPolicy.rankingBonus(row.second, quality.volatilityCapacityPct, candidateTargetPct, quality.tier)
             val researchBonus = researchEvidenceBonus(row.second)
             val familyBonus = MultifyFactorFamilies.rankingBonus(factorModel)
             val fixedPositiveBonus = ForecastFixedPositiveTransferPolicy.rankingBonus(
@@ -1689,7 +1768,8 @@ class TradingRepository @Inject constructor(
                     championBonus + frequencyBonus + dnaBonus + qualityBonus + researchBonus + familyBonus +
                     fixedPositiveBonus
                 ).coerceIn(0.01, .99),
-                championKey = key
+                championKey = key,
+                targetPct = candidateTargetPct
             )
         }.sortedWith(
             compareByDescending<ForecastCandidate> {
@@ -1741,8 +1821,8 @@ class TradingRepository @Inject constructor(
                     rank = existing.size + index + 1,
                     symbol = item.symbol,
                     entryPrice = price,
-                    targetPct = targetPct,
-                    targetPrice = price * (1.0 + targetPct / 100.0),
+                    targetPct = item.targetPct,
+                    targetPrice = price * (1.0 + item.targetPct / 100.0),
                     confidence = item.evaluation.confidence,
                     score = item.score,
                     strategy = item.evaluation.strategy,
@@ -1752,7 +1832,8 @@ class TradingRepository @Inject constructor(
                     reason = quality.reason + " · " + item.evaluation.reason +
                         " · family " + item.factorModel.dominantFamily +
                         " · family consensus " + fmt(item.factorModel.consensusScore * 100.0) + "%" +
-                        " · capacity " + fmt(quality.volatilityCapacityPct) + "% for " + fmt(targetPct) + "% target",
+                        " · capacity " + fmt(quality.volatilityCapacityPct) + "% for " + fmt(item.targetPct) + "% target" +
+                        if (item.targetPct > targetPct) " · positive Fixed upside expansion +" + fmt(item.targetPct - targetPct) + "pp" else "",
                     generatedAtMs = nowMs,
                     lastPrice = price,
                     lastObservedAtMs = nowMs,
@@ -1773,7 +1854,9 @@ class TradingRepository @Inject constructor(
             "published_count" to all.size,
             "daily_recommendation_cap" to "NONE",
             "newly_publishable_count" to publishable.size,
-            "target_pct" to targetPct,
+            "base_target_pct" to targetPct,
+            "max_published_target_pct" to (publishable.maxOfOrNull { it.targetPct } ?: targetPct),
+            "positive_target_expansion_enabled" to true,
             "target_floor_pct" to ForecastQualityPolicy.MIN_TARGET_PCT,
             "multify_mfe_avg_pct" to learned.longAveragePct,
             "breadth_pct" to breadth,
@@ -5132,8 +5215,8 @@ class TradingRepository @Inject constructor(
         if (response.orderStatus.uppercase(Locale.US) in setOf("REJECTED", "FAILED", "CANCELLED")) {
             error("Groww order ${response.orderStatus}: ${response.remark.orEmpty()}")
         }
-        repeat(10) {
-            delay(450)
+        for (pollDelayMs in MARKET_ORDER_FILL_POLL_DELAYS_MS) {
+            delay(pollDelayMs)
             val status = apiFactory.groww.orderStatus(bearer(token), id).requirePayload("Order status")
             if (status.orderStatus.equals("EXECUTED", true) || (status.filledQuantity ?: 0) >= qty) {
                 return acceptFilled(status)
@@ -5742,17 +5825,21 @@ class TradingRepository @Inject constructor(
         private const val FIXED_MIN_STOCK_PRICE_RUPEES = 100.0
         private const val FIXED_PREMARKET_WARMUP_INTERVAL_MS = 5L * 60L * 1000L
         private const val FIXED_V741_FORECAST_SCAN_INTERVAL_MS = 150_000L
-        private const val FIXED_V741_FORECAST_SYMBOL_PACING_MS = 150L
+        private const val FIXED_V741_FORECAST_SYMBOL_PACING_MS = 25L
         private const val FIXED_V741_PRIMARY_CONFIRMATION_WINDOW_MS = 20L * 60L * 1000L
         private const val FIXED_V741_DETAILED_FORECAST_UNIVERSE_LIMIT = 48
         private const val FIXED_V741_DISCOVERY_DYNAMIC_LIMIT = 28
         private const val FIXED_V741_DISCOVERY_ROTATING_FALLBACK = 16
-        private const val FIXED_V741_DISCOVERY_BATCH_PACING_MS = 200L
+        private const val FIXED_V741_DISCOVERY_BATCH_PACING_MS = 25L
         private const val FIXED_V741_DISCOVERY_BATCH_ATTEMPTS = 2
         private const val FIXED_V741_DISCOVERY_RETRY_BACKOFF_MS = 750L
         private const val FIXED_V741_DISCOVERY_CONSECUTIVE_FAILURE_ABORT = 3
         private const val FIXED_V741_MIN_DISCOVERY_COVERAGE_RATIO = 0.85
         private const val FIXED_V741_RESEARCH_CAPTURE_TOP_N = 48
+        private const val FIXED_HOT_PREWARM_MIN_LEAD_MS = 13_000L
+        private const val FIXED_HOT_PREWARM_MAX_LEAD_MS = 18_000L
+        private const val FIXED_HOT_PREWARM_CONCURRENCY = 8
+        private val MARKET_ORDER_FILL_POLL_DELAYS_MS = longArrayOf(125L, 175L, 250L, 350L, 450L, 600L, 750L, 900L, 1_100L, 1_300L)
         private const val FIXED_V741_RESEARCH_SESSION_GOAL = 5
         private const val FIXED_V741_MIN_RESEARCH_EVIDENCE_ROWS = 4
         private const val PRIMARY_CONFIRMATION_WINDOW_MS = 20L * 60L * 1000L
