@@ -123,6 +123,50 @@ data class ForecastResearchEntity(
     val outcomeUpdatedAtMs: Long? = null
 )
 
+
+@Entity(
+    tableName = "forecast_positive_evidence",
+    indices = [
+        Index(value = ["source", "evidenceDate"]),
+        Index(value = ["marketRegime", "regime", "strategy"]),
+        Index(value = ["capBucket", "dominantFamily"]),
+        Index(value = ["symbol", "evidenceDate"])
+    ]
+)
+data class ForecastPositiveEvidenceEntity(
+    @PrimaryKey val evidenceKey: String,
+    val source: String,
+    val evidenceDate: String,
+    val eventAtMs: Long,
+    val symbol: String,
+    val strategy: String,
+    val regime: String,
+    val marketRegime: String,
+    val sectorRegime: String = "UNAVAILABLE",
+    val capBucket: String = "CAP_UNKNOWN",
+    val timeBucket: String = "UNKNOWN",
+    val dominantFamily: String = "UNKNOWN",
+    val familyConsensus: Double = 0.0,
+    val momentumFamilyScore: Double = 0.0,
+    val participationFamilyScore: Double = 0.0,
+    val structureFamilyScore: Double = 0.0,
+    val factorJson: String = "{}",
+    val voteJson: String = "[]",
+    val entryPrice: Double,
+    val targetPct: Double? = null,
+    val maxFavourablePct: Double = 0.0,
+    val maxAdversePct: Double = 0.0,
+    val closePct: Double? = null,
+    val realizedPct: Double? = null,
+    val protectedTrailPct: Double? = null,
+    val trailArmed: Boolean = false,
+    val targetHit: Boolean = false,
+    val positiveReason: String,
+    val qualityTier: String = "EVIDENCE",
+    val reconstructionQuality: String = "LIVE_SNAPSHOT",
+    val updatedAtMs: Long
+)
+
 @Entity(
     tableName = "forecast_champions",
     indices = [Index(value = ["marketRegime", "regime", "strategy"], unique = true)]
