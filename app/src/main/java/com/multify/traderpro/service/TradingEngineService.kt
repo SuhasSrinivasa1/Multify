@@ -49,6 +49,12 @@ class TradingEngineService : Service() {
     private var lastAfterHoursResearchAtMs = 0L
     private var lastAfterHoursMaintenanceAtMs = 0L
     private var lastApiUsageAuditAtMs = 0L
+    private var positionProfileWindowStartedAtMs = 0L
+    private var positionProfilePasses = 0
+    private var positionProfileFailures = 0
+    private var positionProfileElapsedMs = 0L
+    private var positionProfileMaxMs = 0L
+    private var positionProfileUsageBaseline: GrowwApiUsageLedger.Snapshot? = null
     @Volatile private var lastForecastOutcomeCount = 0
     @Volatile private var lastFixedOutcomeCount = 0
 
@@ -150,6 +156,43 @@ class TradingEngineService : Service() {
                     runCatching { repository.maintainArmHotPath() }
                         .onFailure { auditLogger.log("RUNTIME", "ARM_HOT_PATH_MAINTAIN_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
 
+                    val profileNowMs = System.currentTimeMillis()
+                    if (profileNowMs - positionProfileWindowStartedAtMs >= POSITION_PROFILE_INTERVAL_MS) {
+                        val before = positionProfileUsageBaseline
+                        val after = GrowwApiUsageLedger.snapshot()
+                        fun delta(category: GrowwApiUsageLedger.Category, selector: (GrowwApiUsageLedger.CategorySnapshot) -> Long): Long {
+                            if (before == null) return 0L
+                            val b = before.categories.first { it.category == category }
+                            val a = after.categories.first { it.category == category }
+                            return (selector(a) - selector(b)).coerceAtLeast(0L)
+                        }
+                        auditLogger.logAsync("RUNTIME", "TRAILING_MONITOR_PROFILE", mapOf(
+                            "window_ms" to (profileNowMs - positionProfileWindowStartedAtMs),
+                            "passes" to positionProfilePasses,
+                            "failures" to positionProfileFailures,
+                            "average_pass_ms" to if (positionProfilePasses > 0) positionProfileElapsedMs / positionProfilePasses else 0L,
+                            "max_pass_ms" to positionProfileMaxMs,
+                            "last_known_managed_count" to lastKnownManagedCount,
+                            "live_network_requests" to delta(GrowwApiUsageLedger.Category.LIVE_DATA) { it.totalRequests },
+                            "order_network_requests" to delta(GrowwApiUsageLedger.Category.ORDERS) { it.totalRequests },
+                            "non_trading_network_requests" to delta(GrowwApiUsageLedger.Category.NON_TRADING) { it.totalRequests },
+                            "live_429s" to delta(GrowwApiUsageLedger.Category.LIVE_DATA) { it.rateLimitResponses },
+                            "order_429s" to delta(GrowwApiUsageLedger.Category.ORDERS) { it.rateLimitResponses },
+                            "non_trading_429s" to delta(GrowwApiUsageLedger.Category.NON_TRADING) { it.rateLimitResponses },
+                            "governor_wait_ms" to (
+                                delta(GrowwApiUsageLedger.Category.LIVE_DATA) { it.permitWaitMs } +
+                                delta(GrowwApiUsageLedger.Category.ORDERS) { it.permitWaitMs } +
+                                delta(GrowwApiUsageLedger.Category.NON_TRADING) { it.permitWaitMs }
+                            )
+                        ))
+                        positionProfileWindowStartedAtMs = profileNowMs
+                        positionProfilePasses = 0
+                        positionProfileFailures = 0
+                        positionProfileElapsedMs = 0L
+                        positionProfileMaxMs = 0L
+                        positionProfileUsageBaseline = after
+                    }
+
                     val now = ZonedDateTime.now(INDIA)
                     val regularSession = now.dayOfWeek.value < 6 &&
                         now.toLocalTime() >= LocalTime.of(9, 15) &&
@@ -188,7 +231,7 @@ class TradingEngineService : Service() {
                     if (nowMs - lastApiUsageAuditAtMs >= API_USAGE_AUDIT_INTERVAL_MS) {
                         lastApiUsageAuditAtMs = nowMs
                         val usage = GrowwApiUsageLedger.snapshot()
-                        auditLogger.log("API_BUDGET", "ROLLING_USAGE", mapOf(
+                        auditLogger.logAsync("API_BUDGET", "ROLLING_USAGE", mapOf(
                             "summary" to usage.compact(),
                             "categories" to usage.categories.associate { row ->
                                 row.category.name to mapOf(
@@ -198,11 +241,17 @@ class TradingEngineService : Service() {
                                     "app_limit_60s" to row.appPerMinuteLimit,
                                     "headroom_60s" to row.minuteHeadroom,
                                     "utilization_pct" to row.minuteUtilizationPct,
-                                    "429s" to row.rateLimitResponses
+                                    "429s" to row.rateLimitResponses,
+                                    "last_429_at_ms" to row.lastRateLimitAtMs,
+                                    "governor_wait_count" to row.permitWaitCount,
+                                    "governor_wait_ms_total" to row.permitWaitMs,
+                                    "governor_wait_ms_max" to row.maxPermitWaitMs,
+                                    "network_ms_total" to row.networkMs
                                 )
                             },
                             "cache_hits_total" to GrowwApiUsageLedger.cacheHitCount(),
-                            "cache_misses_total" to GrowwApiUsageLedger.cacheMissCount()
+                            "cache_misses_total" to GrowwApiUsageLedger.cacheMissCount(),
+                            "async_audit_dropped_total" to auditLogger.asyncDroppedCount()
                         ))
                     }
 
@@ -241,7 +290,16 @@ class TradingEngineService : Service() {
             auditLogger.log("RUNTIME", "POSITION_MONITOR_WORKER_STARTED")
             while (isActive) {
                 try {
+                    val passStartedAtMs = System.currentTimeMillis()
+                    if (positionProfileWindowStartedAtMs <= 0L) {
+                        positionProfileWindowStartedAtMs = passStartedAtMs
+                        positionProfileUsageBaseline = GrowwApiUsageLedger.snapshot()
+                    }
                     val result = runCatching { repository.monitorManagedPositions() }
+                    val passElapsedMs = (System.currentTimeMillis() - passStartedAtMs).coerceAtLeast(0L)
+                    positionProfilePasses++
+                    positionProfileElapsedMs += passElapsedMs
+                    positionProfileMaxMs = maxOf(positionProfileMaxMs, passElapsedMs)
                     val failure = result.exceptionOrNull()
                     val succeeded = failure == null
                     lastManagedMonitorSucceeded = succeeded
@@ -254,6 +312,7 @@ class TradingEngineService : Service() {
                             reason = if (count > 0) "ACTIVE_MANAGED_HOLDINGS" else "NO_OPEN_MANAGED_HOLDINGS"
                         )
                     } else {
+                        positionProfileFailures++
                         if (failure is CancellationException) throw failure
                         updatePositionMonitoringWakeLock(true, "MONITOR_ERROR_UNKNOWN_POSITION_STATE")
                         auditLogger.log("RUNTIME", "MANAGED_MONITOR_ERROR", mapOf(
@@ -342,11 +401,25 @@ class TradingEngineService : Service() {
                                 val after = usageAfter.categories.first { it.category == category }.totalRequests
                                 return (after - before).coerceAtLeast(0L)
                             }
-                            auditLogger.log("RUNTIME", "FIXED_SCAN_PROFILE", mapOf(
+                            auditLogger.logAsync("RUNTIME", "FIXED_SCAN_PROFILE", mapOf(
                                 "elapsed_ms" to elapsed,
                                 "live_network_requests" to requestDelta(GrowwApiUsageLedger.Category.LIVE_DATA),
                                 "historical_network_requests" to requestDelta(GrowwApiUsageLedger.Category.HISTORICAL),
                                 "non_trading_network_requests" to requestDelta(GrowwApiUsageLedger.Category.NON_TRADING),
+                                "live_429s" to (
+                                    usageAfter.categories.first { it.category == GrowwApiUsageLedger.Category.LIVE_DATA }.rateLimitResponses -
+                                        usageBefore.categories.first { it.category == GrowwApiUsageLedger.Category.LIVE_DATA }.rateLimitResponses
+                                    ).coerceAtLeast(0L),
+                                "historical_429s" to (
+                                    usageAfter.categories.first { it.category == GrowwApiUsageLedger.Category.HISTORICAL }.rateLimitResponses -
+                                        usageBefore.categories.first { it.category == GrowwApiUsageLedger.Category.HISTORICAL }.rateLimitResponses
+                                    ).coerceAtLeast(0L),
+                                "governor_wait_ms" to (
+                                    (usageAfter.categories.first { it.category == GrowwApiUsageLedger.Category.LIVE_DATA }.permitWaitMs -
+                                        usageBefore.categories.first { it.category == GrowwApiUsageLedger.Category.LIVE_DATA }.permitWaitMs).coerceAtLeast(0L) +
+                                    (usageAfter.categories.first { it.category == GrowwApiUsageLedger.Category.HISTORICAL }.permitWaitMs -
+                                        usageBefore.categories.first { it.category == GrowwApiUsageLedger.Category.HISTORICAL }.permitWaitMs).coerceAtLeast(0L)
+                                    ),
                                 "cache_hits" to (GrowwApiUsageLedger.cacheHitCount() - cacheHitsBefore).coerceAtLeast(0L),
                                 "evaluation_concurrency_high_end" to 8,
                                 "fixed_formula_changed" to false
@@ -400,15 +473,40 @@ class TradingEngineService : Service() {
                         now.toLocalTime() >= LocalTime.of(9, 15) &&
                         now.toLocalTime() <= LocalTime.of(15, 0)
                     ) {
+                        val usageBefore = GrowwApiUsageLedger.snapshot()
+                        val cacheHitsBefore = GrowwApiUsageLedger.cacheHitCount()
                         val startedAt = System.currentTimeMillis()
-                        runCatching { repository.runForecastOpportunisticCycle() }
+                        val scanned = runCatching { repository.runForecastOpportunisticCycle() }
                             .onFailure {
                                 if (it !is CancellationException) {
                                     auditLogger.log("RUNTIME", "FORECAST_SCAN_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName)))
                                 }
-                            }
+                            }.getOrDefault(false)
                         val elapsed = System.currentTimeMillis() - startedAt
-                        if (elapsed >= SCAN_DURATION_AUDIT_THRESHOLD_MS) {
+                        if (scanned) {
+                            val usageAfter = GrowwApiUsageLedger.snapshot()
+                            fun delta(category: GrowwApiUsageLedger.Category, selector: (GrowwApiUsageLedger.CategorySnapshot) -> Long): Long {
+                                val before = usageBefore.categories.first { it.category == category }
+                                val after = usageAfter.categories.first { it.category == category }
+                                return (selector(after) - selector(before)).coerceAtLeast(0L)
+                            }
+                            auditLogger.logAsync("RUNTIME", "FORECAST_SCAN_PROFILE", mapOf(
+                                "elapsed_ms" to elapsed,
+                                "live_network_requests" to delta(GrowwApiUsageLedger.Category.LIVE_DATA) { it.totalRequests },
+                                "historical_network_requests" to delta(GrowwApiUsageLedger.Category.HISTORICAL) { it.totalRequests },
+                                "non_trading_network_requests" to delta(GrowwApiUsageLedger.Category.NON_TRADING) { it.totalRequests },
+                                "live_429s" to delta(GrowwApiUsageLedger.Category.LIVE_DATA) { it.rateLimitResponses },
+                                "historical_429s" to delta(GrowwApiUsageLedger.Category.HISTORICAL) { it.rateLimitResponses },
+                                "governor_wait_ms" to (
+                                    delta(GrowwApiUsageLedger.Category.LIVE_DATA) { it.permitWaitMs } +
+                                    delta(GrowwApiUsageLedger.Category.HISTORICAL) { it.permitWaitMs } +
+                                    delta(GrowwApiUsageLedger.Category.NON_TRADING) { it.permitWaitMs }
+                                ),
+                                "cache_hits" to (GrowwApiUsageLedger.cacheHitCount() - cacheHitsBefore).coerceAtLeast(0L),
+                                "fixed_priority_architecture" to true
+                            ))
+                        }
+                        if (scanned && elapsed >= SCAN_DURATION_AUDIT_THRESHOLD_MS) {
                             auditLogger.log("RUNTIME", "FORECAST_SCAN_DURATION", mapOf(
                                 "elapsed_ms" to elapsed,
                                 "parallel_scheduler" to true
@@ -545,6 +643,7 @@ class TradingEngineService : Service() {
         private const val POSITION_LOOP_INTERVAL_MS = 1_000L
         private const val PORTFOLIO_POSITION_LOOP_INTERVAL_MS = 1_000L
         private const val POSITION_MONITOR_ERROR_RETRY_MS = 1_000L
+        private const val POSITION_PROFILE_INTERVAL_MS = 30_000L
         private const val IDLE_POSITION_LOOP_INTERVAL_MS = 5_000L
         private const val SCAN_WORKER_POLL_MS = 1_000L
         private const val FORECAST_PAUSED_POLL_MS = 5_000L
