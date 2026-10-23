@@ -1678,6 +1678,30 @@ class TradingRepository @Inject constructor(
         }
     }
 
+    private suspend fun universalPositiveEvidenceCases(beforeDate: String): List<ForecastPositiveEvidenceCase> {
+        val rows = learningDao.allForecastPositiveEvidence()
+            .filter { it.evidenceDate < beforeDate }
+        val dates = rows.map { it.evidenceDate }.distinct().sortedDescending().take(30).toSet()
+        return rows.filter { it.evidenceDate in dates }.map {
+            ForecastPositiveEvidenceCase(
+                source = it.source,
+                evidenceDate = it.evidenceDate,
+                symbol = it.symbol,
+                strategy = it.strategy,
+                regime = it.regime,
+                marketRegime = it.marketRegime,
+                sectorRegime = it.sectorRegime,
+                capBucket = it.capBucket,
+                timeBucket = it.timeBucket,
+                dominantFamily = it.dominantFamily,
+                realizedPct = it.realizedPct,
+                closePct = it.closePct,
+                maxFavourablePct = it.maxFavourablePct,
+                protectedTrailPct = it.protectedTrailPct
+            )
+        }
+    }
+
     private fun forecastCalibrationDates(): Set<String> =
         appContext.getSharedPreferences(FORECAST_CALIBRATION_PREFS, Context.MODE_PRIVATE)
             .getStringSet(FORECAST_CALIBRATION_DATES_KEY, emptySet())
