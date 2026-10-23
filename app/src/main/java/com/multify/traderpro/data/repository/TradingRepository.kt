@@ -159,6 +159,7 @@ class TradingRepository @Inject constructor(
     private var lastFixedScanAtMs = 0L
     private var lastForecastOutcomeMonitorAtMs = 0L
     private var lastFixedOutcomeMonitorAtMs = 0L
+    private var lastFixedPreMarketWarmupAtMs = 0L
     private var brokerInventorySnapshot: BrokerInventorySnapshot? = null
     @Volatile private var activeGttSnapshot: ActiveGttSnapshot? = null
     private var lastClosedSessionReconcileAtMs = 0L
@@ -809,6 +810,34 @@ class TradingRepository @Inject constructor(
             armHotState = null
         }
         auditLogger.log("SETTINGS", if (enabled) "ARM_ENABLED" else "ARM_DISABLED")
+    }
+
+    suspend fun prepareFixedPreMarketWarmup(): Boolean {
+        val now = ZonedDateTime.now(INDIA)
+        val t = now.toLocalTime()
+        if (now.dayOfWeek.value >= 6 || t < LocalTime.of(9, 0) || t >= LocalTime.of(9, 15)) return false
+        val nowMs = System.currentTimeMillis()
+        if (nowMs - lastFixedPreMarketWarmupAtMs < FIXED_PREMARKET_WARMUP_INTERVAL_MS) return true
+        lastFixedPreMarketWarmupAtMs = nowMs
+
+        val snapshot = ensureFixedEngineSnapshot()
+        val tokenReady = ensureToken() != null
+        val masterCount = nseSymbols.symbols().size
+        val settings = preferences.settings.first()
+        val armHotReady = if (settings.armEffective) {
+            runCatching { prepareArmHotPath(force = false) }.getOrDefault(false)
+        } else true
+
+        auditLogger.log("FIXED_ENGINE", "PREMARKET_WARMUP", mapOf(
+            "time_ist" to now.toString(),
+            "snapshot_id" to snapshot.payload.snapshotId,
+            "token_ready" to tokenReady,
+            "nse_master_count" to masterCount,
+            "arm_hot_ready" to armHotReady,
+            "market_data_scanned" to false,
+            "selection_logic_changed" to false
+        ))
+        return tokenReady && masterCount > 0
     }
 
     suspend fun setForecastScannerEnabled(enabled: Boolean) {
@@ -5315,6 +5344,7 @@ class TradingRepository @Inject constructor(
         private const val FORECAST_AUTO_BUY_ORDER_PACING_MS = 175L
         private const val FORECAST_AUTO_BUY_CANCEL_RECHECK_MS = 300L
         private const val FIXED_MIN_STOCK_PRICE_RUPEES = 100.0
+        private const val FIXED_PREMARKET_WARMUP_INTERVAL_MS = 5L * 60L * 1000L
         private const val FIXED_V741_FORECAST_SCAN_INTERVAL_MS = 5L * 60L * 1000L
         private const val FIXED_V741_FORECAST_SYMBOL_PACING_MS = 150L
         private const val FIXED_V741_PRIMARY_CONFIRMATION_WINDOW_MS = 20L * 60L * 1000L

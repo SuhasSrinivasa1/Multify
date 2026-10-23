@@ -255,6 +255,19 @@ class TradingEngineService : Service() {
                 try {
                     val now = ZonedDateTime.now(INDIA)
                     if (now.dayOfWeek.value < 6 &&
+                        now.toLocalTime() >= LocalTime.of(9, 0) &&
+                        now.toLocalTime() < LocalTime.of(9, 15)
+                    ) {
+                        runCatching { repository.prepareFixedPreMarketWarmup() }
+                            .onFailure {
+                                if (it !is CancellationException) {
+                                    auditLogger.log("RUNTIME", "FIXED_PREMARKET_WARMUP_ERROR", mapOf(
+                                        "message" to (it.message ?: it.javaClass.simpleName)
+                                    ))
+                                }
+                            }
+                    }
+                    if (now.dayOfWeek.value < 6 &&
                         now.toLocalTime() >= LocalTime.of(9, 15) &&
                         now.toLocalTime() < LocalTime.of(15, 30)
                     ) {
