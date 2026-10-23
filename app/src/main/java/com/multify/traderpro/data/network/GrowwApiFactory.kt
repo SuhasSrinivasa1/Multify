@@ -4,6 +4,7 @@ import com.google.gson.GsonBuilder
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
 import com.multify.traderpro.BuildConfig
+import com.multify.traderpro.data.logging.AuditLogger
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import java.util.concurrent.TimeUnit
@@ -11,7 +12,9 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 @Singleton
-class GrowwApiFactory @Inject constructor() {
+class GrowwApiFactory @Inject constructor(
+    private val auditLogger: AuditLogger
+) {
     private val gson = GsonBuilder().create()
 
     val groww: GrowwApi by lazy {
@@ -21,7 +24,7 @@ class GrowwApiFactory @Inject constructor() {
             .writeTimeout(12, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
             .addInterceptor(GrowwHotDataCacheInterceptor())
-            .addInterceptor(GrowwRateLimitInterceptor())
+            .addInterceptor(GrowwRateLimitInterceptor(auditLogger))
             .addInterceptor { chain ->
                 val req = chain.request().newBuilder()
                     .header("Accept", "application/json")
