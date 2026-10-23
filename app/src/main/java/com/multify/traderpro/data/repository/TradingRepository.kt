@@ -1503,16 +1503,49 @@ class TradingRepository @Inject constructor(
     suspend fun runFixedPriorityCycle(): Boolean {
         fixedApiPriorityRequested = true
         return scanApiCycleMutex.withLock {
+            val cycleStartedAtMs = System.currentTimeMillis()
             try {
                 val previousScanAtMs = lastFixedScanAtMs
+                val recommendationStartedAtMs = System.currentTimeMillis()
                 generateFixedForecasts(false)
+                val recommendationCompletedAtMs = System.currentTimeMillis()
                 val scanned = lastFixedScanAtMs != previousScanAtMs
-                if (scanned) autoBuyFixedRecommendations()
+                var autoBuySubmitted = 0
+                var autoBuyElapsedMs = 0L
+                if (scanned) {
+                    val autoBuyStartedAtMs = System.currentTimeMillis()
+                    autoBuySubmitted = autoBuyFixedRecommendations()
+                    autoBuyElapsedMs = (System.currentTimeMillis() - autoBuyStartedAtMs).coerceAtLeast(0L)
+                }
+                if (scanned) {
+                    auditLogger.logAsync("RUNTIME", "FIXED_PRIORITY_PHASE_PROFILE", mapOf(
+                        "cycle_started_at_ms" to cycleStartedAtMs,
+                        "recommendation_stage_ms" to (recommendationCompletedAtMs - recommendationStartedAtMs).coerceAtLeast(0L),
+                        "auto_buy_stage_ms" to autoBuyElapsedMs,
+                        "auto_buy_submitted" to autoBuySubmitted,
+                        "cycle_total_ms" to (System.currentTimeMillis() - cycleStartedAtMs).coerceAtLeast(0L),
+                        "order_before_notification" to true,
+                        "fixed_formula_changed" to false
+                    ))
+                }
                 scanned
             } finally {
                 fixedApiPriorityRequested = false
             }
         }
+    }
+
+    fun fixedRecommendationsForNotification(): List<ForecastDto> {
+        val today = LocalDate.now(INDIA).toString()
+        return fixedRecommendationStore.recommendations(today)
+            .filter {
+                it.status == "ACTIVE" &&
+                    it.executionEligible &&
+                    it.qualityTier == "PRIMARY" &&
+                    it.entryPrice > FIXED_MIN_STOCK_PRICE_RUPEES
+            }
+            .sortedBy { it.generatedAtMs }
+            .map { it.toDto() }
     }
 
     suspend fun runForecastOpportunisticCycle(): Boolean {
