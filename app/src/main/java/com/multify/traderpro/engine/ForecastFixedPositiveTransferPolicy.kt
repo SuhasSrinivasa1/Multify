@@ -7,7 +7,8 @@ data class FixedPositiveTransferCase(
     val strategy: String,
     val regime: String,
     val marketRegime: String,
-    val closeGainPct: Double
+    val closeGainPct: Double,
+    val maxFavourablePct: Double = 0.0
 )
 
 object ForecastFixedPositiveTransferPolicy {
