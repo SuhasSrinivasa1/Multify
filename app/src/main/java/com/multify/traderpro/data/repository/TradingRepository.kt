@@ -3028,7 +3028,7 @@ class TradingRepository @Inject constructor(
         val brokerAckLatencyMs =
             ((SystemClock.elapsedRealtimeNanos() - brokerStartedNs).coerceAtLeast(0L)) / 1_000_000L
         preferences.recordOrderLatency(0L, brokerAckLatencyMs)
-        auditLogger.log("EXECUTION_LATENCY", "FORECAST_GTT_ACK", mapOf(
+        auditLogger.logAsync("EXECUTION_LATENCY", "FORECAST_GTT_ACK", mapOf(
             "symbol" to row.symbol,
             "broker_ack_ms" to brokerAckLatencyMs,
             "fixed_entry_trigger" to row.entryPrice,
@@ -5289,7 +5289,7 @@ class TradingRepository @Inject constructor(
         }
         val brokerAckLatencyMs = ((SystemClock.elapsedRealtimeNanos() - brokerStartedNs).coerceAtLeast(0L)) / 1_000_000L
         preferences.recordOrderLatency(dispatchPrepMicros, brokerAckLatencyMs)
-        auditLogger.log("EXECUTION_LATENCY", "ORDER_ACK", mapOf(
+        auditLogger.logAsync("EXECUTION_LATENCY", "ORDER_ACK", mapOf(
             "symbol" to symbol,
             "transaction" to transaction,
             "dispatch_prep_micros" to dispatchPrepMicros,
@@ -5319,7 +5319,7 @@ class TradingRepository @Inject constructor(
                 )
             }
             brokerInventorySnapshot = null
-            auditLogger.log("EXECUTION_LATENCY", "ORDER_FILLED", mapOf(
+            auditLogger.logAsync("EXECUTION_LATENCY", "ORDER_FILLED", mapOf(
                 "symbol" to symbol,
                 "transaction" to transaction,
                 "total_execution_ms" to totalExecutionMs,
@@ -5763,11 +5763,22 @@ class TradingRepository @Inject constructor(
                 add("forecast_auto_buy_orders.json", forecastAutoBuyOrders)
                 add("fixed_recommendations.json", fixedRecommendations)
                 add("fixed_auto_buy_orders.json", fixedAutoBuyOrders)
+                add("api_usage_snapshot.json", GrowwApiUsageLedger.snapshot())
+                add("telemetry_metadata.json", mapOf(
+                    "exported_at_ms" to System.currentTimeMillis(),
+                    "async_audit_dropped_total" to auditLogger.asyncDroppedCount(),
+                    "fixed_scan_profile_event" to "FIXED_SCAN_PROFILE",
+                    "forecast_scan_profile_event" to "FORECAST_SCAN_PROFILE",
+                    "trailing_profile_event" to "TRAILING_MONITOR_PROFILE",
+                    "multify_pipeline_event" to "MULTIFY_PIPELINE_PROFILE",
+                    "broker_rate_limit_event" to "HTTP_429",
+                    "client_governor_wait_event" to "CLIENT_GOVERNOR_WAIT"
+                ))
                 fixedSnapshot?.let { add("fixed_engine_snapshot.json", it.payload) }
                 addText("system_audit.jsonl", auditLogger.readAll())
             }
         } ?: error("Unable to open export destination")
-        return LogExportResult(if (fixedSnapshot != null) 16 else 15, signals.size, trades.size)
+        return LogExportResult(if (fixedSnapshot != null) 18 else 17, signals.size, trades.size)
     }
 
     suspend fun shouldCapturePackage(packageName: String): Boolean {
