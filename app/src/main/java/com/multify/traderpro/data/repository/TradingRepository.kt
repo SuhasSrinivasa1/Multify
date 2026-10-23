@@ -2594,6 +2594,55 @@ class TradingRepository @Inject constructor(
         .filter { kotlin.math.abs(it.scanAtMs - atMs) <= UNIVERSAL_EVIDENCE_NEAREST_SNAPSHOT_MS }
         .minByOrNull { kotlin.math.abs(it.scanAtMs - atMs) }
 
+    private data class ReplayOutcome(
+        val mfePct: Double,
+        val maePct: Double,
+        val closePct: Double,
+        val targetHit: Boolean
+    )
+
+    private suspend fun replayOutcomeToSessionClose(
+        symbol: String,
+        entryPrice: Double,
+        atMs: Long,
+        targetPct: Double?,
+        token: String
+    ): ReplayOutcome? {
+        if (entryPrice <= 0.0 || atMs <= 0L) return null
+        val at = Instant.ofEpochMilli(atMs).atZone(INDIA)
+        val start = at.toLocalDateTime().format(HIST_FORMAT)
+        val end = at.toLocalDate().atTime(15, 30).format(HIST_FORMAT)
+        val historical = runCatching {
+            apiFactory.groww.historicalCandles(
+                bearer(token),
+                growwSymbol = "NSE-$symbol",
+                startTime = start,
+                endTime = end,
+                candleInterval = "5minute"
+            ).requirePayload("After-hours evidence outcome $symbol")
+        }.getOrNull() ?: return null
+        val rows = historical.candles.mapNotNull { x ->
+            if (x.size < 5) return@mapNotNull null
+            val high = runCatching { x[2].asDouble }.getOrNull() ?: return@mapNotNull null
+            val low = runCatching { x[3].asDouble }.getOrNull() ?: return@mapNotNull null
+            val close = runCatching { x[4].asDouble }.getOrNull() ?: return@mapNotNull null
+            Triple(high, low, close)
+        }
+        if (rows.isEmpty()) return null
+        val high = rows.maxOf { it.first }
+        val low = rows.minOf { it.second }
+        val close = rows.last().third
+        val mfe = max(0.0, (high / entryPrice - 1.0) * 100.0)
+        val mae = max(0.0, (entryPrice - low) / entryPrice * 100.0)
+        val closePct = (close / entryPrice - 1.0) * 100.0
+        return ReplayOutcome(
+            mfePct = mfe,
+            maePct = mae,
+            closePct = closePct,
+            targetHit = targetPct?.let { mfe + 1e-9 >= it } == true
+        )
+    }
+
     private suspend fun replayMultifyEvaluation(
         call: LearningCallEntity,
         token: String,
