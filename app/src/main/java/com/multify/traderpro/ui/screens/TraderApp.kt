@@ -537,7 +537,7 @@ private fun ForecastScreen(
         item {
             SectionTitle(
                 "LONG holding forecast",
-                "No daily numeric recommendation cap. Every newly confirmed PRIMARY candidate can be published; PRIMARY candidates must persist across scans before publication, while weaker SECONDARY/RESEARCH rows remain in the learning ledger."
+                "First five completed live trading sessions are calibration-only. Forecast runs only on spare API capacity, learns in shadow mode, and publishes no live recommendations until session 5 is complete; after unlock, every newly confirmed PRIMARY candidate can publish."
             )
         }
         item {
@@ -555,11 +555,11 @@ private fun ForecastScreen(
                         if (!state.settings.forecastScannerEnabled)
                             "Background Forecast discovery/evaluation is paused, so it consumes no live scanning capacity. Fixed and portfolio sell monitoring continue normally."
                         else if (state.settings.armEffective && state.settings.forecastAutoBuyEnabled)
-                            "Forecast uses spare API capacity after Fixed and sell protection. ARM and Forecast Auto-buy are ON; new confirmed PRIMARY rows use direct CNC MARKET BUY execution."
+                            "Forecast uses only leftover API capacity after trailing protection, Multify execution and Fixed. After five completed calibration sessions, confirmed PRIMARY rows may use direct CNC MARKET BUY execution."
                         else if (state.settings.armEffective)
-                            "Learning and forecasting are running. ARM is ON; forecast recommendations remain manual unless Forecast Auto-buy is enabled in Settings."
+                            "Forecast shadow learning is running only in spare capacity. Live recommendations remain locked until five completed calibration sessions, then they are manual unless Forecast Auto-buy is enabled."
                         else
-                            "Learning and forecasting continue normally while ARM is OFF. Trading is disabled; research and recommendations are not.",
+                            "Forecast shadow learning may use spare capacity while ARM is OFF. Live Forecast publication remains locked until five completed calibration sessions.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -604,7 +604,7 @@ private fun ForecastScreen(
                 value = if (forecastLearning.todayTargetAveragePct > 0.0)
                     String.format(Locale.US, "%.2f%%", forecastLearning.todayTargetAveragePct)
                 else "≥1.00%",
-                supporting = "hard ≥1% target · Multify MFE benchmark ${String.format(Locale.US, "%.2f%%", learning.longAveragePct)} · reverse-engineering sessions ${forecastLearning.researchSessionsCaptured}/${forecastLearning.researchSessionGoal}",
+                supporting = "hard ≥1% target · Multify MFE benchmark ${String.format(Locale.US, "%.2f%%", learning.longAveragePct)} · live calibration ${forecastLearning.researchSessionsCaptured}/${forecastLearning.researchSessionGoal}",
                 modifier = Modifier.fillMaxWidth(),
                 accent = MaterialTheme.colorScheme.primary
             )
@@ -628,7 +628,7 @@ private fun ForecastScreen(
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
                     Text("Multify DNA", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                     Text(
-                        "Forecast keeps the 40 observable factors and three families, then adds one-way transfer learning from prior positive Fixed outcomes. Only profitable Fixed close outcomes become ranking prototypes; negative/flat Fixed outcomes add no bonus. Fixed never reads this feedback.",
+                        "Forecast keeps the 40 observable factors and three families. Prior positive Fixed outcomes are the main one-way transfer signal; positive Multify outcomes may add a smaller assistance bonus. Negative/flat Fixed or Multify outcomes never subtract from ranking. Fixed never reads Forecast feedback.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -952,7 +952,7 @@ private fun SettingsScreen(
                         Column(Modifier.weight(1f)) {
                             Text("Forecast background scanner", fontWeight = FontWeight.SemiBold)
                             Text(
-                                "Default ON, but opportunistic. Forecast consumes API capacity only while the Fixed-priority scan cycle is idle; sell protection and Fixed always take precedence.",
+                                "Default ON, but strictly opportunistic. Trailing/sell protection and Multify execution are never queued behind Forecast. Forecast yields to Fixed, stops before the next Fixed scan window, and runs only while API headroom is comfortably available.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -971,7 +971,7 @@ private fun SettingsScreen(
                         Column(Modifier.weight(1f)) {
                             Text("Auto-buy forecast recommendations", fontWeight = FontWeight.SemiBold)
                             Text(
-                                "When enabled, every new confirmed PRIMARY forecast gets an immediate Groww CNC MARKET BUY. The actual fill becomes the holding/trailing anchor and the same forecast target percentage is applied from that fill. ARM must also be ON.",
+                                "After five completed calibration sessions, enabling this allows new confirmed PRIMARY Forecast calls to use direct Groww CNC MARKET BUY. Fixed, Multify execution and trailing protection still have API priority. ARM must also be ON.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -1019,7 +1019,7 @@ private fun SettingsScreen(
                         }
                     )
                     Text(
-                        "Fixed remains immutable. Forecast may read prior positive Fixed outcomes one-way to improve ranking, but Forecast can never write into Fixed or change its v7.4.1 rules. The same symbol may still be owned independently by both engines.",
+                        "Fixed remains immutable. Forecast may read prior positive Fixed outcomes as its main transfer signal and positive Multify outcomes as secondary guidance, but Forecast can never write into Fixed or change its v7.4.1 rules. The common stepped trailing-stop architecture remains unchanged across Multify, Fixed and Forecast holdings.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
