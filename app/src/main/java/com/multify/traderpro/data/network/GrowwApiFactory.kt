@@ -20,6 +20,7 @@ class GrowwApiFactory @Inject constructor() {
             .readTimeout(12, TimeUnit.SECONDS)
             .writeTimeout(12, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
+            .addInterceptor(GrowwHotDataCacheInterceptor())
             .addInterceptor(GrowwRateLimitInterceptor())
             .addInterceptor { chain ->
                 val req = chain.request().newBuilder()
