@@ -1,4 +1,4 @@
-name: Multify Trader Pro v7.7.1 Deep Telemetry Verification
+name: Multify Trader Pro v7.7.2 Universal Positive Replay Verification
 
 on:
   workflow_dispatch:
@@ -210,8 +210,19 @@ jobs:
           grep -q 'MULTIFY_PIPELINE_PROFILE' app/src/main/java/com/multify/traderpro/service/MultifyNotificationListenerService.kt
           grep -q 'api_usage_snapshot.json' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
           grep -q 'telemetry_metadata.json' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
-          grep -q 'versionCode = 771' app/build.gradle.kts
-          grep -q 'versionName = "7.7.1-deep-telemetry"' app/build.gradle.kts
+          grep -q 'ForecastUniversalPositiveEvidencePolicy' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
+          grep -q 'forecast_positive_evidence' app/src/main/java/com/multify/traderpro/data/local/LearningEntities.kt
+          grep -q 'version = 15' app/src/main/java/com/multify/traderpro/data/local/AppDatabase.kt
+          grep -q 'MIGRATION_14_15' app/src/main/java/com/multify/traderpro/data/local/AppDatabase.kt
+          grep -q 'MIGRATION_14_15' app/src/main/java/com/multify/traderpro/di/AppModule.kt
+          grep -q 'UNIVERSAL_POSITIVE_EVIDENCE_REFRESH' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
+          grep -q 'AFTER_HOURS_FIXED_OUTCOME_REPLAY' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
+          grep -q 'AFTER_HOURS_HISTORICAL_REPLAY' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
+          grep -q 'forecast_positive_evidence.json' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
+          grep -q 'MIN_DISTINCT_DAYS = 3' app/src/main/java/com/multify/traderpro/engine/ForecastUniversalPositiveEvidencePolicy.kt
+          grep -q 'MIN_DISTINCT_SYMBOLS = 3' app/src/main/java/com/multify/traderpro/engine/ForecastUniversalPositiveEvidencePolicy.kt
+          grep -q 'versionCode = 772' app/build.gradle.kts
+          grep -q 'versionName = "7.7.2-universal-positive-replay"' app/build.gradle.kts
 
       - name: Restore stable app signing key when configured
         shell: bash
@@ -237,10 +248,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v7.7.1-deep-telemetry-debug.apk
+          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v7.7.2-universal-positive-replay-debug.apk
           python - <<'PY'
           import gzip, hashlib, zipfile
-          apk = "dist/Multify-TraderPro-v7.7.1-deep-telemetry-debug.apk"
+          apk = "dist/Multify-TraderPro-v7.7.2-universal-positive-replay-debug.apk"
           expected_json = "c5d23a7d14ef413c25f63d43672d8729c77469c589e1c4e36dd2f209ec7f304b"
           expected_gzip = "8cc0cd5accc08921fd710af4ecd4f58ab1b9b5b41bc686f8713e6a7ea1267738"
           with zipfile.ZipFile(apk) as z:
@@ -258,15 +269,15 @@ jobs:
               assert payload.startswith(b'{"schemaVersion":2'), "Embedded historic intelligence JSON is malformed"
           print("Embedded historic intelligence APK asset: checksum verified")
           PY
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/Multify-TraderPro-v7.7.1-deep-telemetry-debug.apk > dist/signature.txt
-          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/Multify-TraderPro-v7.7.1-deep-telemetry-debug.apk | grep -E "^(package:|application-label:)" > dist/package-verification.txt
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/Multify-TraderPro-v7.7.2-universal-positive-replay-debug.apk > dist/signature.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/Multify-TraderPro-v7.7.2-universal-positive-replay-debug.apk | grep -E "^(package:|application-label:)" > dist/package-verification.txt
           (cd dist && sha256sum *.apk > SHA256SUMS.txt)
-          git archive --format=zip --output=dist/Multify-TraderPro-v7.7.1-source.zip HEAD
+          git archive --format=zip --output=dist/Multify-TraderPro-v7.7.2-source.zip HEAD
           if [ -d app/schemas ]; then cp -a app/schemas dist/room-schemas; fi
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Multify-TraderPro-v7.7.1-deep-telemetry-verified
+          name: Multify-TraderPro-v7.7.2-universal-positive-replay-verified
           path: dist/
           if-no-files-found: error
 
@@ -277,11 +288,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          TAG="v7.7.1-deep-telemetry"
-          TITLE="Multify Trader Pro v7.7.1 Deep Telemetry"
+          TAG="v7.7.2-universal-positive-replay"
+          TITLE="Multify Trader Pro v7.7.2 Universal Positive Replay"
           ASSETS=(
-            "dist/Multify-TraderPro-v7.7.1-deep-telemetry-debug.apk"
-            "dist/Multify-TraderPro-v7.7.1-source.zip"
+            "dist/Multify-TraderPro-v7.7.2-universal-positive-replay-debug.apk"
+            "dist/Multify-TraderPro-v7.7.2-source.zip"
             "dist/SHA256SUMS.txt"
             "dist/signature.txt"
             "dist/package-verification.txt"
@@ -290,6 +301,6 @@ jobs:
             gh release upload "$TAG" "${ASSETS[@]}" --clobber
           else
             gh release create "$TAG" --target "$GITHUB_SHA" --title "$TITLE" \
-              --notes "Verified APK with byte-for-byte unchanged frozen Fixed logic and shared stepped trailing architecture plus asynchronous deep telemetry for every broker 429, client governor waits, Fixed/Forecast scan performance, trailing-monitor windows and end-to-end Multify execution latency." \
+              --notes "Verified APK with byte-for-byte unchanged frozen Fixed logic and shared stepped trailing architecture, plus after-hours universal positive Forecast evidence from Fixed, Multify and Forecast with trail-protected target misses, mature context gating, and replay diagnostics." \
               "${ASSETS[@]}"
           fi
