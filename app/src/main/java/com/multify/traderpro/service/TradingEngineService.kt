@@ -424,7 +424,7 @@ class TradingEngineService : Service() {
                                     ),
                                 "cache_hits" to (GrowwApiUsageLedger.cacheHitCount() - cacheHitsBefore).coerceAtLeast(0L),
                                 "decision_elapsed_ms" to cycleResult?.decisionElapsedMs,
-                                "persist_to_autobuy_start_micros" to cycleResult?.persistToAutoBuyStartMicros,
+                                "decision_complete_to_autobuy_start_micros" to cycleResult?.decisionToAutoBuyStartMicros,
                                 "autobuy_elapsed_ms" to cycleResult?.autoBuyElapsedMs,
                                 "auto_buy_submitted" to cycleResult?.autoBuySubmitted,
                                 "new_recommendations" to cycleResult?.newRecommendations?.size,
@@ -569,7 +569,7 @@ class TradingEngineService : Service() {
             "generated_to_notification_ms" to
                 (System.currentTimeMillis() - f.generatedAtMs).coerceAtLeast(0L),
             "decision_elapsed_ms" to cycle.decisionElapsedMs,
-            "persist_to_autobuy_start_micros" to cycle.persistToAutoBuyStartMicros,
+            "decision_complete_to_autobuy_start_micros" to cycle.decisionToAutoBuyStartMicros,
             "autobuy_elapsed_ms" to cycle.autoBuyElapsedMs,
             "auto_buy_submitted_in_cycle" to cycle.autoBuySubmitted,
             "notification_after_autobuy" to true
