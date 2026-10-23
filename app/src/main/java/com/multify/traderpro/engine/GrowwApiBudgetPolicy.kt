@@ -28,7 +28,7 @@ object GrowwApiBudgetPolicy {
     const val SELL_MONITOR_RESERVED_PER_SECOND = 1
     const val SELL_MONITOR_RESERVED_PER_MINUTE = 60
     const val RATE_LIMIT_COOLDOWN_MS = 5_000L
-    const val FIXED_HISTORICAL_MIN_GAP_MS = 250L
+    const val FIXED_HISTORICAL_MIN_GAP_MS = 20L
 
     fun fixedLiveDataPerSecond(hasOpenHoldings: Boolean): Int =
         if (hasOpenHoldings) APP_LIVE_DATA_PER_SECOND - SELL_MONITOR_RESERVED_PER_SECOND
