@@ -2,7 +2,7 @@ package com.multify.traderpro.engine
 
 /** Human/runtime-visible release invariants. CI still performs the authoritative source hash lock. */
 object ReleaseIntegrityManifest {
-    const val RELEASE_FAMILY = "v7.7.0-market-priority-reliability"
+    const val RELEASE_FAMILY = "v7.7.1-deep-telemetry"
     const val FIXED_CONTRACT_ID = "FIXED-V741-20261021-190239-FINAL"
     const val FIXED_SOURCE_COMMIT = "ca0eecaf63d2cc3500e11fd73f8de9bf2d87e39f"
     const val TRAIL_ARM_PCT = 0.55
