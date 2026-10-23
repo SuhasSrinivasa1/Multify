@@ -6396,7 +6396,10 @@ class TradingRepository @Inject constructor(
                     "broker_rate_limit_event" to "HTTP_429",
                     "client_governor_wait_event" to "CLIENT_GOVERNOR_WAIT",
                     "forecast_replay_event" to "UNIVERSAL_POSITIVE_EVIDENCE_REFRESH",
-                    "positive_evidence_file" to "forecast_positive_evidence.json"
+                    "positive_evidence_file" to "forecast_positive_evidence.json",
+                    "fixed_priority_phase_event" to "FIXED_PRIORITY_PHASE_PROFILE",
+                    "fixed_entry_latency_event" to "ENTRY_LATENCY_PROFILE",
+                    "fixed_notification_latency_event" to "FIXED_NOTIFICATION_POSTED"
                 ))
                 fixedSnapshot?.let { add("fixed_engine_snapshot.json", it.payload) }
                 addText("system_audit.jsonl", auditLogger.readAll())
