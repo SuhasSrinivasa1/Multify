@@ -19,7 +19,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         ResearchReportEntity::class
     ],
     version = 14,
-    exportSchema = false
+    exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun signalEventDao(): SignalEventDao
