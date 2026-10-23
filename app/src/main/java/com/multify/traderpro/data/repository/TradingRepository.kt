@@ -6506,6 +6506,7 @@ class TradingRepository @Inject constructor(
         private const val RESEARCH_BACKFILL_NETWORK_ABORT_AFTER = 3
         private const val UNIVERSAL_EVIDENCE_NEAREST_SNAPSHOT_MS = 30L * 60L * 1000L
         private const val UNIVERSAL_EVIDENCE_REPLAY_SYMBOL_PACING_MS = 400L
+        private const val UNIVERSAL_EVIDENCE_FIXED_REPLAY_BATCH = 12
         private val LEARNING_RESTORE_FILES = setOf(
             "long_learning.json",
             "forecast_research_snapshots.json",
