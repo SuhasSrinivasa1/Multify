@@ -475,11 +475,17 @@ class TradingRepository @Inject constructor(
             .filter { it.isFinite() && it >= 0.0 && it < 25.0 }
         val fallback = 0.0
         val pending = learningDao.closedCallsMissingMfe(1000).size
+        val today = LocalDate.now(INDIA).toString()
+        val todayValues = mfeCalls
+            .filter { it.callDate == today }
+            .mapNotNull { it.multifyMfePct }
+        val todayAverage = todayValues.takeIf { it.isNotEmpty() }?.average() ?: 0.0
 
         return LearningStatsDto(
             rollingTradingDays = keepDates.size,
             rollingCalls = values.size,
             longAveragePct = AdaptiveLearningMath.rollingMean(values, fallback),
+            todayAveragePct = todayAverage,
             longMedianPct = AdaptiveLearningMath.median(values, fallback),
             longTrimmedMeanPct = AdaptiveLearningMath.trimmedMean(values, fallback),
             longEwmaPct = AdaptiveLearningMath.ewma(dated, fallback),
@@ -989,6 +995,115 @@ class TradingRepository @Inject constructor(
                 if (publicIp.isNotBlank()) append(" · egress $publicIp")
                 if (settings.expectedStaticIp.isNotBlank()) append(if (staticMatched) " · static IP matched" else " · STATIC IP MISMATCH")
             }
+        )
+    }
+
+    suspend fun refreshDashboardLocal(): DashboardDto {
+        val settings = preferences.settings.first()
+        val fixedSnapshotState = runCatching { ensureFixedEngineSnapshot() }.getOrNull()
+        val today = LocalDate.now(INDIA).toString()
+        val learning = learningStats()
+        val forecastLearning = forecastLearningStats()
+        val snapshot = managedSnapshotLocal()
+        val execution = executionStats()
+        val forecasts = learningDao.longForecastsForDate(today).map { it.toForecastDto() }
+        val fixedForecasts = fixedRecommendationStore.recommendations(today)
+            .filter { it.entryPrice > FIXED_MIN_STOCK_PRICE_RUPEES }
+            .map { it.toDto() }
+        val research = learningDao.latestResearchReport()?.let {
+            ResearchDto(it.reportDate, it.title, it.summary)
+        } ?: ResearchDto()
+        val events = dao.recentNow(8).mapNotNull { e ->
+            e.backendAction?.let {
+                RecentDecisionDto(formatEventTime(e.receivedAtMs), e.symbol, it, e.backendReason.orEmpty())
+            }
+        }
+        val nowMs = System.currentTimeMillis()
+        val heartbeatAge = if (settings.serviceHeartbeatAtMs > 0L) nowMs - settings.serviceHeartbeatAtMs else Long.MAX_VALUE
+        val listenerAge = if (settings.listenerHeartbeatAtMs > 0L) nowMs - settings.listenerHeartbeatAtMs else Long.MAX_VALUE
+        val dataAge = if (settings.lastMarketDataAtMs > 0L) nowMs - settings.lastMarketDataAtMs else Long.MAX_VALUE
+        val discoveryHealth = marketDiscoveryStateStore.loadHealth(today)
+        val discoveryAge = discoveryHealth?.let { nowMs - it.updatedAtMs } ?: Long.MAX_VALUE
+        val discoveryStatus = when {
+            discoveryHealth == null -> "WAITING"
+            discoveryHealth.abortedForNetwork -> "DEGRADED"
+            !discoveryHealth.baselineReady -> "WARMING"
+            discoveryHealth.coverageRatio < MIN_DISCOVERY_COVERAGE_RATIO -> "DEGRADED"
+            discoveryAge > DISCOVERY_HEALTH_STALE_MS -> "STALE"
+            else -> "HEALTHY"
+        }
+        val fixedDiscoveryHealth = fixedMarketDiscoveryStateStore.loadHealth(today)
+        val fixedDiscoveryAge = fixedDiscoveryHealth?.let { nowMs - it.updatedAtMs } ?: Long.MAX_VALUE
+        val fixedDiscoveryStatus = when {
+            fixedDiscoveryHealth == null -> "WAITING"
+            fixedDiscoveryHealth.abortedForNetwork -> "DEGRADED"
+            !fixedDiscoveryHealth.baselineReady -> "WARMING"
+            fixedDiscoveryHealth.coverageRatio < FIXED_V741_MIN_DISCOVERY_COVERAGE_RATIO -> "DEGRADED"
+            fixedDiscoveryAge > DISCOVERY_HEALTH_STALE_MS -> "STALE"
+            else -> "HEALTHY"
+        }
+
+        return DashboardDto(
+            armed = settings.armEffective,
+            halted = settings.safetyHalt,
+            marketSession = marketSession(),
+            asOf = ZonedDateTime.now(INDIA).format(DateTimeFormatter.ISO_OFFSET_DATE_TIME),
+            broker = BrokerStatusDto(
+                configured = hasBrokerCredentials(),
+                connected = settings.brokerAuthenticated,
+                detail = if (settings.brokerAuthenticated)
+                    "Cached broker state · live market-hours API reserved for Fixed + sell protection"
+                else "Groww authentication required"
+            ),
+            risk = RiskStatusDto(
+                maxExposure = settings.holdingBudgetRupees.toDouble(),
+                riskMode = when {
+                    settings.safetyHalt -> "HALTED"
+                    settings.armEffective -> "ARMED"
+                    else -> "DISARMED"
+                }
+            ),
+            summary = snapshot.summary,
+            execution = execution,
+            learning = learning,
+            forecastLearning = forecastLearning,
+            forecasts = forecasts,
+            fixedForecasts = fixedForecasts,
+            research = research,
+            health = EngineHealthDto(
+                listener = if (listenerAge <= 60_000L) "HEALTHY" else "UNHEALTHY",
+                broker = if (settings.brokerAuthenticated) "CONNECTED · CACHED" else "DISCONNECTED",
+                marketData = if (dataAge <= 15_000L) "FRESH" else "STALE",
+                symbolMaster = if (nseSymbols.isStale()) "STALE" else "FRESH",
+                foregroundService = if (heartbeatAge <= 30_000L) "RUNNING" else "NOT_HEARTBEATING",
+                discovery = discoveryStatus,
+                discoveryCoveragePct = (discoveryHealth?.coverageRatio ?: 0.0) * 100.0,
+                discoveryBaselineAgeMs = discoveryAge,
+                discoveryBatchErrors = discoveryHealth?.batchErrors ?: 0,
+                discoveryBaselineReady = discoveryHealth?.baselineReady ?: false,
+                lastNotificationAtMs = settings.lastNotificationAtMs,
+                reconnectCount = settings.listenerReconnectCount,
+                lastReconnectAtMs = settings.lastListenerReconnectAtMs,
+                lastEventProcessingLatencyMs = settings.lastEventProcessingLatencyMs,
+                lastOrderDispatchPrepMicros = settings.lastOrderDispatchPrepMicros,
+                lastBrokerAckLatencyMs = settings.lastBrokerAckLatencyMs,
+                marketDataAgeMs = dataAge
+            ),
+            fixedHealth = EngineHealthDto(
+                broker = if (settings.brokerAuthenticated) "CONNECTED · CACHED" else "DISCONNECTED",
+                marketData = if (dataAge <= 15_000L) "FRESH" else "STALE",
+                symbolMaster = if (nseSymbols.isStale()) "STALE" else "FRESH",
+                foregroundService = if (heartbeatAge <= 30_000L) "RUNNING" else "NOT_HEARTBEATING",
+                discovery = fixedDiscoveryStatus,
+                discoveryCoveragePct = (fixedDiscoveryHealth?.coverageRatio ?: 0.0) * 100.0,
+                discoveryBaselineAgeMs = fixedDiscoveryAge,
+                discoveryBatchErrors = fixedDiscoveryHealth?.batchErrors ?: 0,
+                discoveryBaselineReady = fixedDiscoveryHealth?.baselineReady ?: false,
+                marketDataAgeMs = dataAge
+            ),
+            fixedSnapshot = fixedSnapshotDto(fixedSnapshotState),
+            positions = snapshot.positions,
+            recentDecisions = (snapshot.recentDecisions + events).take(10)
         )
     }
 
@@ -1854,7 +1969,9 @@ class TradingRepository @Inject constructor(
         val now = ZonedDateTime.now(INDIA)
         val start = now.minusDays(4).toLocalDate().atTime(9, 15).format(HIST_FORMAT)
         val end = now.toLocalDateTime().format(HIST_FORMAT)
-        val quote = apiFactory.groww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Fixed quote $symbol")
+        val quote = withBulkMarketDataSlot {
+            apiFactory.groww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Fixed quote $symbol")
+        }
         val historical = apiFactory.groww.historicalCandles(
             bearer(token), growwSymbol = "NSE-$symbol", startTime = start, endTime = end, candleInterval = "15minute"
         ).requirePayload("Fixed forecast candles $symbol")
@@ -3214,6 +3331,10 @@ class TradingRepository @Inject constructor(
     }
 
     suspend fun monitorForecastOutcomes(): Int {
+        val settings = preferences.settings.first()
+        if (!settings.forecastScannerEnabled && marketSession() == "OPEN") {
+            return learningDao.activeLongForecasts().size
+        }
         val nowMs = System.currentTimeMillis()
         if (nowMs - lastForecastOutcomeMonitorAtMs < FORECAST_OUTCOME_INTERVAL_MS) {
             return learningDao.activeLongForecasts().size
@@ -3264,6 +3385,11 @@ class TradingRepository @Inject constructor(
         val nowMs = System.currentTimeMillis()
         val today = LocalDate.now(INDIA).toString()
         val rows = fixedRecommendationStore.recommendations(today)
+        // Fixed outcome tracking is diagnostic only and never feeds future Fixed ranking.
+        // Preserve live-data capacity for Fixed discovery/evaluation and sell protection.
+        if (marketSession() == "OPEN") {
+            return rows.count { it.status == "ACTIVE" }
+        }
         if (rows.isEmpty()) return 0
         if (nowMs - lastFixedOutcomeMonitorAtMs < FORECAST_OUTCOME_INTERVAL_MS) {
             return rows.count { it.status == "ACTIVE" }
@@ -4842,6 +4968,60 @@ class TradingRepository @Inject constructor(
         )
     }
 
+    private suspend fun managedSnapshotLocal(): Snapshot {
+        val open = managedDao.openPositions().filter { it.side == "LONG" }
+        val positions = open.map { p ->
+            val ltp = p.lastPrice.takeIf { it.isFinite() && it > 0.0 } ?: p.entryPrice
+            val pnl = (ltp - p.entryPrice) * p.quantity
+            PositionDto(
+                symbol = p.symbol,
+                engine = p.engine,
+                quantity = p.quantity,
+                averagePrice = p.entryPrice,
+                ltp = ltp,
+                pnl = pnl,
+                stopPrice = p.stopPrice,
+                targetPrice = p.targetPrice,
+                highWaterPrice = p.maxFavourablePrice,
+                trailingLastRatchetPrice = p.trailingLastRatchetPrice.takeIf { it > 0.0 },
+                trailDistance = if (p.stopPrice != null && p.stopPrice > p.entryPrice)
+                    (p.maxFavourablePrice - p.stopPrice).coerceAtLeast(0.0) else null,
+                trailArmPct = p.trailingArmPct.takeIf { it.isFinite() && it > 0.0 },
+                trailArmed = p.smartOrderMode == HoldingSmartOrderPolicy.MODE_TRAILING_GTT ||
+                    (p.stopPrice?.let { it > p.entryPrice } == true),
+                smartOrderId = p.smartOrderId,
+                smartOrderMode = p.smartOrderMode,
+                smartOrderTriggerPrice = p.smartOrderTriggerPrice,
+                smartOrderDirection = p.smartOrderDirection,
+                smartOrderStatus = p.smartOrderStatus,
+                strategy = p.strategy,
+                product = "CNC"
+            )
+        }
+        val recent = managedDao.tradesSince(startOfIndiaDayMs())
+            .filter { it.side == "LONG" }
+            .take(6)
+            .map { t ->
+                RecentDecisionDto(
+                    formatEventTime(t.closedAtMs),
+                    t.symbol,
+                    "LONG_CLOSED",
+                    t.exitReason,
+                    t.strategy,
+                    t.quantity
+                )
+            }
+        return Snapshot(
+            summary = DaySummaryDto(
+                unrealisedPnl = positions.sumOf { it.pnl },
+                grossExposure = positions.sumOf { it.quantity * (it.ltp ?: it.averagePrice) },
+                openPositions = positions.size
+            ),
+            positions = positions,
+            recentDecisions = recent
+        )
+    }
+
     private suspend fun managedSnapshot(token: String): Snapshot {
         val open = managedDao.openPositions().filter { it.side == "LONG" }
         val positions = open.map { p ->
@@ -5410,7 +5590,7 @@ class TradingRepository @Inject constructor(
         private const val ARM_HOT_AUDIT_INTERVAL_MS = 15L * 60L * 1000L
         private const val ARM_HOT_STATE_MAX_AGE_MS = 45_000L
         private const val EXECUTION_SAMPLE_LIMIT = 30
-        private const val BULK_MARKET_DATA_MIN_GAP_MS = 300L
+        private const val BULK_MARKET_DATA_MIN_GAP_MS = 210L
         private const val BULK_MARKET_DATA_429_COOLDOWN_MS = 1_500L
         private const val BROKER_INVENTORY_REFRESH_MS = 5_000L
         private const val ACTIVE_GTT_REFRESH_MS = 30_000L
