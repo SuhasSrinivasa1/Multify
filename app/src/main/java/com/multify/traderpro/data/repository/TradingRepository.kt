@@ -9,6 +9,7 @@ import com.multify.traderpro.BuildConfig
 import com.multify.traderpro.data.local.ExecutionSampleEntity
 import com.multify.traderpro.data.local.ForecastChampionEntity
 import com.multify.traderpro.data.local.ForecastResearchEntity
+import com.multify.traderpro.data.local.ForecastPositiveEvidenceEntity
 import com.multify.traderpro.data.local.LongForecastEntity
 import com.multify.traderpro.data.local.LearningCallEntity
 import com.multify.traderpro.data.local.LearningDao
@@ -37,6 +38,7 @@ import com.multify.traderpro.data.network.GrowwApiFactory
 import com.multify.traderpro.data.network.GrowwApiUsageLedger
 import com.multify.traderpro.data.network.GrowwHolding
 import com.multify.traderpro.data.network.GrowwPosition
+import com.multify.traderpro.data.network.HistoricalPayload
 import com.multify.traderpro.data.network.LearningStatsDto
 import com.multify.traderpro.data.network.OrderCancelRequest
 import com.multify.traderpro.data.network.OrderCreateRequest
@@ -66,6 +68,8 @@ import com.multify.traderpro.engine.FixedPositiveTransferCase
 import com.multify.traderpro.engine.ForecastQualityDecision
 import com.multify.traderpro.engine.ForecastQualityPolicy
 import com.multify.traderpro.engine.ForecastTargetExpansionPolicy
+import com.multify.traderpro.engine.ForecastUniversalPositiveEvidencePolicy
+import com.multify.traderpro.engine.ForecastPositiveEvidenceCase
 import com.multify.traderpro.engine.ForecastPublicationPolicy
 import com.multify.traderpro.engine.FixedAdaptiveLearningMath
 import com.multify.traderpro.engine.FixedForecastPublicationPolicy
