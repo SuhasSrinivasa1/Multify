@@ -14,6 +14,7 @@ import com.multify.traderpro.R
 import com.multify.traderpro.data.logging.AuditLogger
 import com.multify.traderpro.data.network.ForecastDto
 import com.multify.traderpro.data.network.GrowwApiUsageLedger
+import com.multify.traderpro.data.repository.FixedPriorityCycleResult
 import com.multify.traderpro.data.repository.TradingRepository
 import com.multify.traderpro.engine.ReleaseIntegrityManifest
 import dagger.hilt.android.AndroidEntryPoint
@@ -387,12 +388,13 @@ class TradingEngineService : Service() {
                         val usageBefore = GrowwApiUsageLedger.snapshot()
                         val cacheHitsBefore = GrowwApiUsageLedger.cacheHitCount()
                         val startedAt = System.currentTimeMillis()
-                        val scanned = runCatching { repository.runFixedPriorityCycle() }
+                        val cycleResult = runCatching { repository.runFixedPriorityCycleDetailed() }
                             .onFailure {
                                 if (it !is CancellationException) {
                                     auditLogger.log("RUNTIME", "FIXED_SCAN_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName)))
                                 }
-                            }.getOrDefault(false)
+                            }.getOrNull()
+                        val scanned = cycleResult?.scanned == true
                         val elapsed = System.currentTimeMillis() - startedAt
                         if (scanned) {
                             val usageAfter = GrowwApiUsageLedger.snapshot()
@@ -421,8 +423,14 @@ class TradingEngineService : Service() {
                                         usageBefore.categories.first { it.category == GrowwApiUsageLedger.Category.HISTORICAL }.permitWaitMs).coerceAtLeast(0L)
                                     ),
                                 "cache_hits" to (GrowwApiUsageLedger.cacheHitCount() - cacheHitsBefore).coerceAtLeast(0L),
+                                "decision_elapsed_ms" to cycleResult?.decisionElapsedMs,
+                                "persist_to_autobuy_start_micros" to cycleResult?.persistToAutoBuyStartMicros,
+                                "autobuy_elapsed_ms" to cycleResult?.autoBuyElapsedMs,
+                                "auto_buy_submitted" to cycleResult?.autoBuySubmitted,
+                                "new_recommendations" to cycleResult?.newRecommendations?.size,
                                 "evaluation_concurrency_high_end" to 8,
-                                "fixed_formula_changed" to false
+                                "fixed_formula_changed" to false,
+                                "cache_freshness_changed" to false
                             ))
                         }
                         if (scanned && elapsed >= SCAN_DURATION_AUDIT_THRESHOLD_MS) {
@@ -431,6 +439,13 @@ class TradingEngineService : Service() {
                                 "parallel_scheduler" to true,
                                 "forecast_blocking_ms" to 0
                             ))
+                        }
+                        // Repository returns only after the Fixed auto-buy attempt. Deliver the
+                        // presentation alert asynchronously after that boundary.
+                        if (cycleResult != null && cycleResult.newRecommendations.isNotEmpty()) {
+                            scope.launch {
+                                cycleResult.newRecommendations.forEach { notifyFixed(it, cycleResult) }
+                            }
                         }
                         // Fixed auto-buy executes inside the same priority cycle.
                     }
@@ -526,6 +541,39 @@ class TradingEngineService : Service() {
                 }
             }
         }
+    }
+
+    private fun notifyFixed(f: ForecastDto, cycle: FixedPriorityCycleResult) {
+        val manager = getSystemService(NotificationManager::class.java)
+        val message = buildString {
+            append("PRIMARY · entry ₹")
+            append(String.format(Locale.US, "%.2f", f.entryPrice))
+            append(" · target +")
+            append(String.format(Locale.US, "%.2f", f.targetPct))
+            append("% · Fixed auto-buy processing completed before this alert")
+        }
+        val notification = NotificationCompat.Builder(this, FIXED_CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_stat_trader)
+            .setContentTitle("Fixed BUY · " + f.symbol)
+            .setContentText(message)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(message + "\n" + f.reason))
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setAutoCancel(true)
+            .build()
+        manager.notify(
+            (FIXED_NOTIFICATION_ID_BASE xor f.symbol.hashCode() xor f.generatedAtMs.toInt()).and(Int.MAX_VALUE),
+            notification
+        )
+        auditLogger.logAsync("EXECUTION_LATENCY", "FIXED_DELIVERY_NOTIFICATION", mapOf(
+            "symbol" to f.symbol,
+            "generated_to_notification_ms" to
+                (System.currentTimeMillis() - f.generatedAtMs).coerceAtLeast(0L),
+            "decision_elapsed_ms" to cycle.decisionElapsedMs,
+            "persist_to_autobuy_start_micros" to cycle.persistToAutoBuyStartMicros,
+            "autobuy_elapsed_ms" to cycle.autoBuyElapsedMs,
+            "auto_buy_submitted_in_cycle" to cycle.autoBuySubmitted,
+            "notification_after_autobuy" to true
+        ))
     }
 
     private fun notifyForecast(f: ForecastDto) {
@@ -626,6 +674,15 @@ class TradingEngineService : Service() {
         )
         manager.createNotificationChannel(
             NotificationChannel(
+                FIXED_CHANNEL_ID,
+                "Fixed recommendations",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "Frozen Fixed BUY recommendations delivered only after the Fixed auto-buy attempt completes."
+            }
+        )
+        manager.createNotificationChannel(
+            NotificationChannel(
                 FORECAST_CHANNEL_ID,
                 "Forecast opportunities",
                 NotificationManager.IMPORTANCE_DEFAULT
@@ -636,8 +693,10 @@ class TradingEngineService : Service() {
     companion object {
         private val INDIA = ZoneId.of("Asia/Kolkata")
         private const val ENGINE_CHANNEL_ID = "production_engine"
+        private const val FIXED_CHANNEL_ID = "fixed_recommendations"
         private const val FORECAST_CHANNEL_ID = "forecast_opportunities"
         private const val FOREGROUND_NOTIFICATION_ID = 68090
+        private const val FIXED_NOTIFICATION_ID_BASE = 68120
         private const val HEARTBEAT_INTERVAL_MS = 15_000L
         private const val API_USAGE_AUDIT_INTERVAL_MS = 30_000L
         private const val POSITION_LOOP_INTERVAL_MS = 1_000L
