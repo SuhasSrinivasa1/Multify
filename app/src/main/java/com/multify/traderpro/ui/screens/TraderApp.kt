@@ -250,10 +250,18 @@ private fun ExecutionScreen(
     onArmRequested: () -> Unit,
     onResetHalt: () -> Unit
 ) {
-    val context = LocalContext.current
     val dashboard = state.dashboard
-    val notificationAccess = notificationAccessEnabled(context)
-    val armed = state.settings.armEffective && dashboard?.halted != true
+    val learning = dashboard?.learning ?: com.multify.traderpro.data.network.LearningStatsDto()
+    val fixedRows = dashboard?.fixedForecasts.orEmpty()
+    val fixedSnapshot = dashboard?.fixedSnapshot ?: com.multify.traderpro.data.network.FixedSnapshotDto(
+        frozenMultifyMfeAveragePct = FixedFinalContract.CANONICAL_MULTIFY_MFE_AVG_PCT,
+        targetFloorPct = FixedForecastQualityPolicy.MIN_TARGET_PCT,
+        fixedTargetPct = maxOf(
+            FixedForecastQualityPolicy.MIN_TARGET_PCT,
+            FixedFinalContract.CANONICAL_MULTIFY_MFE_AVG_PCT
+        )
+    )
+    val fixedDailyAverage = fixedRows.map { it.targetPct }.takeIf { it.isNotEmpty() }?.average()
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -261,147 +269,58 @@ private fun ExecutionScreen(
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         item {
-            ArmStatusCard(
-                dashboard = dashboard,
-                armed = armed,
-                budget = state.settings.holdingBudgetRupees.toDouble(),
-                ddpi = state.settings.brokerDdpiEnabled,
-                staticIp = state.settings.staticIpMatched,
-                onArmRequested = onArmRequested,
-                onResetHalt = onResetHalt
+            SectionTitle(
+                "Production averages",
+                "Local-only display. Opening this page does not request Groww live prices, margin, holdings or positions."
             )
         }
-        if (!notificationAccess) {
-            item {
-                ActionCard(
-                    title = "Notification access required",
-                    body = "Enable notification access so Multify calls and Book Profit alerts are captured immediately.",
-                    button = "Open settings",
-                    negative = true
-                ) { openNotificationAccessSettings(context) }
-            }
+        item {
+            MetricCard(
+                label = "Multify 30-day Avg",
+                value = String.format(Locale.US, "%.2f%%", learning.longAveragePct),
+                supporting = "${learning.rollingCalls} MFE-observed calls across ${learning.rollingTradingDays} trading days",
+                modifier = Modifier.fillMaxWidth(),
+                accent = MaterialTheme.colorScheme.primary
+            )
         }
-        if (!state.settings.brokerAuthenticated) {
-            item {
-                ActionCard(
-                    title = "Groww authentication required",
-                    body = "Authenticate Groww before ARM can buy CNC holdings.",
-                    button = "Refresh"
-                ) { onRefresh() }
-            }
+        item {
+            MetricCard(
+                label = "Multify Today Avg",
+                value = if (learning.todayAveragePct > 0.0)
+                    String.format(Locale.US, "%.2f%%", learning.todayAveragePct)
+                else "—",
+                supporting = if (learning.todayAveragePct > 0.0)
+                    "Today’s locally recorded Multify MFE average"
+                else
+                    "Waiting for completed/MFE-observed Multify calls today",
+                modifier = Modifier.fillMaxWidth()
+            )
         }
-        if (dashboard != null) {
-            item { SectionTitle("Holdings overview", "Current app-owned LONG CNC holdings.") }
-            item {
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                    MetricCard(
-                        label = "Unrealised",
-                        value = money(dashboard.summary.unrealisedPnl),
-                        supporting = "current app-owned holdings only",
-                        modifier = Modifier.weight(1f),
-                        accent = pnlColor(dashboard.summary.unrealisedPnl)
+        item {
+            MetricCard(
+                label = "Fixed Daily Avg",
+                value = fixedDailyAverage?.let { String.format(Locale.US, "%.2f%%", it) } ?: "—",
+                supporting = if (fixedDailyAverage != null)
+                    "${fixedRows.size} Fixed recommendation(s) today · frozen target calibration ${String.format(Locale.US, "%.2f%%", fixedSnapshot.fixedTargetPct)}"
+                else
+                    "Waiting for today’s Fixed recommendation · frozen target calibration ${String.format(Locale.US, "%.2f%%", fixedSnapshot.fixedTargetPct)}",
+                modifier = Modifier.fillMaxWidth(),
+                accent = MaterialTheme.colorScheme.secondary
+            )
+        }
+        item {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .45f)),
+                shape = RoundedCornerShape(18.dp)
+            ) {
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("Market-hours priority", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "Fixed scanning has priority. Forecast background scanning is paused by default. " +
+                            "Portfolio sell/trailing protection remains independent and is never disabled by this screen.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    MetricCard(
-                        label = "Exposure",
-                        value = money(dashboard.summary.grossExposure),
-                        supporting = "${dashboard.summary.openPositions} open holdings",
-                        modifier = Modifier.weight(1f)
-                    )
-                }
-            }
-            item {
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                    MetricCard(
-                        label = "Holding budget",
-                        value = money(state.settings.holdingBudgetRupees.toDouble()),
-                        supporting = "maximum per new app order",
-                        modifier = Modifier.weight(1f)
-                    )
-                    MetricCard(
-                        label = "Market",
-                        value = dashboard.marketSession,
-                        supporting = "CNC holdings persist overnight",
-                        modifier = Modifier.weight(1f),
-                        accent = if (dashboard.marketSession == "OPEN") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
-                    )
-                }
-            }
-
-            item { SectionTitle("Execution speed", "Rolling average from the latest 30 successful LONG CNC fills.") }
-            item {
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                    MetricCard(
-                        label = "Avg LONG Buy",
-                        value = executionTime(dashboard.execution.buyLong.averageFillMs, dashboard.execution.buyLong.sampleCount),
-                        supporting = executionSupport(dashboard.execution.buyLong),
-                        modifier = Modifier.weight(1f)
-                    )
-                    MetricCard(
-                        label = "Avg LONG Sell",
-                        value = executionTime(dashboard.execution.sellLong.averageFillMs, dashboard.execution.sellLong.sampleCount),
-                        supporting = executionSupport(dashboard.execution.sellLong),
-                        modifier = Modifier.weight(1f)
-                    )
-                }
-            }
-
-            item { SectionTitle("Active holdings", "All positions shown here are app-owned LONG CNC holdings. There is no automatic end-of-day exit.") }
-            if (dashboard.positions.isEmpty()) {
-                item { EmptyState("No app-owned holdings", "ARM will buy the next eligible Multify call. Forecast candidates can also be bought manually while ARM is enabled.") }
-            } else {
-                items(dashboard.positions, key = { "${it.symbol}-${it.averagePrice}" }) { HoldingCard(it) }
-            }
-
-            item {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .45f)),
-                    shape = RoundedCornerShape(18.dp)
-                ) {
-                    Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                        Text("Execution health", fontWeight = FontWeight.SemiBold)
-                        KeyValueRow("ARM", if (dashboard.armed) "ON" else "OFF")
-                        KeyValueRow("DDPI", if (state.settings.brokerDdpiEnabled) "Enabled" else "Required")
-                        KeyValueRow("Static IP", if (state.settings.staticIpMatched) "Verified" else "Not verified")
-                        KeyValueRow("Foreground engine", dashboard.health.foregroundService)
-                        KeyValueRow("Notification listener", dashboard.health.listener)
-                        KeyValueRow("Broker", dashboard.health.broker)
-                        KeyValueRow(
-                            "App order dispatch",
-                            if (dashboard.health.lastOrderDispatchPrepMicros > 0L)
-                                String.format(Locale.US, "%.1f ms · target <100 ms", dashboard.health.lastOrderDispatchPrepMicros / 1000.0)
-                            else "Waiting for first order"
-                        )
-                        KeyValueRow(
-                            "Broker ACK",
-                            if (dashboard.health.lastBrokerAckLatencyMs > 0L)
-                                dashboard.health.lastBrokerAckLatencyMs.toString() + " ms · external"
-                            else "Waiting for first order"
-                        )
-                        KeyValueRow("Market data", dashboard.health.marketData)
-                        KeyValueRow("Symbol master", dashboard.health.symbolMaster)
-                    }
-                }
-            }
-
-            item { SectionTitle("Recent decisions", "Only LONG holding actions and system events are generated by this version.") }
-            if (dashboard.recentDecisions.isEmpty()) {
-                item { EmptyState("No decisions yet", "Captured Multify calls will appear here after processing.") }
-            } else {
-                items(dashboard.recentDecisions.take(8)) { d ->
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = .24f)),
-                        shape = RoundedCornerShape(18.dp)
-                    ) {
-                        Column(Modifier.padding(15.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                Text(d.symbol ?: "System", fontWeight = FontWeight.SemiBold)
-                                StatusPill(d.action.replace('_', ' '), decisionTone(d.action))
-                            }
-                            Text(d.reason, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            if (!d.strategy.isNullOrBlank()) Text(d.strategy, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.secondary)
-                        }
-                    }
                 }
             }
         }
