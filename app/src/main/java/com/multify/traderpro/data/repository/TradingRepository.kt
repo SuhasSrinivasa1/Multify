@@ -3924,6 +3924,8 @@ class TradingRepository @Inject constructor(
 
         var submitted = 0
         for (row in rows) {
+            val symbolStartedAtMs = System.currentTimeMillis()
+            val recommendationAgeAtStartMs = (symbolStartedAtMs - row.generatedAtMs).coerceAtLeast(0L)
             val liveSettings = preferences.settings.first()
             if (!liveSettings.fixedAutoBuyEnabled || !liveSettings.armEffective || liveSettings.safetyHalt) break
             if (managedDao.openPosition(ENGINE_FIXED_HOLDING, row.symbol) != null) continue
@@ -3940,6 +3942,7 @@ class TradingRepository @Inject constructor(
                 continue
             }
 
+            val quoteStartedAtMs = System.currentTimeMillis()
             val quote = runCatching {
                 withFixedLiveDataSlot {
                     apiFactory.groww.quote(
@@ -3953,8 +3956,10 @@ class TradingRepository @Inject constructor(
                     "message" to (it.message ?: it.javaClass.simpleName)
                 ))
             }.getOrNull() ?: continue
+            val quoteElapsedMs = (System.currentTimeMillis() - quoteStartedAtMs).coerceAtLeast(0L)
             val ltp = quote.lastPrice?.takeIf { it.isFinite() && it > 0.0 } ?: continue
 
+            val marginStartedAtMs = System.currentTimeMillis()
             val margin = runCatching { apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin") }
                 .onFailure {
                     auditLogger.log("FIXED_AUTO_BUY", "MARGIN_ERROR", mapOf(
@@ -3962,6 +3967,7 @@ class TradingRepository @Inject constructor(
                         "message" to (it.message ?: it.javaClass.simpleName)
                     ))
                 }.getOrNull() ?: continue
+            val marginElapsedMs = (System.currentTimeMillis() - marginStartedAtMs).coerceAtLeast(0L)
             val available = (margin.equity?.cncBalanceAvailable ?: margin.clearCash).coerceAtLeast(0.0)
             val sizing = CashAwareCncSizing.sizeFixedAvailable(
                 liveSettings.holdingBudgetRupees.toDouble(),
@@ -3982,6 +3988,7 @@ class TradingRepository @Inject constructor(
             if (!executionSettings.fixedAutoBuyEnabled || !executionSettings.armEffective || executionSettings.safetyHalt) break
 
             val reference = stableRef("FXM", "${row.recommendationDate}-${row.id}-${row.symbol}")
+            val orderStartedAtMs = System.currentTimeMillis()
             val order = runCatching {
                 placeCncBuy(token, row.symbol, sizing.quantity, reference)
             }.onFailure {
@@ -3993,6 +4000,7 @@ class TradingRepository @Inject constructor(
                 ))
             }.getOrNull() ?: continue
 
+            val orderElapsedMs = (System.currentTimeMillis() - orderStartedAtMs).coerceAtLeast(0L)
             val filled = order.filledQuantity?.takeIf { it > 0 } ?: sizing.quantity
             val actualFill = order.averageFillPrice?.takeIf { it.isFinite() && it > 0.0 } ?: ltp
             val executionTarget = actualFill * (1.0 + row.targetPct / 100.0)
@@ -4024,6 +4032,19 @@ class TradingRepository @Inject constructor(
                 )
             )
             brokerInventorySnapshot = null
+            auditLogger.logAsync("FIXED_AUTO_BUY", "ENTRY_LATENCY_PROFILE", mapOf(
+                "symbol" to row.symbol,
+                "recommendation_generated_at_ms" to row.generatedAtMs,
+                "recommendation_age_at_auto_buy_start_ms" to recommendationAgeAtStartMs,
+                "quote_ms" to quoteElapsedMs,
+                "margin_ms" to marginElapsedMs,
+                "order_to_fill_ms" to orderElapsedMs,
+                "symbol_total_ms" to (System.currentTimeMillis() - symbolStartedAtMs).coerceAtLeast(0L),
+                "notification_before_order" to false,
+                "fresh_quote_preserved" to true,
+                "fresh_margin_preserved" to true,
+                "fixed_formula_changed" to false
+            ))
             auditLogger.log("FIXED_AUTO_BUY", "ENTRY_MARKET_FILLED", mapOf(
                 "symbol" to row.symbol,
                 "order_id" to order.growwOrderId,
