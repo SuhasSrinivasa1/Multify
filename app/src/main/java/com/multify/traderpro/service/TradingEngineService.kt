@@ -434,7 +434,11 @@ class TradingEngineService : Service() {
                         }
                         // runFixedPriorityCycle returns only after Fixed auto-buy has been attempted.
                         // Presentation therefore remains strictly behind the order path.
-                        if (scanned) notifyNewFixedRecommendationsAfterOrderPath()
+                        if (scanned) {
+                            scope.launch {
+                                notifyNewFixedRecommendationsAfterOrderPath()
+                            }
+                        }
                     }
                     delay(SCAN_WORKER_POLL_MS)
                 } catch (cancelled: CancellationException) {
