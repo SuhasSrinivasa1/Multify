@@ -174,11 +174,13 @@ class MultifyNotificationListenerService : NotificationListenerService() {
                     notifyStatus("ARM disabled", "Multify reported a safety pause. Review broker state before resetting the halt.")
                 }
                 if (researchRelevant && processed.isSuccess) {
-                    val handedOff = TradingEngineService.sampleSignal(this@MultifyNotificationListenerService, id, parsed.symbol)
-                    auditLogger.log("MULTIFY_RESEARCH", "POST_SIGNAL_RESEARCH_HANDED_OFF", mapOf(
+                    // Do not spend market-hours API capacity on post-signal research. The call and
+                    // result are persisted locally; MFE/positive-transfer learning is backfilled
+                    // after market close from historical data.
+                    auditLogger.log("MULTIFY_RESEARCH", "POST_SIGNAL_RESEARCH_DEFERRED_AFTER_HOURS", mapOf(
                         "event_id" to id,
                         "symbol" to parsed.symbol,
-                        "foreground_handoff" to handedOff
+                        "critical_execution_completed" to latencyCritical
                     ))
                 }
             }
