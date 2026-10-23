@@ -13,6 +13,7 @@ import androidx.core.app.NotificationCompat
 import com.multify.traderpro.R
 import com.multify.traderpro.data.logging.AuditLogger
 import com.multify.traderpro.data.network.ForecastDto
+import com.multify.traderpro.data.network.GrowwApiUsageLedger
 import com.multify.traderpro.data.repository.TradingRepository
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CancellationException
@@ -45,6 +46,7 @@ class TradingEngineService : Service() {
     @Volatile private var lastKnownManagedCount = 0
     @Volatile private var lastManagedMonitorSucceeded = true
     private var lastAfterHoursResearchAtMs = 0L
+    private var lastApiUsageAuditAtMs = 0L
 
     override fun onCreate() {
         super.onCreate()
@@ -157,6 +159,27 @@ class TradingEngineService : Service() {
                         .getOrDefault(emptyList())
                         .filter { it.qualityTier == "PRIMARY" && it.executionEligible }
                         .forEach(::notifyForecast)
+
+                    if (nowMs - lastApiUsageAuditAtMs >= API_USAGE_AUDIT_INTERVAL_MS) {
+                        lastApiUsageAuditAtMs = nowMs
+                        val usage = GrowwApiUsageLedger.snapshot()
+                        auditLogger.log("API_BUDGET", "ROLLING_USAGE", mapOf(
+                            "summary" to usage.compact(),
+                            "categories" to usage.categories.associate { row ->
+                                row.category.name to mapOf(
+                                    "used_1s" to row.usedLastSecond,
+                                    "used_60s" to row.usedLastMinute,
+                                    "app_limit_1s" to row.appPerSecondLimit,
+                                    "app_limit_60s" to row.appPerMinuteLimit,
+                                    "headroom_60s" to row.minuteHeadroom,
+                                    "utilization_pct" to row.minuteUtilizationPct,
+                                    "429s" to row.rateLimitResponses
+                                )
+                            },
+                            "cache_hits_total" to GrowwApiUsageLedger.cacheHitCount(),
+                            "cache_misses_total" to GrowwApiUsageLedger.cacheMissCount()
+                        ))
+                    }
 
                     val now = ZonedDateTime.now(INDIA)
                     if (now.dayOfWeek.value < 6 &&
@@ -271,15 +294,40 @@ class TradingEngineService : Service() {
                         now.toLocalTime() >= LocalTime.of(9, 15) &&
                         now.toLocalTime() < LocalTime.of(15, 30)
                     ) {
+                        runCatching { repository.maintainFixedHotDataCache() }
+                            .onFailure {
+                                if (it !is CancellationException) {
+                                    auditLogger.log("RUNTIME", "FIXED_HOT_CACHE_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName)))
+                                }
+                            }
+                        val usageBefore = GrowwApiUsageLedger.snapshot()
+                        val cacheHitsBefore = GrowwApiUsageLedger.cacheHitCount()
                         val startedAt = System.currentTimeMillis()
-                        runCatching { repository.runFixedPriorityCycle() }
+                        val scanned = runCatching { repository.runFixedPriorityCycle() }
                             .onFailure {
                                 if (it !is CancellationException) {
                                     auditLogger.log("RUNTIME", "FIXED_SCAN_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName)))
                                 }
-                            }
+                            }.getOrDefault(false)
                         val elapsed = System.currentTimeMillis() - startedAt
-                        if (elapsed >= SCAN_DURATION_AUDIT_THRESHOLD_MS) {
+                        if (scanned) {
+                            val usageAfter = GrowwApiUsageLedger.snapshot()
+                            fun requestDelta(category: GrowwApiUsageLedger.Category): Long {
+                                val before = usageBefore.categories.first { it.category == category }.totalRequests
+                                val after = usageAfter.categories.first { it.category == category }.totalRequests
+                                return (after - before).coerceAtLeast(0L)
+                            }
+                            auditLogger.log("RUNTIME", "FIXED_SCAN_PROFILE", mapOf(
+                                "elapsed_ms" to elapsed,
+                                "live_network_requests" to requestDelta(GrowwApiUsageLedger.Category.LIVE_DATA),
+                                "historical_network_requests" to requestDelta(GrowwApiUsageLedger.Category.HISTORICAL),
+                                "non_trading_network_requests" to requestDelta(GrowwApiUsageLedger.Category.NON_TRADING),
+                                "cache_hits" to (GrowwApiUsageLedger.cacheHitCount() - cacheHitsBefore).coerceAtLeast(0L),
+                                "evaluation_concurrency_high_end" to 8,
+                                "fixed_formula_changed" to false
+                            ))
+                        }
+                        if (scanned && elapsed >= SCAN_DURATION_AUDIT_THRESHOLD_MS) {
                             auditLogger.log("RUNTIME", "FIXED_SCAN_DURATION", mapOf(
                                 "elapsed_ms" to elapsed,
                                 "parallel_scheduler" to true,
@@ -428,7 +476,8 @@ class TradingEngineService : Service() {
             positionMonitoringWakeLock?.isHeld == true -> "Monitoring $managedCount holding(s) · CPU awake"
             else -> "Monitoring $managedCount holding(s) · CPU wake lock unavailable"
         }
-        val text = monitorStatus + " · " + forecastOutcomeCount + " adaptive + " + fixedOutcomeCount + " fixed outcomes"
+        val text = monitorStatus + " · " + forecastOutcomeCount + " adaptive + " + fixedOutcomeCount + " fixed outcomes" +
+            " · " + GrowwApiUsageLedger.snapshot().compact()
         getSystemService(NotificationManager::class.java)
             .notify(FOREGROUND_NOTIFICATION_ID, engineNotification(text))
     }
@@ -467,6 +516,7 @@ class TradingEngineService : Service() {
         private const val FORECAST_CHANNEL_ID = "forecast_opportunities"
         private const val FOREGROUND_NOTIFICATION_ID = 68090
         private const val HEARTBEAT_INTERVAL_MS = 15_000L
+        private const val API_USAGE_AUDIT_INTERVAL_MS = 30_000L
         private const val POSITION_LOOP_INTERVAL_MS = 1_000L
         private const val PORTFOLIO_POSITION_LOOP_INTERVAL_MS = 1_000L
         private const val POSITION_MONITOR_ERROR_RETRY_MS = 1_000L
