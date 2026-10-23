@@ -103,6 +103,9 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -127,6 +130,17 @@ import javax.inject.Singleton
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
+
+data class FixedPriorityCycleResult(
+    val scanned: Boolean,
+    val newRecommendations: List<ForecastDto> = emptyList(),
+    val autoBuySubmitted: Int = 0,
+    val decisionElapsedMs: Long = 0L,
+    val persistToAutoBuyStartMicros: Long = 0L,
+    val autoBuyElapsedMs: Long = 0L,
+    val cycleElapsedMs: Long = 0L,
+    val completedAtMs: Long = 0L
+)
 
 data class AuthenticationResult(
     val authenticated: Boolean,
@@ -160,6 +174,9 @@ class TradingRepository @Inject constructor(
     private val fixedMarketDiscoveryStateStore: FixedMarketDiscoveryStateStore,
     @ApplicationContext private val appContext: Context
 ) {
+    private val _fixedDeliveryEvents = MutableSharedFlow<FixedPriorityCycleResult>(extraBufferCapacity = 8)
+    val fixedDeliveryEvents: SharedFlow<FixedPriorityCycleResult> = _fixedDeliveryEvents.asSharedFlow()
+
     val settings: Flow<AppSettings> = preferences.settings
     val recentEvents: Flow<List<SignalEventEntity>> = dao.observeRecent(100)
 
@@ -1500,15 +1517,79 @@ class TradingRepository @Inject constructor(
         return id
     }
 
-    suspend fun runFixedPriorityCycle(): Boolean {
+    suspend fun runFixedPriorityCycle(): Boolean = runFixedPriorityCycleDetailed().scanned
+
+    /**
+     * Keeps the frozen Fixed decision path intact while exposing delivery timing outside it.
+     * New recommendation events are emitted only after Fixed auto-buy processing returns, so
+     * presentation work can never sit between a persisted recommendation and the BUY path.
+     */
+    suspend fun runFixedPriorityCycleDetailed(): FixedPriorityCycleResult {
         fixedApiPriorityRequested = true
         return scanApiCycleMutex.withLock {
             try {
+                val cycleStartedNs = SystemClock.elapsedRealtimeNanos()
+                val cycleStartedAtMs = System.currentTimeMillis()
+                val today = LocalDate.now(INDIA).toString()
+                val beforeIds = fixedRecommendationStore.recommendations(today).map { it.id }.toHashSet()
                 val previousScanAtMs = lastFixedScanAtMs
+
+                val decisionStartedNs = SystemClock.elapsedRealtimeNanos()
                 generateFixedForecasts(false)
+                val decisionCompletedNs = SystemClock.elapsedRealtimeNanos()
                 val scanned = lastFixedScanAtMs != previousScanAtMs
-                if (scanned) autoBuyFixedRecommendations()
-                scanned
+
+                var autoBuySubmitted = 0
+                var autoBuyElapsedMs = 0L
+                var persistToAutoBuyStartMicros = 0L
+                var newRecommendations = emptyList<ForecastDto>()
+
+                if (scanned) {
+                    newRecommendations = fixedRecommendationStore.recommendations(today)
+                        .filter { it.id !in beforeIds }
+                        .sortedBy { it.generatedAtMs }
+                        .map { it.toDto() }
+
+                    val autoBuyStartedNs = SystemClock.elapsedRealtimeNanos()
+                    persistToAutoBuyStartMicros =
+                        ((autoBuyStartedNs - decisionCompletedNs).coerceAtLeast(0L) / 1_000L)
+                    autoBuySubmitted = autoBuyFixedRecommendations()
+                    autoBuyElapsedMs =
+                        ((SystemClock.elapsedRealtimeNanos() - autoBuyStartedNs).coerceAtLeast(0L) / 1_000_000L)
+                }
+
+                val completedAtMs = System.currentTimeMillis()
+                val result = FixedPriorityCycleResult(
+                    scanned = scanned,
+                    newRecommendations = newRecommendations,
+                    autoBuySubmitted = autoBuySubmitted,
+                    decisionElapsedMs =
+                        ((decisionCompletedNs - decisionStartedNs).coerceAtLeast(0L) / 1_000_000L),
+                    persistToAutoBuyStartMicros = persistToAutoBuyStartMicros,
+                    autoBuyElapsedMs = autoBuyElapsedMs,
+                    cycleElapsedMs =
+                        ((SystemClock.elapsedRealtimeNanos() - cycleStartedNs).coerceAtLeast(0L) / 1_000_000L),
+                    completedAtMs = completedAtMs
+                )
+
+                if (scanned) {
+                    auditLogger.logAsync("RUNTIME", "FIXED_CRITICAL_PATH_PROFILE", mapOf(
+                        "cycle_started_at_ms" to cycleStartedAtMs,
+                        "decision_elapsed_ms" to result.decisionElapsedMs,
+                        "persist_to_autobuy_start_micros" to result.persistToAutoBuyStartMicros,
+                        "autobuy_elapsed_ms" to result.autoBuyElapsedMs,
+                        "cycle_elapsed_ms" to result.cycleElapsedMs,
+                        "new_recommendations" to result.newRecommendations.size,
+                        "auto_buy_submitted" to result.autoBuySubmitted,
+                        "delivery_emitted_after_auto_buy" to true,
+                        "fixed_formula_changed" to false,
+                        "fixed_interval_changed" to false,
+                        "fixed_confirmations_changed" to false,
+                        "cache_freshness_changed" to false
+                    ))
+                    _fixedDeliveryEvents.tryEmit(result)
+                }
+                result
             } finally {
                 fixedApiPriorityRequested = false
             }
