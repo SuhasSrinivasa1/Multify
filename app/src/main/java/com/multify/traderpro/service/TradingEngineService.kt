@@ -15,6 +15,7 @@ import com.multify.traderpro.data.logging.AuditLogger
 import com.multify.traderpro.data.network.ForecastDto
 import com.multify.traderpro.data.network.GrowwApiUsageLedger
 import com.multify.traderpro.data.repository.TradingRepository
+import com.multify.traderpro.engine.ReleaseIntegrityManifest
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -46,13 +47,26 @@ class TradingEngineService : Service() {
     @Volatile private var lastKnownManagedCount = 0
     @Volatile private var lastManagedMonitorSucceeded = true
     private var lastAfterHoursResearchAtMs = 0L
+    private var lastAfterHoursMaintenanceAtMs = 0L
     private var lastApiUsageAuditAtMs = 0L
+    @Volatile private var lastForecastOutcomeCount = 0
+    @Volatile private var lastFixedOutcomeCount = 0
 
     override fun onCreate() {
         super.onCreate()
         createChannels()
+        check(ReleaseIntegrityManifest.verifyRuntimeConstants()) { "Fixed/trailing release integrity mismatch" }
+        auditLogger.log("INTEGRITY", "RELEASE_INVARIANTS_VERIFIED", mapOf(
+            "release_family" to ReleaseIntegrityManifest.RELEASE_FAMILY,
+            "fixed_contract" to ReleaseIntegrityManifest.FIXED_CONTRACT_ID,
+            "fixed_source_commit" to ReleaseIntegrityManifest.FIXED_SOURCE_COMMIT,
+            "trailing_arm_pct" to ReleaseIntegrityManifest.TRAIL_ARM_PCT,
+            "trailing_initial_gain_pct" to ReleaseIntegrityManifest.TRAIL_INITIAL_PROTECTED_GAIN_PCT,
+            "trailing_step_pct" to ReleaseIntegrityManifest.TRAIL_STEP_PCT
+        ))
         startForeground(FOREGROUND_NOTIFICATION_ID, engineNotification("Starting production engine…"))
         // Keep the CPU awake until the first successful pass confirms whether holdings need monitoring.
+        repository.setTradingRecoveryReady(false)
         updatePositionMonitoringWakeLock(true, "INITIAL_POSITION_DISCOVERY")
         startEngineLoop()
     }
@@ -136,29 +150,40 @@ class TradingEngineService : Service() {
                     runCatching { repository.maintainArmHotPath() }
                         .onFailure { auditLogger.log("RUNTIME", "ARM_HOT_PATH_MAINTAIN_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
 
-                    runCatching { repository.reconcileForecastAutoBuyOrders(true, "DIRECT_MARKET_MIGRATION") }
-                        .onFailure { auditLogger.log("RUNTIME", "FORECAST_AUTO_BUY_RECONCILE_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
-                    runCatching { repository.reconcileFixedAutoBuyOrders(true, "DIRECT_MARKET_MIGRATION") }
-                        .onFailure { auditLogger.log("RUNTIME", "FIXED_AUTO_BUY_RECONCILE_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
+                    val now = ZonedDateTime.now(INDIA)
+                    val regularSession = now.dayOfWeek.value < 6 &&
+                        now.toLocalTime() >= LocalTime.of(9, 15) &&
+                        now.toLocalTime() < LocalTime.of(15, 30)
 
-                    val forecastOutcomeCount = runCatching { repository.monitorForecastOutcomes() }
-                        .onFailure {
-                            if (it !is CancellationException) {
-                                auditLogger.log("RUNTIME", "FORECAST_OUTCOME_MONITOR_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName)))
-                            }
-                        }.getOrDefault(0)
-
-                    val fixedOutcomeCount = runCatching { repository.monitorFixedOutcomes() }
-                        .onFailure {
-                            if (it !is CancellationException) {
-                                auditLogger.log("RUNTIME", "FIXED_OUTCOME_MONITOR_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName)))
-                            }
-                        }.getOrDefault(0)
-
-                    runCatching { repository.pendingLongForecastNotifications() }
-                        .getOrDefault(emptyList())
-                        .filter { it.qualityTier == "PRIMARY" && it.executionEligible }
-                        .forEach(::notifyForecast)
+                    if (regularSession) {
+                        // Market hours are intentionally clean: no adaptive outcome polling, legacy
+                        // entry-order reconciliation or research traffic competes with trailing,
+                        // Multify execution or Fixed scanning.
+                        if (runCatching { repository.forecastLiveUnlocked() }.getOrDefault(false)) {
+                            runCatching { repository.pendingLongForecastNotifications() }
+                                .getOrDefault(emptyList())
+                                .filter { it.qualityTier == "PRIMARY" && it.executionEligible }
+                                .forEach(::notifyForecast)
+                        }
+                    } else if (nowMs - lastAfterHoursMaintenanceAtMs >= AFTER_HOURS_MAINTENANCE_INTERVAL_MS) {
+                        lastAfterHoursMaintenanceAtMs = nowMs
+                        runCatching { repository.reconcileForecastAutoBuyOrders(true, "AFTER_HOURS_MAINTENANCE") }
+                            .onFailure { auditLogger.log("RUNTIME", "FORECAST_AUTO_BUY_RECONCILE_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
+                        runCatching { repository.reconcileFixedAutoBuyOrders(true, "AFTER_HOURS_MAINTENANCE") }
+                            .onFailure { auditLogger.log("RUNTIME", "FIXED_AUTO_BUY_RECONCILE_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
+                        lastForecastOutcomeCount = runCatching { repository.monitorForecastOutcomes() }
+                            .onFailure {
+                                if (it !is CancellationException) {
+                                    auditLogger.log("RUNTIME", "FORECAST_OUTCOME_MONITOR_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName)))
+                                }
+                            }.getOrDefault(lastForecastOutcomeCount)
+                        lastFixedOutcomeCount = runCatching { repository.monitorFixedOutcomes() }
+                            .onFailure {
+                                if (it !is CancellationException) {
+                                    auditLogger.log("RUNTIME", "FIXED_OUTCOME_MONITOR_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName)))
+                                }
+                            }.getOrDefault(lastFixedOutcomeCount)
+                    }
 
                     if (nowMs - lastApiUsageAuditAtMs >= API_USAGE_AUDIT_INTERVAL_MS) {
                         lastApiUsageAuditAtMs = nowMs
@@ -181,7 +206,6 @@ class TradingEngineService : Service() {
                         ))
                     }
 
-                    val now = ZonedDateTime.now(INDIA)
                     if (now.dayOfWeek.value < 6 &&
                         now.toLocalTime() >= LocalTime.of(15, 35) &&
                         nowMs - lastAfterHoursResearchAtMs >= AFTER_HOURS_RESEARCH_INTERVAL_MS
@@ -193,8 +217,8 @@ class TradingEngineService : Service() {
 
                     updateForegroundNotification(
                         lastKnownManagedCount,
-                        forecastOutcomeCount,
-                        fixedOutcomeCount,
+                        lastForecastOutcomeCount,
+                        lastFixedOutcomeCount,
                         lastManagedMonitorSucceeded
                     )
                     delay(MAINTENANCE_LOOP_INTERVAL_MS)
@@ -224,6 +248,7 @@ class TradingEngineService : Service() {
                     if (succeeded) {
                         val count = result.getOrThrow().coerceAtLeast(0)
                         lastKnownManagedCount = count
+                        if (!repository.isTradingRecoveryReady()) repository.setTradingRecoveryReady(true)
                         updatePositionMonitoringWakeLock(
                             shouldHold = count > 0,
                             reason = if (count > 0) "ACTIVE_MANAGED_HOLDINGS" else "NO_OPEN_MANAGED_HOLDINGS"
@@ -528,6 +553,7 @@ class TradingEngineService : Service() {
         private const val CLOSED_SESSION_LOOP_INTERVAL_MS = 60_000L
         private const val ERROR_BACKOFF_MS = 10_000L
         private const val AFTER_HOURS_RESEARCH_INTERVAL_MS = 15L * 60L * 1000L
+        private const val AFTER_HOURS_MAINTENANCE_INTERVAL_MS = 60_000L
         private const val ACTION_SAMPLE_SIGNAL = "com.multify.traderpro.action.SAMPLE_SIGNAL"
         private const val EXTRA_EVENT_ID = "event_id"
         private const val EXTRA_SYMBOL = "symbol"
