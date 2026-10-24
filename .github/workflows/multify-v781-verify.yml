@@ -3,7 +3,7 @@ name: Multify Trader Pro v7.8.1 Execution Safety Verification
 on:
   workflow_dispatch:
   push:
-    branches: [ main ]
+    branches: [ build-v781-apk ]
     paths:
       - 'app/**'
       - 'backend/**'
