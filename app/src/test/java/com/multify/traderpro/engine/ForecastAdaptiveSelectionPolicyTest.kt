@@ -109,4 +109,3 @@ class ForecastAdaptiveSelectionPolicyTest {
         assertFalse(review.failedRules.isNotEmpty())
     }
 }
-
