@@ -2,15 +2,6 @@ name: Multify Trader Pro v7.3.3 Uncapped Forecast Verification
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ main ]
-    paths:
-      - 'app/**'
-      - 'backend/**'
-      - 'build.gradle.kts'
-      - 'settings.gradle.kts'
-      - 'gradle.properties'
-      - '.github/workflows/multify-v733-verify.yml'
 
 permissions:
   contents: read
