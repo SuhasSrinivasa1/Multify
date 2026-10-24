@@ -2,15 +2,6 @@ name: Multify Trader Pro v7.4.1 Forecast GTT Auto-buy Verification
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ main ]
-    paths:
-      - 'app/**'
-      - 'backend/**'
-      - 'build.gradle.kts'
-      - 'settings.gradle.kts'
-      - 'gradle.properties'
-      - '.github/workflows/multify-v740-verify.yml'
 
 permissions:
   contents: read
