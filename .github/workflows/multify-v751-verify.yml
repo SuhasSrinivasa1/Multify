@@ -2,12 +2,6 @@ name: Multify Trader Pro v7.7.3 Order-First Fixed Notification Verification
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ main ]
-    paths:
-      - 'app/**'
-      - 'backend/**'
-      - '.github/workflows/multify-v751-verify.yml'
 
 permissions:
   contents: write
