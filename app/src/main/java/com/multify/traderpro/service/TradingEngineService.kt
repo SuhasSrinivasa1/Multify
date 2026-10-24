@@ -68,7 +68,8 @@ class TradingEngineService : Service() {
             "fixed_source_commit" to ReleaseIntegrityManifest.FIXED_SOURCE_COMMIT,
             "trailing_arm_pct" to ReleaseIntegrityManifest.TRAIL_ARM_PCT,
             "trailing_initial_gain_pct" to ReleaseIntegrityManifest.TRAIL_INITIAL_PROTECTED_GAIN_PCT,
-            "trailing_step_pct" to ReleaseIntegrityManifest.TRAIL_STEP_PCT
+            "trailing_step_pct" to ReleaseIntegrityManifest.TRAIL_STEP_PCT,
+            "hard_stop_loss_pct" to -ReleaseIntegrityManifest.HARD_STOP_LOSS_PCT
         ))
         startForeground(FOREGROUND_NOTIFICATION_ID, engineNotification("Starting production engine…"))
         // Keep the CPU awake until the first successful pass confirms whether holdings need monitoring.
@@ -199,15 +200,9 @@ class TradingEngineService : Service() {
                         now.toLocalTime() < LocalTime.of(15, 30)
 
                     if (regularSession) {
-                        // Market hours are intentionally clean: no adaptive outcome polling, legacy
-                        // entry-order reconciliation or research traffic competes with trailing,
-                        // Multify execution or Fixed scanning.
-                        if (runCatching { repository.forecastLiveUnlocked() }.getOrDefault(false)) {
-                            runCatching { repository.pendingLongForecastNotifications() }
-                                .getOrDefault(emptyList())
-                                .filter { it.qualityTier == "PRIMARY" && it.executionEligible }
-                                .forEach(::notifyForecast)
-                        }
+                        // Market hours are intentionally clean: recommendation delivery lives behind
+                        // each source's order path (Fixed worker / Forecast worker). This maintenance
+                        // loop never races ahead and notifies before an enabled auto-buy attempt.
                     } else if (nowMs - lastAfterHoursMaintenanceAtMs >= AFTER_HOURS_MAINTENANCE_INTERVAL_MS) {
                         lastAfterHoursMaintenanceAtMs = nowMs
                         runCatching { repository.reconcileForecastAutoBuyOrders(true, "AFTER_HOURS_MAINTENANCE") }
@@ -461,19 +456,11 @@ class TradingEngineService : Service() {
                 "parallel_with_fixed" to false,
                 "default_state" to "OPPORTUNISTIC_FIXED_PRIORITY"
             ))
-            var pausedAuditEmitted = false
             while (isActive) {
                 try {
-                    val forecastEnabled = repository.settings.first().forecastScannerEnabled
-                    if (!forecastEnabled) {
-                        if (!pausedAuditEmitted) {
-                            auditLogger.log("RUNTIME", "FORECAST_SCAN_PAUSED_FOR_FIXED_PRIORITY")
-                            pausedAuditEmitted = true
-                        }
-                        delay(FORECAST_PAUSED_POLL_MS)
-                        continue
-                    }
-                    pausedAuditEmitted = false
+                    // Forecast discovery is always present but strictly opportunistic. There is no
+                    // fourth trading toggle: Multify ARM, Fixed auto-buy and Forecast auto-buy are
+                    // the only execution permissions. MarketPriorityPolicy keeps Forecast behind Fixed.
                     val now = ZonedDateTime.now(INDIA)
                     if (now.dayOfWeek.value < 6 &&
                         now.toLocalTime() >= LocalTime.of(9, 15) &&
@@ -518,7 +505,18 @@ class TradingEngineService : Service() {
                                 "parallel_scheduler" to true
                             ))
                         }
-                        // Forecast auto-buy executes only inside the opportunistic cycle.
+                        // Presentation is strictly behind the Forecast order path. If Multify or
+                        // Fixed takes priority during the order pass, repository defers delivery.
+                        runCatching { repository.pendingForecastNotificationsAfterOrderPath() }
+                            .onFailure {
+                                if (it !is CancellationException) {
+                                    auditLogger.log("RUNTIME", "FORECAST_ORDER_FIRST_DELIVERY_ERROR", mapOf(
+                                        "message" to (it.message ?: it.javaClass.simpleName)
+                                    ))
+                                }
+                            }
+                            .getOrDefault(emptyList())
+                            .forEach(::notifyForecast)
                     }
                     delay(SCAN_WORKER_POLL_MS)
                 } catch (cancelled: CancellationException) {
