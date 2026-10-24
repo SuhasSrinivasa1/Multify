@@ -192,7 +192,6 @@ fun TraderApp(viewModel: TraderViewModel = hiltViewModel()) {
                         if (state.settings.armEffective) viewModel.setArm(false) else showArmConfirm = true
                     },
                     onBudgetChanged = viewModel::setHoldingBudget,
-                    onForecastScannerChanged = viewModel::setForecastScannerEnabled,
                     onForecastAutoBuyChanged = viewModel::setForecastAutoBuy,
                     onFixedAutoBuyChanged = viewModel::setFixedAutoBuy,
                     onSubmitManualSignal = viewModel::submitManualSignal,
@@ -373,7 +372,7 @@ private fun HoldingCard(p: PositionDto) {
             KeyValueRow("Average", money(p.averagePrice))
             KeyValueRow("LTP", p.ltp?.let(::money) ?: "—")
             KeyValueRow("Unrealised", money(p.pnl), pnlColor(p.pnl))
-            KeyValueRow("Trail ladder", "arm +0.55% → protect +0.50% · +0.10% steps")
+            KeyValueRow("Sell protection", "hard -5.00% · then +0.55% arm → +0.50% protect · +0.10% steps")
             KeyValueRow(
                 "Arm trigger",
                 p.trailArmPct?.let { "+${String.format(Locale.US, "%.2f", it)}%" } ?: "+0.55%"
@@ -546,20 +545,12 @@ private fun ForecastScreen(
                 shape = RoundedCornerShape(20.dp)
             ) {
                 Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("Forecast engine · AUTOMATIC DISCOVERY", fontWeight = FontWeight.SemiBold)
                     Text(
-                        if (state.settings.forecastScannerEnabled) "Forecast engine · ACTIVE"
-                        else "Forecast engine · PAUSED FOR FIXED PRIORITY",
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    Text(
-                        if (!state.settings.forecastScannerEnabled)
-                            "Background Forecast discovery/evaluation is paused, so it consumes no live scanning capacity. Fixed and portfolio sell monitoring continue normally."
-                        else if (state.settings.armEffective && state.settings.forecastAutoBuyEnabled)
-                            "Forecast uses only leftover API capacity after trailing protection, Multify execution and Fixed. After five completed calibration sessions, confirmed PRIMARY rows may use direct CNC MARKET BUY execution."
-                        else if (state.settings.armEffective)
-                            "Forecast shadow learning is running only in spare capacity. Live recommendations remain locked until five completed calibration sessions, then they are manual unless Forecast Auto-buy is enabled."
+                        if (state.settings.forecastAutoBuyEnabled)
+                            "Forecast uses only leftover API capacity after sell protection, Multify execution and Fixed. Its own toggle independently enables direct CNC MARKET BUY after the five-session calibration lock is satisfied."
                         else
-                            "Forecast shadow learning may use spare capacity while ARM is OFF. Live Forecast publication remains locked until five completed calibration sessions.",
+                            "Forecast shadow learning/discovery continues only in spare capacity and can notify recommendations, but no Forecast entry is placed unless the Forecast auto-buy toggle is enabled.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -613,13 +604,12 @@ private fun ForecastScreen(
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
                 Button(
                     onClick = onGenerate,
-                    modifier = Modifier.weight(1f),
-                    enabled = state.settings.forecastScannerEnabled
-                ) { Text(if (state.settings.forecastScannerEnabled) "Refresh scanner" else "Scanner paused") }
+                    modifier = Modifier.weight(1f)
+                ) { Text("Refresh scanner") }
                 OutlinedButton(onClick = onResearch, modifier = Modifier.weight(1f)) { Text("Run research") }
             }
         }
-        item { ForecastTable(rows, onBuy, state.settings.armEffective) }
+        item { ForecastTable(rows, onBuy, state.settings.brokerAuthenticated && state.settings.staticIpMatched && state.settings.brokerDdpiEnabled && !state.settings.safetyHalt) }
         item {
             Card(
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -716,12 +706,10 @@ private fun FixedScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Text(
-                        if (state.settings.armEffective && state.settings.fixedAutoBuyEnabled)
-                            "ARM and Fixed Auto-buy are ON. Every new Fixed PRIMARY recommendation is sent as its own direct CNC MARKET BUY."
-                        else if (state.settings.armEffective)
-                            "ARM is ON. Fixed recommendations remain manual unless Fixed Auto-buy is enabled in Settings."
+                        if (state.settings.fixedAutoBuyEnabled)
+                            "Fixed Auto-buy is ON independently. Every new Fixed PRIMARY recommendation is sent as its own direct CNC MARKET BUY before presentation."
                         else
-                            "Fixed scanning continues while ARM is OFF. No Fixed broker order is sent.",
+                            "Fixed scanning continues with auto-buy OFF. Recommendations remain manual; Multify ARM is separate.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -770,7 +758,7 @@ private fun FixedScreen(
                 ) { Text("Learning locked") }
             }
         }
-        item { ForecastTable(rows, onBuy, state.settings.armEffective) }
+        item { ForecastTable(rows, onBuy, state.settings.brokerAuthenticated && state.settings.staticIpMatched && state.settings.brokerDdpiEnabled && !state.settings.safetyHalt) }
         item {
             Card(
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -790,7 +778,7 @@ private fun FixedScreen(
 }
 
 @Composable
-private fun ForecastTable(rows: List<ForecastDto>, onBuy: (String) -> Unit, armed: Boolean) {
+private fun ForecastTable(rows: List<ForecastDto>, onBuy: (String) -> Unit, executionReady: Boolean) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha=.24f)),
@@ -841,13 +829,13 @@ private fun ForecastTable(rows: List<ForecastDto>, onBuy: (String) -> Unit, arme
                     )
                     Button(
                         onClick = { onBuy(f.symbol) },
-                        enabled = armed && f.status == "ACTIVE" && f.executionEligible,
+                        enabled = executionReady && f.status == "ACTIVE" && f.executionEligible,
                         modifier = Modifier.fillMaxWidth().padding(top = 7.dp)
                     ) {
                         Text(
                             when {
                                 !f.executionEligible -> f.qualityTier + " · observation only"
-                                !armed -> "ARM to BUY " + f.symbol
+                                !executionReady -> "Broker readiness required · " + f.symbol
                                 else -> "BUY " + f.symbol + " · CNC"
                             }
                         )
@@ -869,7 +857,6 @@ private fun SettingsScreen(
     onAuthenticate: () -> Unit,
     onArmRequested: () -> Unit,
     onBudgetChanged: (Long) -> Unit,
-    onForecastScannerChanged: (Boolean) -> Unit,
     onForecastAutoBuyChanged: (Boolean) -> Unit,
     onFixedAutoBuyChanged: (Boolean) -> Unit,
     onSubmitManualSignal: (String, String, String) -> Unit,
@@ -948,47 +935,30 @@ private fun SettingsScreen(
                         steps = 18
                     )
                     HorizontalDivider()
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) {
-                            Text("Forecast background scanner", fontWeight = FontWeight.SemiBold)
-                            Text(
-                                "Default ON, but strictly opportunistic. Trailing/sell protection and Multify execution are never queued behind Forecast. Forecast yields to Fixed, stops before the next Fixed scan window, and runs only while API headroom is comfortably available.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        Switch(
-                            checked = state.settings.forecastScannerEnabled,
-                            onCheckedChange = onForecastScannerChanged
-                        )
-                    }
-                    KeyValueRow(
-                        "Forecast scanner",
-                        if (state.settings.forecastScannerEnabled) "ACTIVE" else "PAUSED · Fixed priority"
+                    KeyValueRow("Forecast discovery", "AUTOMATIC · opportunistic after Fixed")
+                    Text(
+                        "Forecast discovery has no separate execution switch. It may learn and notify while Forecast auto-buy is OFF, but it always yields API capacity to Multify/Fixed priority and common sell protection.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     HorizontalDivider()
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
                             Text("Auto-buy forecast recommendations", fontWeight = FontWeight.SemiBold)
                             Text(
-                                "After five completed calibration sessions, enabling this allows new confirmed PRIMARY Forecast calls to use direct Groww CNC MARKET BUY. Fixed, Multify execution and trailing protection still have API priority. ARM must also be ON.",
+                                "After five completed calibration sessions, this toggle independently allows new confirmed PRIMARY Forecast calls to use direct Groww CNC MARKET BUY. Multify ARM is separate; common broker readiness, safety halt and sell protection still apply.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
                         Switch(
                             checked = state.settings.forecastAutoBuyEnabled,
-                            onCheckedChange = onForecastAutoBuyChanged,
-                            enabled = state.settings.forecastScannerEnabled
+                            onCheckedChange = onForecastAutoBuyChanged
                         )
                     }
                     KeyValueRow(
                         "Forecast auto-buy",
-                        when {
-                            state.settings.forecastAutoBuyEnabled && armed -> "ACTIVE · ARM ON"
-                            state.settings.forecastAutoBuyEnabled -> "Enabled · waiting for ARM"
-                            else -> "OFF · manual BUY only"
-                        }
+                        if (state.settings.forecastAutoBuyEnabled) "ACTIVE · independent" else "OFF · manual BUY only"
                     )
                     Text(
                         "Entry control: no Fixed entry GTT. Auto-buy uses a fresh quote for sizing and sends a direct CNC MARKET BUY immediately. The actual broker fill becomes the holding average and trailing anchor; the live execution target keeps the frozen recommendation target percentage but is anchored to that actual fill.",
@@ -1000,7 +970,7 @@ private fun SettingsScreen(
                         Column(Modifier.weight(1f)) {
                             Text("Auto-buy Fixed recommendations", fontWeight = FontWeight.SemiBold)
                             Text(
-                                "When enabled, every new PRIMARY recommendation from the immutable Fixed engine gets its own Groww CNC MARKET BUY. Multiple recommendations from the same scan are processed independently. ARM must also be ON; available CNC cash and safety checks still apply.",
+                                "When enabled, every new PRIMARY recommendation from the immutable Fixed engine gets its own Groww CNC MARKET BUY. This toggle is independent from Multify ARM; available CNC cash, broker readiness and safety checks still apply.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -1012,14 +982,10 @@ private fun SettingsScreen(
                     }
                     KeyValueRow(
                         "Fixed auto-buy",
-                        when {
-                            state.settings.fixedAutoBuyEnabled && armed -> "ACTIVE · ARM ON"
-                            state.settings.fixedAutoBuyEnabled -> "Enabled · waiting for ARM"
-                            else -> "OFF · manual BUY only"
-                        }
+                        if (state.settings.fixedAutoBuyEnabled) "ACTIVE · independent" else "OFF · manual BUY only"
                     )
                     Text(
-                        "Fixed remains immutable. Forecast may read prior positive Fixed outcomes as its main transfer signal and positive Multify outcomes as secondary guidance, but Forecast can never write into Fixed or change its v7.4.1 rules. The common stepped trailing-stop architecture remains unchanged across Multify, Fixed and Forecast holdings.",
+                        "Fixed remains immutable. Forecast may read prior positive Fixed outcomes, but can never write into Fixed or change its v7.4.1 rules. Every app-owned Multify, Fixed and Forecast LONG uses the same sell protection: hard -5% loss floor, then the existing +0.55% arm → +0.50% protected gain → +0.10% ratchet when profitable. No averaging down.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
