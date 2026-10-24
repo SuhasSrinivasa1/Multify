@@ -20,7 +20,6 @@ object ForecastAutoBuyPolicy {
         stateDate: String,
         today: String,
         autoBuyEnabled: Boolean,
-        armEffective: Boolean,
         safetyHalt: Boolean,
         forecastActive: Boolean,
         executionEligible: Boolean,
@@ -29,7 +28,6 @@ object ForecastAutoBuyPolicy {
         forceCancel ||
             stateDate != today ||
             !autoBuyEnabled ||
-            !armEffective ||
             safetyHalt ||
             !forecastActive ||
             !executionEligible
