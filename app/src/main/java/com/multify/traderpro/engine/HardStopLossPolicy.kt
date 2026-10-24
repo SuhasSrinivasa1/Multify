@@ -21,4 +21,3 @@ object HardStopLossPolicy {
     fun breached(entryPrice: Double, currentPrice: Double): Boolean =
         currentPrice.isFinite() && currentPrice > 0.0 && currentPrice <= stopPrice(entryPrice) + 1e-9
 }
-
