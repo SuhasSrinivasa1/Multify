@@ -4,14 +4,6 @@ name: Multify Trader Pro v7.3.0 Resilient Forecast Build
 
 on:
   workflow_dispatch:
-    branches: [ main ]
-    paths:
-      - 'app/**'
-      - 'backend/**'
-      - 'build.gradle.kts'
-      - 'settings.gradle.kts'
-      - 'gradle.properties'
-      - '.github/workflows/multify-v450-build.yml'
 
 permissions:
   contents: write
