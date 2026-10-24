@@ -2,15 +2,6 @@ name: Multify Trader Pro v7.3.2 Resilient Forecast Health Verification
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ main ]
-    paths:
-      - 'app/**'
-      - 'backend/**'
-      - 'build.gradle.kts'
-      - 'settings.gradle.kts'
-      - 'gradle.properties'
-      - '.github/workflows/multify-v732-verify.yml'
 
 permissions:
   contents: read
