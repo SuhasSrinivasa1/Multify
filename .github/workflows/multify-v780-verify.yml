@@ -2,14 +2,6 @@ name: Multify Trader Pro v7.8.0 Forecast Validation Verification
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ main ]
-    paths:
-      - 'app/**'
-      - 'backend/**'
-      - 'RELEASE_NOTES_v7.8.0.md'
-      - 'FORECAST_V780_IMPLEMENTATION_AUDIT.md'
-      - '.github/workflows/multify-v780-verify.yml'
 
 permissions:
   contents: write
