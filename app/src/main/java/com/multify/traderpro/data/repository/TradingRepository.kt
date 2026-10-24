@@ -61,6 +61,11 @@ import com.multify.traderpro.engine.AdaptiveLearningMath
 import com.multify.traderpro.engine.CashAwareCncSizing
 import com.multify.traderpro.engine.ExecutionTelemetryMath
 import com.multify.traderpro.engine.ForecastAutoBuyPolicy
+import com.multify.traderpro.engine.ForecastAdaptiveSelectionPolicy
+import com.multify.traderpro.engine.ForecastEconomicsDecision
+import com.multify.traderpro.engine.ForecastEvidenceDiagnostics
+import com.multify.traderpro.engine.ForecastFamilyOutcome
+import com.multify.traderpro.engine.ForecastHistoricalOutcome
 import com.multify.traderpro.engine.ForecastFixedPositiveTransferPolicy
 import com.multify.traderpro.engine.ForecastMultifyPositiveTransferPolicy
 import com.multify.traderpro.engine.MultifyPositiveTransferCase
@@ -224,7 +229,9 @@ class TradingRepository @Inject constructor(
         val factorModel: MultifyFactorModel,
         val score: Double,
         val championKey: String,
-        val targetPct: Double
+        val targetPct: Double,
+        val economics: ForecastEconomicsDecision,
+        val evidenceDiagnostics: ForecastEvidenceDiagnostics
     )
 
     private data class FixedCandidate(
@@ -1841,6 +1848,10 @@ class TradingRepository @Inject constructor(
         if (!force && nowMs - lastForecastScanAtMs < FORECAST_SCAN_INTERVAL_MS) return existing.map { it.toForecastDto() }
         val token = ensureToken() ?: return existing.map { it.toForecastDto() }
         lastForecastScanAtMs = nowMs
+        val scanStartedElapsedMs = SystemClock.elapsedRealtime()
+        val apiBefore = GrowwApiUsageLedger.snapshot()
+        val cacheHitsBefore = GrowwApiUsageLedger.cacheHitCount()
+        val cacheMissesBefore = GrowwApiUsageLedger.cacheMissCount()
 
         val calls = learningDao.allCalls().filter { it.action.equals("BUY", true) }
         val recentDates = calls.map { it.callDate }.distinct().sortedDescending().take(30).toSet()
@@ -1860,11 +1871,13 @@ class TradingRepository @Inject constructor(
 
         // v7.3 persists broad discovery state across Android process death. A truly cold pass is
         // research-only; production waits for healthy market-wide baseline coverage.
+        val discoveryStartedElapsedMs = SystemClock.elapsedRealtime()
         val discoveryPass = if (master.isEmpty()) {
             MarketDiscoveryPass(emptyList(), false, 0.0, false, 0)
         } else {
             discoverMarketWideCandidates(token, master, today)
         }
+        val discoveryElapsedMs = SystemClock.elapsedRealtime() - discoveryStartedElapsedMs
         val discoveredSymbols = discoveryPass.symbols
 
         val slot = (now.hour * 60 + now.minute) / 30
@@ -1878,6 +1891,7 @@ class TradingRepository @Inject constructor(
             .distinct()
             .take(DETAILED_FORECAST_UNIVERSE_LIMIT)
         val evaluated = mutableListOf<Pair<String, StrategyEvaluation>>()
+        val detailedEvaluationStartedElapsedMs = SystemClock.elapsedRealtime()
         for (symbol in universe) {
             if (fixedApiPriorityRequested) {
                 auditLogger.log("FORECAST", "YIELD_TO_FIXED_PRIORITY", mapOf("stage" to "detailed_evaluation"))
@@ -1895,6 +1909,7 @@ class TradingRepository @Inject constructor(
             evaluated += symbol to evaluation
             delay(FORECAST_SYMBOL_PACING_MS)
         }
+        val detailedEvaluationElapsedMs = SystemClock.elapsedRealtime() - detailedEvaluationStartedElapsedMs
 
         val breadth = evaluated.mapNotNull { it.second.features.dayChangePct }
             .takeIf { it.isNotEmpty() }?.average() ?: 0.0
@@ -1905,6 +1920,7 @@ class TradingRepository @Inject constructor(
         }
         val champions = learningDao.allForecastChampions().associateBy { it.key }
         val learned = learningStats()
+        val forecastSettings = preferences.settings.first()
         val priorForecasts = learningDao.allLongForecasts().filter {
             it.forecastDate < today && it.status in setOf("TARGET_HIT", "MISSED") &&
                 ForecastUniversalPositiveEvidencePolicy.qualifies(
@@ -1925,19 +1941,35 @@ class TradingRepository @Inject constructor(
             .filter { it < today }
             .take(30)
             .toSet()
-        val priorResearch = if (priorResearchDates.isEmpty()) emptyList() else {
+        val priorResearchAll = if (priorResearchDates.isEmpty()) emptyList() else {
             learningDao.allForecastResearch()
-                .filter {
-                    it.researchDate in priorResearchDates && it.outcomeUpdatedAtMs != null &&
-                        ForecastUniversalPositiveEvidencePolicy.qualifies(
-                            realizedPct = null,
-                            closePct = it.outcomeClosePct,
-                            maxFavourablePct = it.outcomeMfePct ?: 0.0,
-                            targetHit = it.outcomeTargetHit == true
-                        )
-                }
+                .filter { it.researchDate in priorResearchDates && it.outcomeUpdatedAtMs != null }
                 .groupBy { it.researchDate + "|" + it.symbol }
                 .mapNotNull { (_, rows) -> rows.minByOrNull { it.scanAtMs } }
+        }
+        val priorResearch = priorResearchAll.filter {
+            ForecastUniversalPositiveEvidencePolicy.qualifies(
+                realizedPct = null,
+                closePct = it.outcomeClosePct,
+                maxFavourablePct = it.outcomeMfePct ?: 0.0,
+                targetHit = it.outcomeTargetHit == true
+            )
+        }
+        val historicalOutcomes = priorResearchAll.mapNotNull { row ->
+            val mfe = row.outcomeMfePct ?: return@mapNotNull null
+            val mae = row.outcomeMaePct ?: return@mapNotNull null
+            val close = row.outcomeClosePct ?: return@mapNotNull null
+            ForecastHistoricalOutcome(
+                date = row.researchDate,
+                symbol = row.symbol,
+                strategy = row.strategy,
+                regime = row.regime,
+                marketRegime = row.marketRegime,
+                maxFavourablePct = mfe,
+                maxAdversePct = mae,
+                closePct = close,
+                targetHit = row.outcomeTargetHit == true
+            )
         }
 
         fun researchEvidenceBonus(evaluation: StrategyEvaluation): Double {
@@ -2005,6 +2037,21 @@ class TradingRepository @Inject constructor(
                 dominantFamily = factorModel.dominantFamily,
                 evidence = universalPositiveEvidence
             )
+            val atrPct = row.second.features.atr14?.takeIf { row.second.features.ltp > 0.0 }
+                ?.let { it / row.second.features.ltp * 100.0 }
+            val economics = ForecastAdaptiveSelectionPolicy.economics(
+                entryPrice = row.second.features.ltp,
+                targetPct = candidateTargetPct,
+                budgetRupees = forecastSettings.holdingBudgetRupees,
+                spreadBps = row.second.features.spreadBps,
+                atrPct = atrPct
+            )
+            val evidenceDiagnostics = ForecastAdaptiveSelectionPolicy.diagnostics(
+                strategy = row.second.strategy,
+                regime = row.second.regime,
+                marketRegime = marketRegime,
+                outcomes = historicalOutcomes
+            )
             ForecastCandidate(
                 symbol = row.first,
                 evaluation = row.second,
@@ -2017,12 +2064,15 @@ class TradingRepository @Inject constructor(
                     fixedPositiveBonus + multifyPositiveBonus + universalEvidenceBonus
                 ).coerceIn(0.01, .99),
                 championKey = key,
-                targetPct = candidateTargetPct
+                targetPct = candidateTargetPct,
+                economics = economics,
+                evidenceDiagnostics = evidenceDiagnostics
             )
         }.sortedWith(
             compareByDescending<ForecastCandidate> {
                 when (it.quality.tier) { "PRIMARY" -> 3; "SECONDARY" -> 2; else -> 1 }
             }.thenByDescending { it.score }
+                .thenByDescending { it.economics.riskAdjustedScore }
         )
 
         val capturedResearchDates = learningDao.forecastResearchDates()
@@ -2053,7 +2103,8 @@ class TradingRepository @Inject constructor(
         val liveForecastReady = MarketPriorityPolicy.liveForecastUnlocked(completedCalibrationSessions)
         val publishable = if (liveForecastReady) unseen.filter { item ->
             val currentPrimary =
-                item.quality.tier == "PRIMARY" && item.quality.publishEligible && item.quality.executionEligible
+                item.quality.tier == "PRIMARY" && item.quality.publishEligible && item.quality.executionEligible &&
+                    item.economics.profitableAfterCosts
             ForecastPublicationPolicy.isReady(
                 discoveryBaselineReady = discoveryPass.baselineReady,
                 currentPrimary = currentPrimary,
@@ -2083,6 +2134,11 @@ class TradingRepository @Inject constructor(
                         " · family " + item.factorModel.dominantFamily +
                         " · family consensus " + fmt(item.factorModel.consensusScore * 100.0) + "%" +
                         " · capacity " + fmt(quality.volatilityCapacityPct) + "% for " + fmt(item.targetPct) + "% target" +
+                        " · est net ₹" + fmt(item.economics.netProfitRupees) +
+                        " (" + fmt(item.economics.netReturnPct) + "%) after charges/slippage" +
+                        " · risk-adjusted " + fmt(item.economics.riskAdjustedScore) +
+                        " · evidence " + item.evidenceDiagnostics.sampleCount + " samples/" +
+                        item.evidenceDiagnostics.distinctDays + "d/" + item.evidenceDiagnostics.distinctSymbols + " stocks" +
                         if (item.targetPct > targetPct) " · positive Fixed upside expansion +" + fmt(item.targetPct - targetPct) + "pp" else "",
                     generatedAtMs = nowMs,
                     lastPrice = price,
@@ -2138,6 +2194,8 @@ class TradingRepository @Inject constructor(
             "arm_effective" to preferences.settings.first().armEffective,
             "forecasting_independent_of_arm" to true,
             "publishable_after_confirmation" to publishable.size,
+            "shadow_stricter_filter_pass_count" to ranked.count { ForecastAdaptiveSelectionPolicy.shadowFilterReview(it.evaluation, it.targetPct).passes },
+            "shadow_stricter_filter_applied_live" to false,
             "publication_suppressed_until_discovery_ready" to !discoveryPass.baselineReady,
             "top_candidates" to ranked.take(5).map {
                 mapOf("symbol" to it.symbol, "tier" to it.quality.tier, "score" to it.score,
@@ -2147,14 +2205,74 @@ class TradingRepository @Inject constructor(
                     "positive_families" to it.factorModel.positiveFamilies,
                     "market_wide_discovered" to (it.symbol in discoveredSymbols),
                     "prior_primary_confirmations" to priorPrimaryHits(it.symbol),
+                    "estimated_net_profit_rupees" to it.economics.netProfitRupees,
+                    "estimated_net_return_pct" to it.economics.netReturnPct,
+                    "estimated_charges_rupees" to it.economics.estimatedChargesRupees,
+                    "estimated_slippage_rupees" to it.economics.estimatedSlippageRupees,
+                    "risk_adjusted_score" to it.economics.riskAdjustedScore,
+                    "historical_sample_count" to it.evidenceDiagnostics.sampleCount,
+                    "historical_distinct_days" to it.evidenceDiagnostics.distinctDays,
+                    "historical_distinct_symbols" to it.evidenceDiagnostics.distinctSymbols,
+                    "historical_positive_rate_pct" to it.evidenceDiagnostics.positiveRatePct,
+                    "historical_target_hit_rate_pct" to it.evidenceDiagnostics.targetHitRatePct,
+                    "historical_median_mfe_pct" to it.evidenceDiagnostics.medianMfePct,
+                    "historical_median_mae_pct" to it.evidenceDiagnostics.medianMaePct,
+                    "historical_median_close_pct" to it.evidenceDiagnostics.medianClosePct,
+                    "shadow_evidence_confidence_bonus" to ForecastAdaptiveSelectionPolicy.positiveConfidenceBonus(it.evidenceDiagnostics),
+                    "shadow_evidence_confidence_bonus_applied_live" to false,
+                    "shadow_economics_bonus" to ForecastAdaptiveSelectionPolicy.economicsBonus(it.economics),
+                    "shadow_risk_bonus" to ForecastAdaptiveSelectionPolicy.riskBonus(it.economics),
+                    "shadow_economics_risk_bonus_applied_live" to false,
+                    "shadow_context_target_pct" to ForecastAdaptiveSelectionPolicy.shadowTargetPct(it.targetPct, it.evidenceDiagnostics),
+                    "shadow_context_target_applied_live" to false,
+                    "shadow_filter_pass" to ForecastAdaptiveSelectionPolicy.shadowFilterReview(it.evaluation, it.targetPct).passes,
+                    "shadow_filter_failures" to ForecastAdaptiveSelectionPolicy.shadowFilterReview(it.evaluation, it.targetPct).failedRules,
+                    "shadow_filter_applied_live" to false,
+                    "out_of_sample_validation_samples" to it.evidenceDiagnostics.validationSamples,
+                    "out_of_sample_target_hit_rate_pct" to it.evidenceDiagnostics.validationTargetHitRatePct,
+                    "shadow_negative_penalty" to it.evidenceDiagnostics.shadowPenalty,
+                    "shadow_negative_penalty_applied_live" to false,
                     "publication_ready" to ForecastPublicationPolicy.isReady(
                         discoveryPass.baselineReady,
-                        it.quality.tier == "PRIMARY" && it.quality.publishEligible && it.quality.executionEligible,
+                        it.quality.tier == "PRIMARY" && it.quality.publishEligible && it.quality.executionEligible &&
+                            it.economics.profitableAfterCosts,
                         it.symbol in discoveredSymbols,
                         priorPrimaryHits(it.symbol)
                     ),
                     "reason" to it.quality.reason)
             }
+        ))
+        val apiAfter = GrowwApiUsageLedger.snapshot()
+        fun apiDelta(category: GrowwApiUsageLedger.Category): Map<String, Any?> {
+            val before = apiBefore.categories.first { it.category == category }
+            val after = apiAfter.categories.first { it.category == category }
+            return mapOf(
+                "requests" to (after.totalRequests - before.totalRequests),
+                "rate_limits" to (after.rateLimitResponses - before.rateLimitResponses),
+                "network_ms" to (after.networkMs - before.networkMs),
+                "permit_wait_count" to (after.permitWaitCount - before.permitWaitCount),
+                "permit_wait_ms" to (after.permitWaitMs - before.permitWaitMs),
+                "minute_utilization_pct_end" to after.minuteUtilizationPct,
+                "minute_headroom_end" to after.minuteHeadroom
+            )
+        }
+        auditLogger.logAsync("FORECAST_TELEMETRY", "SCAN_PROFILE", mapOf(
+            "date" to today,
+            "scan_elapsed_ms" to (SystemClock.elapsedRealtime() - scanStartedElapsedMs),
+            "discovery_elapsed_ms" to discoveryElapsedMs,
+            "detailed_evaluation_elapsed_ms" to detailedEvaluationElapsedMs,
+            "master_count" to master.size,
+            "universe_count" to universe.size,
+            "evaluated_count" to evaluated.size,
+            "published_new_count" to publishable.size,
+            "cache_hits" to (GrowwApiUsageLedger.cacheHitCount() - cacheHitsBefore),
+            "cache_misses" to (GrowwApiUsageLedger.cacheMissCount() - cacheMissesBefore),
+            "live_data" to apiDelta(GrowwApiUsageLedger.Category.LIVE_DATA),
+            "historical" to apiDelta(GrowwApiUsageLedger.Category.HISTORICAL),
+            "non_trading" to apiDelta(GrowwApiUsageLedger.Category.NON_TRADING),
+            "fixed_guard_window_ms" to MarketPriorityPolicy.FIXED_GUARD_WINDOW_MS,
+            "live_forecast_unlocked" to liveForecastReady,
+            "fixed_formula_changed" to false
         ))
         return all.map { it.toForecastDto() }
     }
@@ -2542,7 +2660,36 @@ class TradingRepository @Inject constructor(
         candidates: List<ForecastCandidate>
     ) {
         candidates.forEachIndexed { index, item ->
-            val featureMap = researchFeatureMap(item.evaluation, item.factorModel)
+            val featureMap = researchFeatureMap(item.evaluation, item.factorModel) + mapOf(
+                "adaptive_selection_version" to "V78_SHADOW_VALIDATED",
+                "estimated_net_profit_rupees" to item.economics.netProfitRupees,
+                "estimated_net_return_pct" to item.economics.netReturnPct,
+                "estimated_charges_rupees" to item.economics.estimatedChargesRupees,
+                "estimated_slippage_rupees" to item.economics.estimatedSlippageRupees,
+                "risk_adjusted_score" to item.economics.riskAdjustedScore,
+                "downside_proxy_pct" to item.economics.downsideProxyPct,
+                "historical_sample_count" to item.evidenceDiagnostics.sampleCount,
+                "historical_distinct_days" to item.evidenceDiagnostics.distinctDays,
+                "historical_distinct_symbols" to item.evidenceDiagnostics.distinctSymbols,
+                "historical_positive_count" to item.evidenceDiagnostics.positiveCount,
+                "historical_flat_count" to item.evidenceDiagnostics.flatCount,
+                "historical_adverse_count" to item.evidenceDiagnostics.adverseCount,
+                "historical_positive_rate_pct" to item.evidenceDiagnostics.positiveRatePct,
+                "historical_target_hit_rate_pct" to item.evidenceDiagnostics.targetHitRatePct,
+                "historical_median_mfe_pct" to item.evidenceDiagnostics.medianMfePct,
+                "historical_median_mae_pct" to item.evidenceDiagnostics.medianMaePct,
+                "historical_median_close_pct" to item.evidenceDiagnostics.medianClosePct,
+                "evidence_confidence" to item.evidenceDiagnostics.confidence,
+                "out_of_sample_validation_samples" to item.evidenceDiagnostics.validationSamples,
+                "out_of_sample_target_hit_rate_pct" to item.evidenceDiagnostics.validationTargetHitRatePct,
+                "shadow_negative_penalty" to item.evidenceDiagnostics.shadowPenalty,
+                "shadow_negative_penalty_applied_live" to false,
+                "shadow_context_target_pct" to ForecastAdaptiveSelectionPolicy.shadowTargetPct(item.targetPct, item.evidenceDiagnostics),
+                "shadow_context_target_applied_live" to false,
+                "shadow_filter_pass" to ForecastAdaptiveSelectionPolicy.shadowFilterReview(item.evaluation, item.targetPct).passes,
+                "shadow_filter_failures" to ForecastAdaptiveSelectionPolicy.shadowFilterReview(item.evaluation, item.targetPct).failedRules,
+                "shadow_filter_applied_live" to false
+            )
             val votes = item.evaluation.votes.map {
                 mapOf("name" to it.name, "score" to it.score, "note" to it.note)
             }
@@ -2555,7 +2702,7 @@ class TradingRepository @Inject constructor(
                     qualityTier = item.quality.tier,
                     publishEligible = item.quality.publishEligible,
                     executionEligible = item.quality.executionEligible,
-                    targetPct = targetPct,
+                    targetPct = item.targetPct,
                     entryPrice = item.evaluation.features.ltp,
                     regime = item.evaluation.regime,
                     marketRegime = marketRegime,
@@ -4627,6 +4774,93 @@ class TradingRepository @Inject constructor(
         val matched = forecasts.count { it.multifyMatched }
         val frozen = learningDao.allForecastChampions().count { it.frozen }
         val avgTarget = forecasts.map { it.targetPct }.takeIf { it.isNotEmpty() }?.average() ?: 0.0
+        val allCompletedHistoricalRows = learningDao.allForecastResearch()
+            .filter { it.researchDate < today && it.outcomeUpdatedAtMs != null }
+            .groupBy { it.researchDate + "|" + it.symbol }
+            .mapNotNull { (_, rows) -> rows.minByOrNull { it.scanAtMs } }
+        val historicalOutcomes = allCompletedHistoricalRows.mapNotNull { row ->
+            ForecastHistoricalOutcome(
+                date = row.researchDate,
+                symbol = row.symbol,
+                strategy = row.strategy,
+                regime = row.regime,
+                marketRegime = row.marketRegime,
+                maxFavourablePct = row.outcomeMfePct ?: return@mapNotNull null,
+                maxAdversePct = row.outcomeMaePct ?: return@mapNotNull null,
+                closePct = row.outcomeClosePct ?: return@mapNotNull null,
+                targetHit = row.outcomeTargetHit == true
+            )
+        }
+        val broadDiagnostics = ForecastAdaptiveSelectionPolicy.diagnostics(
+            strategy = "__ALL__",
+            regime = "__ALL__",
+            marketRegime = "__ALL__",
+            outcomes = historicalOutcomes
+        ).takeIf { it.sampleCount > 0 } ?: run {
+            if (historicalOutcomes.isEmpty()) ForecastEvidenceDiagnostics() else {
+                // Force a broad aggregate without changing the policy's live context matching.
+                val normalized = historicalOutcomes.map {
+                    it.copy(strategy = "ALL", regime = "ALL", marketRegime = "ALL")
+                }
+                ForecastAdaptiveSelectionPolicy.diagnostics("ALL", "ALL", "ALL", normalized)
+            }
+        }
+        val familyOutcomes = allCompletedHistoricalRows.mapNotNull { row ->
+            val summary = evidenceFeatureSummary(row.featureJson)
+            val close = row.outcomeClosePct ?: return@mapNotNull null
+            ForecastFamilyOutcome(
+                date = row.researchDate,
+                symbol = row.symbol,
+                marketRegime = row.marketRegime,
+                momentumScore = summary.momentum,
+                participationScore = summary.participation,
+                structureScore = summary.structure,
+                positive = row.outcomeTargetHit == true || close > 0.05
+            )
+        }
+        val shadowFamilyWeights = listOf("BREADTH_BULL", "BREADTH_NEUTRAL", "BREADTH_WEAK")
+            .associateWith { regime -> ForecastAdaptiveSelectionPolicy.shadowFamilyWeights(regime, familyOutcomes) }
+        val fixedToday = adaptiveFixedEvidenceRecords().filter { it.recommendationDate == today }
+        val fixedHitRate = if (fixedToday.isEmpty()) 0.0 else
+            fixedToday.count { it.maxFavourablePct + 1e-9 >= it.targetPct }.toDouble() / fixedToday.size * 100.0
+        val fixedAvgMfe = fixedToday.map { it.maxFavourablePct }.takeIf { it.isNotEmpty() }?.average() ?: 0.0
+        val forecastResearchHitRate = if (snapshots.isEmpty()) 0.0 else
+            snapshots.count { it.outcomeTargetHit == true }.toDouble() / snapshots.size * 100.0
+        val forecastResearchAvgMfe = snapshots.mapNotNull { it.outcomeMfePct }.takeIf { it.isNotEmpty() }?.average() ?: 0.0
+        val forecastVsFixedMfeDelta = forecastResearchAvgMfe - fixedAvgMfe
+        val forecastVsFixedHitDelta = forecastResearchHitRate - fixedHitRate
+        val forecastTradesToday = managedDao.allTrades().filter { trade ->
+            trade.engine == ENGINE_FORECAST_HOLDING &&
+                Instant.ofEpochMilli(trade.closedAtMs).atZone(INDIA).toLocalDate().toString() == today
+        }
+        val avgRealizedNetPct = forecastTradesToday.mapNotNull { trade ->
+            val invested = trade.entryPrice * trade.quantity
+            if (invested > 0.0) trade.netPnl / invested * 100.0 else null
+        }.takeIf { it.isNotEmpty() }?.average() ?: 0.0
+        val avgMfeTradePct = forecastTradesToday.mapNotNull { trade ->
+            val invested = trade.entryPrice * trade.quantity
+            if (invested > 0.0) trade.mfeRupees / invested * 100.0 else null
+        }.takeIf { it.isNotEmpty() }?.average() ?: 0.0
+        val avgProfitCapturePct = forecastTradesToday.mapNotNull { trade ->
+            if (trade.mfeRupees > 0.0) (trade.grossPnl / trade.mfeRupees * 100.0).coerceIn(-500.0, 500.0) else null
+        }.takeIf { it.isNotEmpty() }?.average() ?: 0.0
+        val timeBucketPerformance = snapshots
+            .groupBy { ForecastUniversalPositiveEvidencePolicy.timeBucket(it.scanAtMs) }
+            .mapValues { (_, rows) ->
+                val hitRate = if (rows.isEmpty()) 0.0 else rows.count { it.outcomeTargetHit == true }.toDouble() / rows.size * 100.0
+                val positiveRate = if (rows.isEmpty()) 0.0 else rows.count {
+                    (it.outcomeClosePct ?: 0.0) > 0.05 || it.outcomeTargetHit == true
+                }.toDouble() / rows.size * 100.0
+                val avgMfe = rows.mapNotNull { it.outcomeMfePct }.takeIf { it.isNotEmpty() }?.average() ?: 0.0
+                val avgMae = rows.mapNotNull { it.outcomeMaePct }.takeIf { it.isNotEmpty() }?.average() ?: 0.0
+                mapOf(
+                    "count" to rows.size,
+                    "target_hit_rate_pct" to hitRate,
+                    "positive_rate_pct" to positiveRate,
+                    "avg_mfe_pct" to avgMfe,
+                    "avg_mae_pct" to avgMae
+                )
+            }
 
         fun tierSummary(tier: String): String {
             val xs = positiveCloseSnapshots.filter { it.qualityTier == tier }
@@ -4651,6 +4885,19 @@ class TradingRepository @Inject constructor(
             append("Published target hits: $wins/${forecasts.size}. ")
             append("Five-session live calibration: ${forecastLearning.researchSessionsCaptured}/${forecastLearning.researchSessionGoal}. ")
             append("Universal positive evidence today: ${universalEvidence.size} rows (Forecast/Fixed/Multify), with target misses still positive when the shared stepped trail armed/protected profit. ")
+            append("All-outcome diagnostics: ${broadDiagnostics.sampleCount} historical rows across ${broadDiagnostics.distinctDays} days/${broadDiagnostics.distinctSymbols} stocks; positive ${fmt(broadDiagnostics.positiveRatePct)}%, target-hit ${fmt(broadDiagnostics.targetHitRatePct)}%, median MFE ${fmt(broadDiagnostics.medianMfePct)}%, median MAE ${fmt(broadDiagnostics.medianMaePct)}%, median close ${fmt(broadDiagnostics.medianClosePct)}%. ")
+            if (broadDiagnostics.validationSamples > 0) append("Chronological out-of-sample holdout: ${broadDiagnostics.validationSamples} rows, target-hit ${fmt(broadDiagnostics.validationTargetHitRatePct)}%. ")
+            append("Shadow negative penalty proposal ${fmt(broadDiagnostics.shadowPenalty)} is diagnostic only and is NOT applied to live ranking. ")
+            val nonNeutralShadowWeights = shadowFamilyWeights.filterValues { weights -> weights.values.any { kotlin.math.abs(it - 1.0) > 0.001 } }
+            if (nonNeutralShadowWeights.isNotEmpty()) append("Shadow family-weight proposals: " + nonNeutralShadowWeights.entries.joinToString("; ") { (regime, weights) -> regime + " " + weights.entries.joinToString(",") { (family, weight) -> family + "=" + fmt(weight) } } + ". These are research-only; live 40-factor family weights are unchanged. ")
+            if (fixedToday.isNotEmpty() || snapshots.isNotEmpty()) append("Forecast vs frozen Fixed today: research MFE ${fmt(forecastResearchAvgMfe)}% vs Fixed ${fmt(fixedAvgMfe)}% (Δ ${fmt(forecastVsFixedMfeDelta)}pp); target-hit ${fmt(forecastResearchHitRate)}% vs Fixed ${fmt(fixedHitRate)}% (Δ ${fmt(forecastVsFixedHitDelta)}pp). ")
+            if (forecastTradesToday.isNotEmpty()) append("Forecast exits: ${forecastTradesToday.size} closed holdings · avg realised net ${fmt(avgRealizedNetPct)}% · avg MFE ${fmt(avgMfeTradePct)}% · avg gross profit capture ${fmt(avgProfitCapturePct)}%. ")
+            if (timeBucketPerformance.isNotEmpty()) append("Time-of-day diagnostics: " + timeBucketPerformance.entries.sortedBy { it.key }.joinToString("; ") { (bucket, stats) ->
+                bucket + " n=" + stats["count"] + ", hit=" + fmt(stats["target_hit_rate_pct"] as Double) + "%" +
+                    ", positive=" + fmt(stats["positive_rate_pct"] as Double) + "%" +
+                    ", MFE=" + fmt(stats["avg_mfe_pct"] as Double) + "%" +
+                    ", MAE=" + fmt(stats["avg_mae_pct"] as Double) + "%"
+            } + ". ")
             append(tierSummary("PRIMARY")).append(". ")
             append(tierSummary("SECONDARY")).append(". ")
             append(tierSummary("RESEARCH")).append(". ")
@@ -4670,6 +4917,30 @@ class TradingRepository @Inject constructor(
             "research_rows_completed" to snapshots.size,
             "positive_close_learning_rows" to positiveCloseSnapshots.size,
             "negative_or_flat_rows_excluded" to (snapshots.size - positiveCloseSnapshots.size),
+            "all_outcome_sample_count" to broadDiagnostics.sampleCount,
+            "all_outcome_positive_rate_pct" to broadDiagnostics.positiveRatePct,
+            "all_outcome_target_hit_rate_pct" to broadDiagnostics.targetHitRatePct,
+            "all_outcome_median_mfe_pct" to broadDiagnostics.medianMfePct,
+            "all_outcome_median_mae_pct" to broadDiagnostics.medianMaePct,
+            "out_of_sample_validation_samples" to broadDiagnostics.validationSamples,
+            "out_of_sample_target_hit_rate_pct" to broadDiagnostics.validationTargetHitRatePct,
+            "shadow_negative_penalty" to broadDiagnostics.shadowPenalty,
+            "shadow_negative_penalty_applied_live" to false,
+            "shadow_family_weights" to shadowFamilyWeights,
+            "shadow_family_weights_applied_live" to false,
+            "fixed_today_count" to fixedToday.size,
+            "fixed_today_avg_mfe_pct" to fixedAvgMfe,
+            "fixed_today_target_hit_rate_pct" to fixedHitRate,
+            "forecast_today_research_avg_mfe_pct" to forecastResearchAvgMfe,
+            "forecast_today_research_target_hit_rate_pct" to forecastResearchHitRate,
+            "forecast_vs_fixed_mfe_delta_pp" to forecastVsFixedMfeDelta,
+            "forecast_vs_fixed_hit_delta_pp" to forecastVsFixedHitDelta,
+            "forecast_closed_trades_today" to forecastTradesToday.size,
+            "forecast_avg_realized_net_pct" to avgRealizedNetPct,
+            "forecast_avg_trade_mfe_pct" to avgMfeTradePct,
+            "forecast_avg_profit_capture_pct" to avgProfitCapturePct,
+            "time_bucket_performance" to timeBucketPerformance,
+            "time_bucket_analysis_applied_live" to false,
             "research_sessions" to forecastLearning.researchSessionsCaptured
         ))
         return ResearchDto(today, entity.title, report)
