@@ -595,6 +595,7 @@ class TradingEngineService : Service() {
 
     private fun notifyForecast(f: ForecastDto) {
         val manager = getSystemService(NotificationManager::class.java)
+        val postedAtMs = System.currentTimeMillis()
         val message = buildString {
             append(f.qualityTier)
             append(" · entry ₹")
@@ -613,6 +614,15 @@ class TradingEngineService : Service() {
             .setAutoCancel(true)
             .build()
         manager.notify((f.symbol.hashCode() xor f.generatedAtMs.toInt()).and(Int.MAX_VALUE), notification)
+        auditLogger.logAsync("EXECUTION_LATENCY", "FORECAST_NOTIFICATION_POSTED", mapOf(
+            "symbol" to f.symbol,
+            "quality_tier" to f.qualityTier,
+            "recommendation_generated_at_ms" to f.generatedAtMs,
+            "notification_posted_at_ms" to postedAtMs,
+            "recommendation_to_notification_ms" to (postedAtMs - f.generatedAtMs).coerceAtLeast(0L),
+            "execution_eligible" to f.executionEligible,
+            "fixed_formula_changed" to false
+        ))
     }
 
     private fun updatePositionMonitoringWakeLock(shouldHold: Boolean, reason: String) {
