@@ -157,9 +157,9 @@ class TraderViewModel @Inject constructor(
                     remote.value = remote.value.copy(
                         loading = false,
                         message = if (enabled)
-                            "Forecast auto-buy enabled · fixed GTT UP entry trigger and fixed published target · ARM required"
+                            "Forecast auto-buy enabled · independent direct MARKET BUY · common sell protection remains active"
                         else
-                            "Forecast auto-buy disabled · active untriggered forecast entry GTTs are being cancelled"
+                            "Forecast auto-buy disabled · no new Forecast entries; existing holdings remain sell-protected"
                     )
                     refresh(silent = true)
                 }
@@ -175,9 +175,9 @@ class TraderViewModel @Inject constructor(
                     remote.value = remote.value.copy(
                         loading = false,
                         message = if (enabled)
-                            "Fixed auto-buy enabled · immutable Fixed recommendations use direct MARKET BUY · ARM required"
+                            "Fixed auto-buy enabled · immutable Fixed recommendations use independent direct MARKET BUY · common sell protection remains active"
                         else
-                            "Fixed auto-buy disabled · active untriggered Fixed entry GTTs are being cancelled"
+                            "Fixed auto-buy disabled · no new Fixed entries; existing holdings remain sell-protected"
                     )
                     refresh(silent = true)
                 }
@@ -210,9 +210,6 @@ class TraderViewModel @Inject constructor(
         viewModelScope.launch {
             remote.value = remote.value.copy(loading = true, error = null, message = null)
             runCatching {
-                check(repository.settings.first().forecastScannerEnabled) {
-                    "Forecast scanner is paused for Fixed priority. Enable it in Settings before refreshing Forecast."
-                }
                 val rows = repository.generateDailyForecasts(force = true)
                 repository.autoBuyForecastRecommendations()
                 rows
