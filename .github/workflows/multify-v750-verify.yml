@@ -2,14 +2,6 @@ name: Multify Trader Pro v7.5.0 Fixed Engine Verification
 
 on:
   workflow_dispatch:
-    branches: [ main ]
-    paths:
-      - 'app/**'
-      - 'backend/**'
-      - 'build.gradle.kts'
-      - 'settings.gradle.kts'
-      - 'gradle.properties'
-      - '.github/workflows/multify-v750-verify.yml'
 
 permissions:
   contents: read
