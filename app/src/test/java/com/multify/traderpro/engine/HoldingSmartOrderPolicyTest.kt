@@ -14,7 +14,8 @@ class HoldingSmartOrderPolicyTest {
         assertEquals("DOWN", HoldingSmartOrderPolicy.recoveryDirection(102.0, 101.0))
     }
 
-    @Test fun onlyKnownTrailingOrRecoveryGttCountsAsServerProtection() {
+    @Test fun onlyKnownProtectiveGttCountsAsServerProtection() {
+        assertTrue(HoldingSmartOrderPolicy.isServerProtected(HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT, "gtt_0"))
         assertTrue(HoldingSmartOrderPolicy.isServerProtected(HoldingSmartOrderPolicy.MODE_TRAILING_GTT, "gtt_1"))
         assertTrue(HoldingSmartOrderPolicy.isServerProtected(HoldingSmartOrderPolicy.MODE_RECOVERY_GTT, "gtt_2"))
         assertFalse(HoldingSmartOrderPolicy.isServerProtected(HoldingSmartOrderPolicy.MODE_NONE, "gtt_3"))
