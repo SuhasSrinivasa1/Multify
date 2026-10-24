@@ -17,4 +17,3 @@ class HardStopLossPolicyTest {
         assertTrue(HardStopLossPolicy.breached(100.0, 94.0))
     }
 }
-
