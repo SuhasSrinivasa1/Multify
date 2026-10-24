@@ -17,13 +17,12 @@ class ForecastAutoBuyPolicyTest {
         assertTrue(ForecastAutoBuyPolicy.isCompleted("COMPLETED"))
     }
 
-    @Test fun staleOrDisarmedEntryMustCancel() {
+    @Test fun staleOrDisabledEntryMustCancel() {
         assertTrue(
             ForecastAutoBuyPolicy.shouldCancel(
                 stateDate = "2026-10-20",
                 today = "2026-10-21",
                 autoBuyEnabled = true,
-                armEffective = true,
                 safetyHalt = false,
                 forecastActive = true,
                 executionEligible = true,
@@ -34,8 +33,18 @@ class ForecastAutoBuyPolicyTest {
             ForecastAutoBuyPolicy.shouldCancel(
                 stateDate = "2026-10-21",
                 today = "2026-10-21",
+                autoBuyEnabled = false,
+                safetyHalt = false,
+                forecastActive = true,
+                executionEligible = true,
+                forceCancel = false
+            )
+        )
+        assertFalse(
+            ForecastAutoBuyPolicy.shouldCancel(
+                stateDate = "2026-10-21",
+                today = "2026-10-21",
                 autoBuyEnabled = true,
-                armEffective = false,
                 safetyHalt = false,
                 forecastActive = true,
                 executionEligible = true,
