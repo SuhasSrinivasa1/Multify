@@ -40,7 +40,7 @@ jobs:
           python - <<'PY'
           from pathlib import Path
           t = Path('app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt').read_text()
-          assert 'class ForecastEarlyEntryPolicy' in Path('app/src/main/java/com/multify/traderpro/engine/ForecastEarlyEntryPolicy.kt').read_text()
+          assert 'object ForecastEarlyEntryPolicy' in Path('app/src/main/java/com/multify/traderpro/engine/ForecastEarlyEntryPolicy.kt').read_text()
           assert 'FIXED_FINAL_LOCK_BEGIN' in t and 'FIXED_FINAL_LOCK_END' in t
           assert 'handleMultifyBuy' in t
           print("v7.8.8 source applied; Fixed lock and Multify handler present")
