@@ -14,6 +14,7 @@ import com.multify.traderpro.R
 import com.multify.traderpro.data.logging.AuditLogger
 import com.multify.traderpro.data.network.ForecastDto
 import com.multify.traderpro.data.network.GrowwApiUsageLedger
+import com.multify.traderpro.data.network.GrowwRecoveryGate
 import com.multify.traderpro.data.repository.TradingRepository
 import com.multify.traderpro.engine.ReleaseIntegrityManifest
 import dagger.hilt.android.AndroidEntryPoint
@@ -37,6 +38,7 @@ import javax.inject.Inject
 class TradingEngineService : Service() {
     @Inject lateinit var repository: TradingRepository
     @Inject lateinit var auditLogger: AuditLogger
+    @Inject lateinit var recoveryGate: GrowwRecoveryGate
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var engineJob: Job? = null
@@ -301,7 +303,13 @@ class TradingEngineService : Service() {
                     if (succeeded) {
                         val count = result.getOrThrow().coerceAtLeast(0)
                         lastKnownManagedCount = count
-                        if (!repository.isTradingRecoveryReady()) repository.setTradingRecoveryReady(true)
+                        if (!repository.brokerSessionHealthy()) {
+                            // Local-only portfolio accounting is NOT successful broker reconciliation.
+                            if (repository.isTradingRecoveryReady()) repository.setTradingRecoveryReady(false)
+                            lastManagedMonitorSucceeded = false
+                        } else if (!repository.isTradingRecoveryReady()) {
+                            repository.setTradingRecoveryReady(true)
+                        }
                         updatePositionMonitoringWakeLock(
                             shouldHold = count > 0,
                             reason = if (count > 0) "ACTIVE_MANAGED_HOLDINGS" else "NO_OPEN_MANAGED_HOLDINGS"
@@ -666,6 +674,8 @@ class TradingEngineService : Service() {
         managedMonitorSucceeded: Boolean
     ) {
         val monitorStatus = when {
+            recoveryGate.requiresReconnect() -> "Groww login expired — RECONNECT in Settings; broker orders paused · " +
+                "$managedCount last-known holding(s); verify GTT in Groww"
             !managedMonitorSucceeded -> "Monitor error · $managedCount last-known holding(s) · " +
                 if (positionMonitoringWakeLock?.isHeld == true) "CPU awake; retrying" else "CPU wake lock unavailable"
             managedCount <= 0 -> "No open holdings"
