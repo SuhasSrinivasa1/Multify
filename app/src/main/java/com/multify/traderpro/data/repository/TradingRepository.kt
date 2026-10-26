@@ -162,6 +162,7 @@ class TradingRepository @Inject constructor(
     private val apiFactory: GrowwApiFactory,
     private val recoveryGate: GrowwRecoveryGate,
     private val brokerRetryGuard: BrokerExecutionRetryGuard,
+    private val fixedShortManager: FixedShortExecutionManager,
     private val parser: NotificationParser,
     private val nseSymbols: NseSymbolRepository,
     private val auditLogger: AuditLogger,
@@ -1551,6 +1552,51 @@ class TradingRepository @Inject constructor(
                 fixedApiPriorityRequested = false
             }
         }
+    }
+
+    /** Fixed SHORT consumes Fixed's *already completed* primary recommendations. No second scanner. */
+    suspend fun processFixedShortEntries(): Int {
+        val settings = preferences.settings.first()
+        if (!settings.fixedShortAutoTradeEnabled || settings.fixedAutoBuyEnabled || settings.safetyHalt ||
+            !settings.brokerAuthenticated || !settings.staticIpMatched) return 0
+        val token = ensureToken() ?: return 0
+        val today = LocalDate.now(INDIA).toString()
+        val candidates = fixedRecommendationStore.recommendations(today)
+            .filter { it.status == "ACTIVE" && it.executionEligible && it.qualityTier == "PRIMARY" &&
+                it.generatedAtMs >= settings.fixedShortEnabledAtMs && it.generatedAtMs > 0L }
+            .map { it.toDto() }
+            .sortedBy { it.generatedAtMs }
+        if (candidates.isEmpty()) return 0
+        val blocked = managedDao.openPositions().map { it.symbol.uppercase(Locale.US) }.toMutableSet()
+        // A broker CNC holding unknown to the app is also a long exposure. Never short against it.
+        val inventory = runCatching {
+            apiFactory.groww.holdings(bearer(token)).requirePayload("Fixed Short broker holdings")
+        }.getOrNull() ?: return 0
+        blocked.addAll(inventory.holdings.filter { it.quantity > 0 }.map { it.tradingSymbol.uppercase(Locale.US) })
+        return fixedShortManager.submit(token, candidates, settings.holdingBudgetRupees, blocked)
+    }
+
+    /** Runs on its own worker; skips nonessential price requests while Fixed is scanning. */
+    suspend fun monitorFixedShorts(): Int {
+        if (fixedShortManager.snapshots().none { it.state !in setOf("CLOSED", "ENTRY_REJECTED") }) return 0
+        val token = ensureToken() ?: return 0
+        return fixedShortManager.maintain(token, permitNonUrgentQuotes = !fixedApiPriorityRequested)
+    }
+
+    fun fixedShortPositionsSnapshot(): List<FixedShortExecutionManager.ShortRecord> =
+        fixedShortManager.snapshots()
+
+    suspend fun setFixedShortAutoTrade(enabled: Boolean) {
+        val current = preferences.settings.first()
+        if (enabled) {
+            require(current.brokerAuthenticated && current.staticIpMatched && !current.safetyHalt) {
+                "Reconnect Groww and verify broker readiness before enabling Fixed Short"
+            }
+        }
+        preferences.setFixedShortAutoTrade(enabled)
+        auditLogger.log("FIXED_SHORT", if (enabled) "MIS_SHORT_AUTO_TRADE_ENABLED" else "MIS_SHORT_AUTO_TRADE_DISABLED",
+            mapOf("new_entries_enabled" to enabled, "existing_positions_remain_protected" to true,
+                "forecast_remains_long_only" to true, "fixed_selection_changed" to false))
     }
 
     fun fixedRecommendationsForNotification(): List<ForecastDto> {
