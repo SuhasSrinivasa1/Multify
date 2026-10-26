@@ -5168,6 +5168,9 @@ class TradingRepository @Inject constructor(
             }
 
             if (existing == null) {
+                if (managedDao.tradesSince(now - 86_400_000L).any {
+                    it.symbol.equals(symbol, true) && it.side == "LONG"
+                }) return@forEach
                 val closedAt = recentlyClosedSymbolsAtMs[symbol]
                 if (closedAt != null) {
                     if (now - closedAt < PORTFOLIO_REIMPORT_COOLDOWN_MS) return@forEach
