@@ -1,0 +1,94 @@
+name: Multify v7.8.9 Growing Forecast Reference APK
+on:
+  push:
+    branches: [ build-v789-forecast-growing-reference ]
+    paths:
+      - '.github/workflows/multify-v789-apk.yml'
+      - 'v789/**'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Android SDK 35
+        shell: bash
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
+      - name: Apply v788 baseline and independent v789 Forecast patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 -d v788/multify.patch.gz.b64 | gzip -d > /tmp/v788.patch
+          git apply --check /tmp/v788.patch
+          git apply /tmp/v788.patch
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib
+          t=Path('app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt').read_text()
+          lock=t.split('// FIXED_FINAL_LOCK_BEGIN:',1)[1].split('// FIXED_FINAL_LOCK_END:',1)[0]
+          Path('/tmp/fixed-v788-sha').write_text(hashlib.sha256(lock.encode()).hexdigest())
+          Path('/tmp/multify-buy-v788').write_text(t.split('private suspend fun handleMultify',1)[1].split('private suspend fun',1)[0] if 'private suspend fun handleMultify' in t else 'NO_HANDLER')
+          PY
+          base64 -d v789/forecast-reference.patch.gz.b64 | gzip -d > /tmp/v789.patch
+          git apply --check /tmp/v789.patch
+          git apply /tmp/v789.patch
+          grep -q 'versionCode = 789' app/build.gradle.kts
+          grep -q 'versionName = "7.8.9-forecast-growing-reference"' app/build.gradle.kts
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib
+          p=Path('app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt')
+          t=p.read_text()
+          lock=t.split('// FIXED_FINAL_LOCK_BEGIN:',1)[1].split('// FIXED_FINAL_LOCK_END:',1)[0]
+          assert hashlib.sha256(lock.encode()).hexdigest()==Path('/tmp/fixed-v788-sha').read_text()
+          handler=t.split('private suspend fun handleMultify',1)[1].split('private suspend fun',1)[0] if 'private suspend fun handleMultify' in t else 'NO_HANDLER'
+          assert handler==Path('/tmp/multify-buy-v788').read_text()
+          assert 'ForecastMultifyReferenceLedger.build(' in t
+          print('FIXED & MULTIFY SOURCE LOCKS IDENTICAL; cumulative Forecast reference included')
+          PY
+      - name: Backend tests
+        shell: bash
+        run: |
+          python -m pip install -r backend/requirements.txt
+          PYTHONPATH="$GITHUB_WORKSPACE" PHONE_HMAC_SECRET=test-secret-test-secret-test-secret GROWW_API_KEY=test-api-key GROWW_TOTP_SECRET=JBSWY3DPEHPK3PXP python -m pytest -q backend/tests
+      - name: Android unit tests
+        run: gradle --no-daemon testDebugUnitTest
+      - name: Assemble debug APK
+        run: gradle --no-daemon assembleDebug
+      - name: Verify package and export artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v7.8.9-forecast-growing-reference-debug.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/*.apk > dist/APK-SIGNATURE.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/*.apk | head -n 2 > dist/PACKAGE.txt
+          sha256sum dist/*.apk > dist/SHA256SUMS.txt
+          python - <<'PY'
+          from pathlib import Path
+          import zipfile
+          with zipfile.ZipFile('dist/Multify-TraderPro-v7.8.9-exact-source.zip','w',zipfile.ZIP_DEFLATED,compresslevel=6) as z:
+            for p in Path('.').rglob('*'):
+              if not p.is_file() or any(s in {'.git','.gradle','build','dist','v788','v789'} for s in p.parts):continue
+              z.write(p,p.as_posix())
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: multify-v789-build
+          path: dist/
+          if-no-files-found: warn
