@@ -24,6 +24,7 @@ data class AppSettings(
     val forecastScannerEnabled: Boolean = true,
     val forecastAutoBuyEnabled: Boolean = false,
     val fixedAutoBuyEnabled: Boolean = false,
+    val fixedShortAutoTradeEnabled: Boolean = false,
     val onboardingComplete: Boolean = false,
     val brokerAuthenticated: Boolean = false,
     val authenticatedAtMs: Long = 0L,
@@ -60,6 +61,7 @@ class AppPreferences @Inject constructor(
         val forecastScannerEnabled = booleanPreferencesKey("forecast_scanner_enabled")
         val forecastAutoBuyEnabled = booleanPreferencesKey("forecast_auto_buy_enabled")
         val fixedAutoBuyEnabled = booleanPreferencesKey("fixed_auto_buy_enabled")
+        val fixedShortAutoTradeEnabled = booleanPreferencesKey("fixed_short_auto_trade_enabled")
         val onboardingComplete = booleanPreferencesKey("onboarding_complete")
         val brokerAuthenticated = booleanPreferencesKey("broker_authenticated")
         val authenticatedAtMs = longPreferencesKey("authenticated_at_ms")
@@ -136,7 +138,17 @@ class AppPreferences @Inject constructor(
     }
 
     suspend fun setFixedAutoBuy(value: Boolean) {
-        context.dataStore.edit { it[Keys.fixedAutoBuyEnabled] = value }
+        context.dataStore.edit {
+            it[Keys.fixedAutoBuyEnabled] = value
+            if (value) it[Keys.fixedShortAutoTradeEnabled] = false
+        }
+    }
+
+    suspend fun setFixedShortAutoTrade(value: Boolean) {
+        context.dataStore.edit {
+            it[Keys.fixedShortAutoTradeEnabled] = value
+            if (value) it[Keys.fixedAutoBuyEnabled] = false
+        }
     }
 
     suspend fun setSafetyHalt(value: Boolean) {
@@ -191,6 +203,7 @@ class AppPreferences @Inject constructor(
         forecastScannerEnabled = this[Keys.forecastScannerEnabled] ?: true,
         forecastAutoBuyEnabled = this[Keys.forecastAutoBuyEnabled] ?: false,
         fixedAutoBuyEnabled = this[Keys.fixedAutoBuyEnabled] ?: false,
+        fixedShortAutoTradeEnabled = this[Keys.fixedShortAutoTradeEnabled] ?: false,
         onboardingComplete = this[Keys.onboardingComplete] ?: false,
         brokerAuthenticated = this[Keys.brokerAuthenticated] ?: false,
         authenticatedAtMs = this[Keys.authenticatedAtMs] ?: 0L,
