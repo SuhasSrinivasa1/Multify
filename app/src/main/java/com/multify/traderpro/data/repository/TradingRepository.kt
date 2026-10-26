@@ -5624,7 +5624,7 @@ class TradingRepository @Inject constructor(
             runCatching {
                 createPositionGtt(token, localProtected, desiredProtectedPrice, "DOWN", desiredMode)
             }.onFailure {
-                auditLogger.log("GTT", "PROTECTIVE_GTT_CREATE_FAILED_LOCAL_FALLBACK_ACTIVE", mapOf(
+                if (it !is BrokerExecutionRetryGuard.Deferred) auditLogger.log("GTT", "PROTECTIVE_GTT_CREATE_FAILED_LOCAL_FALLBACK_ACTIVE", mapOf(
                     "symbol" to working.symbol,
                     "desired_trigger" to desiredProtectedPrice,
                     "desired_mode" to desiredMode,
