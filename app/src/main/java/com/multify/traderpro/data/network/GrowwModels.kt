@@ -172,6 +172,41 @@ data class GttModifyRequest(
     val order: GttOrder = GttOrder()
 )
 
+/** MIS short: both OCO exits are BUY-to-cover; only one may execute. */
+data class OcoExitLeg(
+    @SerializedName("trigger_price") val triggerPrice: String,
+    @SerializedName("order_type") val orderType: String,
+    val price: String? = null
+)
+
+data class OcoCreateRequest(
+    @SerializedName("reference_id") val referenceId: String,
+    @SerializedName("smart_order_type") val smartOrderType: String = "OCO",
+    val segment: String = "CASH",
+    @SerializedName("trading_symbol") val tradingSymbol: String,
+    val quantity: Int,
+    @SerializedName("net_position_quantity") val netPositionQuantity: Int,
+    @SerializedName("transaction_type") val transactionType: String = "BUY",
+    val target: OcoExitLeg,
+    @SerializedName("stop_loss") val stopLoss: OcoExitLeg,
+    @SerializedName("product_type") val productType: String = "MIS",
+    val exchange: String = "NSE",
+    val duration: String = "DAY"
+)
+
+data class OcoModifyRequest(
+    @SerializedName("smart_order_type") val smartOrderType: String = "OCO",
+    val segment: String = "CASH",
+    val duration: String = "DAY",
+    val quantity: Int,
+    @SerializedName("product_type") val productType: String = "MIS",
+    @SerializedName("stop_loss") val stopLoss: OcoTriggerUpdate
+)
+
+data class OcoTriggerUpdate(
+    @SerializedName("trigger_price") val triggerPrice: String
+)
+
 data class SmartOrderPayload(
     @SerializedName("smart_order_id") val smartOrderId: String = "",
     @SerializedName("smart_order_type") val smartOrderType: String = "",
