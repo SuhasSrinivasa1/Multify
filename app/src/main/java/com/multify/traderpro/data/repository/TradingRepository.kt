@@ -5828,6 +5828,9 @@ class TradingRepository @Inject constructor(
             HoldingSmartOrderPolicy.MODE_RECOVERY_GTT
         ))
         val id = position.smartOrderId ?: return createPositionGtt(token, position, triggerPrice, direction, mode)
+        if (brokerRetryGuard.gttBlockedUntil(position.symbol) > System.currentTimeMillis()) {
+            throw BrokerExecutionRetryGuard.Deferred("GTT modification deferred on ${position.symbol}")
+        }
         val roundedTrigger = roundSmartOrderPrice(triggerPrice)
         val postTriggerOrder = if (mode == HoldingSmartOrderPolicy.MODE_RECOVERY_GTT)
             GttOrder(orderType = "LIMIT", price = smartPrice(roundedTrigger), transactionType = "SELL")
