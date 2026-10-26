@@ -60,6 +60,7 @@ class TradingEngineService : Service() {
     private var positionProfileUsageBaseline: GrowwApiUsageLedger.Snapshot? = null
     @Volatile private var lastForecastOutcomeCount = 0
     @Volatile private var lastFixedOutcomeCount = 0
+    @Volatile private var lastFixedCycleCompletedAtMs = 0L
 
     override fun onCreate() {
         super.onCreate()
@@ -472,9 +473,17 @@ class TradingEngineService : Service() {
                                 "forecast_blocking_ms" to 0
                             ))
                         }
-                        // runFixedPriorityCycle returns only after Fixed auto-buy has been attempted.
-                        // Presentation therefore remains strictly behind the order path.
+                        // Preserve order-first: this timestamp is AFTER any Fixed auto-buy attempt.
+                        // Historical generatedAtMs is the scan start, not the notification-ready time.
                         if (scanned) {
+                            lastFixedCycleCompletedAtMs = System.currentTimeMillis()
+                            auditLogger.logAsync("FIXED_LATENCY", "FIXED_READY_AFTER_ORDER_PATH", mapOf(
+                                "scan_start_at_ms" to startedAt,
+                                "ready_at_ms" to lastFixedCycleCompletedAtMs,
+                                "elapsed_ms" to elapsed,
+                                "order_path_completed" to true,
+                                "fixed_model_changed" to false
+                            ))
                             scope.launch {
                                 notifyNewFixedRecommendationsAfterOrderPath()
                             }
@@ -629,7 +638,14 @@ class TradingEngineService : Service() {
             "symbol" to f.symbol,
             "recommendation_generated_at_ms" to f.generatedAtMs,
             "notification_posted_at_ms" to postedAtMs,
+            // Compatibility field retains its prior value. It includes the whole scan,
+            // because Fixed generatedAtMs was assigned at the start of that scan.
             "recommendation_to_notification_ms" to (postedAtMs - f.generatedAtMs).coerceAtLeast(0L),
+            "scan_start_to_notification_ms" to (postedAtMs - f.generatedAtMs).coerceAtLeast(0L),
+            "fixed_cycle_ready_at_ms" to lastFixedCycleCompletedAtMs,
+            "cycle_ready_to_notification_ms" to
+                if (lastFixedCycleCompletedAtMs > 0L) (postedAtMs - lastFixedCycleCompletedAtMs).coerceAtLeast(0L) else null,
+            "generated_at_semantics" to "SCAN_START_NOT_PUBLICATION_TIME",
             "posted_after_fixed_priority_cycle" to true,
             "posted_after_auto_buy_attempt" to true,
             "fixed_formula_changed" to false
