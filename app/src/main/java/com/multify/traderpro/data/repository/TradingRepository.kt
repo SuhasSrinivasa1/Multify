@@ -94,6 +94,7 @@ import com.multify.traderpro.engine.GrowwDeliveryCostPolicy
 import com.multify.traderpro.engine.GrowwApiBudgetPolicy
 import com.multify.traderpro.engine.HardStopLossPolicy
 import com.multify.traderpro.engine.HoldingSmartOrderPolicy
+import com.multify.traderpro.engine.BrokerExecutionSafetyPolicy
 import com.multify.traderpro.engine.MarketPriorityPolicy
 import com.multify.traderpro.engine.LocalStrategyEngine
 import com.multify.traderpro.engine.MarketDiscoveryPolicy
@@ -159,6 +160,7 @@ class TradingRepository @Inject constructor(
     private val secretStore: SecretStore,
     private val apiFactory: GrowwApiFactory,
     private val recoveryGate: GrowwRecoveryGate,
+    private val brokerRetryGuard: BrokerExecutionRetryGuard,
     private val parser: NotificationParser,
     private val nseSymbols: NseSymbolRepository,
     private val auditLogger: AuditLogger,
