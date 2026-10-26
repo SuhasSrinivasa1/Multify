@@ -219,7 +219,7 @@ class TradingRepository @Inject constructor(
     private var fixedHistoricalCooldownUntilElapsedMs = 0L
     @Volatile private var activePortfolioMonitorCount = 0
     private val lastTrailStateAuditAtMs = ConcurrentHashMap<Long, Long>()
-    private val lastTrailStateAuditSignature = mutableMapOf<Long, String>()
+    private val lastTrailStateAuditSignature = ConcurrentHashMap<Long, String>()
     private val lastSmartOrderStatusAtMs = ConcurrentHashMap<Long, Long>()
 
     private data class MarketDiscoveryPass(
