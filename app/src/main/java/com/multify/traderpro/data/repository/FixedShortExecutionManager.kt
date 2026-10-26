@@ -58,7 +58,7 @@ class FixedShortExecutionManager @Inject constructor(
     private val gson = Gson()
     private val prefs = context.getSharedPreferences("fixed_short_mis_v790", Context.MODE_PRIVATE)
     private val mutex = Mutex()
-    private val listType = object : TypeToken<List<ShortRecord>>() {}.type
+    private val listType: java.lang.reflect.Type = object : TypeToken<List<ShortRecord>>() {}.type
     private var records: MutableList<ShortRecord> =
         runCatching { gson.fromJson<List<ShortRecord>>(prefs.getString("records", "[]"), listType) }
             .getOrNull()?.toMutableList() ?: mutableListOf()
@@ -114,12 +114,15 @@ class FixedShortExecutionManager @Inject constructor(
             if (!FixedShortExitPolicy.isEntryTime(nowAtOrder.hour, nowAtOrder.minute)) break
             val freshQuote = runCatching {
                 apiFactory.groww.quote(bearer(token), tradingSymbol = candidate.symbol).requirePayload("Fixed Short fresh quote")
-            }.getOrElse { auditLogger.log("FIXED_SHORT", "QUOTE_FAILED", mapOf("symbol" to candidate.symbol)); continue }
+            }.onFailure {
+                auditLogger.log("FIXED_SHORT", "QUOTE_FAILED", mapOf("symbol" to candidate.symbol))
+            }.getOrNull() ?: continue
             val ltp = freshQuote.lastPrice ?: continue
             if (!ltp.isFinite() || ltp <= 100.0) continue
             val margins = runCatching {
                 apiFactory.groww.margins(bearer(token)).requirePayload("Fixed Short available cash")
-            }.getOrElse { auditLogger.log("FIXED_SHORT", "MARGIN_FAILED", mapOf("symbol" to candidate.symbol)); break }
+            }.onFailure { auditLogger.log("FIXED_SHORT", "MARGIN_FAILED", mapOf("symbol" to candidate.symbol)) }
+                .getOrNull() ?: break
             // Deliberately no assumed leverage: cap notional at unencumbered cash and configured budget.
             val available = margins.clearCash.coerceAtLeast(0.0)
             val quantity = floor(minOf(budget.toDouble(), available) / ltp).toInt().coerceAtLeast(0)
