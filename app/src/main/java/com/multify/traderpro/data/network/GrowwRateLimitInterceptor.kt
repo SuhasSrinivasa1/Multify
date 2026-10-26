@@ -2,6 +2,10 @@ package com.multify.traderpro.data.network
 
 import android.os.SystemClock
 import com.multify.traderpro.data.logging.AuditLogger
+import com.multify.traderpro.data.preferences.AppPreferences
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import com.multify.traderpro.engine.GrowwApiBudgetPolicy
 import okhttp3.Interceptor
 import okhttp3.Response
@@ -9,8 +13,11 @@ import java.util.ArrayDeque
 import java.util.EnumMap
 
 internal class GrowwRateLimitInterceptor(
-    private val auditLogger: AuditLogger
+    private val auditLogger: AuditLogger,
+    private val recoveryGate: GrowwRecoveryGate,
+    private val appPreferences: AppPreferences
 ) : Interceptor {
+    private val stateScope = CoroutineScope(Dispatchers.IO)
     private data class Limits(val perSecond: Int, val perMinute: Int)
     private data class State(
         val second: ArrayDeque<Long> = ArrayDeque(),
@@ -20,6 +27,7 @@ internal class GrowwRateLimitInterceptor(
     private data class PermitResult(val waitedMs: Long, val dominantReason: String)
 
     private val lock = Any()
+    private val lastBlockedAuditMs = EnumMap<GrowwApiUsageLedger.Category, Long>(GrowwApiUsageLedger.Category::class.java)
     private val states = EnumMap<GrowwApiUsageLedger.Category, State>(GrowwApiUsageLedger.Category::class.java).apply {
         GrowwApiUsageLedger.Category.values().forEach { put(it, State()) }
     }
@@ -28,6 +36,12 @@ internal class GrowwRateLimitInterceptor(
         val request = chain.request()
         val path = request.url.encodedPath
         val category = classify(request.method, path)
+        // Block locally rather than letting each worker retry Groww during a cooldown.
+        try { recoveryGate.checkRequestAllowed(category) }
+        catch (blocked: GrowwRecoveryGate.LocallyBlocked) {
+            auditBlocked(category, path, blocked)
+            throw blocked
+        }
         val permit = awaitPermit(category)
         if (permit.waitedMs >= AUDIT_WAIT_THRESHOLD_MS) {
             val row = GrowwApiUsageLedger.snapshot().categories.first { it.category == category }
@@ -46,6 +60,12 @@ internal class GrowwRateLimitInterceptor(
             ))
         }
 
+        try { recoveryGate.reserveRequest(category) }
+        catch (blocked: GrowwRecoveryGate.LocallyBlocked) {
+            auditBlocked(category, path, blocked)
+            throw blocked
+        }
+        GrowwApiUsageLedger.recordRequest(category)
         val started = SystemClock.elapsedRealtime()
         val response = chain.proceed(request)
         val networkMs = (SystemClock.elapsedRealtime() - started).coerceAtLeast(0L)
@@ -53,13 +73,10 @@ internal class GrowwRateLimitInterceptor(
         if (response.code == 429) {
             val rawRetryAfter = response.header("Retry-After")
             val retryAfterMs = parseRetryAfterMs(rawRetryAfter)
-            val appliedCooldownMs = maxOf(GrowwApiBudgetPolicy.RATE_LIMIT_COOLDOWN_MS, retryAfterMs)
+            val appliedCooldownMs = recoveryGate.on429(category, retryAfterMs)
             synchronized(lock) {
                 val state = states.getValue(category)
-                state.cooldownUntilMs = maxOf(
-                    state.cooldownUntilMs,
-                    SystemClock.elapsedRealtime() + appliedCooldownMs
-                )
+                state.cooldownUntilMs = maxOf(state.cooldownUntilMs, SystemClock.elapsedRealtime() + appliedCooldownMs)
             }
             val row = GrowwApiUsageLedger.snapshot().categories.first { it.category == category }
             auditLogger.logAsync("API_RATE_LIMIT", "HTTP_429", mapOf(
@@ -82,7 +99,30 @@ internal class GrowwRateLimitInterceptor(
                 "governor_wait_ms_max" to row.maxPermitWaitMs
             ))
         }
+        if (response.code == 401 && category != GrowwApiUsageLedger.Category.AUTH) {
+            recoveryGate.onUnauthorized()
+            stateScope.launch { appPreferences.updateAuthState(authenticated = false) }
+            auditLogger.logAsync("AUTH", "GROWW_RECONNECT_REQUIRED_401", mapOf(
+                "category" to category.name, "path" to path,
+                "note" to "Network calls paused; explicit successful authentication required"
+            ))
+        } else if (category == GrowwApiUsageLedger.Category.AUTH && response.isSuccessful) {
+            recoveryGate.onAccessTokenSuccess()
+        }
         return response
+    }
+
+    private fun auditBlocked(category: GrowwApiUsageLedger.Category, path: String, blocked: GrowwRecoveryGate.LocallyBlocked) {
+        // At most one log for each category per minute even when many local callers are waiting.
+        val now = SystemClock.elapsedRealtime()
+        val log = synchronized(lock) {
+            val previous = lastBlockedAuditMs[category] ?: 0L
+            if (previous > 0L && now - previous < 60_000L) false else { lastBlockedAuditMs[category] = now; true }
+        }
+        if (log) auditLogger.logAsync("API_RATE_LIMIT", "LOCAL_REQUEST_SUPPRESSED", mapOf(
+            "category" to category.name, "path" to path,
+            "reason" to blocked.reason, "next_allowed_at_ms" to blocked.nextAllowedAtMs
+        ))
     }
 
     private fun awaitPermit(category: GrowwApiUsageLedger.Category): PermitResult {
@@ -111,7 +151,6 @@ internal class GrowwRateLimitInterceptor(
                 if (wait <= 0L) {
                     state.second.addLast(now)
                     state.minute.addLast(now)
-                    GrowwApiUsageLedger.recordRequest(category, now)
                     0L
                 } else wait
             }
