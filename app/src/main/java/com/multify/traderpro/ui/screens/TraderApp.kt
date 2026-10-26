@@ -901,7 +901,7 @@ private fun SettingsScreen(
                         ) { Text("Save") }
                         Button(onClick = onAuthenticate, enabled = state.credentialsConfigured, modifier = Modifier.weight(1f)) { Text("Authenticate") }
                     }
-                    KeyValueRow("Groww", if (state.settings.brokerAuthenticated) "Authenticated" else "Not authenticated")
+                    KeyValueRow("Groww", if (state.settings.brokerAuthenticated) "Authenticated" else "Reconnect Groww — trading and broker monitoring paused; verify holdings/GTT in Groww")
                     KeyValueRow("DDPI", if (state.settings.brokerDdpiEnabled) "Enabled" else "Required for ARM")
                     KeyValueRow("Static IP", if (state.settings.staticIpMatched) "Verified" else "Not verified")
                 }
