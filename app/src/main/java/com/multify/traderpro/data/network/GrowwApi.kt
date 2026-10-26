@@ -95,6 +95,19 @@ interface GrowwApi {
         @Body request: GttCreateRequest
     ): ApiEnvelope<SmartOrderPayload>
 
+    @POST("v1/order-advance/create")
+    suspend fun createOco(
+        @Header("Authorization") authorization: String,
+        @Body request: OcoCreateRequest
+    ): ApiEnvelope<SmartOrderPayload>
+
+    @PUT("v1/order-advance/modify/{smartOrderId}")
+    suspend fun modifyOco(
+        @Header("Authorization") authorization: String,
+        @Path("smartOrderId") smartOrderId: String,
+        @Body request: OcoModifyRequest
+    ): ApiEnvelope<SmartOrderPayload>
+
     @PUT("v1/order-advance/modify/{smartOrderId}")
     suspend fun modifyGtt(
         @Header("Authorization") authorization: String,
