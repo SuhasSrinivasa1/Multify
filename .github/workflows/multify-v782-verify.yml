@@ -295,7 +295,7 @@ jobs:
           assert buy_i < emit_i, "Fixed UI delivery event is emitted before auto-buy"
           print("Fixed order-first asynchronous notification/UI ordering verified")
           PY
-          grep -q 'versionCode = 781' app/build.gradle.kts
+          grep -q 'versionCode = 782' app/build.gradle.kts
           grep -q 'versionName = "7.8.2-auth-recovery"' app/build.gradle.kts
 
       - name: Verify v7.8.2 Forecast validation policy
@@ -312,7 +312,7 @@ jobs:
           grep -q 'FORECAST_NOTIFICATION_POSTED' app/src/main/java/com/multify/traderpro/service/TradingEngineService.kt
           grep -q 'time_bucket_performance' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
           grep -q 'targetPct = item.targetPct' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
-          grep -q 'versionCode = 781' app/build.gradle.kts
+          grep -q 'versionCode = 782' app/build.gradle.kts
           grep -q 'versionName = "7.8.2-auth-recovery"' app/build.gradle.kts
 
       - name: Restore stable app signing key when configured
