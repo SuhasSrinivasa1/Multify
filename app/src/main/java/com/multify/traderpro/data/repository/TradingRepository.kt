@@ -6221,6 +6221,11 @@ class TradingRepository @Inject constructor(
             return@withLock null
         }
 
+        if (brokerRetryGuard.sellBlockedUntil(local.symbol) > System.currentTimeMillis()) {
+            closePositionMutexes.remove(local.id, closeMutex)
+            return@withLock null
+        }
+
         if (!local.smartOrderId.isNullOrBlank()) {
             val cleared = cancelKnownPositionGtt(token, local, "BEFORE_DIRECT_SELL", clearIfTerminal = false)
             if (!cleared.smartOrderId.isNullOrBlank()) {
