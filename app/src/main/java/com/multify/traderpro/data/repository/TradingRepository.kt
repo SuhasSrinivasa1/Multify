@@ -89,6 +89,7 @@ import com.multify.traderpro.engine.FixedMultifyFactorModel
 import com.multify.traderpro.engine.FixedMultifyReverseEngineering
 import com.multify.traderpro.engine.FixedPositiveCloseForecastPolicy
 import com.multify.traderpro.engine.FixedScanPerformancePolicy
+import com.multify.traderpro.engine.FixedHistoricalSlotPolicy
 import com.multify.traderpro.engine.FixedStrategyEvaluation
 import com.multify.traderpro.engine.GrowwDeliveryCostPolicy
 import com.multify.traderpro.engine.GrowwApiBudgetPolicy
@@ -3442,29 +3443,44 @@ class TradingRepository @Inject constructor(
         }
     }
 
-    private suspend fun <T> withFixedHistoricalDataSlot(block: suspend () -> T): T =
-        fixedHistoricalDataMutex.withLock {
-            val now = SystemClock.elapsedRealtime()
-            val waitMs = max(
-                (nextFixedHistoricalAtElapsedMs - now).coerceAtLeast(0L),
-                (fixedHistoricalCooldownUntilElapsedMs - now).coerceAtLeast(0L)
-            )
-            if (waitMs > 0L) delay(waitMs)
-            try {
-                block().also {
-                    nextFixedHistoricalAtElapsedMs =
-                        SystemClock.elapsedRealtime() + GrowwApiBudgetPolicy.FIXED_HISTORICAL_MIN_GAP_MS
+    // v7.8.5: reserve the local historical-data slot under the mutex, then release it
+    // BEFORE the HTTP request. The global Groww interceptor still enforces the stricter
+    // 1 request/second and 45 requests/minute; Fixed candidates and candles are unchanged.
+    // This avoids serializing independent network responses behind a local mutex.
+    private suspend fun <T> withFixedHistoricalDataSlot(block: suspend () -> T): T {
+        while (true) {
+            var reserved = false
+            var retryInMs = 0L
+            fixedHistoricalDataMutex.withLock {
+                val now = SystemClock.elapsedRealtime()
+                retryInMs = FixedHistoricalSlotPolicy.waitMs(
+                    now, nextFixedHistoricalAtElapsedMs, fixedHistoricalCooldownUntilElapsedMs
+                )
+                if (retryInMs <= 0L) {
+                    // No I/O or suspension while holding this lock.
+                    nextFixedHistoricalAtElapsedMs = FixedHistoricalSlotPolicy.reservedNextSlotMs(
+                        now, GrowwApiBudgetPolicy.FIXED_HISTORICAL_MIN_GAP_MS
+                    )
+                    reserved = true
                 }
-            } catch (t: Throwable) {
-                if (t is HttpException && t.code() == 429) {
-                    fixedHistoricalCooldownUntilElapsedMs =
-                        SystemClock.elapsedRealtime() + GrowwApiBudgetPolicy.RATE_LIMIT_COOLDOWN_MS
-                }
-                nextFixedHistoricalAtElapsedMs =
-                    SystemClock.elapsedRealtime() + GrowwApiBudgetPolicy.FIXED_HISTORICAL_MIN_GAP_MS
-                throw t
             }
+            if (reserved) break
+            delay(retryInMs.coerceAtLeast(5L))
         }
+        return try {
+            block()
+        } catch (t: Throwable) {
+            if (t is HttpException && t.code() == 429) {
+                fixedHistoricalDataMutex.withLock {
+                    fixedHistoricalCooldownUntilElapsedMs = maxOf(
+                        fixedHistoricalCooldownUntilElapsedMs,
+                        SystemClock.elapsedRealtime() + GrowwApiBudgetPolicy.RATE_LIMIT_COOLDOWN_MS
+                    )
+                }
+            }
+            throw t
+        }
+    }
 
     private suspend fun <T> withForecastLiveDataSlot(block: suspend () -> T): T {
         if (!forecastMarketCapacityAvailable()) error("Forecast yielded to market priority")
