@@ -174,7 +174,7 @@ internal class GrowwRateLimitInterceptor(
         GrowwApiUsageLedger.Category.ORDERS -> Limits(GrowwApiBudgetPolicy.APP_ORDER_PER_SECOND, GrowwApiBudgetPolicy.APP_ORDER_PER_MINUTE)
         GrowwApiUsageLedger.Category.LIVE_DATA -> Limits(GrowwApiBudgetPolicy.APP_LIVE_DATA_PER_SECOND, GrowwApiBudgetPolicy.APP_LIVE_DATA_PER_MINUTE)
         GrowwApiUsageLedger.Category.NON_TRADING -> Limits(GrowwApiBudgetPolicy.APP_NON_TRADING_PER_SECOND, GrowwApiBudgetPolicy.APP_NON_TRADING_PER_MINUTE)
-        GrowwApiUsageLedger.Category.HISTORICAL -> Limits(1, 45) // endpoint-specific 429 safety budget
+        GrowwApiUsageLedger.Category.HISTORICAL -> Limits(GrowwHistoricalThrottlePolicy.APP_PER_SECOND, GrowwHistoricalThrottlePolicy.APP_PER_MINUTE) // same enforced budget as telemetry
     }
 
     private fun classify(method: String, path: String): GrowwApiUsageLedger.Category = when {
