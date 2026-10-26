@@ -27,7 +27,7 @@ object GrowwApiBudgetPolicy {
 
     const val SELL_MONITOR_RESERVED_PER_SECOND = 1
     const val SELL_MONITOR_RESERVED_PER_MINUTE = 60
-    const val RATE_LIMIT_COOLDOWN_MS = 5_000L
+    const val RATE_LIMIT_COOLDOWN_MS = 600_000L // 10-minute minimum; state persisted by GrowwRecoveryGate
     const val FIXED_HISTORICAL_MIN_GAP_MS = 20L
 
     fun fixedLiveDataPerSecond(hasOpenHoldings: Boolean): Int =
