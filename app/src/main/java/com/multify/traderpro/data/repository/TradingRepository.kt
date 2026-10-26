@@ -5836,16 +5836,27 @@ class TradingRepository @Inject constructor(
             GttOrder(orderType = "LIMIT", price = smartPrice(roundedTrigger), transactionType = "SELL")
         else
             GttOrder(orderType = "MARKET", price = null, transactionType = "SELL")
-        val payload = apiFactory.groww.modifyGtt(
-            bearer(token),
-            id,
-            GttModifyRequest(
-                quantity = position.quantity,
-                triggerPrice = smartPrice(roundedTrigger),
-                triggerDirection = direction,
-                order = postTriggerOrder
-            )
-        ).requirePayload("Modify GTT ${position.symbol}")
+        val payload = try {
+            apiFactory.groww.modifyGtt(
+                bearer(token),
+                id,
+                GttModifyRequest(
+                    quantity = position.quantity,
+                    triggerPrice = smartPrice(roundedTrigger),
+                    triggerDirection = direction,
+                    order = postTriggerOrder
+                )
+            ).requirePayload("Modify GTT ${position.symbol}")
+        } catch (t: Throwable) {
+            val rejected = t.message.orEmpty().contains("HTTP 400") ||
+                BrokerExecutionSafetyPolicy.isInsufficientShares(t.message.orEmpty())
+            val until = brokerRetryGuard.blockGtt(position.symbol, rejected)
+            auditLogger.log("GTT", "GTT_MODIFY_COOLDOWN_APPLIED", mapOf(
+                "symbol" to position.symbol, "until_ms" to until
+            ))
+            throw t
+        }
+        brokerRetryGuard.clearGtt(position.symbol)
         activeGttSnapshot = null
         val now = System.currentTimeMillis()
         val updated = position.copy(
