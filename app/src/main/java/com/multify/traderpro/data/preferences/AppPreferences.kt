@@ -25,6 +25,7 @@ data class AppSettings(
     val forecastAutoBuyEnabled: Boolean = false,
     val fixedAutoBuyEnabled: Boolean = false,
     val fixedShortAutoTradeEnabled: Boolean = false,
+    val fixedShortEnabledAtMs: Long = 0L,
     val onboardingComplete: Boolean = false,
     val brokerAuthenticated: Boolean = false,
     val authenticatedAtMs: Long = 0L,
@@ -62,6 +63,7 @@ class AppPreferences @Inject constructor(
         val forecastAutoBuyEnabled = booleanPreferencesKey("forecast_auto_buy_enabled")
         val fixedAutoBuyEnabled = booleanPreferencesKey("fixed_auto_buy_enabled")
         val fixedShortAutoTradeEnabled = booleanPreferencesKey("fixed_short_auto_trade_enabled")
+        val fixedShortEnabledAtMs = longPreferencesKey("fixed_short_enabled_at_ms")
         val onboardingComplete = booleanPreferencesKey("onboarding_complete")
         val brokerAuthenticated = booleanPreferencesKey("broker_authenticated")
         val authenticatedAtMs = longPreferencesKey("authenticated_at_ms")
@@ -147,6 +149,7 @@ class AppPreferences @Inject constructor(
     suspend fun setFixedShortAutoTrade(value: Boolean) {
         context.dataStore.edit {
             it[Keys.fixedShortAutoTradeEnabled] = value
+            if (value) it[Keys.fixedShortEnabledAtMs] = System.currentTimeMillis()
             if (value) it[Keys.fixedAutoBuyEnabled] = false
         }
     }
@@ -204,6 +207,7 @@ class AppPreferences @Inject constructor(
         forecastAutoBuyEnabled = this[Keys.forecastAutoBuyEnabled] ?: false,
         fixedAutoBuyEnabled = this[Keys.fixedAutoBuyEnabled] ?: false,
         fixedShortAutoTradeEnabled = this[Keys.fixedShortAutoTradeEnabled] ?: false,
+        fixedShortEnabledAtMs = this[Keys.fixedShortEnabledAtMs] ?: 0L,
         onboardingComplete = this[Keys.onboardingComplete] ?: false,
         brokerAuthenticated = this[Keys.brokerAuthenticated] ?: false,
         authenticatedAtMs = this[Keys.authenticatedAtMs] ?: 0L,
