@@ -11,6 +11,9 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import com.multify.traderpro.worker.NseSymbolSyncWorker
+import com.multify.traderpro.data.network.GrowwRateLimitInterceptor
+import com.multify.traderpro.data.network.GrowwRecoveryGate
+import com.multify.traderpro.data.preferences.AppPreferences
 import dagger.hilt.android.HiltAndroidApp
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
@@ -18,6 +21,8 @@ import javax.inject.Inject
 @HiltAndroidApp
 class MultifyApp : Application(), Configuration.Provider {
     @Inject lateinit var workerFactory: HiltWorkerFactory
+    @Inject lateinit var recoveryGate: GrowwRecoveryGate
+    @Inject lateinit var preferences: AppPreferences
 
     override val workManagerConfiguration: Configuration
         get() = Configuration.Builder()
@@ -27,6 +32,7 @@ class MultifyApp : Application(), Configuration.Provider {
 
     override fun onCreate() {
         super.onCreate()
+        GrowwRateLimitInterceptor.installRecovery(recoveryGate, preferences)
         val network = Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()
         val wm = WorkManager.getInstance(this)
         wm.enqueueUniqueWork(
