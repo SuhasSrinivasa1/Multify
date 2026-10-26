@@ -5918,6 +5918,22 @@ class TradingRepository @Inject constructor(
         if (position.smartOrderId.isNullOrBlank()) return position
         val refreshed = runCatching { refreshKnownSmartOrderStatus(token, position, force = false) }
             .getOrDefault(position)
+        if (refreshed.smartOrderStatus?.uppercase(Locale.US) in setOf("FAILED", "CANCELLED", "EXPIRED")) {
+            val cleared = refreshed.copy(
+                smartOrderId = null,
+                smartOrderMode = HoldingSmartOrderPolicy.MODE_NONE,
+                smartOrderTriggerPrice = null,
+                smartOrderDirection = null,
+                smartOrderStatus = null,
+                smartOrderUpdatedAtMs = System.currentTimeMillis()
+            )
+            managedDao.updatePosition(cleared)
+            auditLogger.log("GTT", "TERMINAL_GTT_RECONCILED_FOR_REPROTECTION", mapOf(
+                "symbol" to cleared.symbol, "old_gtt_id" to refreshed.smartOrderId,
+                "old_status" to refreshed.smartOrderStatus
+            ))
+            return cleared
+        }
         if (!refreshed.smartOrderStatus.equals("COMPLETED", true)) return refreshed
 
         val inventory = runCatching { brokerInventory(token, force = true) }.getOrNull()
