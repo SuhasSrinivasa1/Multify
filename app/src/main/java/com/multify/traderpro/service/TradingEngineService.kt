@@ -512,9 +512,12 @@ class TradingEngineService : Service() {
             ))
             while (isActive) {
                 try {
-                    // Forecast discovery is always present but strictly opportunistic. There is no
-                    // fourth trading toggle: Multify ARM, Fixed auto-buy and Forecast auto-buy are
-                    // the only execution permissions. MarketPriorityPolicy keeps Forecast behind Fixed.
+                    // Default Fixed-only mode pauses only opportunistic Forecast discovery.
+                    // SELL monitoring and all three execution permissions stay independent.
+                    if (!repository.forecastBackgroundScanningEnabled()) {
+                        delay(SCAN_WORKER_POLL_MS)
+                        continue
+                    }
                     val now = ZonedDateTime.now(INDIA)
                     if (now.dayOfWeek.value < 6 &&
                         now.toLocalTime() >= LocalTime.of(9, 15) &&
