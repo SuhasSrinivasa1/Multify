@@ -9,5 +9,10 @@ import javax.inject.Singleton
 class BrokerExecutionRetryGuard @Inject constructor(@ApplicationContext context: Context) {
     private val prefs = context.getSharedPreferences("execution_retry_v783", Context.MODE_PRIVATE)
     fun sellBlockedUntil(symbol: String): Long = prefs.getLong("sell_"+symbol, 0L)
+    fun blockSell(symbol: String): Long {
+        val until = System.currentTimeMillis() + 86_400_000L
+        prefs.edit().putLong("sell_"+symbol, until).commit()
+        return until
+    }
     fun gttBlockedUntil(symbol: String): Long = prefs.getLong("gtt_"+symbol, 0L)
 }
