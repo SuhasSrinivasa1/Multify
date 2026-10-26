@@ -125,7 +125,7 @@ object GrowwApiUsageLedger {
         Category.ORDERS -> GrowwApiBudgetPolicy.APP_ORDER_PER_SECOND to GrowwApiBudgetPolicy.APP_ORDER_PER_MINUTE
         Category.LIVE_DATA -> GrowwApiBudgetPolicy.APP_LIVE_DATA_PER_SECOND to GrowwApiBudgetPolicy.APP_LIVE_DATA_PER_MINUTE
         Category.NON_TRADING -> GrowwApiBudgetPolicy.APP_NON_TRADING_PER_SECOND to GrowwApiBudgetPolicy.APP_NON_TRADING_PER_MINUTE
-        Category.HISTORICAL -> GrowwApiBudgetPolicy.APP_HISTORICAL_PER_SECOND to GrowwApiBudgetPolicy.APP_HISTORICAL_PER_MINUTE
+        Category.HISTORICAL -> GrowwHistoricalThrottlePolicy.APP_PER_SECOND to GrowwHistoricalThrottlePolicy.APP_PER_MINUTE
     }
 
     private fun hardLimits(category: Category): Pair<Int?, Int?> = when (category) {
