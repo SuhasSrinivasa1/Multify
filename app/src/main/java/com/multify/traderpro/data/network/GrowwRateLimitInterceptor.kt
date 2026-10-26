@@ -13,11 +13,11 @@ import java.util.ArrayDeque
 import java.util.EnumMap
 
 internal class GrowwRateLimitInterceptor(
-    private val auditLogger: AuditLogger,
-    private val recoveryGate: GrowwRecoveryGate,
-    private val appPreferences: AppPreferences
+    private val auditLogger: AuditLogger
 ) : Interceptor {
     private val stateScope = CoroutineScope(Dispatchers.IO)
+    private val recoveryGate: GrowwRecoveryGate get() = requireNotNull(bootstrappedGate) { "Groww recovery gate must be installed at application startup" }
+    private val appPreferences: AppPreferences get() = requireNotNull(bootstrappedPreferences) { "Groww app preferences must be installed at application startup" }
     private data class Limits(val perSecond: Int, val perMinute: Int)
     private data class State(
         val second: ArrayDeque<Long> = ArrayDeque(),
@@ -197,5 +197,12 @@ internal class GrowwRateLimitInterceptor(
 
     companion object {
         private const val AUDIT_WAIT_THRESHOLD_MS = 500L
+        @Volatile private var bootstrappedGate: GrowwRecoveryGate? = null
+        @Volatile private var bootstrappedPreferences: AppPreferences? = null
+
+        fun installRecovery(gate: GrowwRecoveryGate, preferences: AppPreferences) {
+            bootstrappedGate = gate
+            bootstrappedPreferences = preferences
+        }
     }
 }
