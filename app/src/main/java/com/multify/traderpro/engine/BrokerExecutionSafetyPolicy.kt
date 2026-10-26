@@ -18,7 +18,7 @@ object BrokerExecutionSafetyPolicy {
 
     fun isInsufficientShares(message: String): Boolean {
         val lower = message.lowercase()
-        return lower.contains("not enough shares") ||
+        return lower.contains("enough shares") ||
                lower.contains("insufficient shares") ||
                lower.contains("insufficient holdings") ||
                lower.contains("no shares available")
