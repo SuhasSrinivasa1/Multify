@@ -5752,17 +5752,29 @@ class TradingRepository @Inject constructor(
             GttOrder(orderType = "LIMIT", price = smartPrice(roundedTrigger), transactionType = "SELL")
         else
             GttOrder(orderType = "MARKET", price = null, transactionType = "SELL")
-        val payload = apiFactory.groww.createGtt(
-            bearer(token),
-            GttCreateRequest(
-                referenceId = reference,
-                tradingSymbol = position.symbol,
-                quantity = position.quantity,
-                triggerPrice = smartPrice(roundedTrigger),
-                triggerDirection = direction,
-                order = postTriggerOrder
-            )
-        ).requirePayload("Create GTT ${position.symbol}")
+        val payload = try {
+            apiFactory.groww.createGtt(
+                bearer(token),
+                GttCreateRequest(
+                    referenceId = reference,
+                    tradingSymbol = position.symbol,
+                    quantity = position.quantity,
+                    triggerPrice = smartPrice(roundedTrigger),
+                    triggerDirection = direction,
+                    order = postTriggerOrder
+                )
+            ).requirePayload("Create GTT ${position.symbol}")
+        } catch (t: Throwable) {
+            val rejected = t.message.orEmpty().contains("HTTP 400") ||
+                BrokerExecutionSafetyPolicy.isInsufficientShares(t.message.orEmpty())
+            val until = brokerRetryGuard.blockGtt(position.symbol, rejected)
+            auditLogger.log("GTT", "GTT_CREATE_COOLDOWN_APPLIED", mapOf(
+                "symbol" to position.symbol, "until_ms" to until,
+                "reason" to (t.message ?: t.javaClass.simpleName)
+            ))
+            throw t
+        }
+        brokerRetryGuard.clearGtt(position.symbol)
         require(payload.smartOrderId.isNotBlank()) { "Groww did not return a GTT id for ${position.symbol}" }
         activeGttSnapshot = null
         val now = System.currentTimeMillis()
