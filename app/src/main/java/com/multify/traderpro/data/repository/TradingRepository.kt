@@ -89,6 +89,7 @@ import com.multify.traderpro.engine.FixedMultifyFactorModel
 import com.multify.traderpro.engine.FixedMultifyReverseEngineering
 import com.multify.traderpro.engine.FixedPositiveCloseForecastPolicy
 import com.multify.traderpro.engine.FixedScanPerformancePolicy
+import com.multify.traderpro.engine.FixedDiscoveryWindowScheduler
 import com.multify.traderpro.engine.FixedHistoricalSlotPolicy
 import com.multify.traderpro.engine.FixedStrategyEvaluation
 import com.multify.traderpro.engine.GrowwDeliveryCostPolicy
@@ -218,6 +219,7 @@ class TradingRepository @Inject constructor(
     private var fixedHistoricalCooldownUntilElapsedMs = 0L
     @Volatile private var activePortfolioMonitorCount = 0
     private val lastTrailStateAuditAtMs = ConcurrentHashMap<Long, Long>()
+    private val lastTrailStateAuditSignature = mutableMapOf<Long, String>()
     private val lastSmartOrderStatusAtMs = ConcurrentHashMap<Long, Long>()
 
     private data class MarketDiscoveryPass(
@@ -1601,6 +1603,9 @@ class TradingRepository @Inject constructor(
         return (last + FIXED_V741_FORECAST_SCAN_INTERVAL_MS - System.currentTimeMillis()).coerceAtLeast(0L)
     }
 
+    suspend fun forecastBackgroundScanningEnabled(): Boolean =
+        preferences.settings.first().forecastScannerEnabled
+
     private fun forecastMarketCapacityAvailable(): Boolean {
         if (fixedApiPriorityRequested || marketCriticalTradeInFlight) return false
         val usage = GrowwApiUsageLedger.snapshot()
@@ -2576,24 +2581,32 @@ class TradingRepository @Inject constructor(
         var abortedForNetwork = false
         val chunks = distinctMaster.chunked(50)
 
-        for ((index, chunk) in chunks.withIndex()) {
-            val payload = fetchFixedDiscoveryLtpBatch(token, chunk, index)
-            if (payload == null) {
-                batchErrors++
-                consecutiveFailures++
-                if (consecutiveFailures >= FIXED_V741_DISCOVERY_CONSECUTIVE_FAILURE_ABORT) {
-                    abortedForNetwork = true
-                    break
-                }
-            } else {
-                consecutiveFailures = 0
-                payload.forEach { (key, value) ->
-                    if (value.isFinite() && value >= 10.0) {
-                        current[key.removePrefix("NSE_").uppercase(Locale.US)] = value
+        // Fixed v7.4.1's universe, inputs and ranking are unchanged. Only independent
+        // LTP batches are fetched two at a time; all responses are consumed in original
+        // index order, preserving the original network-failure abort and coverage rules.
+        for (windowStart in chunks.indices step FixedDiscoveryWindowScheduler.WINDOW_SIZE) {
+            val results = FixedDiscoveryWindowScheduler.fetchOrdered(
+                chunks, windowStart
+            ) { index, chunk -> fetchFixedDiscoveryLtpBatch(token, chunk, index) }
+            for ((index, payload) in results) {
+                if (payload == null) {
+                    batchErrors++
+                    consecutiveFailures++
+                    if (consecutiveFailures >= FIXED_V741_DISCOVERY_CONSECUTIVE_FAILURE_ABORT) {
+                        abortedForNetwork = true
+                        break
+                    }
+                } else {
+                    consecutiveFailures = 0
+                    payload.forEach { (key, value) ->
+                        if (value.isFinite() && value >= 10.0) {
+                            current[key.removePrefix("NSE_").uppercase(Locale.US)] = value
+                        }
                     }
                 }
+                if (index + 1 < chunks.size) delay(FIXED_V741_DISCOVERY_BATCH_PACING_MS)
             }
-            if (index + 1 < chunks.size) delay(FIXED_V741_DISCOVERY_BATCH_PACING_MS)
+            if (abortedForNetwork) break
         }
 
         val denominator = distinctMaster.size.coerceAtLeast(1)
@@ -6201,8 +6214,16 @@ class TradingRepository @Inject constructor(
     ) {
         val now = System.currentTimeMillis()
         val last = lastTrailStateAuditAtMs[position.id] ?: 0L
+        // Logging-only suppression: preserve 1-second monitoring and every sell/GTT decision.
+        // A stable protection state needs only one diagnostic heartbeat per minute.
+        val signature = listOf(position.stopPrice, position.smartOrderId, position.smartOrderMode,
+            position.smartOrderStatus, position.quantity, desiredStopGainPct,
+            position.maxFavourablePrice).joinToString("|")
+        val sameState = lastTrailStateAuditSignature[position.id] == signature
         if (!force && now - last < TRAIL_STATE_LOG_INTERVAL_MS) return
+        if (!force && sameState && now - last < 60_000L) return
         lastTrailStateAuditAtMs[position.id] = now
+        lastTrailStateAuditSignature[position.id] = signature
         val gainPct = SteppedTrailingPolicy.gainPct(position.entryPrice, ltp)
         val highGainPct = SteppedTrailingPolicy.gainPct(position.entryPrice, position.maxFavourablePrice)
         val protectedGainPct = position.stopPrice?.takeIf { it > position.entryPrice }
