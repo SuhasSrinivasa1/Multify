@@ -36,6 +36,7 @@ import com.multify.traderpro.data.network.GttModifyRequest
 import com.multify.traderpro.data.network.GttOrder
 import com.multify.traderpro.data.network.GrowwApiFactory
 import com.multify.traderpro.data.network.GrowwApiUsageLedger
+import com.multify.traderpro.data.network.GrowwRecoveryGate
 import com.multify.traderpro.data.network.GrowwHolding
 import com.multify.traderpro.data.network.GrowwPosition
 import com.multify.traderpro.data.network.HistoricalPayload
@@ -157,6 +158,7 @@ class TradingRepository @Inject constructor(
     private val preferences: AppPreferences,
     private val secretStore: SecretStore,
     private val apiFactory: GrowwApiFactory,
+    private val recoveryGate: GrowwRecoveryGate,
     private val parser: NotificationParser,
     private val nseSymbols: NseSymbolRepository,
     private val auditLogger: AuditLogger,
@@ -992,6 +994,7 @@ class TradingRepository @Inject constructor(
     fun hasBrokerCredentials(): Boolean = secretStore.hasApiKey() && secretStore.hasTotpSecret()
 
     suspend fun authenticate(): AuthenticationResult {
+        recoveryGate.checkRequestAllowed(GrowwApiUsageLedger.Category.AUTH)
         auditLogger.log("AUTH", "AUTHENTICATION_ATTEMPT", mapOf("method" to "TOTP"))
         val settings = preferences.settings.first()
         val apiKey = secretStore.getApiKey() ?: error("Groww TOTP token is not configured")
@@ -1583,6 +1586,11 @@ class TradingRepository @Inject constructor(
     }
 
     fun isTradingRecoveryReady(): Boolean = tradingRecoveryReady
+
+    fun brokerReconnectRequired(): Boolean = recoveryGate.requiresReconnect()
+
+    suspend fun brokerSessionHealthy(): Boolean =
+        preferences.settings.first().brokerAuthenticated && !recoveryGate.requiresReconnect()
 
     private fun millisUntilNextFixedScan(): Long {
         val last = lastFixedScanAtMs
@@ -6808,6 +6816,7 @@ class TradingRepository @Inject constructor(
                 add("fixed_recommendations.json", fixedRecommendations)
                 add("fixed_auto_buy_orders.json", fixedAutoBuyOrders)
                 add("api_usage_snapshot.json", GrowwApiUsageLedger.snapshot())
+                add("groww_recovery_state.json", recoveryGate.status())
                 add("telemetry_metadata.json", mapOf(
                     "exported_at_ms" to System.currentTimeMillis(),
                     "async_audit_dropped_total" to auditLogger.asyncDroppedCount(),
@@ -6873,15 +6882,13 @@ class TradingRepository @Inject constructor(
     }
 
     private suspend fun ensureToken(): String? {
-        armHotState?.token?.takeIf { it.isNotBlank() }?.let { return it }
-        var settings = preferences.settings.first()
-        var token = secretStore.getAccessToken()
-        if (!settings.brokerAuthenticated || token.isNullOrBlank()) {
-            if (!hasBrokerCredentials()) return null
-            runCatching { authenticate() }.getOrElse { return null }
-            settings = preferences.settings.first()
-            token = secretStore.getAccessToken()
-        }
+        // Never silently regenerate an expired Groww token. A manual Authenticate action is
+        // required after HTTP 401; this prevents background workers from consuming auth quota.
+        if (recoveryGate.requiresReconnect()) return null
+        val settings = preferences.settings.first()
+        if (!settings.brokerAuthenticated) return null
+        val token = armHotState?.token?.takeIf { it.isNotBlank() }
+            ?: secretStore.getAccessToken()?.takeIf { it.isNotBlank() }
         return token
     }
 
