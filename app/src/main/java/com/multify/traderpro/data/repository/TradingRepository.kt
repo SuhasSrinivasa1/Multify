@@ -6263,6 +6263,16 @@ class TradingRepository @Inject constructor(
             placeOwnedCncSell(token, local, ref, notificationStartedNs)
         } catch (t: Throwable) {
             brokerInventorySnapshot = null
+            val brokerError = t.message.orEmpty()
+            if (BrokerExecutionSafetyPolicy.isInsufficientShares(brokerError) ||
+                brokerError.contains("Groww order FAILED", true) ||
+                brokerError.contains("Groww order REJECTED", true) ||
+                brokerError.contains("Groww order CANCELLED", true)) {
+                val until = brokerRetryGuard.blockSell(local.symbol)
+                auditLogger.log("EXECUTION", "TERMINAL_SELL_FAILURE_COOLDOWN", mapOf(
+                    "symbol" to local.symbol, "blocked_until_ms" to until, "message" to brokerError
+                ))
+            }
             runCatching { reconcilePositionWithBroker(token, local, preferredMark = mark, force = true) }
             auditLogger.log("EXECUTION", "FAST_SELL_DISPATCH_FAILED", mapOf(
                 "symbol" to local.symbol,
