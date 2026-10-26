@@ -7121,7 +7121,7 @@ class TradingRepository @Inject constructor(
         private const val MAX_ACTIVE_GTT_PAGES = 20
         private const val PORTFOLIO_AVERAGE_PRICE_EPSILON = 0.005
         private const val PORTFOLIO_CONFLICT_AUDIT_INTERVAL_MS = 60_000L
-        private const val PORTFOLIO_REIMPORT_COOLDOWN_MS = 120_000L
+        private const val PORTFOLIO_REIMPORT_COOLDOWN_MS = 86_400_000L
         private const val CLOSED_SESSION_RECONCILE_MS = 60_000L
         private const val TRAIL_STATE_LOG_INTERVAL_MS = 5_000L
         private const val SMART_ORDER_STATUS_REFRESH_MS = 15_000L
