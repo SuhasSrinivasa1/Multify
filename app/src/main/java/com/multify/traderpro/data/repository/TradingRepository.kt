@@ -6241,7 +6241,24 @@ class TradingRepository @Inject constructor(
             local = cleared
         }
 
-        val ref = stableRef("CLS", "${local.id}-${local.symbol}")
+        val snapshot = try { brokerInventory(token, force = true) } catch (t: Throwable) {
+            closePositionMutexes.remove(local.id, closeMutex)
+            return@withLock null
+        }
+        val symbolKey = local.symbol.uppercase(Locale.US)
+        val free = snapshot.holdings[symbolKey]?.dematFreeQuantity ?: 0
+        val intraday = snapshot.positions[symbolKey]?.quantity ?: 0
+        if (!BrokerExecutionSafetyPolicy.maySell(local.quantity, free, intraday)) {
+            val until = brokerRetryGuard.blockSell(local.symbol)
+            auditLogger.log("EXECUTION", "SELL_PAUSED_SELLABLE_QUANTITY_MISMATCH", mapOf(
+                "symbol" to local.symbol, "requested" to local.quantity,
+                "demat_free" to free, "cnc_position" to intraday, "blocked_until_ms" to until
+            ))
+            closePositionMutexes.remove(local.id, closeMutex)
+            return@withLock null
+        }
+        val tradingDay = ZonedDateTime.now(ZoneId.of("Asia/Kolkata")).toLocalDate()
+        val ref = stableRef("CLS", "${local.id}-${local.symbol}-${tradingDay}")
         val order = try {
             placeOwnedCncSell(token, local, ref, notificationStartedNs)
         } catch (t: Throwable) {
