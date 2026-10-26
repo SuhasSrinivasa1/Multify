@@ -174,7 +174,7 @@ jobs:
           grep -q 'const val ENGINE_PORTFOLIO_HOLDING = "PORTFOLIO_HOLDING"' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
           grep -q 'EXISTING_HOLDING_IMPORTED' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
           grep -q 'ACTIVE_GTT_DISCOVERY_ERROR' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
-          grep -q 'PORTFOLIO_REIMPORT_COOLDOWN_MS = 120_000L' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
+          grep -q 'PORTFOLIO_REIMPORT_COOLDOWN_MS = 86_400_000L' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
           grep -q 'private fun startPositionMonitorWorker()' app/src/main/java/com/multify/traderpro/service/TradingEngineService.kt
           grep -q 'private fun startFixedScanWorker()' app/src/main/java/com/multify/traderpro/service/TradingEngineService.kt
           grep -q 'private fun startForecastScanWorker()' app/src/main/java/com/multify/traderpro/service/TradingEngineService.kt
