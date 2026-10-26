@@ -37,6 +37,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -193,6 +194,7 @@ fun TraderApp(viewModel: TraderViewModel = hiltViewModel()) {
                     },
                     onBudgetChanged = viewModel::setHoldingBudget,
                     onForecastAutoBuyChanged = viewModel::setForecastAutoBuy,
+                    onForecastScannerChanged = viewModel::setForecastScannerEnabled,
                     onFixedAutoBuyChanged = viewModel::setFixedAutoBuy,
                     onSubmitManualSignal = viewModel::submitManualSignal,
                     onResetHalt = { showResetConfirm = true },
@@ -858,6 +860,7 @@ private fun SettingsScreen(
     onArmRequested: () -> Unit,
     onBudgetChanged: (Long) -> Unit,
     onForecastAutoBuyChanged: (Boolean) -> Unit,
+    onForecastScannerChanged: (Boolean) -> Unit,
     onFixedAutoBuyChanged: (Boolean) -> Unit,
     onSubmitManualSignal: (String, String, String) -> Unit,
     onResetHalt: () -> Unit,
@@ -935,12 +938,21 @@ private fun SettingsScreen(
                         steps = 18
                     )
                     HorizontalDivider()
-                    KeyValueRow("Forecast discovery", "AUTOMATIC · opportunistic after Fixed")
-                    Text(
-                        "Forecast discovery has no separate execution switch. It may learn and notify while Forecast auto-buy is OFF, but it always yields API capacity to Multify/Fixed priority and common sell protection.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Fixed-only performance mode", fontWeight = FontWeight.SemiBold)
+                            Text(
+                                "ON pauses background Forecast discovery/research, preserving Fixed and all existing holdings. Turning this ON also disables Forecast auto-buy; Forecast code and history are retained.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Checkbox(
+                            checked = !state.settings.forecastScannerEnabled,
+                            onCheckedChange = { fixedOnly -> onForecastScannerChanged(!fixedOnly) }
+                        )
+                    }
+                    KeyValueRow("Forecast background discovery", if (state.settings.forecastScannerEnabled) "ON · opportunistic" else "PAUSED · Fixed-only")
                     HorizontalDivider()
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
