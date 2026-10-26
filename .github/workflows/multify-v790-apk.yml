@@ -1,7 +1,7 @@
 name: Multify v7.9.0 Adaptive Entry Intelligence APK
 on:
   push:
-    branches: [ build-v790-forecast-adaptive-entry-intelligence ]
+    branches: [ build-v790-entry-intelligence ]
     paths:
       - '.github/workflows/multify-v790-apk.yml'
       - 'v790/**'
