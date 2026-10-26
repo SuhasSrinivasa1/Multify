@@ -15,6 +15,7 @@ import com.multify.traderpro.data.logging.AuditLogger
 import com.multify.traderpro.data.network.ForecastDto
 import com.multify.traderpro.data.network.GrowwApiUsageLedger
 import com.multify.traderpro.data.network.GrowwRecoveryGate
+import com.multify.traderpro.engine.FixedDataPipelinePolicy
 import com.multify.traderpro.data.repository.TradingRepository
 import com.multify.traderpro.engine.ReleaseIntegrityManifest
 import dagger.hilt.android.AndroidEntryPoint
@@ -357,6 +358,13 @@ class TradingEngineService : Service() {
     private fun startFixedScanWorker() {
         if (fixedScanJob?.isActive == true) return
         fixedScanJob = scope.launch {
+            var previousFixedPause: FixedDataPipelinePolicy.Readiness? = null
+            var lastFixedPauseAuditMs = 0L
+            auditLogger.log("FIXED_DATA_PIPELINE", "SPECULATIVE_HISTORICAL_PREWARM_DISABLED", mapOf(
+                "reason" to "0 useful cache hits in v7.8.2; protect broker historical-candle quota",
+                "fixed_algorithm_changed" to false,
+                "frozen_history_rows" to 107
+            ))
             auditLogger.log("RUNTIME", "FIXED_SCAN_WORKER_STARTED", mapOf(
                 "priority" to "FIXED_FIRST",
                 "blocked_by_adaptive_forecast" to false
@@ -381,12 +389,41 @@ class TradingEngineService : Service() {
                         now.toLocalTime() >= LocalTime.of(9, 15) &&
                         now.toLocalTime() < LocalTime.of(15, 30)
                     ) {
-                        runCatching { repository.maintainFixedHotDataCache() }
-                            .onFailure {
-                                if (it !is CancellationException) {
-                                    auditLogger.log("RUNTIME", "FIXED_HOT_CACHE_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName)))
-                                }
+                        // Speculative historical prewarming is intentionally disabled. The
+                        // 22-second verified cache remains unchanged; the old prewarm calls
+                        // regularly expired before Fixed used them and consumed broker quota.
+                        val gateState = recoveryGate.status()
+                        val cooldownUntilMs = gateState.categoryCooldownUntilMs[
+                            GrowwApiUsageLedger.Category.HISTORICAL
+                        ] ?: 0L
+                        val nowMs = System.currentTimeMillis()
+                        val readiness = FixedDataPipelinePolicy.readiness(
+                            gateState.reconnectRequired, cooldownUntilMs, nowMs
+                        )
+                        if (readiness != FixedDataPipelinePolicy.Readiness.READY) {
+                            if (FixedDataPipelinePolicy.shouldAuditSuppression(
+                                previousFixedPause, readiness, lastFixedPauseAuditMs, nowMs
+                            )) {
+                                auditLogger.log("FIXED_DATA_PIPELINE", "FIXED_SCAN_DEFERRED_BROKER_UNAVAILABLE", mapOf(
+                                    "reason" to readiness.name,
+                                    "historical_cooldown_until_ms" to cooldownUntilMs,
+                                    "remaining_cooldown_ms" to (cooldownUntilMs - nowMs).coerceAtLeast(0L),
+                                    "forecast_formula_unchanged" to true,
+                                    "existing_fixed_recommendations_preserved" to true
+                                ))
+                                lastFixedPauseAuditMs = nowMs
                             }
+                            previousFixedPause = readiness
+                            delay(SCAN_WORKER_POLL_MS)
+                            continue
+                        }
+                        if (previousFixedPause != null) {
+                            auditLogger.log("FIXED_DATA_PIPELINE", "FIXED_SCAN_RESUMED_AFTER_BROKER_RECOVERY", mapOf(
+                                "previous_reason" to previousFixedPause!!.name,
+                                "cooldown_expired" to true
+                            ))
+                            previousFixedPause = null
+                        }
                         val usageBefore = GrowwApiUsageLedger.snapshot()
                         val cacheHitsBefore = GrowwApiUsageLedger.cacheHitCount()
                         val startedAt = System.currentTimeMillis()
