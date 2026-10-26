@@ -15,4 +15,13 @@ class BrokerExecutionRetryGuard @Inject constructor(@ApplicationContext context:
         return until
     }
     fun gttBlockedUntil(symbol: String): Long = prefs.getLong("gtt_"+symbol, 0L)
+    fun blockGtt(symbol: String, rejected: Boolean): Long {
+        val until = System.currentTimeMillis() + (if (rejected) 1_800_000L else 300_000L)
+        prefs.edit().putLong("gtt_"+symbol, until).commit()
+        return until
+    }
+    fun clearGtt(symbol: String) {
+        prefs.edit().remove("gtt_"+symbol).commit()
+    }
+    class Deferred(message: String) : IllegalStateException(message)
 }
