@@ -1,0 +1,83 @@
+name: Multify v7.8.8 Forecast Early Entry APK
+on:
+  push:
+    branches: [ build-v788-forecast-early ]
+    paths:
+      - '.github/workflows/multify-v788-apk.yml'
+      - 'v788/**'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Android SDK 35
+        shell: bash
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
+      - name: Apply and verify v7.8.8 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 -d v788/multify.patch.gz.b64 | gzip -d > /tmp/v788.patch
+          git apply --check /tmp/v788.patch
+          git apply /tmp/v788.patch
+          grep -q 'versionCode = 788' app/build.gradle.kts
+          grep -q 'versionName = "7.8.8-forecast-early-entry"' app/build.gradle.kts
+          python - <<'PY'
+          from pathlib import Path
+          t = Path('app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt').read_text()
+          assert 'class ForecastEarlyEntryPolicy' in Path('app/src/main/java/com/multify/traderpro/engine/ForecastEarlyEntryPolicy.kt').read_text()
+          assert 'FIXED_FINAL_LOCK_BEGIN' in t and 'FIXED_FINAL_LOCK_END' in t
+          assert 'handleMultifyBuy' in t
+          print("v7.8.8 source applied; Fixed lock and Multify handler present")
+          PY
+      - name: Backend tests
+        shell: bash
+        run: |
+          python -m pip install -r backend/requirements.txt
+          PYTHONPATH="$GITHUB_WORKSPACE" PHONE_HMAC_SECRET=test-secret-test-secret-test-secret GROWW_API_KEY=test-api-key GROWW_TOTP_SECRET=JBSWY3DPEHPK3PXP python -m pytest -q backend/tests
+      - name: Android unit tests
+        run: gradle --no-daemon testDebugUnitTest
+      - name: Assemble debug APK
+        run: gradle --no-daemon assembleDebug
+      - name: Verify package and prepare deliverables
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v7.8.8-forecast-early-entry-debug.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/Multify-TraderPro-v7.8.8-forecast-early-entry-debug.apk | tee dist/APK-SIGNATURE.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/Multify-TraderPro-v7.8.8-forecast-early-entry-debug.apk | head -n 2 | tee dist/PACKAGE.txt
+          sha256sum dist/*.apk > dist/SHA256SUMS.txt
+          python - <<'PY'
+          import zipfile
+          from pathlib import Path
+          root=Path('.')
+          output=Path('dist/Multify-TraderPro-v7.8.8-exact-source.zip')
+          with zipfile.ZipFile(output,'w',zipfile.ZIP_DEFLATED,compresslevel=6) as z:
+            for p in root.rglob('*'):
+              if not p.is_file() or any(s in {'.git','.gradle','build','dist'} for s in p.parts):continue
+              if p.parts[:1]==('v788',):continue
+              z.write(p,p.as_posix())
+          print(output,output.stat().st_size)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: multify-v788-build
+          path: dist/
+          if-no-files-found: warn
