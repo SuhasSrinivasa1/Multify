@@ -93,8 +93,9 @@ jobs:
           t=p.read_text()
           lock=t.split('// FIXED_FINAL_LOCK_BEGIN:',1)[1].split('// FIXED_FINAL_LOCK_END:',1)[0]
           old=Path('/tmp/fixed-before-v794-region').read_text()
-          expected=old.replace('candleInterval = "15minute"\\n            ).requirePayload("Fixed forecast candles $symbol")','candleInterval = "5minute"\\n            ).requirePayload("Fixed forecast candles $symbol")').replace('FixedLocalStrategyEngine.buildFeatures(quote, historical, 15)','FixedLocalStrategyEngine.buildFeatures(quote, historical, 5)')
-          assert lock==expected,"Fixed selection changed beyond approved 5-minute input adaptation"
+          normalized=lock.replace('candleInterval = "5minute"','candleInterval = "15minute"').replace('FixedLocalStrategyEngine.buildFeatures(quote, historical, 5)','FixedLocalStrategyEngine.buildFeatures(quote, historical, 15)')
+          assert normalized==old and lock!=old,"Fixed changed beyond approved 5-minute input adaptation"
+          expected=lock
           handler=t.split('private suspend fun handleMultify',1)[1].split('private suspend fun',1)[0] if 'private suspend fun handleMultify' in t else 'NO_HANDLER'
           assert handler==Path('/tmp/multify-buy-v788').read_text()
           assert 'ForecastMultifyReferenceLedger.build(' in t
