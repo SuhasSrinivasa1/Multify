@@ -123,10 +123,10 @@ jobs:
           assert 'FORECAST_EVALUATION_TRANCHE_SIZE = 12' in t
           assert 'val features = LocalStrategyEngine.buildFeatures(quote, historical, 1)' in t
           assert 'val features = FixedLocalStrategyEngine.buildFeatures(quote, historical, 5)' in t
-          assert 'candleInterval = "1minute"\\n            ).requirePayload("Forecast candles $symbol")' in t
+          assert 'candleInterval = "1minute"\n            ).requirePayload("Forecast candles $symbol")' in t
           assert '"candle_interval" to "1minute"' in t
           original=Path('/tmp/v794-repository-snapshot').read_text()
-          expected_repo=original.replace('"candle_interval" to "5minute"','"candle_interval" to "1minute"').replace('candleInterval = "5minute"\\n            ).requirePayload("Forecast candles $symbol")','candleInterval = "1minute"\\n            ).requirePayload("Forecast candles $symbol")').replace('Insufficient forecast 5-minute candles','Insufficient forecast 1-minute candles').replace('val features = LocalStrategyEngine.buildFeatures(quote, historical, 5)','val features = LocalStrategyEngine.buildFeatures(quote, historical, 1)')
+          expected_repo=original.replace('"candle_interval" to "5minute"','"candle_interval" to "1minute"').replace('candleInterval = "5minute"\n            ).requirePayload("Forecast candles $symbol")','candleInterval = "1minute"\n            ).requirePayload("Forecast candles $symbol")').replace('Insufficient forecast 5-minute candles','Insufficient forecast 1-minute candles').replace('val features = LocalStrategyEngine.buildFeatures(quote, historical, 5)','val features = LocalStrategyEngine.buildFeatures(quote, historical, 1)')
           assert t==expected_repo,"Unexpected repository changes outside Forecast 1-minute timeframe"
           assert 'Forecast candles $symbol' in t
           assert 'require(safeAppSellScope(token, position, forceGttRefresh = true))' in t
