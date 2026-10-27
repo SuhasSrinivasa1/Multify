@@ -120,8 +120,9 @@ jobs:
           assert 'ForecastEntryTimingPolicy' in t
           import hashlib
           lock=t.split('// FIXED_FINAL_LOCK_BEGIN:',1)[1].split('// FIXED_FINAL_LOCK_END:',1)[0]
-          assert hashlib.sha256(lock.encode()).hexdigest()==Path('/tmp/fixed-v789-hash').read_text()
-          print('FIXED & MULTIFY SOURCE LOCKS IDENTICAL; cumulative Forecast reference included')
+          assert normalized==old,"Unexpected Fixed formula/selection changes"
+          assert lock!=old,"Requested 5-minute Fixed adaptation missing"
+          print('FIXED protected rules preserved except explicitly approved 5-minute data inputs; Multify handler identical')
           PY
       - name: Backend tests
         shell: bash
