@@ -292,6 +292,22 @@ jobs:
           assert 'val targetPct = FixedFinalContract' in after or 'val targetPct =' in after
           print('v799 locked Fixed scorer, 150s cadence, 5m/1m inputs, Multify BUY, SELL protections PASS')
           PY
+      - name: Apply v799 resumable research replay retry policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 -d v799/forecast-replay-retry.patch.gz.b64 | gzip -d > /tmp/v799-replay.patch
+          git apply --check /tmp/v799-replay.patch
+          git apply /tmp/v799-replay.patch
+          python - <<'PY'
+          from pathlib import Path
+          s=Path('app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt').read_text()
+          assert 'forecastReplayRetryAfterMs' in s
+          assert 'OUTCOME_REPLAY_DEFERRED' in s
+          assert 'FIXED_V741_FORECAST_SCAN_INTERVAL_MS = 150_000L' in s
+          assert 'FixedLocalStrategyEngine.buildFeatures(quote, historical, 5)' in s
+          print('v799 replay: rotating backfill retries enabled, Fixed cadence unchanged')
+          PY
       - name: Backend tests
         shell: bash
         run: |
