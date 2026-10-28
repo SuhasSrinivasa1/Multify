@@ -1,11 +1,12 @@
-name: Multify v7.9.8 Fixed Priority Broker Inventory Safety
+name: Multify v7.9.9 Fixed Speed and Forecast Learning Preservation
 on:
   push:
-    branches: [ build-v798-broker-safety-fixed-priority ]
+    branches: [ build-v799-preserved-learning-fixed-reliability ]
     paths:
       - '.github/workflows/multify-v797-standalone.yml'
       - 'v797/**'
       - 'v798/**'
+      - 'v799/**'
   workflow_dispatch:
 permissions:
   contents: read
@@ -247,6 +248,50 @@ jobs:
           assert 'require(safeAppSellScope(token, position, forceGttRefresh = true))' in code
           print('v798: Fixed protected scoring, 5-minute candles, Multify buying and ownership SELL rules unchanged')
           PY
+      - name: Apply v799 Fixed cooldown guard and complete learning restore
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib
+          p=Path('app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt')
+          code=p.read_text()
+          Path('/tmp/v799-fixed-scorer-sha').write_text(hashlib.sha256(Path('app/src/main/java/com/multify/traderpro/engine/FixedLocalStrategyEngine.kt').read_bytes()).hexdigest())
+          Path('/tmp/v799-fixed-lock').write_text(code.split('// FIXED_FINAL_LOCK_BEGIN:',1)[1].split('// FIXED_FINAL_LOCK_END:',1)[0])
+          Path('/tmp/v799-multify-handler').write_text(code.split('private suspend fun handleMultify',1)[1].split('private suspend fun',1)[0])
+          PY
+          base64 -d v799/full-reliability-learning.patch.gz.b64 | gzip -d > /tmp/v799.patch
+          git apply --check /tmp/v799.patch
+          git apply /tmp/v799.patch
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib
+          p=Path('app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt')
+          code=p.read_text()
+          before=Path('/tmp/v799-fixed-lock').read_text()
+          after=code.split('// FIXED_FINAL_LOCK_BEGIN:',1)[1].split('// FIXED_FINAL_LOCK_END:',1)[0]
+          assert 'val evaluatedBySymbol = linkedMapOf<String, FixedStrategyEvaluation>()' in after
+          assert 'FIXED_V741_FORECAST_SCAN_INTERVAL_MS = 150_000L' in code
+          assert 'FixedLocalStrategyEngine.buildFeatures(quote, historical, 5)' in code
+          assert 'LocalStrategyEngine.buildFeatures(quote, historical, 1)' in code
+          assert 'SCAN_DEFERRED_BROKER' in code
+          assert 'forecast_positive_evidence.json' in code
+          assert 'fixed_recommendations.json' in code
+          assert 'FIXED_MISSES_IMPORTED_TO_SHADOW' in code
+          assert 'versionCode = 799' in Path('app/build.gradle.kts').read_text()
+          assert 'versionName = "7.9.9-fixed-preserve-forecast-research"' in Path('app/build.gradle.kts').read_text()
+          assert hashlib.sha256(Path('app/src/main/java/com/multify/traderpro/engine/FixedLocalStrategyEngine.kt').read_bytes()).hexdigest()==Path('/tmp/v799-fixed-scorer-sha').read_text()
+          assert code.split('private suspend fun handleMultify',1)[1].split('private suspend fun',1)[0]==Path('/tmp/v799-multify-handler').read_text()
+          # Any protected-region change is a broker-availability early exit, not a scorer,
+          # candidate selection, target, timeframe, ranking, or trailing alteration.
+          assert after.count('if (!marketDataAvailableForFixed())')==2
+          assert before.count('if (!marketDataAvailableForFixed())')==0
+          assert 'FixedForecastPublicationPolicy.isReady(' in after
+          assert 'val publishable = unseen.filter' in after
+          assert 'val targetPct = FixedFinalContract' in after or 'val targetPct =' in after
+          print('v799 locked Fixed scorer, 150s cadence, 5m/1m inputs, Multify BUY, SELL protections PASS')
+          PY
       - name: Backend tests
         shell: bash
         run: |
@@ -262,21 +307,21 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v7.9.8-fixed-priority-debug.apk
+          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v7.9.9-fixed-learning-debug.apk
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/*.apk > dist/APK-SIGNATURE.txt
           "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/*.apk | head -n 2 > dist/PACKAGE.txt
           sha256sum dist/*.apk > dist/SHA256SUMS.txt
           python - <<'PY'
           from pathlib import Path
           import zipfile
-          with zipfile.ZipFile('dist/Multify-TraderPro-v7.9.8-exact-source.zip','w',zipfile.ZIP_DEFLATED,compresslevel=6) as z:
+          with zipfile.ZipFile('dist/Multify-TraderPro-v7.9.9-exact-source.zip','w',zipfile.ZIP_DEFLATED,compresslevel=6) as z:
             for p in Path('.').rglob('*'):
-              if not p.is_file() or any(s in {'.git','.gradle','build','dist','v788','v789','v790','v791','v792','v793','v794','v795','v796','v797','v798'} for s in p.parts):continue
+              if not p.is_file() or any(s in {'.git','.gradle','build','dist','v788','v789','v790','v791','v792','v793','v794','v795','v796','v797','v798','v799'} for s in p.parts):continue
               z.write(p,p.as_posix())
           PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: multify-v798-fixed-priority
+          name: multify-v799-fixed-learning
           path: dist/
           if-no-files-found: warn
