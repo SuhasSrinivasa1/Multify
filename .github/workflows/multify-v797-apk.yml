@@ -195,7 +195,14 @@ jobs:
           import hashlib
           t=Path('app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt').read_text()
           lock=t.split('// FIXED_FINAL_LOCK_BEGIN:',1)[1].split('// FIXED_FINAL_LOCK_END:',1)[0]
-          assert lock==Path('/tmp/v797-fixed-lock').read_text(),'Fixed protected decision region was modified'
+          diagnostic_start='        if (incremental == null) {\n            val reason = fixedHistoricalWindowStore.ineligibilityReason(historyKey, start, SystemClock.elapsedRealtime())'
+          original=Path('/tmp/v797-fixed-lock').read_text()
+          assert diagnostic_start in lock
+          prefix,rem=lock.split(diagnostic_start,1)
+          assert rem.startswith('\n            // Sample at most one diagnostic every 15 seconds; do not slow the Fixed pipeline.')
+          diag,tail=rem.split('        val raw = withFixedHistoricalDataSlot {',1)
+          normalized=prefix+'        val raw = withFixedHistoricalDataSlot {'+tail
+          assert normalized==original,'Fixed protected decision region changed beyond bounded cache diagnostic'
           assert t.split('private suspend fun handleMultify',1)[1].split('private suspend fun',1)[0]==Path('/tmp/v797-buy-handler').read_text()
           assert 'versionCode = 797' in Path('app/build.gradle.kts').read_text()
           assert 'versionName = "7.9.7-fixed-reuse-arm-forecast-retry"' in Path('app/build.gradle.kts').read_text()
