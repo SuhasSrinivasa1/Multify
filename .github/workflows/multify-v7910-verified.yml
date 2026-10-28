@@ -323,6 +323,15 @@ jobs:
             p=Path('app/src/main/java/com/multify/traderpro/engine')/name
             Path('/tmp/'+name+'.sha').write_text(hashlib.sha256(p.read_bytes()).hexdigest())
           PY
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('v7910/toggle-readiness.patch.gz.b64')
+          s=p.read_text()
+          old='NpORd6uO9'
+          new='NpORd6UO9'
+          assert s.count(old)==1, 'Expected exact single-byte transfer correction'
+          p.write_text(s.replace(old,new))
+          PY
           base64 -d v7910/toggle-readiness.patch.gz.b64 | gzip -d > /tmp/v7910.patch
           git apply --check /tmp/v7910.patch
           git apply /tmp/v7910.patch
