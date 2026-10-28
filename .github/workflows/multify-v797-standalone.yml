@@ -1,10 +1,11 @@
-name: Multify v7.9.7 Signed APK Standalone Package
+name: Multify v7.9.8 Fixed Priority Broker Inventory Safety
 on:
   push:
-    branches: [ build-v797-standalone-verified ]
+    branches: [ build-v798-broker-safety-fixed-priority ]
     paths:
       - '.github/workflows/multify-v797-standalone.yml'
       - 'v797/**'
+      - 'v798/**'
   workflow_dispatch:
 permissions:
   contents: read
@@ -215,6 +216,37 @@ jobs:
           assert 'AppPositionOwnershipPolicy' in t
           print('Fixed 5m protected rules, Forecast 1m, Multify BUY, ownership guard preserved')
           PY
+      - name: Apply v798 null-safe broker inventory without changing Fixed engine
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib
+          repo = Path('app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt').read_text()
+          Path('/tmp/v798-fixed-lock').write_text(repo.split('// FIXED_FINAL_LOCK_BEGIN:',1)[1].split('// FIXED_FINAL_LOCK_END:',1)[0])
+          Path('/tmp/v798-fixed-scorer-sha').write_text(hashlib.sha256(Path('app/src/main/java/com/multify/traderpro/engine/FixedLocalStrategyEngine.kt').read_bytes()).hexdigest())
+          Path('/tmp/v798-multify-buy-handler').write_text(repo.split('private suspend fun handleMultify',1)[1].split('private suspend fun',1)[0])
+          PY
+          base64 -d v798/broker-inventory-null-safe.patch.gz.b64 | gzip -d > /tmp/v798.patch
+          git apply --check /tmp/v798.patch
+          git apply /tmp/v798.patch
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib
+          code = Path('app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt').read_text()
+          lock = code.split('// FIXED_FINAL_LOCK_BEGIN:',1)[1].split('// FIXED_FINAL_LOCK_END:',1)[0]
+          assert lock == Path('/tmp/v798-fixed-lock').read_text(), 'Fixed protected engine changed'
+          scorer = Path('app/src/main/java/com/multify/traderpro/engine/FixedLocalStrategyEngine.kt')
+          assert hashlib.sha256(scorer.read_bytes()).hexdigest() == Path('/tmp/v798-fixed-scorer-sha').read_text(), 'Fixed scorer changed'
+          handler = code.split('private suspend fun handleMultify',1)[1].split('private suspend fun',1)[0]
+          assert handler == Path('/tmp/v798-multify-buy-handler').read_text(), 'Multify buy handler changed'
+          assert 'versionCode = 798' in Path('app/build.gradle.kts').read_text()
+          assert 'BrokerInventorySymbolPolicy.normalize' in code
+          assert Path('app/src/test/java/com/multify/traderpro/engine/BrokerInventorySymbolPolicyTest.kt').exists()
+          assert 'require(safeAppSellScope(token, position, forceGttRefresh = true))' in code
+          print('v798: Fixed protected scoring, 5-minute candles, Multify buying and ownership SELL rules unchanged')
+          PY
       - name: Backend tests
         shell: bash
         run: |
@@ -230,21 +262,21 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v7.9.7-forecast-one-minute-debug.apk
+          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v7.9.8-fixed-priority-debug.apk
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/*.apk > dist/APK-SIGNATURE.txt
           "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/*.apk | head -n 2 > dist/PACKAGE.txt
           sha256sum dist/*.apk > dist/SHA256SUMS.txt
           python - <<'PY'
           from pathlib import Path
           import zipfile
-          with zipfile.ZipFile('dist/Multify-TraderPro-v7.9.7-exact-source.zip','w',zipfile.ZIP_DEFLATED,compresslevel=6) as z:
+          with zipfile.ZipFile('dist/Multify-TraderPro-v7.9.8-exact-source.zip','w',zipfile.ZIP_DEFLATED,compresslevel=6) as z:
             for p in Path('.').rglob('*'):
-              if not p.is_file() or any(s in {'.git','.gradle','build','dist','v788','v789','v790','v791','v792','v793','v794','v795','v796','v797'} for s in p.parts):continue
+              if not p.is_file() or any(s in {'.git','.gradle','build','dist','v788','v789','v790','v791','v792','v793','v794','v795','v796','v797','v798'} for s in p.parts):continue
               z.write(p,p.as_posix())
           PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: multify-v797-standalone
+          name: multify-v798-fixed-priority
           path: dist/
           if-no-files-found: warn
