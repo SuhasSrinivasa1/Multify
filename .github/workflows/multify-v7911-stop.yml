@@ -390,7 +390,7 @@ jobs:
           change('app/build.gradle.kts','versionCode = 7910','versionCode = 7911',1)
           change('app/build.gradle.kts','7.9.10-auto-buy-readiness-guards','7.9.11-common-minus-one-stop',1)
           t=Path('app/src/test/java/com/multify/traderpro/engine/HardStopLossPolicyTest.kt')
-          for a,b,n in [('FivePercent','OnePercent',2),('95.0','99.0',2),('237.5','247.5',1),('95.01','99.01',1),('94.0','98.0',1)]:
+          for a,b,n in [('FivePercent','OnePercent',2),('95.01','99.01',1),('95.0','99.0',2),('237.5','247.5',1),('94.0','98.0',1)]:
             change(t,a,b,n)
           updated=q.read_text()
           assert updated.split('// FIXED_FINAL_LOCK_BEGIN:',1)[1].split('// FIXED_FINAL_LOCK_END:',1)[0]==fixed
