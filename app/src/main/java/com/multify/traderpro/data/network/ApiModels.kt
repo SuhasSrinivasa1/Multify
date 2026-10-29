@@ -74,6 +74,8 @@ data class DashboardDto(
     val execution: ExecutionStatsDto = ExecutionStatsDto(),
     val learning: LearningStatsDto = LearningStatsDto(),
     val forecastLearning: ForecastLearningStatsDto = ForecastLearningStatsDto(),
+    val forecastReferences: ForecastReferenceStatsDto = ForecastReferenceStatsDto(),
+    val fixedOutcomes: FixedOutcomeStatsDto = FixedOutcomeStatsDto(),
     val forecasts: List<ForecastDto> = emptyList(),
     val fixedForecasts: List<ForecastDto> = emptyList(),
     val forecastChampions: List<ForecastChampionDto> = emptyList(),
@@ -114,6 +116,39 @@ data class LearningStatsDto(
     val mfeBackfillPendingCalls: Int = 0
 )
 
+data class FixedOutcomeStatsDto(
+    val published: Int = 0,
+    val observed: Int = 0,
+    val todayPublished: Int = 0,
+    val todayObserved: Int = 0,
+    val todayTargetAveragePct: Double? = null,
+    val todayObservedAveragePct: Double? = null,
+    val rollingObservedAveragePct: Double? = null,
+    val armHits: Int = 0,
+    val onePctHits: Int = 0,
+    val fullTargetHits: Int = 0,
+    val armHitRatePct: Double? = null,
+    val onePctHitRatePct: Double? = null,
+    val fullTargetHitRatePct: Double? = null,
+    val armHitMeanMfePct: Double? = null,
+    val onePctHitMeanMfePct: Double? = null,
+    val fullHitMeanMfePct: Double? = null,
+    val p25Pct: Double? = null,
+    val medianPct: Double? = null,
+    val p75Pct: Double? = null
+)
+
+data class ForecastReferenceStatsDto(
+    val frozenCases: Int = 107,
+    val appendedCalls: Int = 0,
+    val totalCalls: Int = 107,
+    val distinctSymbols: Int = 0,
+    val liveCompleted: Int = 0,
+    val liveMfeMeasured: Int = 0,
+    val livePendingOutcome: Int = 0,
+    val latestLiveCallDate: String? = null
+)
+
 data class ForecastLearningStatsDto(
     val rollingTradingDays: Int = 0,
     val completedForecasts: Int = 0,
@@ -149,6 +184,7 @@ data class ForecastDto(
     val maxFavourablePct: Double = 0.0,
     val maxAdversePct: Double = 0.0,
     val generatedAtMs: Long = 0L,
+    val observedAfterPublication: Boolean = false,
     val qualityTier: String = "LEGACY",
     val executionEligible: Boolean = false
 )

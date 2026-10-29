@@ -21,6 +21,7 @@ import com.multify.traderpro.data.local.ResearchReportEntity
 import com.multify.traderpro.data.local.SignalEventDao
 import com.multify.traderpro.data.local.SignalEventEntity
 import com.multify.traderpro.data.logging.AuditLogger
+import com.multify.traderpro.data.logging.FixedFactorTelemetry
 import com.multify.traderpro.data.network.BrokerStatusDto
 import com.multify.traderpro.data.network.DashboardDto
 import com.multify.traderpro.data.network.DaySummaryDto
@@ -30,12 +31,15 @@ import com.multify.traderpro.data.network.ExecutionStatsDto
 import com.multify.traderpro.data.network.ForecastChampionDto
 import com.multify.traderpro.data.network.ForecastDto
 import com.multify.traderpro.data.network.ForecastLearningStatsDto
+import com.multify.traderpro.data.network.ForecastReferenceStatsDto
 import com.multify.traderpro.data.network.FixedSnapshotDto
+import com.multify.traderpro.data.network.FixedOutcomeStatsDto
 import com.multify.traderpro.data.network.GttCreateRequest
 import com.multify.traderpro.data.network.GttModifyRequest
 import com.multify.traderpro.data.network.GttOrder
 import com.multify.traderpro.data.network.GrowwApiFactory
 import com.multify.traderpro.data.network.GrowwApiUsageLedger
+import com.multify.traderpro.data.network.BetaResearchGate
 import com.multify.traderpro.data.network.GrowwRecoveryGate
 import com.multify.traderpro.data.network.GrowwHolding
 import com.multify.traderpro.data.network.GrowwPosition
@@ -60,6 +64,8 @@ import com.multify.traderpro.domain.ParsedSignal
 import com.multify.traderpro.domain.SignalType
 import com.multify.traderpro.engine.AdaptiveLearningMath
 import com.multify.traderpro.engine.CashAwareCncSizing
+import com.multify.traderpro.engine.BrokerInventorySymbolPolicy
+import com.multify.traderpro.engine.AutoBuyEntrySafetyPolicy
 import com.multify.traderpro.engine.ExecutionTelemetryMath
 import com.multify.traderpro.engine.ForecastAutoBuyPolicy
 import com.multify.traderpro.engine.ForecastAdaptiveSelectionPolicy
@@ -69,6 +75,9 @@ import com.multify.traderpro.engine.ForecastFamilyOutcome
 import com.multify.traderpro.engine.ForecastHistoricalOutcome
 import com.multify.traderpro.engine.ForecastFixedPositiveTransferPolicy
 import com.multify.traderpro.engine.ForecastMultifyPositiveTransferPolicy
+import com.multify.traderpro.engine.ForecastMultifyReferenceLedger
+import com.multify.traderpro.engine.ForecastPreSpikeContextPolicy
+import com.multify.traderpro.engine.ForecastEntryTimingPolicy
 import com.multify.traderpro.engine.MultifyPositiveTransferCase
 import com.multify.traderpro.engine.FixedPositiveTransferCase
 import com.multify.traderpro.engine.ForecastQualityDecision
@@ -90,14 +99,17 @@ import com.multify.traderpro.engine.FixedMultifyReverseEngineering
 import com.multify.traderpro.engine.FixedPositiveCloseForecastPolicy
 import com.multify.traderpro.engine.FixedScanPerformancePolicy
 import com.multify.traderpro.engine.FixedDiscoveryWindowScheduler
+import com.multify.traderpro.engine.FixedHistoricalWindowStore
 import com.multify.traderpro.engine.FixedHistoricalSlotPolicy
 import com.multify.traderpro.engine.FixedStrategyEvaluation
 import com.multify.traderpro.engine.GrowwDeliveryCostPolicy
 import com.multify.traderpro.engine.GrowwApiBudgetPolicy
 import com.multify.traderpro.engine.HardStopLossPolicy
+import com.multify.traderpro.engine.AppPositionOwnershipPolicy
 import com.multify.traderpro.engine.HoldingSmartOrderPolicy
 import com.multify.traderpro.engine.BrokerExecutionSafetyPolicy
 import com.multify.traderpro.engine.MarketPriorityPolicy
+import com.multify.traderpro.engine.ForecastResearchWindowPolicy
 import com.multify.traderpro.engine.LocalStrategyEngine
 import com.multify.traderpro.engine.MarketDiscoveryPolicy
 import com.multify.traderpro.engine.MultifyFactorFamilies
@@ -112,6 +124,8 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -132,6 +146,7 @@ import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
@@ -161,16 +176,19 @@ class TradingRepository @Inject constructor(
     private val preferences: AppPreferences,
     private val secretStore: SecretStore,
     private val apiFactory: GrowwApiFactory,
+    private val betaResearchGate: BetaResearchGate,
     private val recoveryGate: GrowwRecoveryGate,
     private val brokerRetryGuard: BrokerExecutionRetryGuard,
     private val parser: NotificationParser,
     private val nseSymbols: NseSymbolRepository,
     private val auditLogger: AuditLogger,
+    private val fixedFactorTelemetry: FixedFactorTelemetry,
     private val marketDiscoveryStateStore: MarketDiscoveryStateStore,
     private val forecastAutoBuyOrderStore: ForecastAutoBuyOrderStore,
     private val fixedEngineSnapshotStore: FixedEngineSnapshotStore,
     private val embeddedHistoricalIntelligenceStore: EmbeddedHistoricalIntelligenceStore,
     private val fixedRecommendationStore: FixedRecommendationStore,
+    private val fixedOutcomePerformanceStore: FixedOutcomePerformanceStore,
     private val fixedAutoBuyOrderStore: FixedAutoBuyOrderStore,
     private val fixedMarketDiscoveryStateStore: FixedMarketDiscoveryStateStore,
     @ApplicationContext private val appContext: Context
@@ -185,7 +203,40 @@ class TradingRepository @Inject constructor(
     @Volatile private var embeddedHistoricalIntelligenceEnsured = false
     @Volatile private var fixedSnapshotAudited = false
     @Volatile private var armHotState: ArmHotState? = null
+    // Adaptive-only resume cursor: repeated Fixed preemption must not restart NSE sweep at symbol zero.
+    private var forecastDiscoveryDate = ""
+    private var forecastDiscoveryNextBatch = 0
+    private val forecastDiscoveryPartialLtps = linkedMapOf<String, Double>()
+    private var forecastDiscoveryBatchErrors = 0
+    private var forecastDiscoveryMustClear = false
+    private var forecastWaitingForSharedBaseline = false
+    @Volatile private var cachedBetaResearchToken: String? = null
+    @Volatile private var betaSessionInvalid = false
+    private var lastForecastCapacitySkipLogAtMs = 0L
     private var lastForecastScanAtMs = 0L
+    // Forecast-only checkpoint: preserve unprocessed candidates across Fixed-priority yields.
+    // Do not retain evaluation/price objects: each resumed symbol receives fresh market data.
+    private var forecastDetailDate = ""
+    private var forecastDetailQueue: List<String> = emptyList()
+    private val forecastDetailRetryAttempts = mutableMapOf<String, Int>()
+    // Research-only retry memory. Transient broker timeouts must not pin the first 24
+    // replay symbols forever; this does not influence production trading decisions.
+    private val forecastReplayRetryAfterMs = ConcurrentHashMap<String, Long>()
+    private val forecastReplayFailureCount = ConcurrentHashMap<String, Int>()
+    private var forecastDetailCursor = 0
+
+    // The scheduling timestamp remains frozen; this flag only prevents auto-BUY on incomplete scans.
+    @Volatile private var fixedScanDeferredBroker = false
+    // In-memory historical OHLCV reuse across Fixed cycles; live latest bars are ALWAYS refetched.
+    private val fixedHistoricalWindowStore = FixedHistoricalWindowStore()
+    private val fixedReuseDiagnosticLastLoggedAtMs = AtomicLong(0L)
+    private val fixedHistoryFullFetches = AtomicLong(0L)
+    private val fixedHistoryDeltaFetches = AtomicLong(0L)
+    private val fixedHistoryStitchFallbacks = AtomicLong(0L)
+    fun fixedHistoricalRequestCounters(): Triple<Long, Long, Long> = Triple(
+        fixedHistoryFullFetches.get(), fixedHistoryDeltaFetches.get(), fixedHistoryStitchFallbacks.get()
+    )
+    @Volatile private var forecastPostFixedOpportunity = false
     private var lastFixedScanAtMs = 0L
     private var lastForecastOutcomeMonitorAtMs = 0L
     private var lastFixedOutcomeMonitorAtMs = 0L
@@ -194,6 +245,7 @@ class TradingRepository @Inject constructor(
     private var brokerInventorySnapshot: BrokerInventorySnapshot? = null
     @Volatile private var activeGttSnapshot: ActiveGttSnapshot? = null
     private var lastClosedSessionReconcileAtMs = 0L
+    private var lastIdlePortfolioAuditAtMs = 0L
     private val lastPortfolioConflictAuditAtMs = ConcurrentHashMap<String, Long>()
     private val recentlyClosedSymbolsAtMs = ConcurrentHashMap<String, Long>()
     private var lastArmHotAuditAtMs = 0L
@@ -201,14 +253,17 @@ class TradingRepository @Inject constructor(
     private var lastArmHotAuditBalance = Double.NaN
     private var lastArmHotAuditArmed: Boolean? = null
     private val closePositionMutexes = ConcurrentHashMap<Long, Mutex>()
+    private val appOwnedBuyMutex = Mutex()
     private val forecastAutoBuySubmissionMutex = Mutex()
     private val fixedAutoBuySubmissionMutex = Mutex()
     private val scanApiCycleMutex = Mutex()
+    private val betaForecastCycleMutex = Mutex()
     @Volatile private var fixedApiPriorityRequested = false
     @Volatile private var marketCriticalTradeInFlight = false
     @Volatile private var tradingRecoveryReady = false
     private val embeddedHistoricalSeedMutex = Mutex()
     private val bulkMarketDataMutex = Mutex()
+    private val learningRestoreMutex = Mutex() // Multiple user taps cannot interleave imports.
     private var nextBulkMarketDataAtElapsedMs = 0L
     private val fixedLiveDataRateMutex = Mutex()
     private val fixedLiveDataSecondWindowMs = mutableListOf<Long>()
@@ -255,7 +310,9 @@ class TradingRepository @Inject constructor(
         val atMs: Long,
         val high: Double,
         val low: Double,
-        val close: Double
+        val close: Double,
+        val open: Double = close,
+        val volume: Double = 0.0
     )
 
     private val researchGson = GsonBuilder().disableHtmlEscaping().create()
@@ -544,6 +601,22 @@ class TradingRepository @Inject constructor(
         )
     }
 
+    /** Forecast-only cumulative Multify ledger: canonical 107 + subsequent LIVE BUY events. */
+    suspend fun forecastReferenceStats(): ForecastReferenceStatsDto {
+        val frozen = ensureFixedEngineSnapshot().payload.learningCalls
+        val count = ForecastMultifyReferenceLedger.summary(frozen, learningDao.allCalls())
+        return ForecastReferenceStatsDto(
+            frozenCases = count.frozenCases,
+            appendedCalls = count.appendedCalls,
+            totalCalls = count.totalCalls,
+            distinctSymbols = count.distinctSymbols,
+            liveCompleted = count.liveCompleted,
+            liveMfeMeasured = count.liveMfeMeasured,
+            livePendingOutcome = count.livePendingOutcome,
+            latestLiveCallDate = count.latestLiveCallDate
+        )
+    }
+
     suspend fun forecastLearningStats(): ForecastLearningStatsDto {
         val all = learningDao.allLongForecasts()
         // Positive-close-only rows remain the training set, per forecasting policy.
@@ -816,6 +889,77 @@ class TradingRepository @Inject constructor(
         }
     }
 
+    fun betaCredentialsConfigured(): Boolean = secretStore.hasBetaCredentials()
+    fun betaResearchAuthenticated(): Boolean = secretStore.hasBetaCredentials() &&
+        !betaSessionInvalid && !secretStore.getBetaAccessToken().isNullOrBlank()
+
+    /** Beta is research-only. Credentials never enter Alpha's token, orders or inventory. */
+    suspend fun saveBetaResearchSettings(apiKey: String, totpSecret: String) {
+        require(apiKey.isNotBlank() || totpSecret.isNotBlank()) { "Enter Beta credentials to save" }
+        if (apiKey.isNotBlank()) {
+            require(apiKey.trim() != secretStore.getApiKey()) { "Beta API key must differ from Alpha" }
+            secretStore.putBetaApiKey(apiKey)
+        }
+        if (totpSecret.isNotBlank()) secretStore.putBetaTotpSecret(totpSecret)
+        secretStore.clearBetaAccessToken()
+        cachedBetaResearchToken = null
+        betaSessionInvalid = false
+        auditLogger.log("BETA_RESEARCH", "CREDENTIALS_SAVED_AUTH_REQUIRED", mapOf(
+            "read_only" to true, "trading_account" to "ALPHA", "static_ip_required_for_beta_orders" to false
+        ))
+    }
+
+    suspend fun authenticateBetaResearch(): String {
+        require(secretStore.hasBetaCredentials()) { "Save Beta API key and TOTP secret first" }
+        val key = secretStore.getBetaApiKey() ?: error("Beta key missing")
+        val totp = secretStore.getBetaTotpSecret() ?: error("Beta TOTP secret missing")
+        require(key != secretStore.getApiKey()) { "Alpha and Beta API keys must differ" }
+        // Authentication is explicitly initiated by the user; never auto-retry credentials.
+        val payload = apiFactory.betaGroww.createAccessToken(
+            "Bearer $key", TokenRequest(keyType = "totp", totp = TotpGenerator.generate(totp))
+        )
+        val token = payload.token?.takeIf { it.isNotBlank() } ?: error("Beta token was not returned")
+        val profile = apiFactory.betaGroww.userProfile(bearer(token)).requirePayload("Beta research profile")
+        val ucc = profile.ucc.orEmpty()
+        val alphaUcc = preferences.settings.first().brokerUcc
+        require(ucc.isNotBlank() && (alphaUcc.isBlank() || !ucc.equals(alphaUcc, true))) {
+            "Beta must be a separate authorized Groww account from Alpha"
+        }
+        secretStore.putBetaAccessToken(token)
+        secretStore.putBetaUcc(ucc)
+        cachedBetaResearchToken = token
+        betaSessionInvalid = false
+        auditLogger.log("BETA_RESEARCH", "AUTHENTICATED_READ_ONLY", mapOf(
+            "ucc_present" to true, "alpha_ip_unchanged" to true, "orders_permitted" to false
+        ))
+        return "Beta authenticated for market-data research only; Alpha retains all orders"
+    }
+
+    private suspend fun forecastMarketToken(): String? {
+        if (!secretStore.hasBetaCredentials()) return ensureToken() // compatibility until Beta configured
+        if (betaSessionInvalid) return null
+        val token = cachedBetaResearchToken ?: secretStore.getBetaAccessToken()
+        if (!token.isNullOrBlank()) cachedBetaResearchToken = token
+        return token
+    }
+
+    private fun forecastUsesBeta(token: String): Boolean = secretStore.hasBetaCredentials() &&
+        cachedBetaResearchToken == token && !betaSessionInvalid
+
+    private suspend fun <T> betaMarketRead(token: String, type: BetaResearchGate.Type,
+                                           alphaCall: suspend () -> T, betaCall: suspend () -> T): T {
+        if (!forecastUsesBeta(token)) return alphaCall()
+        return try { betaResearchGate.read(type, betaCall) } catch (t: Throwable) {
+            if (t is HttpException && t.code() == 401) {
+                betaSessionInvalid = true
+                cachedBetaResearchToken = null
+                secretStore.clearBetaAccessToken()
+                auditLogger.logAsync("BETA_RESEARCH", "REAUTH_REQUIRED", mapOf("code" to 401))
+            }
+            throw t
+        }
+    }
+
     suspend fun setHoldingBudget(value: Long) {
         preferences.setHoldingBudget(value)
         armHotState = null
@@ -825,23 +969,49 @@ class TradingRepository @Inject constructor(
     suspend fun setArm(enabled: Boolean) {
         if (enabled) {
             val s = preferences.settings.first()
-            require(tradingRecoveryReady) { "Wait for broker recovery and trailing protection reconciliation" }
-            require(s.brokerAuthenticated) { "Authenticate Groww first" }
-            require(s.staticIpMatched) { "Static IP verification failed" }
-            require(s.brokerDdpiEnabled) { "DDPI is required for CNC holdings so the app can sell its own holdings later" }
-            require(!s.safetyHalt) { "Safety halt is active" }
-        }
-        preferences.setArm(enabled)
-        if (enabled) {
-            val ready = runCatching { prepareArmHotPath(force = true) }.getOrDefault(false)
-            if (!ready) {
-                preferences.setArm(false)
-                armHotState = null
-                error("ARM could not pre-warm Groww token and CNC buying power")
+            val rejected = when {
+                !tradingRecoveryReady -> "BROKER_RECOVERY_PENDING"
+                !s.brokerAuthenticated -> "AUTH_REQUIRED"
+                !s.staticIpMatched -> "STATIC_IP_MISMATCH"
+                !s.brokerDdpiEnabled -> "DDPI_REQUIRED"
+                s.safetyHalt -> "SAFETY_HALT_ACTIVE"
+                recoveryGate.requiresReconnect() -> "BROKER_RECONNECT_REQUIRED"
+                else -> null
             }
+            if (rejected != null) {
+                auditLogger.log("SETTINGS", "ARM_REJECTED", mapOf("reason" to rejected))
+                error("Multify ARM unavailable: $rejected. Check Groww settings and broker recovery.")
+            }
+            // Validate before persisting ARM. A failed broker call must not briefly show ARM=ON.
+            val cooldown = buyApiCooldownOrNull()
+            if (cooldown != null) {
+                auditLogger.log("SETTINGS", "ARM_REJECTED", mapOf(
+                    "reason" to cooldown.reason,
+                    "next_allowed_at_ms" to cooldown.nextAllowedAtMs,
+                    "broker_reconnect_required" to recoveryGate.requiresReconnect()
+                ))
+                error("Multify ARM unavailable: ${cooldown.message}")
+            }
+            val warm = runCatching { prepareArmHotPath(force = true) }
+            if (warm.getOrDefault(false) != true) {
+                val cause = warm.exceptionOrNull()
+                val reason = when (cause) {
+                    is GrowwRecoveryGate.LocallyBlocked -> cause.reason
+                    null -> "TOKEN_OR_MARGIN_UNAVAILABLE"
+                    else -> "BROKER_PREWARM_EXCEPTION"
+                }
+                auditLogger.log("SETTINGS", "ARM_REJECTED", mapOf(
+                    "reason" to reason,
+                    "exception_type" to (cause?.javaClass?.simpleName ?: "NONE"),
+                    "next_allowed_at_ms" to ((cause as? GrowwRecoveryGate.LocallyBlocked)?.nextAllowedAtMs ?: 0L),
+                    "broker_reconnect_required" to recoveryGate.requiresReconnect()
+                ))
+                error("Multify ARM unavailable: $reason. ${cause?.message ?: "Check Groww token and CNC balance service."}")
+            }
+            preferences.setArm(true)
         } else {
-            // Multify ARM controls Multify execution only. Fixed and Forecast have independent
-            // execution toggles and must not be disabled or cancelled when Multify is disarmed.
+            preferences.setArm(false)
+            // The other two independent BUY toggles and all SELL monitoring stay unchanged.
             val live = preferences.settings.first()
             if (!live.fixedAutoBuyEnabled && !live.forecastAutoBuyEnabled) armHotState = null
         }
@@ -904,6 +1074,14 @@ class TradingRepository @Inject constructor(
     }
 
     suspend fun setForecastAutoBuy(enabled: Boolean) {
+        if (enabled && !forecastLiveUnlocked()) {
+            val completed = forecastCalibrationDates().size
+            auditLogger.log("FORECAST_AUTO_BUY", "ENABLE_REJECTED_CALIBRATION", mapOf(
+                "completed_sessions" to completed,
+                "required_sessions" to MarketPriorityPolicy.LIVE_FORECAST_UNLOCK_SESSIONS
+            ))
+            error("Forecast Auto Buy locked: $completed/${MarketPriorityPolicy.LIVE_FORECAST_UNLOCK_SESSIONS} completed calibration sessions. Research and manual observation stay available.")
+        }
         if (enabled) preferences.setForecastScannerEnabled(true) // migrate old paused-scanner installs
         preferences.setForecastAutoBuy(enabled)
         auditLogger.log(
@@ -936,6 +1114,27 @@ class TradingRepository @Inject constructor(
                     ))
                 }
         }
+    }
+
+    /** A read-only check: never send doomed live-data or non-trading calls during broker cooldowns. */
+    private fun buyApiCooldownOrNull(): GrowwRecoveryGate.LocallyBlocked? {
+        for (category in listOf(GrowwApiUsageLedger.Category.LIVE_DATA, GrowwApiUsageLedger.Category.NON_TRADING)) {
+            try {
+                recoveryGate.checkRequestAllowed(category)
+            } catch (blocked: GrowwRecoveryGate.LocallyBlocked) {
+                return blocked
+            }
+        }
+        return null
+    }
+
+    private fun auditAutoBuyBlocked(engine: String, blocked: GrowwRecoveryGate.LocallyBlocked) {
+        auditLogger.logAsync(engine, "BUY_BLOCKED_BROKER_NOT_READY", mapOf(
+            "reason" to blocked.reason,
+            "next_allowed_at_ms" to blocked.nextAllowedAtMs,
+            "broker_request_suppressed" to true,
+            "safety_checks_bypassed" to false
+        ))
     }
 
     suspend fun setFixedAutoBuy(enabled: Boolean) {
@@ -1019,6 +1218,12 @@ class TradingRepository @Inject constructor(
             ?: error("Groww did not return an access token. Verify the TOTP token/secret and phone time.")
         secretStore.putAccessToken(token)
         val profile = apiFactory.groww.userProfile(bearer(token)).requirePayload("Groww profile")
+        if (profile.ucc?.isNotBlank() == true && profile.ucc.equals(secretStore.getBetaUcc(), true)) {
+            secretStore.clearBetaAccessToken()
+            cachedBetaResearchToken = null
+            betaSessionInvalid = true
+            auditLogger.logAsync("BETA_RESEARCH", "SAME_ACCOUNT_REJECTED", mapOf("beta_disabled" to true))
+        }
         val cashEnabled = profile.nseEnabled && profile.activeSegments.any { it.equals("CASH", true) }
         require(cashEnabled) { "Groww profile is not enabled for NSE CASH trading" }
         val margin = apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin")
@@ -1055,12 +1260,32 @@ class TradingRepository @Inject constructor(
         val today = LocalDate.now(INDIA).toString()
         val learning = learningStats()
         val forecastLearning = forecastLearningStats()
+        val forecastReferences = forecastReferenceStats()
         val snapshot = managedSnapshotLocal()
         val execution = executionStats()
         val forecasts = learningDao.longForecastsForDate(today).map { it.toForecastDto() }
-        val fixedForecasts = fixedRecommendationStore.recommendations(today)
+        val fixedRecords = fixedRecommendationStore.recommendations(today)
             .filter { it.entryPrice > FIXED_MIN_STOCK_PRICE_RUPEES }
-            .map { it.toDto() }
+        fixedOutcomePerformanceStore.record(fixedRecords)
+        val fixedRolling = fixedOutcomePerformanceStore.rolling()
+        val fixedDaily = fixedOutcomePerformanceStore.today()
+        val fixedOutcomes = FixedOutcomeStatsDto(
+            published = fixedRolling.published, observed = fixedRolling.observed,
+            todayPublished = fixedDaily.published, todayObserved = fixedDaily.observed,
+            todayTargetAveragePct = fixedDaily.meanTargetPct,
+            todayObservedAveragePct = fixedDaily.meanObservedMfePct,
+            rollingObservedAveragePct = fixedRolling.meanObservedMfePct,
+            armHits = fixedRolling.armHits, onePctHits = fixedRolling.onePctHits,
+            fullTargetHits = fixedRolling.fullTargetHits,
+            armHitRatePct = fixedRolling.armHitRatePct,
+            onePctHitRatePct = fixedRolling.onePctHitRatePct,
+            fullTargetHitRatePct = fixedRolling.fullTargetHitRatePct,
+            armHitMeanMfePct = fixedRolling.armHitMeanMfePct,
+            onePctHitMeanMfePct = fixedRolling.onePctHitMeanMfePct,
+            fullHitMeanMfePct = fixedRolling.fullHitMeanMfePct,
+            p25Pct = fixedRolling.p25Pct, medianPct = fixedRolling.medianPct, p75Pct = fixedRolling.p75Pct
+        )
+        val fixedForecasts = fixedRecords.map { it.toDto().copy(observedAfterPublication = it.lastObservedAtMs > it.generatedAtMs) }
         val research = learningDao.latestResearchReport()?.let {
             ResearchDto(it.reportDate, it.title, it.summary)
         } ?: ResearchDto()
@@ -1118,6 +1343,8 @@ class TradingRepository @Inject constructor(
             execution = execution,
             learning = learning,
             forecastLearning = forecastLearning,
+            forecastReferences = forecastReferences,
+            fixedOutcomes = fixedOutcomes,
             forecasts = forecasts,
             fixedForecasts = fixedForecasts,
             research = research,
@@ -1176,6 +1403,7 @@ class TradingRepository @Inject constructor(
             runCatching { backfillRecentMultifyMfe(token, MFE_BACKFILL_BATCH_SIZE) }
             val learning = learningStats()
             val forecastLearning = forecastLearningStats()
+            val forecastReferences = forecastReferenceStats()
             val snapshot = managedSnapshot(token)
             val execution = executionStats()
             val today = LocalDate.now(INDIA).toString()
@@ -1226,6 +1454,7 @@ class TradingRepository @Inject constructor(
                     riskMode = when { settings.safetyHalt -> "HALTED"; settings.armEffective -> "ARMED"; else -> "DISARMED" }
                 ),
                 summary = snapshot.summary, execution = execution, learning = learning, forecastLearning = forecastLearning,
+                forecastReferences = forecastReferences,
                 forecasts = forecasts, fixedForecasts = fixedForecasts, forecastChampions = champions,
                 research = research,
                 health = EngineHealthDto(
@@ -1420,7 +1649,7 @@ class TradingRepository @Inject constructor(
                 engine = ENGINE_MULTIFY_HOLDING, symbol = symbol, product = "CNC", side = "LONG", quantity = filled,
                 entryPrice = entry, stopPrice = HardStopLossPolicy.stopPrice(entry),
                 targetPrice = signal.target,
-                strategy = "Multify ARM holding · hard -5% floor · v7 fixed stepped trail 0.55→0.50 then +0.10%",
+                strategy = "Multify ARM holding · hard -2% floor · v7 fixed stepped trail 0.55→0.50 then +0.10%",
                 regime = "HOLDING_LONG", confidence = 1.0, sourceEventId = eventId,
                 openOrderId = order.growwOrderId, openReferenceId = ref, openedAtMs = System.currentTimeMillis(),
                 lastPrice = entry, maxFavourablePrice = entry, maxAdversePrice = entry, lastEvaluatedAtMs = System.currentTimeMillis(),
@@ -1476,7 +1705,7 @@ class TradingRepository @Inject constructor(
 
         dao.updateForwarding(
             eventId, "ANALYZED", "MULTIFY_EXIT_TRAIL_CONTINUES",
-            "Multify Book Profit recorded for MFE learning only. $symbol remains held; the common -5% hard stop and fixed stepped profitable trail remain the mandatory sell logic.",
+            "Multify Book Profit recorded for MFE learning only. $symbol remains held; the common -2% hard stop and fixed stepped profitable trail remain the mandatory sell logic.",
             null
         )
         auditLogger.log("HOLDING", "MULTIFY_BOOK_PROFIT_IGNORED_FOR_EXECUTION", mapOf(
@@ -1519,16 +1748,33 @@ class TradingRepository @Inject constructor(
         return id
     }
 
+    // Only broker availability preflight. Never delays the frozen 150s Fixed cadence
+    // or bypasses trading controls. A deferred attempt is NOT a completed Fixed scan.
+    private fun marketDataAvailableForFixed(): Boolean = runCatching {
+        recoveryGate.checkRequestAllowed(GrowwApiUsageLedger.Category.LIVE_DATA)
+        recoveryGate.checkRequestAllowed(GrowwApiUsageLedger.Category.HISTORICAL)
+    }.isSuccess
+
     suspend fun runFixedPriorityCycle(): Boolean {
         fixedApiPriorityRequested = true
         return scanApiCycleMutex.withLock {
             val cycleStartedAtMs = System.currentTimeMillis()
             try {
+                fixedScanDeferredBroker = false
+                if (!marketDataAvailableForFixed()) {
+                    fixedScanDeferredBroker = true
+                    auditLogger.logAsync("FIXED_PERFORMANCE", "SCAN_DEFERRED_BROKER", mapOf(
+                        "reason" to "LIVE_OR_HISTORICAL_CATEGORY_UNAVAILABLE",
+                        "next_fixed_due_unchanged" to true,
+                        "complete_scan_count_incremented" to false
+                    ))
+                    return@withLock false
+                }
                 val previousScanAtMs = lastFixedScanAtMs
                 val recommendationStartedAtMs = System.currentTimeMillis()
                 generateFixedForecasts(false)
                 val recommendationCompletedAtMs = System.currentTimeMillis()
-                val scanned = lastFixedScanAtMs != previousScanAtMs
+                val scanned = lastFixedScanAtMs != previousScanAtMs && !fixedScanDeferredBroker
                 var autoBuySubmitted = 0
                 var autoBuyElapsedMs = 0L
                 if (scanned) {
@@ -1568,11 +1814,27 @@ class TradingRepository @Inject constructor(
             .map { it.toDto() }
     }
 
-    suspend fun runForecastOpportunisticCycle(): Boolean {
-        if (!forecastMarketCapacityAvailable()) return false
-        if (!scanApiCycleMutex.tryLock()) return false
+    suspend fun runForecastOpportunisticCycle(postFixedOpportunity: Boolean = false): Boolean {
+        if (postFixedOpportunity) forecastPostFixedOpportunity = true
+        if (!forecastMarketCapacityAvailable()) {
+            logForecastCapacitySkip("BROKER_CAPACITY_OR_FIXED_GUARD")
+            forecastPostFixedOpportunity = false
+            return false
+        }
+        // With separate Beta credentials the long research scan is allowed its own mutex;
+        // it no longer holds Fixed's scan mutex across Beta HTTP waits. New candidate
+        // requests still yield to Fixed and SELL in the existing capacity guards.
+        val researchMutex = if (secretStore.hasBetaCredentials()) betaForecastCycleMutex else scanApiCycleMutex
+        if (!researchMutex.tryLock()) {
+            logForecastCapacitySkip(if (secretStore.hasBetaCredentials()) "BETA_FORECAST_BUSY" else "SHARED_SCAN_MUTEX_BUSY")
+            forecastPostFixedOpportunity = false
+            return false
+        }
         return try {
-            if (!forecastMarketCapacityAvailable()) return false
+            if (!forecastMarketCapacityAvailable()) {
+                logForecastCapacitySkip("CAPACITY_CHANGED_BEFORE_SCAN")
+                return false
+            }
             val previousScanAtMs = lastForecastScanAtMs
             generateDailyForecasts(false)
             val scanned = lastForecastScanAtMs != previousScanAtMs
@@ -1581,7 +1843,8 @@ class TradingRepository @Inject constructor(
             }
             scanned
         } finally {
-            scanApiCycleMutex.unlock()
+            forecastPostFixedOpportunity = false
+            researchMutex.unlock()
         }
     }
 
@@ -1603,20 +1866,74 @@ class TradingRepository @Inject constructor(
         return (last + FIXED_V741_FORECAST_SCAN_INTERVAL_MS - System.currentTimeMillis()).coerceAtLeast(0L)
     }
 
+    suspend fun activateForecastEarlyEntryOnce() = preferences.activateForecastEarlyEntryOnce()
+
     suspend fun forecastBackgroundScanningEnabled(): Boolean =
         preferences.settings.first().forecastScannerEnabled
 
+    private fun logForecastCapacitySkip(reason: String) {
+        val now = System.currentTimeMillis()
+        if (now - lastForecastCapacitySkipLogAtMs < 60_000L) return
+        lastForecastCapacitySkipLogAtMs = now
+        val usage = GrowwApiUsageLedger.snapshot()
+        auditLogger.log("FORECAST_SCHEDULER", "SCAN_DEFERRED", mapOf(
+            "reason" to reason,
+            "fixed_priority_requested" to fixedApiPriorityRequested,
+            "critical_order_in_flight" to marketCriticalTradeInFlight,
+            "fixed_due_in_ms" to millisUntilNextFixedScan(),
+            "forecast_scanner_enabled" to true,
+            "live_usage_pct" to usage.categories.first { it.category == GrowwApiUsageLedger.Category.LIVE_DATA }.minuteUtilizationPct,
+            "historical_usage_pct" to usage.categories.first { it.category == GrowwApiUsageLedger.Category.HISTORICAL }.minuteUtilizationPct,
+            "forecast_only" to true,
+            "quote_and_history_pair_required" to true,
+            "five_minute_research_boost" to forecastBoostActive(),
+            "fixed_priority_sacrificed" to false
+        ))
+    }
+
+    private fun forecastBoostActive(): Boolean =
+        ForecastResearchWindowPolicy.isBoostWindow(ZonedDateTime.now(INDIA).toLocalTime())
+
+    private fun forecastBrokerHealthyForResearch(): Boolean = runCatching {
+        recoveryGate.checkRequestAllowed(GrowwApiUsageLedger.Category.LIVE_DATA)
+        recoveryGate.checkRequestAllowed(GrowwApiUsageLedger.Category.HISTORICAL)
+        recoveryGate.checkRequestAllowed(GrowwApiUsageLedger.Category.NON_TRADING)
+    }.isSuccess
+
     private fun forecastMarketCapacityAvailable(): Boolean {
         if (fixedApiPriorityRequested || marketCriticalTradeInFlight) return false
+        if (secretStore.hasBetaCredentials()) {
+            // When Beta is configured, never silently fall back to Alpha research quota.
+            return betaResearchAuthenticated() && millisUntilNextFixedScan() > 35_000L
+        }
+        // A cooldown is an immediate no-go. Do not repeatedly request a blocked endpoint.
+        // Trading and Fixed categories are never reserved for this research engine.
+        if (!forecastBrokerHealthyForResearch()) return false
         val usage = GrowwApiUsageLedger.snapshot()
         fun row(category: GrowwApiUsageLedger.Category) = usage.categories.first { it.category == category }
         val live = row(GrowwApiUsageLedger.Category.LIVE_DATA)
         val historical = row(GrowwApiUsageLedger.Category.HISTORICAL)
         val nonTrading = row(GrowwApiUsageLedger.Category.NON_TRADING)
+        val fixedDueInMs = millisUntilNextFixedScan()
+        val isBoost = forecastBoostActive() && ForecastResearchWindowPolicy.noRecent429(
+            System.currentTimeMillis(),
+            listOf(live.lastRateLimitAtMs, historical.lastRateLimitAtMs, nonTrading.lastRateLimitAtMs)
+        )
+        if (forecastPostFixedOpportunity || isBoost) {
+            // Five minutes every half-hour may use spare capacity but not Fixed's upcoming
+            // scan, the SELL path, or the hard broker governor. No broker budget is borrowed.
+            return ForecastResearchWindowPolicy.canUseSpareCapacity(
+                fixedDueInMs = fixedDueInMs,
+                liveHeadroom = live.minuteHeadroom,
+                historicalHeadroom = historical.minuteHeadroom,
+                nonTradingHeadroom = nonTrading.minuteHeadroom,
+                isBoost = isBoost
+            )
+        }
         return MarketPriorityPolicy.canRunForecast(
             fixedPriorityRequested = fixedApiPriorityRequested,
             criticalTradeInFlight = marketCriticalTradeInFlight,
-            millisUntilNextFixed = millisUntilNextFixedScan(),
+            millisUntilNextFixed = fixedDueInMs,
             liveUsedPerMinute = live.usedLastMinute,
             liveAppLimitPerMinute = live.appPerMinuteLimit,
             historicalUsedPerMinute = historical.usedLastMinute,
@@ -1632,58 +1949,10 @@ class TradingRepository @Inject constructor(
      * are untouched. If a 15-minute boundary is crossed, the cache key changes and Fixed naturally
      * falls back to fresh broker data.
      */
-    suspend fun maintainFixedHotDataCache(): Boolean {
-        val now = ZonedDateTime.now(INDIA)
-        if (now.dayOfWeek.value >= 6 || now.toLocalTime() < LocalTime.of(9, 15) || now.toLocalTime() >= LocalTime.of(15, 30)) {
-            return false
-        }
-        val previousScanAt = lastFixedScanAtMs
-        if (previousScanAt <= 0L || fixedApiPriorityRequested) return false
-        val nextDueAt = previousScanAt + FIXED_V741_FORECAST_SCAN_INTERVAL_MS
-        val untilDueMs = nextDueAt - System.currentTimeMillis()
-        if (untilDueMs !in FIXED_HOT_PREWARM_MIN_LEAD_MS..FIXED_HOT_PREWARM_MAX_LEAD_MS) return false
-        if (lastFixedHotPrewarmForDueAtMs == nextDueAt) return false
-
-        val today = now.toLocalDate().toString()
-        val observations = fixedRecommendationStore.observations(today)
-        val latestScanAt = observations.maxOfOrNull { it.scanAtMs } ?: return false
-        val symbols = observations.asSequence()
-            .filter { it.scanAtMs == latestScanAt }
-            .map { it.symbol.uppercase(Locale.US) }
-            .distinct()
-            .take(FIXED_V741_RESEARCH_CAPTURE_TOP_N)
-            .toList()
-        if (symbols.isEmpty()) return false
-        val token = ensureToken() ?: return false
-        lastFixedHotPrewarmForDueAtMs = nextDueAt
-
-        val start = now.minusDays(4).toLocalDate().atTime(9, 15).format(HIST_FORMAT)
-        val end = now.toLocalDateTime().format(HIST_FORMAT)
-        var warmed = 0
-        for (batch in symbols.chunked(FIXED_HOT_PREWARM_CONCURRENCY)) {
-            if (fixedApiPriorityRequested) break
-            val results = coroutineScope {
-                batch.map { symbol ->
-                    async {
-                        runCatching {
-                            apiFactory.groww.historicalCandles(
-                                bearer(token), growwSymbol = "NSE-$symbol", startTime = start, endTime = end, candleInterval = "15minute"
-                            ).requirePayload("Fixed hot prewarm $symbol")
-                        }.isSuccess
-                    }
-                }.awaitAll()
-            }
-            warmed += results.count { it }
-        }
-        auditLogger.log("FIXED_ENGINE", "HOT_DATA_PREWARM", mapOf(
-            "symbols_requested" to symbols.size,
-            "symbols_warmed" to warmed,
-            "lead_ms" to untilDueMs,
-            "formula_changed" to false,
-            "cache_only_acceleration" to true
-        ))
-        return warmed > 0
-    }
+    // v7.9.4: previously generated up to 48 additional historical requests but zero
+    // cache hits in the observed session; stop consuming Fixed's broker budget on prewarm.
+    // The real Fixed scan still fetches every selected symbol at its scheduled cadence.
+    suspend fun maintainFixedHotDataCache(): Boolean = false
 
     private data class AdaptiveFixedEvidenceRecord(
         val recommendationDate: String,
@@ -1859,14 +2128,25 @@ class TradingRepository @Inject constructor(
             return existing.map { it.toForecastDto() }
         }
         val nowMs = System.currentTimeMillis()
-        if (!force && nowMs - lastForecastScanAtMs < FORECAST_SCAN_INTERVAL_MS) return existing.map { it.toForecastDto() }
-        val token = ensureToken() ?: return existing.map { it.toForecastDto() }
+        val scanInterval = if (forecastDiscoveryNextBatch > 0 || forecastDiscoveryMustClear || forecastWaitingForSharedBaseline || forecastDetailQueue.isNotEmpty())
+            45_000L else FORECAST_SCAN_INTERVAL_MS
+        if (!force && nowMs - lastForecastScanAtMs < scanInterval) return existing.map { it.toForecastDto() }
+        val token = forecastMarketToken() ?: return existing.map { it.toForecastDto() }
         lastForecastScanAtMs = nowMs
         val scanStartedElapsedMs = SystemClock.elapsedRealtime()
         val apiBefore = GrowwApiUsageLedger.snapshot()
         val cacheHitsBefore = GrowwApiUsageLedger.cacheHitCount()
         val cacheMissesBefore = GrowwApiUsageLedger.cacheMissCount()
 
+        val forecastHistoricalReferences = ForecastMultifyReferenceLedger.build(
+            ensureFixedEngineSnapshot().payload.learningCalls, learningDao.allCalls()
+        )
+        auditLogger.log("FORECAST_REFERENCE", "GROWING_MULTIFY_LEDGER", mapOf(
+            "frozen" to FixedFinalContract.CANONICAL_LEARNING_CALLS,
+            "live_appended" to forecastHistoricalReferences.size - FixedFinalContract.CANONICAL_LEARNING_CALLS,
+            "total" to forecastHistoricalReferences.size,
+            "fixed_model_changed" to false
+        ))
         val calls = learningDao.allCalls().filter { it.action.equals("BUY", true) }
         val recentDates = calls.map { it.callDate }.distinct().sortedDescending().take(30).toSet()
         val rolling = calls.filter { it.callDate in recentDates }
@@ -1893,6 +2173,16 @@ class TradingRepository @Inject constructor(
         }
         val discoveryElapsedMs = SystemClock.elapsedRealtime() - discoveryStartedElapsedMs
         val discoveredSymbols = discoveryPass.symbols
+        if (!discoveryPass.baselineReady) {
+            auditLogger.log("FORECAST_DISCOVERY", "AWAIT_FULL_NSE_BASELINE", mapOf(
+                "date" to today, "master_count" to master.size,
+                "coverage_pct" to (discoveryPass.coverageRatio * 100.0),
+                "resuming_at_batch" to forecastDiscoveryNextBatch,
+                "next_probe_earliest_seconds" to 60,
+                "fixed_formula_changed" to false
+            ))
+            return existing.map { it.toForecastDto() }
+        }
 
         val slot = (now.hour * 60 + now.minute) / 30
         val rotating = if (master.isEmpty()) emptyList() else {
@@ -1904,25 +2194,71 @@ class TradingRepository @Inject constructor(
         val universe = (discoveredSymbols + dnaSymbols + recentSymbols + rotating)
             .distinct()
             .take(DETAILED_FORECAST_UNIVERSE_LIMIT)
+        // v7.9.4: partial Forecast work must not be thrown away whenever Fixed starts.
+        // Evaluate fresh quotes/candles, one bounded tranche per opportunistic cycle.
+        // Any qualified/watching candidates are captured this cycle for after-market research.
+        val tranche = forecastNextEvaluationTranche(today, universe)
+            .take(ForecastResearchWindowPolicy.trancheSize(forecastBoostActive(), forecastPostFixedOpportunity, FORECAST_EVALUATION_TRANCHE_SIZE))
         val evaluated = mutableListOf<Pair<String, StrategyEvaluation>>()
         val detailedEvaluationStartedElapsedMs = SystemClock.elapsedRealtime()
-        for (symbol in universe) {
-            if (fixedApiPriorityRequested) {
-                auditLogger.log("FORECAST", "YIELD_TO_FIXED_PRIORITY", mapOf("stage" to "detailed_evaluation"))
+        var processed = 0
+        for (symbol in tranche) {
+            if (fixedApiPriorityRequested || marketCriticalTradeInFlight || !forecastMarketCapacityAvailable()) {
+                auditLogger.log("FORECAST", "EVALUATION_PAUSED_FOR_FIXED", mapOf(
+                    "processed" to processed,
+                    "remaining" to forecastDetailQueue.size - forecastDetailCursor,
+                    "reason" to "FIXED_PRIORITY_OR_CAPACITY"
+                ))
                 break
             }
-            val evaluation = runCatching { forecastEvaluation(symbol, token) }
-                .onFailure {
-                    auditLogger.log("FORECAST_RESEARCH", "EVALUATION_ERROR", mapOf(
-                        "symbol" to symbol,
-                        "message" to (it.message ?: it.javaClass.simpleName)
-                    ))
-                }
-                .getOrNull() ?: continue
-            if (evaluation.features.ltp < 10.0) continue
-            evaluated += symbol to evaluation
+            // Advance only after attempting the symbol. A failed API request is revisited
+            // in the next complete evaluation cycle; it cannot poison today's remaining queue.
+            val evaluationResult = runCatching { forecastEvaluation(symbol, token) }
+            // A Fixed-priority yield is not a failed stock evaluation: retain this queue
+            // position and retry when spare broker capacity returns.
+            if (evaluationResult.exceptionOrNull() is ForecastPriorityYieldException) {
+                auditLogger.logAsync("FORECAST", "EVALUATION_PRESERVED_FOR_FIXED", mapOf(
+                    "symbol" to symbol,
+                    "pending" to (forecastDetailQueue.size - forecastDetailCursor).coerceAtLeast(0),
+                    "retry_budget_consumed" to false
+                ))
+                break
+            }
+            val evaluation = evaluationResult.onFailure {
+                auditLogger.log("FORECAST_RESEARCH", "EVALUATION_ERROR", mapOf(
+                    "symbol" to symbol, "message" to (it.message ?: it.javaClass.simpleName)
+                ))
+            }.getOrNull()
+            forecastDetailCursor++
+            processed++
+            if (evaluation == null) {
+                val attempts = (forecastDetailRetryAttempts[symbol] ?: 0) + 1
+                forecastDetailRetryAttempts[symbol] = attempts
+                // Move transient failures to the back so other candidates can be evaluated.
+                // Retry at most twice within the same queue; no endless API hammering.
+                if (attempts < 3) forecastDetailQueue = forecastDetailQueue + symbol
+                auditLogger.log("FORECAST", "EVALUATION_RETRY_QUEUED", mapOf(
+                    "symbol" to symbol, "attempt" to attempts,
+                    "will_retry" to (attempts < 3),
+                    "pending" to (forecastDetailQueue.size - forecastDetailCursor).coerceAtLeast(0)
+                ))
+            } else {
+                forecastDetailRetryAttempts.remove(symbol)
+                if (evaluation.features.ltp >= 10.0) evaluated += symbol to evaluation
+            }
             delay(FORECAST_SYMBOL_PACING_MS)
         }
+        if (forecastDetailCursor >= forecastDetailQueue.size) {
+            forecastDetailQueue = emptyList()
+            forecastDetailCursor = 0
+        }
+        auditLogger.log("FORECAST", "RESUMABLE_EVALUATION_PROGRESS", mapOf(
+            "evaluated_this_cycle" to evaluated.size,
+            "attempted_this_cycle" to processed,
+            "pending" to (forecastDetailQueue.size - forecastDetailCursor).coerceAtLeast(0),
+            "date" to today,
+            "candle_interval" to "1minute"
+        ))
         val detailedEvaluationElapsedMs = SystemClock.elapsedRealtime() - detailedEvaluationStartedElapsedMs
 
         val breadth = evaluated.mapNotNull { it.second.features.dayChangePct }
@@ -1948,7 +2284,8 @@ class TradingRepository @Inject constructor(
             .filter { it.isFinite() && it >= 0.0 && it < 25.0 }
         val targetPct = ForecastQualityPolicy.adaptiveTargetPct(learned.longAveragePct, priorMfe)
 
-        val have = existing.map { it.symbol }.toSet()
+        val latestBySymbol = existing.groupBy { it.symbol.uppercase(Locale.US) }
+            .mapValues { (_, rows) -> rows.maxByOrNull { it.generatedAtMs }!! }
         val priorTodayResearch = learningDao.forecastResearchForDate(today)
             .filter { it.scanAtMs < nowMs && nowMs - it.scanAtMs <= PRIMARY_CONFIRMATION_WINDOW_MS }
         val priorResearchDates = learningDao.forecastResearchDates()
@@ -1969,6 +2306,7 @@ class TradingRepository @Inject constructor(
                 targetHit = it.outcomeTargetHit == true
             )
         }
+        val timingHistoricalExamples = timingExamples(priorResearchAll)
         val historicalOutcomes = priorResearchAll.mapNotNull { row ->
             val mfe = row.outcomeMfePct ?: return@mapNotNull null
             val mae = row.outcomeMaePct ?: return@mapNotNull null
@@ -1984,7 +2322,29 @@ class TradingRepository @Inject constructor(
                 closePct = close,
                 targetHit = row.outcomeTargetHit == true
             )
-        }
+        } + adaptiveFixedEvidenceRecords().asSequence()
+            .filter { row -> row.recommendationDate < today && row.status != "ACTIVE" &&
+                row.maxFavourablePct.isFinite() && row.maxAdversePct.isFinite() &&
+                row.entryPrice > 0.0 && row.lastPrice.isFinite() && row.lastPrice > 0.0 }
+            .map { row ->
+                ForecastHistoricalOutcome(
+                    date = row.recommendationDate,
+                    symbol = row.symbol,
+                    strategy = row.strategy,
+                    regime = row.regime,
+                    marketRegime = row.marketRegime,
+                    maxFavourablePct = row.maxFavourablePct,
+                    maxAdversePct = row.maxAdversePct,
+                    closePct = (row.lastPrice / row.entryPrice - 1.0) * 100.0,
+                    targetHit = row.maxFavourablePct >= row.targetPct && row.targetPct > 0.0
+                )
+            }.toList()
+        auditLogger.logAsync("FORECAST_RESEARCH", "FIXED_MISSES_IMPORTED_TO_SHADOW", mapOf(
+            "historical_outcomes_including_fixed" to historicalOutcomes.size,
+            "failed_outcomes_in_shadow" to historicalOutcomes.count { !it.targetHit },
+            "live_forecast_gate_changed" to false,
+            "fixed_formula_changed" to false
+        ))
 
         fun researchEvidenceBonus(evaluation: StrategyEvaluation): Double {
             val xs = priorResearch.filter {
@@ -2003,7 +2363,7 @@ class TradingRepository @Inject constructor(
         val universalPositiveEvidence = universalPositiveEvidenceCases(today)
 
         val ranked = evaluated.map { row ->
-            val baseQuality = ForecastQualityPolicy.evaluate(row.second, targetPct, marketRegime)
+            val baseQuality = com.multify.traderpro.engine.ForecastEarlyEntryPolicy.quality(row.second, targetPct)
             val expandedTargetPct = ForecastTargetExpansionPolicy.targetPct(
                 baseTargetPct = targetPct,
                 symbol = row.first,
@@ -2013,7 +2373,7 @@ class TradingRepository @Inject constructor(
                 volatilityCapacityPct = baseQuality.volatilityCapacityPct,
                 positives = fixedPositiveTransfer
             )
-            val expandedQuality = ForecastQualityPolicy.evaluate(row.second, expandedTargetPct, marketRegime)
+            val expandedQuality = com.multify.traderpro.engine.ForecastEarlyEntryPolicy.quality(row.second, expandedTargetPct)
             val useExpandedTarget = expandedTargetPct > targetPct &&
                 expandedQuality.tier == baseQuality.tier &&
                 expandedQuality.publishEligible == baseQuality.publishEligible &&
@@ -2040,6 +2400,13 @@ class TradingRepository @Inject constructor(
             val multifyPositiveBonus = ForecastMultifyPositiveTransferPolicy.rankingBonus(
                 row.first, multifyPositiveTransfer
             )
+            val historicalReferenceBonus = ForecastMultifyReferenceLedger.historicalContextBonus(
+                row.first, today, forecastHistoricalReferences
+            )
+            // Only rank already-qualified EARLY ENTRY calls by pre-spike structure.
+            // A historical winner, a coil or volume build cannot bypass eligibility.
+            val preSpikeEvidence = ForecastPreSpikeContextPolicy.evaluate(row.second.features.candles)
+            val preSpikeBonus = if (quality.publishEligible) preSpikeEvidence.rankingBonus else 0.0
             val universalEvidenceBonus = ForecastUniversalPositiveEvidencePolicy.rankingBonus(
                 symbol = row.first,
                 strategy = row.second.strategy,
@@ -2075,7 +2442,7 @@ class TradingRepository @Inject constructor(
                     row.second.confidence +
                     row.second.directionalScore.coerceAtLeast(0.0) * 0.10 +
                     championBonus + frequencyBonus + dnaBonus + qualityBonus + researchBonus + familyBonus +
-                    fixedPositiveBonus + multifyPositiveBonus + universalEvidenceBonus
+                    fixedPositiveBonus + multifyPositiveBonus + historicalReferenceBonus + preSpikeBonus + universalEvidenceBonus
                 ).coerceIn(0.01, .99),
                 championKey = key,
                 targetPct = candidateTargetPct,
@@ -2095,12 +2462,19 @@ class TradingRepository @Inject constructor(
         // improving from positive outcomes. API-heavy outcome backfill stays after market hours.
         val researchCaptureAllowed = today >= V7_RESEARCH_COHORT_START_DATE
         if (researchCaptureAllowed) {
-            captureForecastResearchScan(today, nowMs, marketRegime, targetPct, ranked.take(RESEARCH_CAPTURE_TOP_N))
+            captureForecastResearchScan(today, nowMs, marketRegime, targetPct, ranked.take(RESEARCH_CAPTURE_TOP_N), timingHistoricalExamples)
         }
 
         // v7.3.3: there is no daily numeric recommendation cap.
-        // Every newly confirmed PRIMARY candidate can publish; same-day duplicate symbols remain blocked.
-        val unseen = ranked.filter { it.symbol !in have }
+        // Multiple distinct intraday spikes are allowed only AFTER the preceding campaign hit
+        // its target, cooled down and price rebased. The prior target-hit row stays locked.
+        val unseen = ranked.filter { item ->
+            val prior = latestBySymbol[item.symbol.uppercase(Locale.US)]
+            com.multify.traderpro.engine.ForecastRepeatEntryPolicy.mayPublish(
+                prior?.status, prior?.generatedAtMs, prior?.targetPrice,
+                item.evaluation.features.ltp, nowMs
+            )
+        }
         fun priorPrimaryHits(symbol: String): Int = priorTodayResearch
             .asSequence()
             .filter {
@@ -2115,7 +2489,7 @@ class TradingRepository @Inject constructor(
 
         val completedCalibrationSessions = forecastCalibrationDates().size
         val liveForecastReady = MarketPriorityPolicy.liveForecastUnlocked(completedCalibrationSessions)
-        val publishable = if (liveForecastReady) unseen.filter { item ->
+        val publishable = unseen.filter { item ->
             val currentPrimary =
                 item.quality.tier == "PRIMARY" && item.quality.publishEligible && item.quality.executionEligible &&
                     item.economics.profitableAfterCosts
@@ -2125,7 +2499,7 @@ class TradingRepository @Inject constructor(
                 discoveredMarketWide = item.symbol in discoveredSymbols,
                 priorPrimaryHits = priorPrimaryHits(item.symbol)
             )
-        } else emptyList()
+        }
 
         publishable.forEachIndexed { index, item ->
             val price = item.evaluation.features.ltp
@@ -2145,6 +2519,12 @@ class TradingRepository @Inject constructor(
                     marketRegime = marketRegime,
                     championKey = item.championKey,
                     reason = quality.reason + " · " + item.evaluation.reason +
+                        " · Entry intelligence " + run {
+                            val context = ForecastPreSpikeContextPolicy.evaluate(item.evaluation.features.candles)
+                            val advice = timingAdvice(marketRegime, nowMs, item.evaluation.features.rvol,
+                                context.compressionRatio, context.risingFloor, timingHistoricalExamples, today)
+                            advice.method.name + if (advice.validated) " (validated advisory)" else " (learning)"
+                        } +
                         " · family " + item.factorModel.dominantFamily +
                         " · family consensus " + fmt(item.factorModel.consensusScore * 100.0) + "%" +
                         " · capacity " + fmt(quality.volatilityCapacityPct) + "% for " + fmt(item.targetPct) + "% target" +
@@ -2317,12 +2697,25 @@ class TradingRepository @Inject constructor(
         val dnaSymbols = FixedMultifyReverseEngineering.positiveCases.map { it.symbol }
         val master = nseSymbols.symbols()
 
+        val scanPhaseStartedMs = SystemClock.elapsedRealtime()
+        val priorFull = fixedHistoryFullFetches.get()
+        val priorDelta = fixedHistoryDeltaFetches.get()
+        val priorFallback = fixedHistoryStitchFallbacks.get()
         val discoveryPass = if (master.isEmpty()) {
             MarketDiscoveryPass(emptyList(), false, 0.0, false, 0)
         } else {
             discoverFixedMarketWideCandidates(token, master, today)
         }
+        val discoveryPhaseMs = (SystemClock.elapsedRealtime() - scanPhaseStartedMs).coerceAtLeast(0L)
         val discoveredSymbols = discoveryPass.symbols
+        if (!marketDataAvailableForFixed()) {
+            fixedScanDeferredBroker = true
+            auditLogger.logAsync("FIXED_PERFORMANCE", "SCAN_DEFERRED_BROKER", mapOf(
+                "reason" to "BROKER_COOLDOWN_DURING_DISCOVERY",
+                "published_from_incomplete_scan" to false
+            ))
+            return existing.map { it.toDto() }
+        }
 
         val slot = (now.hour * 60 + now.minute) / 30
         val rotating = if (master.isEmpty()) emptyList() else {
@@ -2362,11 +2755,31 @@ class TradingRepository @Inject constructor(
                     evaluatedBySymbol[symbol] = evaluation
                 }
             }
+            if (!marketDataAvailableForFixed()) {
+                fixedScanDeferredBroker = true
+                auditLogger.logAsync("FIXED_PERFORMANCE", "SCAN_DEFERRED_BROKER", mapOf(
+                    "reason" to "BROKER_COOLDOWN_DURING_DETAIL",
+                    "evaluated_before_pause" to evaluatedBySymbol.size,
+                    "required_candidates" to universe.size,
+                    "published_from_incomplete_scan" to false
+                ))
+                return existing.map { it.toDto() }
+            }
             delay(FIXED_V741_FORECAST_SYMBOL_PACING_MS)
         }
         val evaluated = universe.mapNotNull { symbol ->
             evaluatedBySymbol[symbol]?.let { symbol to it }
         }
+        auditLogger.logAsync("FIXED_PERFORMANCE", "HISTORICAL_WINDOW_AND_PHASE_PROFILE", mapOf(
+            "discovery_ms" to discoveryPhaseMs,
+            "detail_ms" to (SystemClock.elapsedRealtime() - scanPhaseStartedMs - discoveryPhaseMs).coerceAtLeast(0L),
+            "full_history_requests" to (fixedHistoryFullFetches.get() - priorFull).coerceAtLeast(0L),
+            "incremental_history_requests" to (fixedHistoryDeltaFetches.get() - priorDelta).coerceAtLeast(0L),
+            "fallback_full_requests" to (fixedHistoryStitchFallbacks.get() - priorFallback).coerceAtLeast(0L),
+            "attempted" to universe.size,
+            "evaluated" to evaluated.size,
+            "signal_intervals" to "fixed_5minute_forecast_1minute"
+        ))
 
         val breadth = evaluated.mapNotNull { it.second.features.dayChangePct }
             .takeIf { it.isNotEmpty() }?.average() ?: 0.0
@@ -2553,15 +2966,56 @@ class TradingRepository @Inject constructor(
         val quote = withFixedLiveDataSlot {
             apiFactory.groww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Fixed quote $symbol")
         }
-        val historical = withFixedHistoricalDataSlot {
+        // Token-scope the RAM snapshot so a reconnect or account change cannot reuse candles.
+        val historyKey = sha256(token).take(12) + ":" + symbol
+        val incremental = fixedHistoricalWindowStore.request(historyKey, start, SystemClock.elapsedRealtime())
+        if (incremental == null) {
+            val reason = fixedHistoricalWindowStore.ineligibilityReason(historyKey, start, SystemClock.elapsedRealtime())
+            // Sample at most one diagnostic every 15 seconds; do not slow the Fixed pipeline.
+            val nowElapsed = SystemClock.elapsedRealtime()
+            val lastLogged = fixedReuseDiagnosticLastLoggedAtMs.get()
+            if (nowElapsed - lastLogged >= 15_000L &&
+                fixedReuseDiagnosticLastLoggedAtMs.compareAndSet(lastLogged, nowElapsed)) {
+                auditLogger.logAsync("FIXED_PERFORMANCE", "HISTORICAL_REUSE_SKIPPED", mapOf(
+                    "symbol" to symbol, "reason" to reason
+                ))
+            }
+        }
+        val raw = withFixedHistoricalDataSlot {
             apiFactory.groww.historicalCandles(
-                bearer(token), growwSymbol = "NSE-$symbol", startTime = start, endTime = end, candleInterval = "15minute"
+                bearer(token), growwSymbol = "NSE-$symbol", startTime = incremental?.startTime ?: start,
+                endTime = end, candleInterval = "5minute"
             ).requirePayload("Fixed forecast candles $symbol")
         }
+        val historical = if (incremental == null) {
+            fixedHistoryFullFetches.incrementAndGet()
+            raw
+        } else {
+            val merged = fixedHistoricalWindowStore.stitch(historyKey, start, raw, SystemClock.elapsedRealtime())
+            if (merged != null) {
+                fixedHistoryDeltaFetches.incrementAndGet()
+                merged
+            } else {
+                // No guessing or partially stale candles: return to authoritative full history.
+                fixedHistoryStitchFallbacks.incrementAndGet()
+                fixedHistoryFullFetches.incrementAndGet()
+                withFixedHistoricalDataSlot {
+                    apiFactory.groww.historicalCandles(
+                        bearer(token), growwSymbol = "NSE-$symbol", startTime = start, endTime = end,
+                        candleInterval = "5minute"
+                    ).requirePayload("Fixed historical fallback $symbol")
+                }
+            }
+        }
+        fixedHistoricalWindowStore.remember(historyKey, start, historical, SystemClock.elapsedRealtime())
         require(historical.candles.size >= 5) { "Insufficient fixed forecast candles" }
-        val features = FixedLocalStrategyEngine.buildFeatures(quote, historical, 15)
+        val features = FixedLocalStrategyEngine.buildFeatures(quote, historical, 5)
         val signal = ParsedSignal(SignalType.TRADE_RELEASE, symbol = symbol, rawText = "fixed-forecast", confidence = 1.0)
-        return FixedLocalStrategyEngine.evaluateLong(signal, features, includeEventPrior = false)
+        val evaluation = FixedLocalStrategyEngine.evaluateLong(signal, features, includeEventPrior = false)
+        // Diagnostic-only, O(1) non-blocking queue offer. All 40 factor calculations and disk
+        // writes execute later on a low-priority worker; never delay Fixed recommendations.
+        fixedFactorTelemetry.tryRecord(symbol, evaluation, lastFixedScanAtMs)
+        return evaluation
     }
 
     private suspend fun discoverFixedMarketWideCandidates(
@@ -2674,15 +3128,41 @@ class TradingRepository @Inject constructor(
     }
     // FIXED_FINAL_LOCK_END: FIXED-V741-20261021-190239-FINAL
 
+    /** Forecast-only deterministic checkpoint. The Fixed universe/ranking is not touched. */
+    private fun forecastNextEvaluationTranche(date: String, candidates: List<String>): List<String> {
+        if (forecastDetailDate != date || forecastDetailQueue.isEmpty()) {
+            forecastDetailDate = date
+            forecastDetailQueue = candidates
+            forecastDetailCursor = 0
+            forecastDetailRetryAttempts.clear()
+        }
+        return forecastDetailQueue.drop(forecastDetailCursor).take(FORECAST_EVALUATION_TRANCHE_SIZE)
+    }
+
     private suspend fun captureForecastResearchScan(
         date: String,
         scanAtMs: Long,
         marketRegime: String,
         targetPct: Double,
-        candidates: List<ForecastCandidate>
+        candidates: List<ForecastCandidate>,
+        timingHistory: List<ForecastEntryTimingPolicy.Example>
     ) {
         candidates.forEachIndexed { index, item ->
+            val preSpike = ForecastPreSpikeContextPolicy.evaluate(item.evaluation.features.candles)
+            val entryAdvice = timingAdvice(marketRegime, scanAtMs, item.evaluation.features.rvol,
+                preSpike.compressionRatio, preSpike.risingFloor, timingHistory, date)
             val featureMap = researchFeatureMap(item.evaluation, item.factorModel) + mapOf(
+                "forecast_pre_spike_compression_ratio" to preSpike.compressionRatio,
+                "forecast_pre_spike_rising_floor" to preSpike.risingFloor,
+                "forecast_pre_spike_volume_build" to preSpike.orderlyVolumeBuild,
+                "forecast_pre_spike_rank_bonus" to preSpike.rankingBonus,
+                "forecast_entry_timing_advice" to entryAdvice.method.name,
+                "forecast_entry_timing_validated" to entryAdvice.validated,
+                "forecast_entry_timing_context" to entryAdvice.context,
+                "forecast_entry_timing_sample_count" to entryAdvice.sampleSize,
+                "forecast_entry_timing_holdout_count" to entryAdvice.holdoutSamples,
+                "forecast_entry_timing_expected_net_edge_pct" to entryAdvice.estimatedImprovementPct,
+                "forecast_entry_timing_advisory_only" to true,
                 "adaptive_selection_version" to "V78_SHADOW_VALIDATED",
                 "estimated_net_profit_rupees" to item.economics.netProfitRupees,
                 "estimated_net_return_pct" to item.economics.netReturnPct,
@@ -3247,70 +3727,190 @@ class TradingRepository @Inject constructor(
         return inserted
     }
 
+    /**
+     * Read-only reuse of Fixed's complete NSE LTP sweep. It uses no part of Fixed's
+     * scoring or recommendations and never writes into Fixed's frozen persistence.
+     * Snapshot A and B must be from distinct completed Fixed sweeps; we do not invent
+     * a short-term price movement by comparing the same snapshot against itself.
+     */
+    private fun sharedFixedDiscoveryPass(master: List<String>, today: String): MarketDiscoveryPass? {
+        val fixed = fixedMarketDiscoveryStateStore.load(today) ?: return null
+        val now = System.currentTimeMillis()
+        if (!ForecastSharedDiscoveryPolicy.fresh(now, fixed.updatedAtMs)) return null
+        val symbols = master.asSequence().map { it.uppercase(Locale.US) }.toSet()
+        val current = fixed.previousLtps.filterKeys { it.uppercase(Locale.US) in symbols }
+        val coverage = current.size.toDouble() / symbols.size.coerceAtLeast(1)
+        if (coverage + 1e-9 < MIN_DISCOVERY_COVERAGE_RATIO) return null
+        val prefs = appContext.getSharedPreferences("forecast_shared_fixed_snapshots_v792", Context.MODE_PRIVATE)
+        val sameDay = prefs.getString("date", "") == today
+        var previous = if (sameDay) MarketDiscoveryStateCodec.decode(prefs.getString("current", "").orEmpty())
+            else emptyMap()
+        var priorSourceAtMs = if (sameDay) prefs.getLong("source_ms", 0L) else 0L
+        if (fixed.updatedAtMs > priorSourceAtMs) {
+            // Do not promote a partial/stale read. Two distinct completed Fixed sweeps
+            // are sufficient for an independent Forecast pulse baseline.
+            val originalPrevious = if (sameDay) MarketDiscoveryStateCodec.decode(prefs.getString("previous", "").orEmpty())
+                else emptyMap()
+            if (priorSourceAtMs <= 0L) previous = emptyMap()
+            prefs.edit()
+                .putString("date", today)
+                .putString("current", MarketDiscoveryStateCodec.encode(current))
+                .putString("previous", MarketDiscoveryStateCodec.encode(previous))
+                .putString("session_open", MarketDiscoveryStateCodec.encode(fixed.sessionOpenLtps))
+                .putLong("source_ms", fixed.updatedAtMs)
+                .putLong("previous_source_ms", priorSourceAtMs)
+                .commit()
+            // Suppress the unused-variable lint without relying on a stale previous.
+            if (originalPrevious.isNotEmpty() && previous.isEmpty()) {
+                auditLogger.log("FORECAST_DISCOVERY", "PREVIOUS_SOURCE_NOT_REUSED", mapOf("count" to originalPrevious.size))
+            }
+            auditLogger.log("FORECAST_DISCOVERY", "SHARED_FIXED_FULL_NSE_UPDATED", mapOf(
+                "master_count" to symbols.size,
+                "ltp_coverage" to current.size,
+                "coverage_pct" to (coverage * 100.0),
+                "source_age_ms" to (now - fixed.updatedAtMs),
+                "previous_snapshot_count" to previous.size,
+                "shared_requests" to 0,
+                "fixed_formula_changed" to false
+            ))
+        } else {
+            // Source unchanged: use its genuinely older sibling, never self-compare.
+            previous = MarketDiscoveryStateCodec.decode(prefs.getString("previous", "").orEmpty())
+            priorSourceAtMs = prefs.getLong("previous_source_ms", 0L)
+        }
+        val previousCoverage = previous.keys.count { it.uppercase(Locale.US) in symbols }.toDouble() / symbols.size.coerceAtLeast(1)
+        val ready = ForecastSharedDiscoveryPolicy.ready(coverage, previousCoverage, fixed.updatedAtMs, priorSourceAtMs)
+        forecastWaitingForSharedBaseline = !ready
+        val sessionOpen = fixed.sessionOpenLtps.filterKeys { it.uppercase(Locale.US) in symbols }
+        val ranked = if (ready) com.multify.traderpro.engine.ForecastEarlyDiscoveryPolicy.rank(
+            current = current, previous = previous, sessionOpen = sessionOpen, limit = DISCOVERY_DYNAMIC_LIMIT
+        ) else emptyList()
+        if (!ready) auditLogger.log("FORECAST_DISCOVERY", "WAITING_FOR_SECOND_FIXED_FULL_NSE_SNAPSHOT", mapOf(
+            "coverage_pct" to coverage * 100.0,
+            "previous_coverage_pct" to previousCoverage * 100.0,
+            "source_at_ms" to fixed.updatedAtMs,
+            "previous_source_at_ms" to priorSourceAtMs,
+            "next_probe_earliest_seconds" to 60
+        ))
+        marketDiscoveryStateStore.recordHealth(today, coverage, 0, false, ready)
+        auditLogger.log("FORECAST_DISCOVERY", "MARKET_WIDE_SCAN", mapOf(
+            "source" to "FIXED_RAW_FULL_NSE_LTPS",
+            "master_count" to symbols.size,
+            "ltp_coverage" to current.size,
+            "coverage_pct" to coverage * 100.0,
+            "baseline_ready" to ready,
+            "full_sweep_completed" to true,
+            "selected" to ranked.size,
+            "broker_ltp_requests_avoided" to (symbols.size + 49) / 50,
+            "fixed_formula_changed" to false
+        ))
+        return MarketDiscoveryPass(ranked.map { it.symbol }, ready, coverage, true, 0)
+    }
+
+    /**
+     * Small coroutine bridge: isolate Android DEX verification of the suspend
+     * network fetch loop from read-only shared Fixed snapshot access and ranking.
+     * This prevents the wide register/state-machine merge that Android rejected
+     * in v7.9.2's discoverMarketWideCandidates on real devices.
+     */
     private suspend fun discoverMarketWideCandidates(
         token: String,
         master: List<String>,
         today: String
     ): MarketDiscoveryPass {
         val distinctMaster = master.distinct()
-        val persisted = marketDiscoveryStateStore.load(today)
-        val previous = persisted?.previousLtps.orEmpty()
-        val sessionOpen = persisted?.sessionOpenLtps.orEmpty()
-        val restored = persisted != null
-        val current = linkedMapOf<String, Double>()
-        var batchErrors = 0
-        var consecutiveFailures = 0
-        var abortedForNetwork = false
-        val chunks = distinctMaster.chunked(50)
+        val shared = sharedFixedDiscoveryPass(distinctMaster, today)
+        if (shared != null) return shared
+        forecastWaitingForSharedBaseline = false
+        return discoverForecastDirectCandidates(token, distinctMaster, today)
+    }
 
-        for ((index, chunk) in chunks.withIndex()) {
-            if (fixedApiPriorityRequested) {
+    /** Direct full-NSE fallback when fresh complete Fixed snapshots are unavailable. */
+    private suspend fun discoverForecastDirectCandidates(
+        token: String,
+        distinctMaster: List<String>,
+        today: String
+    ): MarketDiscoveryPass {
+        val persisted = marketDiscoveryStateStore.load(today)
+        if (forecastDiscoveryDate != today || forecastDiscoveryMustClear) {
+            forecastDiscoveryMustClear = false
+            forecastDiscoveryDate = today
+            forecastDiscoveryNextBatch = 0
+            forecastDiscoveryPartialLtps.clear()
+            forecastDiscoveryBatchErrors = 0
+        }
+        val chunks = distinctMaster.chunked(50)
+        val errors = fetchForecastDiscoveryBatchSeries(token, chunks)
+        // Ranking/persistence/telemetry deliberately outside this suspend method.
+        val result = finishForecastDirectDiscovery(distinctMaster, today, persisted, chunks.size, errors)
+        preferences.recordMarketData()
+        return result
+    }
+
+    /** The only suspend loop; a failed batch is never consumed and is retried. */
+    private suspend fun fetchForecastDiscoveryBatchSeries(
+        token: String,
+        chunks: List<List<String>>
+    ): Int {
+        var batchErrors = forecastDiscoveryBatchErrors
+        for (index in forecastDiscoveryNextBatch until chunks.size) {
+            if (fixedApiPriorityRequested || marketCriticalTradeInFlight || millisUntilNextFixedScan() <= 35_000L) {
                 auditLogger.log("FORECAST_DISCOVERY", "YIELD_TO_FIXED_PRIORITY", mapOf("batch_index" to index))
                 break
             }
-            val payload = fetchDiscoveryLtpBatch(token, chunk, index)
+            val payload = fetchDiscoveryLtpBatch(token, chunks[index], index)
             if (payload == null) {
                 batchErrors++
-                consecutiveFailures++
-                if (consecutiveFailures >= DISCOVERY_CONSECUTIVE_FAILURE_ABORT) {
-                    abortedForNetwork = true
-                    auditLogger.log("FORECAST_DISCOVERY", "LTP_SCAN_ABORTED_NETWORK", mapOf(
-                        "batch_index" to index,
-                        "master_count" to distinctMaster.size,
-                        "coverage_so_far" to current.size,
-                        "consecutive_failures" to consecutiveFailures
-                    ))
-                    break
-                }
-            } else {
-                consecutiveFailures = 0
-                payload.forEach { (key, value) ->
-                    if (value.isFinite() && value >= 10.0) {
-                        current[key.removePrefix("NSE_").uppercase(Locale.US)] = value
-                    }
+                forecastDiscoveryBatchErrors = batchErrors
+                auditLogger.log("FORECAST_DISCOVERY", "BATCH_RETRY_PENDING", mapOf(
+                    "batch_index" to index,
+                    "coverage_so_far" to forecastDiscoveryPartialLtps.size,
+                    "attempted_errors_total" to batchErrors,
+                    "resume_batch" to forecastDiscoveryNextBatch,
+                    "next_probe_earliest_seconds" to 60
+                ))
+                break
+            }
+            for ((key, value) in payload) {
+                if (value.isFinite() && value >= 10.0) {
+                    forecastDiscoveryPartialLtps[key.removePrefix("NSE_").uppercase(Locale.US)] = value
                 }
             }
+            forecastDiscoveryNextBatch = index + 1
+            forecastDiscoveryBatchErrors = batchErrors
             if (index + 1 < chunks.size) delay(DISCOVERY_BATCH_PACING_MS)
         }
+        return batchErrors
+    }
 
+    /** Entirely synchronous post-fetch processing: no coroutine spilled registers. */
+    private fun finishForecastDirectDiscovery(
+        distinctMaster: List<String>,
+        today: String,
+        persisted: PersistedMarketDiscoveryState?,
+        batchCount: Int,
+        batchErrors: Int
+    ): MarketDiscoveryPass {
+        val previous = persisted?.previousLtps.orEmpty()
+        val sessionOpen = persisted?.sessionOpenLtps.orEmpty()
+        val restored = persisted != null
+        val current = forecastDiscoveryPartialLtps
+        val fullSweepCompleted = forecastDiscoveryNextBatch == batchCount
         val denominator = distinctMaster.size.coerceAtLeast(1)
         val coverageRatio = current.size.toDouble() / denominator.toDouble()
         val previousCoverageRatio = previous.size.toDouble() / denominator.toDouble()
-        val baselineReady =
+        val baselineReady = fullSweepCompleted &&
             previousCoverageRatio >= MIN_DISCOVERY_COVERAGE_RATIO &&
-                coverageRatio >= MIN_DISCOVERY_COVERAGE_RATIO &&
-                !abortedForNetwork
+            coverageRatio >= MIN_DISCOVERY_COVERAGE_RATIO
 
         val ranked = if (baselineReady) {
-            MarketDiscoveryPolicy.rank(
-                currentLtps = current,
-                previousLtps = previous,
-                sessionOpenLtps = sessionOpen,
+            com.multify.traderpro.engine.ForecastEarlyDiscoveryPolicy.rank(
+                current = current, previous = previous, sessionOpen = sessionOpen,
                 limit = DISCOVERY_DYNAMIC_LIMIT
             )
         } else emptyList()
 
-        if (coverageRatio >= MIN_DISCOVERY_COVERAGE_RATIO && !abortedForNetwork) {
+        if (fullSweepCompleted && coverageRatio >= MIN_DISCOVERY_COVERAGE_RATIO) {
             val mergedSessionOpen = sessionOpen.toMutableMap()
             current.forEach { (symbol, ltp) -> mergedSessionOpen.putIfAbsent(symbol, ltp) }
             marketDiscoveryStateStore.save(today, mergedSessionOpen, current)
@@ -3318,26 +3918,31 @@ class TradingRepository @Inject constructor(
             auditLogger.log("FORECAST_DISCOVERY", "BASELINE_NOT_OVERWRITTEN", mapOf(
                 "coverage_pct" to coverageRatio * 100.0,
                 "required_coverage_pct" to MIN_DISCOVERY_COVERAGE_RATIO * 100.0,
-                "aborted_for_network" to abortedForNetwork,
+                "aborted_for_network" to false,
                 "persisted_previous_count" to previous.size
             ))
         }
-
+        if (fullSweepCompleted) {
+            forecastDiscoveryNextBatch = 0
+            forecastDiscoveryBatchErrors = 0
+            forecastDiscoveryMustClear = true
+        }
         marketDiscoveryStateStore.recordHealth(
             date = today,
             coverageRatio = coverageRatio,
             batchErrors = batchErrors,
-            abortedForNetwork = abortedForNetwork,
+            abortedForNetwork = false,
             baselineReady = baselineReady
         )
-        preferences.recordMarketData()
         auditLogger.log("FORECAST_DISCOVERY", "MARKET_WIDE_SCAN", mapOf(
             "master_count" to distinctMaster.size,
+            "full_sweep_completed" to fullSweepCompleted,
+            "resume_batch" to forecastDiscoveryNextBatch,
             "ltp_coverage" to current.size,
             "coverage_pct" to coverageRatio * 100.0,
-            "batch_count" to chunks.size,
+            "batch_count" to batchCount,
             "batch_errors" to batchErrors,
-            "aborted_for_network" to abortedForNetwork,
+            "aborted_for_network" to false,
             "baseline_ready" to baselineReady,
             "state_restored" to restored,
             "persisted_baseline_count" to previous.size,
@@ -3367,10 +3972,11 @@ class TradingRepository @Inject constructor(
             try {
                 val exchangeSymbols = chunk.joinToString(",") { "NSE_$it" }
                 return withForecastLiveDataSlot {
-                    apiFactory.groww.ltp(
-                        bearer(token),
-                        exchangeSymbols = exchangeSymbols
-                    ).requirePayload("Market-wide discovery LTP")
+                    betaMarketRead(token, BetaResearchGate.Type.LIVE,
+                        alphaCall = { apiFactory.groww.ltp(bearer(token), exchangeSymbols = exchangeSymbols)
+                            .requirePayload("Market-wide discovery LTP") },
+                        betaCall = { apiFactory.betaGroww.ltp(bearer(token), exchangeSymbols = exchangeSymbols)
+                            .requirePayload("Beta market-wide discovery LTP") })
                 }
             } catch (t: Throwable) {
                 lastFailure = t
@@ -3495,30 +4101,55 @@ class TradingRepository @Inject constructor(
         }
     }
 
+    /** Transient scheduler yield, not a candidate failure; never use up its retry budget. */
+    private class ForecastPriorityYieldException : IllegalStateException("Forecast yielded to Fixed priority")
+
     private suspend fun <T> withForecastLiveDataSlot(block: suspend () -> T): T {
-        if (!forecastMarketCapacityAvailable()) error("Forecast yielded to market priority")
-        return withFixedLiveDataSlot(block)
+        // A quote and its 1m history must fit before the next scheduled Fixed scan.
+        // Never reserve the shared scanner or broker capacity across Fixed's guard window.
+        if (!forecastMarketCapacityAvailable() || millisUntilNextFixedScan() <= 35_000L) {
+            throw ForecastPriorityYieldException()
+        }
+        return if (secretStore.hasBetaCredentials()) block() else withFixedLiveDataSlot(block)
     }
 
     private suspend fun <T> withForecastHistoricalDataSlot(block: suspend () -> T): T {
-        if (!forecastMarketCapacityAvailable()) error("Forecast yielded to market priority")
-        return withFixedHistoricalDataSlot(block)
+        // The quote already passed the full budget admission check. Reapplying all
+        // Forecast utilization thresholds after that quote starved the matching 1m
+        // candle request. Only check Fixed, SELL priority and the approaching guard;
+        // actual network requests still pass the unmodified Groww rate governor.
+        if (fixedApiPriorityRequested || marketCriticalTradeInFlight ||
+            millisUntilNextFixedScan() <= 35_000L) {
+            throw ForecastPriorityYieldException()
+        }
+        return if (secretStore.hasBetaCredentials()) block() else withFixedHistoricalDataSlot(block)
     }
 
     private suspend fun forecastEvaluation(symbol: String, token: String): StrategyEvaluation {
         val now = ZonedDateTime.now(INDIA)
-        val start = now.minusDays(4).toLocalDate().atTime(9,15).format(HIST_FORMAT)
+        val start = now.toLocalDate().atTime(9,15).format(HIST_FORMAT)
         val end = now.toLocalDateTime().format(HIST_FORMAT)
         val quote = withForecastLiveDataSlot {
-            apiFactory.groww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Quote $symbol")
+            betaMarketRead(token, BetaResearchGate.Type.LIVE,
+                alphaCall = { apiFactory.groww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Quote $symbol") },
+                betaCall = { apiFactory.betaGroww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Beta quote $symbol") })
         }
         val historical = withForecastHistoricalDataSlot {
-            apiFactory.groww.historicalCandles(
-                bearer(token), growwSymbol = "NSE-$symbol", startTime = start, endTime = end, candleInterval = "15minute"
-            ).requirePayload("Forecast candles $symbol")
+            betaMarketRead(token, BetaResearchGate.Type.HISTORICAL,
+                alphaCall = { apiFactory.groww.historicalCandles(bearer(token), growwSymbol = "NSE-$symbol",
+                    startTime = start, endTime = end, candleInterval = "1minute").requirePayload("Forecast candles $symbol") },
+                betaCall = { apiFactory.betaGroww.historicalCandles(bearer(token), growwSymbol = "NSE-$symbol",
+                    startTime = start, endTime = end, candleInterval = "1minute").requirePayload("Beta 1m candles $symbol") })
         }
-        require(historical.candles.size >= 5) { "Insufficient forecast candles" }
-        val features = LocalStrategyEngine.buildFeatures(quote, historical, 15)
+        require(historical.candles.size >= 10) { "Insufficient forecast 1-minute candles" }
+        val aggregated5m = com.multify.traderpro.engine.ForecastCandleShadow.aggregateFiveMinute(historical)
+        if (aggregated5m.completeBars > 0) auditLogger.logAsync("FORECAST_RESEARCH", "SHADOW_1M_5M", mapOf(
+            "symbol" to symbol, "account" to (if (forecastUsesBeta(token)) "BETA" else "ALPHA"),
+            "one_minute_bars" to historical.candles.size, "complete_five_minute_bars" to aggregated5m.completeBars,
+            "last_completed_five_minute_close" to aggregated5m.lastClose, "decision_effect" to false,
+            "extra_broker_requests" to 0
+        ))
+        val features = LocalStrategyEngine.buildFeatures(quote, historical, 1)
         val signal = ParsedSignal(SignalType.TRADE_RELEASE, symbol = symbol, rawText = "forecast", confidence = 1.0)
         return LocalStrategyEngine.evaluateLong(signal, features, includeEventPrior = false)
     }
@@ -3531,7 +4162,8 @@ class TradingRepository @Inject constructor(
         val token = ensureToken() ?: error("Authenticate Groww first")
         val today = now.toLocalDate().toString()
         val row = learningDao.longForecastsForDate(today)
-            .firstOrNull { it.symbol.equals(symbol, true) } ?: error("No active LONG recommendation for $symbol")
+            .filter { it.symbol.equals(symbol, true) }
+            .maxByOrNull { it.generatedAtMs } ?: error("No active LONG recommendation for $symbol")
         val pendingAuto = forecastAutoBuyOrderStore.forSymbol(today, row.symbol)
         if (pendingAuto != null && !ForecastAutoBuyPolicy.isTerminal(pendingAuto.status)) {
             return "Legacy Forecast entry order is still being migrated for ${row.symbol}; duplicate BUY blocked"
@@ -3546,6 +4178,7 @@ class TradingRepository @Inject constructor(
             apiFactory.groww.quote(bearer(token), tradingSymbol = row.symbol).requirePayload("Quote ${row.symbol}")
         }
         val ltp = quote.lastPrice ?: error("Groww quote has no LTP")
+        require(ltp < row.targetPrice) { "Forecast target already reached; BUY disabled" }
         val margin = apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin")
         val available = (margin.equity?.cncBalanceAvailable ?: margin.clearCash).coerceAtLeast(0.0)
         val sizing = CashAwareCncSizing.sizeStrictBudget(settings.holdingBudgetRupees.toDouble(), available, ltp)
@@ -3569,7 +4202,7 @@ class TradingRepository @Inject constructor(
                 engine = ENGINE_FORECAST_HOLDING, symbol = row.symbol, product = "CNC", side = "LONG", quantity = filled,
                 entryPrice = entry, stopPrice = HardStopLossPolicy.stopPrice(entry),
                 targetPrice = entry * (1.0 + row.targetPct / 100.0),
-                strategy = "Forecast holding · ${row.strategy} · hard -5% floor · v7 fixed stepped trail 0.55→0.50 then +0.10%",
+                strategy = "Forecast holding · ${row.strategy} · hard -2% floor · v7 fixed stepped trail 0.55→0.50 then +0.10%",
                 regime = row.regime, confidence = row.confidence,
                 sourceEventId = null, openOrderId = order.growwOrderId, openReferenceId = ref,
                 openedAtMs = System.currentTimeMillis(), lastPrice = entry,
@@ -3601,6 +4234,19 @@ class TradingRepository @Inject constructor(
         if (now.dayOfWeek.value >= 6 || marketSession() != "OPEN") return 0
         val settings = preferences.settings.first()
         if (!settings.forecastAutoBuyEnabled || settings.safetyHalt) return 0
+        // A restored or legacy ON setting must never bypass five completed research sessions.
+        if (!forecastLiveUnlocked()) {
+            auditLogger.logAsync("FORECAST_AUTO_BUY", "BUY_BLOCKED_CALIBRATION", mapOf(
+                "completed_sessions" to forecastCalibrationDates().size,
+                "required_sessions" to MarketPriorityPolicy.LIVE_FORECAST_UNLOCK_SESSIONS
+            ))
+            return 0
+        }
+        val preflightCooldown = buyApiCooldownOrNull()
+        if (preflightCooldown != null) {
+            auditAutoBuyBlocked("FORECAST_AUTO_BUY", preflightCooldown)
+            return 0
+        }
         preIndependentExecutionGuard(settings)
         val today = now.toLocalDate().toString()
         val rows = learningDao.longForecastsForDate(today)
@@ -3608,9 +4254,14 @@ class TradingRepository @Inject constructor(
             .sortedBy { it.generatedAtMs }
         var submitted = 0
         for (row in rows) {
+            val cooldown = buyApiCooldownOrNull()
+            if (cooldown != null) {
+                auditAutoBuyBlocked("FORECAST_AUTO_BUY", cooldown)
+                break
+            }
             if (fixedApiPriorityRequested || marketCriticalTradeInFlight) break
             val live = preferences.settings.first()
-            if (!live.forecastAutoBuyEnabled || live.safetyHalt) break
+            if (!live.forecastAutoBuyEnabled || live.safetyHalt || !forecastLiveUnlocked()) break
             if (managedDao.openPosition(ENGINE_FORECAST_HOLDING, row.symbol) != null) continue
             if (forecastAutoBuyOrderStore.forSymbol(today, row.symbol) != null) continue
             val ok = runCatching { executeForecast(row.symbol) }
@@ -3899,7 +4550,7 @@ class TradingRepository @Inject constructor(
                     append(" · MARKET child · fixed target ₹")
                     append(fmt(state.fixedTargetPrice))
                     forecast?.strategy?.takeIf { it.isNotBlank() }?.let { append(" · "); append(it) }
-                    append(" · hard -5% floor · v7 fixed stepped trail 0.55→0.50 then +0.10%")
+                    append(" · hard -2% floor · v7 fixed stepped trail 0.55→0.50 then +0.10%")
                 },
                 regime = forecast?.regime ?: "FORECAST_AUTO_BUY",
                 confidence = forecast?.confidence ?: 1.0,
@@ -3993,7 +4644,7 @@ class TradingRepository @Inject constructor(
                 entryPrice = actualFill,
                 stopPrice = HardStopLossPolicy.stopPrice(actualFill),
                 targetPrice = state.fixedTargetPrice,
-                strategy = "Migrated legacy forecast LIMIT fill · fixed target ₹${fmt(state.fixedTargetPrice)} · hard -5% floor · v7 fixed stepped trail 0.55→0.50 then +0.10%",
+                strategy = "Migrated legacy forecast LIMIT fill · fixed target ₹${fmt(state.fixedTargetPrice)} · hard -2% floor · v7 fixed stepped trail 0.55→0.50 then +0.10%",
                 regime = "FORECAST_AUTO_BUY",
                 confidence = 1.0,
                 sourceEventId = null,
@@ -4039,11 +4690,25 @@ class TradingRepository @Inject constructor(
             apiFactory.groww.quote(bearer(token), tradingSymbol = row.symbol).requirePayload("Quote ${row.symbol}")
         }
         val ltp = quote.lastPrice ?: error("Groww quote has no LTP")
+        if (ltp >= row.targetPrice) {
+            fixedRecommendationStore.update(row.copy(
+                status = "TARGET_HIT", targetHitAtMs = System.currentTimeMillis(),
+                lastPrice = ltp,
+                maxFavourablePct = maxOf(row.maxFavourablePct, (ltp / row.entryPrice - 1.0) * 100.0),
+                lastObservedAtMs = System.currentTimeMillis()
+            ))
+            fixedOutcomePerformanceStore.record(fixedRecommendationStore.recommendations(today))
+            error("Fixed target already reached for $symbol; BUY disabled")
+        }
         val margin = apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin")
         val available = (margin.equity?.cncBalanceAvailable ?: margin.clearCash).coerceAtLeast(0.0)
         val sizing = CashAwareCncSizing.sizeFixedAvailable(settings.holdingBudgetRupees.toDouble(), available, ltp)
         require(sizing.quantity > 0) { "Fixed BUY skipped: remaining CNC cash cannot fund one buffered share of ${row.symbol}" }
 
+        require(marketSession() == "OPEN") { "Fixed BUY disabled: NSE closed at 15:30 IST" }
+        require(fixedRecommendationStore.recommendations(today).firstOrNull { it.id == row.id }?.status == "ACTIVE") {
+            "Fixed BUY disabled: recommendation is no longer active"
+        }
         val ref = stableRef("FXH", "${row.recommendationDate}-${row.id}-${row.symbol}")
         val order = placeCncBuy(token, row.symbol, sizing.quantity, ref)
         val filled = order.filledQuantity?.takeIf { it > 0 } ?: sizing.quantity
@@ -4060,7 +4725,7 @@ class TradingRepository @Inject constructor(
                 entryPrice = actualFill,
                 stopPrice = HardStopLossPolicy.stopPrice(actualFill),
                 targetPrice = executionTarget,
-                strategy = "Fixed ${FixedEngineSnapshotStore.SNAPSHOT_ID} manual direct MARKET BUY · published entry ₹${fmt(row.entryPrice)} · broker fill ₹${fmt(actualFill)} · execution target ₹${fmt(executionTarget)} · ${row.strategy} · hard -5% floor · v7 stepped trail 0.55→0.50 then +0.10%",
+                strategy = "Fixed ${FixedEngineSnapshotStore.SNAPSHOT_ID} manual direct MARKET BUY · published entry ₹${fmt(row.entryPrice)} · broker fill ₹${fmt(actualFill)} · execution target ₹${fmt(executionTarget)} · ${row.strategy} · hard -2% floor · v7 stepped trail 0.55→0.50 then +0.10%",
                 regime = row.regime,
                 confidence = row.confidence,
                 sourceEventId = null,
@@ -4099,8 +4764,16 @@ class TradingRepository @Inject constructor(
         if (now.dayOfWeek.value >= 6 || marketSession() != "OPEN") return 0
         val settings = preferences.settings.first()
         if (!settings.fixedAutoBuyEnabled || settings.safetyHalt) return 0
+        val preflightCooldown = buyApiCooldownOrNull()
+        if (preflightCooldown != null) {
+            auditAutoBuyBlocked("FIXED_AUTO_BUY", preflightCooldown)
+            return 0
+        }
         preIndependentExecutionGuard(settings)
-        val token = ensureToken() ?: return 0
+        val token = ensureToken() ?: run {
+            auditLogger.logAsync("FIXED_AUTO_BUY", "BUY_BLOCKED_BROKER_NOT_READY", mapOf("reason" to "TOKEN_NOT_READY"))
+            return 0
+        }
         val today = now.toLocalDate().toString()
 
         // Legacy entry GTTs migrate in the maintenance worker; normal direct buys do no pre-order broker reconciliation.
@@ -4118,7 +4791,20 @@ class TradingRepository @Inject constructor(
             val symbolStartedAtMs = System.currentTimeMillis()
             val recommendationAgeAtStartMs = (symbolStartedAtMs - row.generatedAtMs).coerceAtLeast(0L)
             val liveSettings = preferences.settings.first()
-            if (!liveSettings.fixedAutoBuyEnabled || liveSettings.safetyHalt) break
+            if (!liveSettings.fixedAutoBuyEnabled || liveSettings.safetyHalt || marketSession() != "OPEN") break
+            if (!AutoBuyEntrySafetyPolicy.isFreshFixedEntry(row.generatedAtMs, symbolStartedAtMs)) {
+                auditLogger.logAsync("FIXED_AUTO_BUY", "ENTRY_SKIPPED_STALE_RECOMMENDATION", mapOf(
+                    "symbol" to row.symbol,
+                    "recommendation_age_ms" to recommendationAgeAtStartMs,
+                    "max_age_ms" to AutoBuyEntrySafetyPolicy.FIXED_AUTO_BUY_MAX_AGE_MS
+                ))
+                continue
+            }
+            val cooldown = buyApiCooldownOrNull()
+            if (cooldown != null) {
+                auditAutoBuyBlocked("FIXED_AUTO_BUY", cooldown)
+                break
+            }
             if (managedDao.openPosition(ENGINE_FIXED_HOLDING, row.symbol) != null) continue
 
             // If broker reconciliation cannot prove an old entry GTT is gone, skip only this symbol
@@ -4146,10 +4832,34 @@ class TradingRepository @Inject constructor(
                     "symbol" to row.symbol,
                     "message" to (it.message ?: it.javaClass.simpleName)
                 ))
-            }.getOrNull() ?: continue
+            }.getOrNull()
+            if (quote == null) {
+                val cooldown = buyApiCooldownOrNull()
+                if (cooldown != null) {
+                    auditAutoBuyBlocked("FIXED_AUTO_BUY", cooldown)
+                    break
+                }
+                continue
+            }
             val quoteElapsedMs = (System.currentTimeMillis() - quoteStartedAtMs).coerceAtLeast(0L)
             val ltp = quote.lastPrice?.takeIf { it.isFinite() && it > 0.0 } ?: continue
+            if (ltp >= row.targetPrice) {
+                fixedRecommendationStore.update(row.copy(
+                    status = "TARGET_HIT", targetHitAtMs = System.currentTimeMillis(),
+                    lastPrice = ltp,
+                    maxFavourablePct = maxOf(row.maxFavourablePct, (ltp / row.entryPrice - 1.0) * 100.0),
+                    lastObservedAtMs = System.currentTimeMillis()
+                ))
+                fixedOutcomePerformanceStore.record(fixedRecommendationStore.recommendations(today))
+                auditLogger.log("FIXED_OUTCOME", "BUY_PREVENTED_TARGET_ALREADY_HIT", mapOf("symbol" to row.symbol))
+                continue
+            }
 
+            val marginCooldown = buyApiCooldownOrNull()
+            if (marginCooldown != null) {
+                auditAutoBuyBlocked("FIXED_AUTO_BUY", marginCooldown)
+                break
+            }
             val marginStartedAtMs = System.currentTimeMillis()
             val margin = runCatching { apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin") }
                 .onFailure {
@@ -4157,7 +4867,15 @@ class TradingRepository @Inject constructor(
                         "symbol" to row.symbol,
                         "message" to (it.message ?: it.javaClass.simpleName)
                     ))
-                }.getOrNull() ?: continue
+                }.getOrNull()
+            if (margin == null) {
+                val cooldown = buyApiCooldownOrNull()
+                if (cooldown != null) {
+                    auditAutoBuyBlocked("FIXED_AUTO_BUY", cooldown)
+                    break
+                }
+                continue
+            }
             val marginElapsedMs = (System.currentTimeMillis() - marginStartedAtMs).coerceAtLeast(0L)
             val available = (margin.equity?.cncBalanceAvailable ?: margin.clearCash).coerceAtLeast(0.0)
             val sizing = CashAwareCncSizing.sizeFixedAvailable(
@@ -4176,7 +4894,12 @@ class TradingRepository @Inject constructor(
             }
 
             val executionSettings = preferences.settings.first()
-            if (!executionSettings.fixedAutoBuyEnabled || executionSettings.safetyHalt) break
+            if (!executionSettings.fixedAutoBuyEnabled || executionSettings.safetyHalt || marketSession() != "OPEN") break
+            if (!AutoBuyEntrySafetyPolicy.isFreshFixedEntry(row.generatedAtMs, System.currentTimeMillis())) {
+                auditLogger.logAsync("FIXED_AUTO_BUY", "ENTRY_SKIPPED_EXPIRED_DURING_PREP", mapOf("symbol" to row.symbol))
+                continue
+            }
+            if (fixedRecommendationStore.recommendations(today).firstOrNull { it.id == row.id }?.status != "ACTIVE") continue
 
             val reference = stableRef("FXM", "${row.recommendationDate}-${row.id}-${row.symbol}")
             val orderStartedAtMs = System.currentTimeMillis()
@@ -4206,7 +4929,7 @@ class TradingRepository @Inject constructor(
                     entryPrice = actualFill,
                     stopPrice = HardStopLossPolicy.stopPrice(actualFill),
                     targetPrice = executionTarget,
-                    strategy = "Fixed ${FixedEngineSnapshotStore.SNAPSHOT_ID} auto-buy · direct MARKET · published entry ₹${fmt(row.entryPrice)} · fill ₹${fmt(actualFill)} · execution target ₹${fmt(executionTarget)} · ${row.strategy} · hard -5% floor · v7 stepped trail 0.55→0.50 then +0.10%",
+                    strategy = "Fixed ${FixedEngineSnapshotStore.SNAPSHOT_ID} auto-buy · direct MARKET · published entry ₹${fmt(row.entryPrice)} · fill ₹${fmt(actualFill)} · execution target ₹${fmt(executionTarget)} · ${row.strategy} · hard -2% floor · v7 stepped trail 0.55→0.50 then +0.10%",
                     regime = row.regime,
                     confidence = row.confidence,
                     sourceEventId = null,
@@ -4442,7 +5165,7 @@ class TradingRepository @Inject constructor(
                 entryPrice = actualEntry,
                 stopPrice = HardStopLossPolicy.stopPrice(actualEntry),
                 targetPrice = executionTarget,
-                strategy = "Fixed ${FixedEngineSnapshotStore.SNAPSHOT_ID} legacy GTT migrated · actual entry ₹${fmt(actualEntry)} · execution target ₹${fmt(executionTarget)} · ${row?.strategy.orEmpty()} · hard -5% floor · v7 stepped trail 0.55→0.50 then +0.10%",
+                strategy = "Fixed ${FixedEngineSnapshotStore.SNAPSHOT_ID} legacy GTT migrated · actual entry ₹${fmt(actualEntry)} · execution target ₹${fmt(executionTarget)} · ${row?.strategy.orEmpty()} · hard -2% floor · v7 stepped trail 0.55→0.50 then +0.10%",
                 regime = row?.regime ?: "FIXED_ENGINE",
                 confidence = row?.confidence ?: 1.0,
                 sourceEventId = null,
@@ -4484,10 +5207,9 @@ class TradingRepository @Inject constructor(
      * pre-empted by Multify or Fixed priority. A higher-priority arrival simply defers delivery.
      */
     suspend fun pendingForecastNotificationsAfterOrderPath(): List<ForecastDto> {
-        if (!forecastLiveUnlocked()) return emptyList()
         val settings = preferences.settings.first()
         if (settings.safetyHalt) return emptyList()
-        if (settings.forecastAutoBuyEnabled) {
+        if (settings.forecastAutoBuyEnabled && forecastLiveUnlocked()) {
             if (!forecastMarketCapacityAvailable()) return emptyList()
             autoBuyForecastRecommendations()
             if (fixedApiPriorityRequested || marketCriticalTradeInFlight) return emptyList()
@@ -4517,7 +5239,7 @@ class TradingRepository @Inject constructor(
             val movePct = (ltp / row.entryPrice - 1.0) * 100.0
             val adversePct = max(0.0, (row.entryPrice - ltp) / row.entryPrice * 100.0)
             val hitNow = ltp >= row.targetPrice
-            val expired = now.toLocalTime() >= LocalTime.of(15, 0)
+            val expired = now.toLocalTime() >= LocalTime.of(15, 30)
             val status = when {
                 row.status == "TARGET_HIT" -> "TARGET_HIT"
                 hitNow -> "TARGET_HIT"
@@ -4543,63 +5265,124 @@ class TradingRepository @Inject constructor(
         return learningDao.longForecastsForDate(today).count { it.status == "ACTIVE" }
     }
 
+    /**
+     * Diagnostic-only Fixed outcome observer. Not a Fixed model input and never touches order/SELL policies.
+     * Observe DURING the session: after-close LTP cannot reconstruct intraday highs.
+     * Priority: shared Fixed bulk scan snapshot first, then one small Fixed-priority LTP batch
+     * only when neither the Fixed scan nor a critical order is using broker bandwidth.
+     */
     suspend fun monitorFixedOutcomes(): Int {
+        val now = ZonedDateTime.now(INDIA)
         val nowMs = System.currentTimeMillis()
-        val today = LocalDate.now(INDIA).toString()
+        val today = now.toLocalDate().toString()
         val rows = fixedRecommendationStore.recommendations(today)
-        // Fixed outcome tracking is diagnostic only and never feeds future Fixed ranking.
-        // Preserve live-data capacity for Fixed discovery/evaluation and sell protection.
-        if (marketSession() == "OPEN") {
-            return rows.count { it.status == "ACTIVE" }
-        }
+        fixedOutcomePerformanceStore.record(rows)
         if (rows.isEmpty()) return 0
-        if (nowMs - lastFixedOutcomeMonitorAtMs < FORECAST_OUTCOME_INTERVAL_MS) {
-            return rows.count { it.status == "ACTIVE" }
+
+        val open = marketSession() == "OPEN"
+        if (!open) {
+            // Do not hallucinate intraday target hits from a stale post-close quote.
+            rows.filter { it.status == "ACTIVE" }.forEach { row ->
+                fixedRecommendationStore.update(row.copy(status = "SESSION_ENDED"))
+            }
+            fixedOutcomePerformanceStore.record(fixedRecommendationStore.recommendations(today))
+            return 0
+        }
+
+        // Reuse fresh market-wide Fixed discovery samples, without extra API calls.
+        val discovery = fixedMarketDiscoveryStateStore.load(today)
+        val cachedPrices = discovery?.takeIf { nowMs - it.updatedAtMs in 0L..75_000L }
+            ?.previousLtps.orEmpty()
+        val cachedAt = discovery?.updatedAtMs ?: 0L
+        var observed = 0
+        for (row in rows) {
+            // The published generatedAtMs is scan START, not delivery. Use a full scan-spacing
+            // delay before accepting the shared discovery snapshot as post-publication evidence.
+            if (cachedAt < row.generatedAtMs + FIXED_V741_FORECAST_SCAN_INTERVAL_MS ||
+                cachedAt <= row.lastObservedAtMs) continue
+            val price = cachedPrices[row.symbol.uppercase(Locale.US)] ?: continue
+            if (price.isFinite() && price > 0.0) {
+                updateFixedObservedOutcome(row, price, cachedAt, "DISCOVERY_CACHE")
+                observed++
+            }
+        }
+
+        if (nowMs - lastFixedOutcomeMonitorAtMs < FORECAST_OUTCOME_INTERVAL_MS ||
+            fixedApiPriorityRequested || marketCriticalTradeInFlight) {
+            if (observed > 0) fixedOutcomePerformanceStore.record(fixedRecommendationStore.recommendations(today))
+            return fixedRecommendationStore.recommendations(today).count { it.status == "ACTIVE" }
+        }
+        // Avoid delaying protected trades and the high-priority Fixed scanner when Live Data is saturated.
+        val liveUsage = GrowwApiUsageLedger.snapshot().categories
+            .firstOrNull { it.category == GrowwApiUsageLedger.Category.LIVE_DATA }
+        if (liveUsage == null || liveUsage.minuteHeadroom <= 5) {
+            if (observed > 0) fixedOutcomePerformanceStore.record(fixedRecommendationStore.recommendations(today))
+            return fixedRecommendationStore.recommendations(today).count { it.status == "ACTIVE" }
         }
         lastFixedOutcomeMonitorAtMs = nowMs
-        val token = ensureToken() ?: return rows.count { it.status == "ACTIVE" }
-        val ltps = fetchForecastOutcomeLtps(token, rows.map { it.symbol })
-        if (ltps.isEmpty()) return rows.count { it.status == "ACTIVE" }
-        preferences.recordMarketData()
-        val now = ZonedDateTime.now(INDIA)
-        for (row in rows) {
-            val ltp = ltps[row.symbol.uppercase(Locale.US)] ?: continue
-            val movePct = (ltp / row.entryPrice - 1.0) * 100.0
-            val adversePct = max(0.0, (row.entryPrice - ltp) / row.entryPrice * 100.0)
-            val hitNow = ltp >= row.targetPrice
-            val expired = now.toLocalTime() >= LocalTime.of(15, 30)
-            val status = when {
-                row.status == "TARGET_HIT" -> "TARGET_HIT"
-                hitNow -> "TARGET_HIT"
-                expired -> "MISSED"
-                else -> "ACTIVE"
+        val token = ensureToken() ?: return fixedRecommendationStore.recommendations(today).count { it.status == "ACTIVE" }
+        val symbols = rows.map { it.symbol.uppercase(Locale.US) }.distinct()
+        val fetched = runCatching {
+            withFixedLiveDataSlot {
+                apiFactory.groww.ltp(
+                    bearer(token), exchangeSymbols = symbols.joinToString(",") { "NSE_$it" }
+                ).requirePayload("Fixed outcome live LTP")
             }
-            fixedRecommendationStore.update(
-                row.copy(
-                    status = status,
-                    targetHitAtMs = when {
-                        row.targetHitAtMs != null -> row.targetHitAtMs
-                        hitNow -> nowMs
-                        else -> null
-                    },
-                    lastPrice = ltp,
-                    maxFavourablePct = max(row.maxFavourablePct, max(0.0, movePct)),
-                    maxAdversePct = max(row.maxAdversePct, adversePct),
-                    lastObservedAtMs = nowMs
-                )
-            )
+        }.onFailure {
+            auditLogger.log("FIXED_OUTCOME", "LIVE_SAMPLE_ERROR", mapOf(
+                "symbols" to symbols.size, "message" to (it.message ?: it.javaClass.simpleName)
+            ))
+        }.getOrNull().orEmpty()
+        val observedAt = System.currentTimeMillis()
+        for (row in fixedRecommendationStore.recommendations(today)) {
+            val price = fetched["NSE_${row.symbol.uppercase(Locale.US)}"]
+                ?: fetched[row.symbol.uppercase(Locale.US)] ?: continue
+            if (price.isFinite() && price > 0.0) {
+                updateFixedObservedOutcome(row, price, observedAt, "LIVE_LTP")
+                observed++
+            }
+        }
+        if (observed > 0) {
+            fixedOutcomePerformanceStore.record(fixedRecommendationStore.recommendations(today))
+            _fixedDeliveryEvents.tryEmit(observedAt) // Repaint Fixed badges and Averages promptly.
         }
         return fixedRecommendationStore.recommendations(today).count { it.status == "ACTIVE" }
+    }
+
+    private fun updateFixedObservedOutcome(
+        row: FixedRecommendationRecord, price: Double, atMs: Long, source: String
+    ) {
+        if (atMs <= row.lastObservedAtMs || atMs <= row.generatedAtMs) return
+        val move = maxOf(0.0, (price / row.entryPrice - 1.0) * 100.0)
+        val maxMfe = maxOf(row.maxFavourablePct, move)
+        val targetHit = row.status == "TARGET_HIT" || price >= row.targetPrice ||
+            maxMfe >= row.targetPct - 1e-9
+        val nextStatus = if (targetHit) "TARGET_HIT" else row.status
+        fixedRecommendationStore.update(row.copy(
+            status = nextStatus,
+            targetHitAtMs = row.targetHitAtMs ?: if (targetHit) atMs else null,
+            lastPrice = price,
+            maxFavourablePct = maxMfe,
+            maxAdversePct = maxOf(row.maxAdversePct, maxOf(0.0, (row.entryPrice - price) / row.entryPrice * 100.0)),
+            lastObservedAtMs = atMs
+        ))
+        if (targetHit && row.status != "TARGET_HIT") {
+            auditLogger.log("FIXED_OUTCOME", "TARGET_HIT", mapOf(
+                "symbol" to row.symbol, "target_pct" to row.targetPct,
+                "mfe_pct" to maxMfe, "observed_price" to price, "source" to source
+            ))
+        }
     }
 
     private suspend fun fetchForecastOutcomeLtps(token: String, symbols: List<String>): Map<String, Double> {
         val result = linkedMapOf<String, Double>()
         for ((index, chunk) in symbols.map { it.uppercase(Locale.US) }.distinct().chunked(50).withIndex()) {
+            if (fixedApiPriorityRequested || marketCriticalTradeInFlight) break
             var payload: Map<String, Double>? = null
             var lastFailure: Throwable? = null
             for (attempt in 0 until FORECAST_OUTCOME_BATCH_ATTEMPTS) {
                 try {
-                    payload = withForecastLiveDataSlot {
+                    payload = withFixedLiveDataSlot {
                         apiFactory.groww.ltp(
                             bearer(token),
                             exchangeSymbols = chunk.joinToString(",") { "NSE_$it" }
@@ -4675,14 +5458,64 @@ class TradingRepository @Inject constructor(
         return runCatching { Instant.parse(text).toEpochMilli() }.getOrNull()
     }
 
+    /** Serialized inside the existing, backup/exported Forecast snapshot JSON. No Room migration. */
+    private fun timingStudy(row: ForecastResearchEntity): ForecastEntryTimingPolicy.Study? = runCatching {
+        val json = JsonParser.parseString(row.featureJson).asJsonObject
+        val studyJson = json.get("entry_timing_v1") ?: return@runCatching null
+        researchGson.fromJson(studyJson, ForecastEntryTimingPolicy.Study::class.java)
+            ?.takeIf { it.version == ForecastEntryTimingPolicy.VERSION && it.dataQuality == "OK" }
+    }.getOrNull()
+
+    private fun timingExamples(rows: List<ForecastResearchEntity>): List<ForecastEntryTimingPolicy.Example> =
+        rows.asSequence().filter { it.outcomeUpdatedAtMs != null }
+            // Repeated scanner snapshots are correlated. Retain one per symbol and 30-minute window.
+            .groupBy { "${it.researchDate}|${it.symbol.uppercase(Locale.US)}|${it.scanAtMs / 1_800_000L}" }
+            .values.mapNotNull { xs -> xs.minByOrNull { it.scanAtMs } }
+            .mapNotNull { row ->
+                val study = timingStudy(row) ?: return@mapNotNull null
+                val features = runCatching { JsonParser.parseString(row.featureJson).asJsonObject }.getOrNull()
+                fun numeric(name: String) = runCatching { features?.get(name)?.asDouble }.getOrNull()
+                fun bool(name: String) = runCatching { features?.get(name)?.asBoolean }.getOrNull() == true
+                ForecastEntryTimingPolicy.Example(
+                    row.researchDate, row.symbol.uppercase(Locale.US), row.scanAtMs,
+                    row.marketRegime, ForecastEntryTimingPolicy.timeBucket(row.scanAtMs),
+                    ForecastEntryTimingPolicy.volumeBucket(numeric("rvol")),
+                    ForecastEntryTimingPolicy.structureBucket(numeric("forecast_pre_spike_compression_ratio"),
+                        bool("forecast_pre_spike_rising_floor")), study.outcomes
+                )
+            }.sortedWith(compareBy({ it.date }, { it.atMs })).toList()
+
+    private fun timingAdvice(
+        market: String, scanAtMs: Long, rvol: Double?,
+        compression: Double?, rising: Boolean,
+        history: List<ForecastEntryTimingPolicy.Example>, date: String
+    ): ForecastEntryTimingPolicy.Advice = ForecastEntryTimingPolicy.advise(
+        market, ForecastEntryTimingPolicy.timeBucket(scanAtMs),
+        ForecastEntryTimingPolicy.volumeBucket(rvol),
+        ForecastEntryTimingPolicy.structureBucket(compression, rising), history, date
+    )
+
     private suspend fun backfillForecastResearchOutcomes(date: String, token: String): Int {
         val pending = learningDao.pendingForecastResearchOutcomes(date)
         if (pending.isEmpty()) return 0
+        val now = ZonedDateTime.now(INDIA)
+        // No partial-session replay; every alternative must have the same completed outcome window.
+        if (date == now.toLocalDate().toString() && now.toLocalTime() < LocalTime.of(15, 35)) return 0
         val sessionDate = runCatching { LocalDate.parse(date) }.getOrNull() ?: return 0
         val sessionEndMs = sessionDate.atTime(15, 30).atZone(INDIA).toInstant().toEpochMilli()
         var updatedCount = 0
         var consecutiveNetworkFailures = 0
-        val groups = pending.groupBy { it.symbol }.entries.take(RESEARCH_BACKFILL_SYMBOL_BATCH)
+        val nowElapsed = SystemClock.elapsedRealtime()
+        val groups = pending.groupBy { it.symbol }.entries
+            .filter { (symbol, _) -> (forecastReplayRetryAfterMs["$date|$symbol"] ?: 0L) <= nowElapsed }
+            .take(RESEARCH_BACKFILL_SYMBOL_BATCH)
+        if (groups.isEmpty()) {
+            auditLogger.logAsync("FORECAST_RESEARCH", "OUTCOME_REPLAY_DEFERRED", mapOf(
+                "date" to date, "pending_rows" to pending.size,
+                "reason" to "RESEARCH_ONLY_SYMBOL_BACKOFF", "live_forecast_changed" to false
+            ))
+            return 0
+        }
 
         for ((symbol, rows) in groups) {
             val earliest = rows.minOf { it.scanAtMs }
@@ -4691,22 +5524,30 @@ class TradingRepository @Inject constructor(
             val endTime = sessionDate.atTime(15, 30).format(HIST_FORMAT)
             var failure: Throwable? = null
             val historical = try {
-                apiFactory.groww.historicalCandles(
-                    bearer(token),
-                    growwSymbol = "NSE-$symbol",
-                    startTime = startTime,
-                    endTime = endTime,
-                    candleInterval = "5minute"
-                ).requirePayload("Forecast research outcome $symbol")
+                betaMarketRead(token, BetaResearchGate.Type.HISTORICAL,
+                    alphaCall = { apiFactory.groww.historicalCandles(bearer(token), growwSymbol = "NSE-$symbol",
+                        startTime = startTime, endTime = endTime, candleInterval = "1minute")
+                        .requirePayload("Forecast research outcome $symbol") },
+                    betaCall = { apiFactory.betaGroww.historicalCandles(bearer(token), growwSymbol = "NSE-$symbol",
+                        startTime = startTime, endTime = endTime, candleInterval = "1minute")
+                        .requirePayload("Beta Forecast research outcome $symbol") })
             } catch (t: Throwable) {
                 failure = t
                 null
             }
 
             if (historical == null) {
+                val retryKey = "$date|$symbol"
+                val failures = (forecastReplayFailureCount[retryKey] ?: 0) + 1
+                forecastReplayFailureCount[retryKey] = failures
+                val retryMs = (30_000L * (1L shl (failures - 1).coerceIn(0, 5)))
+                    .coerceAtMost(15L * 60_000L)
+                forecastReplayRetryAfterMs[retryKey] = SystemClock.elapsedRealtime() + retryMs
                 auditLogger.log("FORECAST_RESEARCH", "OUTCOME_BACKFILL_ERROR", mapOf(
                     "date" to date, "symbol" to symbol,
-                    "message" to (failure?.message ?: failure?.javaClass?.simpleName ?: "unknown")
+                    "message" to (failure?.message ?: failure?.javaClass?.simpleName ?: "unknown"),
+                    "research_retry_ms" to retryMs,
+                    "attempt" to failures
                 ))
                 if (failure != null && isTransientMarketDataFailure(failure)) {
                     consecutiveNetworkFailures++
@@ -4727,17 +5568,22 @@ class TradingRepository @Inject constructor(
             }
 
             consecutiveNetworkFailures = 0
+            forecastReplayFailureCount.remove("$date|$symbol")
+            forecastReplayRetryAfterMs.remove("$date|$symbol")
             preferences.recordMarketData()
             val candles = historical.candles.mapNotNull { x ->
                 if (x.size < 5) return@mapNotNull null
                 val atMs = researchCandleTimestampMs(x[0]) ?: return@mapNotNull null
+                val open = runCatching { x[1].asDouble }.getOrNull() ?: return@mapNotNull null
                 val high = runCatching { x[2].asDouble }.getOrNull() ?: return@mapNotNull null
                 val low = runCatching { x[3].asDouble }.getOrNull() ?: return@mapNotNull null
                 val close = runCatching { x[4].asDouble }.getOrNull() ?: return@mapNotNull null
-                ResearchCandle(atMs, high, low, close)
+                val volume = x.getOrNull(5)?.let { runCatching { it.asDouble }.getOrNull() } ?: 0.0
+                ResearchCandle(atMs, high, low, close, open, volume)
             }.sortedBy { it.atMs }
             rows.forEach { row ->
-                val xs = candles.filter { it.atMs >= row.scanAtMs && it.atMs <= sessionEndMs }
+                // Never count the partly observed one-minute bar at notification time.
+                val xs = candles.filter { it.atMs > row.scanAtMs && it.atMs < sessionEndMs }
                 if (xs.isEmpty() || row.entryPrice <= 0.0) return@forEach
                 val high = xs.maxOf { it.high }
                 val low = xs.minOf { it.low }
@@ -4745,8 +5591,21 @@ class TradingRepository @Inject constructor(
                 val mfe = max(0.0, (high / row.entryPrice - 1.0) * 100.0)
                 val mae = max(0.0, (row.entryPrice - low) / row.entryPrice * 100.0)
                 val closePct = (close / row.entryPrice - 1.0) * 100.0
+                val study = ForecastEntryTimingPolicy.reconstruct(
+                    signalAtMs = row.scanAtMs,
+                    referencePrice = row.entryPrice,
+                    targetPct = row.targetPct,
+                    bars = candles.map { bar -> ForecastEntryTimingPolicy.Bar(
+                        bar.atMs, bar.open, bar.high, bar.low, bar.close, bar.volume
+                    ) }
+                )
+                val enriched = runCatching { JsonParser.parseString(row.featureJson).asJsonObject }
+                    .getOrElse { com.google.gson.JsonObject() }
+                enriched.add("entry_timing_v1", researchGson.toJsonTree(study))
+                enriched.addProperty("entry_timing_model_applied_live", false)
                 learningDao.updateForecastResearch(
                     row.copy(
+                        featureJson = researchGson.toJson(enriched),
                         outcomeMfePct = mfe,
                         outcomeMaePct = mae,
                         outcomeClosePct = closePct,
@@ -4755,12 +5614,21 @@ class TradingRepository @Inject constructor(
                     )
                 )
                 updatedCount++
+                if (study.dataQuality == "OK") {
+                    auditLogger.log("FORECAST_ENTRY_TIMING", "ONE_MINUTE_STUDY", mapOf(
+                        "date" to date, "symbol" to symbol, "scan_at_ms" to row.scanAtMs,
+                        "context" to row.marketRegime, "best_hindsight_method" to study.hindsightBest,
+                        "methods" to study.outcomes.map { mapOf("method" to it.method.name,
+                            "filled" to it.filled, "net_pct" to it.netPct, "target_hit" to it.targetHit) },
+                        "hindsight_not_live_selection" to true
+                    ))
+                }
             }
             delay(RESEARCH_BACKFILL_SYMBOL_PACING_MS)
         }
         if (updatedCount > 0) {
             auditLogger.log("FORECAST_RESEARCH", "OUTCOMES_BACKFILLED", mapOf(
-                "date" to date, "count" to updatedCount
+                "date" to date, "count" to updatedCount, "candle_interval" to "1minute", "timing_study_version" to ForecastEntryTimingPolicy.VERSION
             ))
         }
         return updatedCount
@@ -4769,9 +5637,10 @@ class TradingRepository @Inject constructor(
     suspend fun runAfterHoursResearch(force: Boolean = false): ResearchDto {
         ensureHistoricalSeed()
         val today = LocalDate.now(INDIA).toString()
-        val token = ensureToken()
-        if (token != null) {
-            runCatching { backfillRecentMultifyMfe(token, MFE_AFTER_HOURS_BACKFILL_BATCH_SIZE, force = true) }
+        val alphaToken = ensureToken()
+        val token = forecastMarketToken()
+        if (alphaToken != null) {
+            runCatching { backfillRecentMultifyMfe(alphaToken, MFE_AFTER_HOURS_BACKFILL_BATCH_SIZE, force = true) }
         }
         val researchUpdated = if (token != null) {
             val incompleteDate = learningDao.forecastResearchDates()
@@ -4784,8 +5653,8 @@ class TradingRepository @Inject constructor(
         val todayCalibrationUpdated = if (token != null && learningDao.forecastResearchForDate(today).isNotEmpty()) {
             runCatching { backfillForecastResearchOutcomes(today, token) }.getOrDefault(0)
         } else 0
-        val universalEvidenceUpdated = if (token != null) {
-            runCatching { refreshUniversalPositiveEvidence(token) }
+        val universalEvidenceUpdated = if (alphaToken != null) {
+            runCatching { refreshUniversalPositiveEvidence(alphaToken) }
                 .onFailure {
                     auditLogger.log("FORECAST_REPLAY", "UNIVERSAL_EVIDENCE_REFRESH_ERROR", mapOf(
                         "message" to (it.message ?: it.javaClass.simpleName)
@@ -4921,7 +5790,31 @@ class TradingRepository @Inject constructor(
             return "$tier: ${xs.size} rows · target hit ${fmt(hitRate)}% · avg MFE ${fmt(mfe)}% · avg MAE ${fmt(mae)}% · Multify matches $multifyMatches"
         }
 
+        val entryTimingStudies = timingExamples(learningDao.allForecastResearch())
+        val entryTimingDates = entryTimingStudies.map { it.date }.distinct().size
+        val entryTimingSymbols = entryTimingStudies.map { it.symbol }.distinct().size
+        val entryTimingToday = entryTimingStudies.filter { it.date == today }
+        val entryTimingNowNet = entryTimingToday.mapNotNull {
+            it.outcomes.firstOrNull { o -> o.method == ForecastEntryTimingPolicy.Method.NOW }?.netPct
+        }
+        val entryTimingBestNet = entryTimingToday.mapNotNull { example ->
+            example.outcomes.mapNotNull { it.netPct }.maxOrNull()
+        }
+        val entryTimingAdvisories = entryTimingToday.map { example ->
+            ForecastEntryTimingPolicy.advise(example.market, example.time,
+                example.volume, example.structure, entryTimingStudies, example.date)
+        }
+        val entryTimingValidated = entryTimingAdvisories.count { it.validated }
+        val entryTimingPending = learningDao.pendingForecastResearchOutcomes(today).size
         val report = buildString {
+            append("Forecast 1m entry-timing replay: ${entryTimingToday.size} independent setups today, " +
+                "${entryTimingStudies.size} historical independent setups across $entryTimingDates days/$entryTimingSymbols stocks. " +
+                "NOW mean net ${fmt(entryTimingNowNet.takeIf { it.isNotEmpty() }?.average() ?: 0.0)}%, " +
+                "best hindsight alternative mean ${fmt(entryTimingBestNet.takeIf { it.isNotEmpty() }?.average() ?: 0.0)}% " +
+                "(diagnostic only, not achievable live). " +
+                "Walk-forward validated context advisories: $entryTimingValidated/${entryTimingAdvisories.size}. " +
+                "Pending one-minute outcome snapshots: $entryTimingPending. " +
+                "Research backfill batches are resumable and do not modify Fixed or SELL. ")
             append("Rolling 30-trading-day Multify MFE average: ${fmt(stats.longAveragePct)}% (median ${fmt(stats.longMedianPct)}%) from ${stats.rollingCalls} MFE-observed calls. ")
             append("Pending historical MFE backfill: ${stats.mfeBackfillPendingCalls}. ")
             append(
@@ -4962,6 +5855,15 @@ class TradingRepository @Inject constructor(
         learningDao.insertResearchReport(entity)
         auditLogger.log("RESEARCH", "AFTER_HOURS_PRODUCTION_REPORT", mapOf(
             "date" to today, "wins" to wins, "total" to forecasts.size, "matches" to matched,
+            "entry_timing_version" to ForecastEntryTimingPolicy.VERSION,
+            "entry_timing_independent_setups_today" to entryTimingToday.size,
+            "entry_timing_independent_setups_total" to entryTimingStudies.size,
+            "entry_timing_distinct_days" to entryTimingDates,
+            "entry_timing_validated_contexts_today" to entryTimingValidated,
+            "entry_timing_pending_rows_today" to entryTimingPending,
+            "entry_timing_immediate_avg_net_pct" to entryTimingNowNet.takeIf { it.isNotEmpty() }?.average(),
+            "entry_timing_hindsight_avg_net_pct" to entryTimingBestNet.takeIf { it.isNotEmpty() }?.average(),
+            "entry_timing_research_only" to true,
             "multify_mfe_avg_pct" to stats.longAveragePct, "forecast_avg_target_pct" to avgTarget,
             "research_rows_completed" to snapshots.size,
             "positive_close_learning_rows" to positiveCloseSnapshots.size,
@@ -4984,6 +5886,11 @@ class TradingRepository @Inject constructor(
             "forecast_today_research_target_hit_rate_pct" to forecastResearchHitRate,
             "forecast_vs_fixed_mfe_delta_pp" to forecastVsFixedMfeDelta,
             "forecast_vs_fixed_hit_delta_pp" to forecastVsFixedHitDelta,
+            // 20% relative lift is a validation objective, not a guarantee or new live gate.
+            "forecast_20pct_relative_hit_goal_pct" to (fixedHitRate * 1.20).coerceAtMost(100.0),
+            "forecast_20pct_relative_goal_met_research" to (fixedToday.size >= 30 && snapshots.size >= 30 &&
+                forecastResearchHitRate >= (fixedHitRate * 1.20).coerceAtMost(100.0)),
+            "forecast_20pct_goal_is_provisional" to (fixedToday.size < 30 || snapshots.size < 30),
             "forecast_closed_trades_today" to forecastTradesToday.size,
             "forecast_avg_realized_net_pct" to avgRealizedNetPct,
             "forecast_avg_trade_mfe_pct" to avgMfeTradePct,
@@ -4998,11 +5905,18 @@ class TradingRepository @Inject constructor(
     private suspend fun brokerInventory(token: String, force: Boolean): BrokerInventorySnapshot {
         val now = System.currentTimeMillis()
         brokerInventorySnapshot?.takeIf { !force && now - it.atMs <= BROKER_INVENTORY_REFRESH_MS }?.let { return it }
+        // Gson can decode a null trading_symbol despite the non-null model declaration.
+        // Never crash portfolio monitoring; omit malformed rows and fail closed during
+        // app-owned ownership reconciliation instead of assuming an unknown symbol.
         val holdings = apiFactory.groww.holdings(bearer(token)).requirePayload("Groww holdings").holdings
-            .associateBy { it.tradingSymbol.uppercase(Locale.US) }
+            .mapNotNull { holding ->
+                BrokerInventorySymbolPolicy.normalize(holding.tradingSymbol)?.let { symbol -> symbol to holding }
+            }.toMap()
         val positions = apiFactory.groww.positions(bearer(token)).requirePayload("Groww positions").positions
             .filter { it.product.equals("CNC", true) }
-            .associateBy { it.tradingSymbol.uppercase(Locale.US) }
+            .mapNotNull { position ->
+                BrokerInventorySymbolPolicy.normalize(position.tradingSymbol)?.let { symbol -> symbol to position }
+            }.toMap()
         return BrokerInventorySnapshot(holdings, positions, now).also { brokerInventorySnapshot = it }
     }
 
@@ -5013,79 +5927,21 @@ class TradingRepository @Inject constructor(
         force: Boolean
     ): ManagedPositionEntity? {
         if (position.side != "LONG" || position.product != "CNC") return position
+        if (!appOwned(position)) return position
         val inventory = brokerInventory(token, force)
         val symbol = position.symbol.uppercase(Locale.US)
         val holdingQty = inventory.holdings[symbol]?.quantity?.coerceAtLeast(0) ?: 0
         val brokerPosition = inventory.positions[symbol]
         val intradayQty = brokerPosition?.quantity?.coerceAtLeast(0) ?: 0
         val visibleQty = max(holdingQty, intradayQty)
-        if (visibleQty >= position.quantity) return position
-
-        val removedQty = (position.quantity - visibleQty).coerceAtLeast(0)
-        if (removedQty <= 0) return position
-        val signalExit = preferredMark ?: latestMultifyExitPrice(position.symbol, position.openedAtMs)
-        val exit = brokerPosition?.debitPrice?.takeIf { it.isFinite() && it > 0.0 }
-            ?: signalExit
-            ?: runCatching {
-                apiFactory.groww.quote(bearer(token), tradingSymbol = position.symbol).requirePayload("Quote ${position.symbol}").lastPrice
-            }.getOrNull()
-            ?: position.lastPrice
-        val smartStatus = position.smartOrderId?.let { id ->
-            runCatching {
-                apiFactory.groww.smartOrderStatus(
-                    bearer(token), segment = "CASH", smartOrderType = "GTT", smartOrderId = id
-                ).requirePayload("GTT status on broker reconciliation ${position.symbol}").status.uppercase(Locale.US)
-            }.getOrNull()
-        }
-        val gttExecuted = smartStatus in setOf("TRIGGERED", "COMPLETED")
-        val exitReason = when {
-            gttExecuted && position.smartOrderMode == HoldingSmartOrderPolicy.MODE_TRAILING_GTT -> "TRAILING_GTT_EXIT"
-            gttExecuted && position.smartOrderMode == HoldingSmartOrderPolicy.MODE_RECOVERY_GTT -> "RECOVERY_GTT_100_NET_EXIT"
-            visibleQty == 0 -> "MANUAL_BROKER_EXIT"
-            else -> "MANUAL_BROKER_PARTIAL_EXIT"
-        }
-        recordExternalClose(position, removedQty, exit, exitReason)
-        brokerInventorySnapshot = null
-        if (visibleQty <= 0) {
-            recentlyClosedSymbolsAtMs[position.symbol.uppercase(Locale.US)] = System.currentTimeMillis()
-            runCatching { cancelKnownPositionGtt(token, position.copy(smartOrderStatus = smartStatus), "POSITION_CLOSED", clearIfTerminal = true) }
-            managedDao.deletePosition(position.id)
-            lastTrailStateAuditAtMs.remove(position.id)
-            lastSmartOrderStatusAtMs.remove(position.id)
-            auditLogger.log("HOLDING", "EXTERNAL_LONG_CLOSED", mapOf(
-                "symbol" to position.symbol,
-                "qty" to removedQty,
-                "exit" to exit,
-                "exit_reason" to exitReason,
-                "gtt_id" to position.smartOrderId,
-                "gtt_status" to smartStatus,
-                "active_gtt_cleanup_requested" to true
-            ))
-            return null
-        }
-        var updated = position.copy(
-            quantity = visibleQty,
-            lastEvaluatedAtMs = System.currentTimeMillis()
-        )
-        managedDao.updatePosition(updated)
-        if (!updated.smartOrderId.isNullOrBlank() && updated.smartOrderTriggerPrice != null &&
-            updated.smartOrderDirection in setOf("UP", "DOWN") && smartStatus !in setOf("TRIGGERED", "COMPLETED")
-        ) {
-            updated = runCatching {
-                modifyPositionGtt(
-                    token,
-                    updated,
-                    updated.smartOrderTriggerPrice,
-                    updated.smartOrderDirection ?: "UP",
-                    updated.smartOrderMode
-                )
-            }.getOrDefault(updated)
-        }
-        auditLogger.log("HOLDING", "EXTERNAL_LONG_REDUCED", mapOf(
-            "symbol" to position.symbol, "removed_qty" to removedQty, "remaining_qty" to visibleQty, "exit" to exit,
-            "gtt_quantity_resync" to !updated.smartOrderId.isNullOrBlank()
+        if (visibleQty == position.quantity) return position
+        // Never rebase app-owned share quantities to an aggregate, externally editable
+        // Groww position. Such a rebase could accidentally make third-party shares sellable.
+        auditLogger.log("SAFETY", "RECONCILIATION_OWNERSHIP_MISMATCH", mapOf(
+            "symbol" to symbol, "app_qty" to position.quantity, "broker_qty" to visibleQty
         ))
-        return updated
+        return position
+
     }
 
     private suspend fun latestMultifyExitPrice(symbol: String, openedAtMs: Long): Double? =
@@ -5149,175 +6005,118 @@ class TradingRepository @Inject constructor(
         ) + extra)
     }
 
-    private suspend fun syncPortfolioHoldings(
-        token: String,
-        inventory: BrokerInventorySnapshot,
-        activeGtts: Map<String, List<SmartOrderPayload>>
-    ): Set<String> {
-        val blockedSymbols = mutableSetOf<String>()
-        val now = System.currentTimeMillis()
-        val existingBySymbol = managedDao.openPositions().groupBy { it.symbol.uppercase(Locale.US) }
+    private fun appOwned(position: ManagedPositionEntity): Boolean = AppPositionOwnershipPolicy.appOpened(
+        engine = position.engine, side = position.side, product = position.product,
+        openingOrderId = position.openOrderId, openingReference = position.openReferenceId,
+        strategy = position.strategy, quantity = position.quantity
+    )
 
-        inventory.holdings.values.forEach { holding ->
-            val symbol = holding.tradingSymbol.trim().uppercase(Locale.US)
-            val quantity = holding.quantity.coerceAtLeast(0)
-            val averagePrice = holding.averagePrice
-            if (symbol.isBlank() || quantity <= 0) return@forEach
-            if (!averagePrice.isFinite() || averagePrice <= 0.0) {
-                logPortfolioConflict(symbol, "Broker holding has no valid average price; refusing to invent a trailing-stop basis.")
-                blockedSymbols += symbol
-                return@forEach
-            }
-
-            val existingRows = existingBySymbol[symbol].orEmpty()
-            if (existingRows.size > 1) {
-                blockedSymbols += symbol
-                logPortfolioConflict(symbol, "Multiple local managed records exist for this stock; refusing to merge quantities automatically.", mapOf(
-                    "local_position_ids" to existingRows.map { it.id },
-                    "broker_quantity" to quantity
-                ))
-                return@forEach
-            }
-            val existing = existingRows.singleOrNull()
-            val activeForSymbol = activeGtts[symbol].orEmpty()
-            val conflictingOrders = activeForSymbol.filter { order ->
-                existing?.smartOrderId.isNullOrBlank() || order.smartOrderId != existing?.smartOrderId
-            }
-            if (conflictingOrders.isNotEmpty()) {
-                blockedSymbols += symbol
-                logPortfolioConflict(symbol, "A broker-side active GTT already exists outside the local position record. It is left untouched to prevent duplicate sell orders.", mapOf(
-                    "broker_quantity" to quantity,
-                    "local_position_id" to existing?.id,
-                    "local_gtt_id" to existing?.smartOrderId,
-                    "active_gtt_ids" to conflictingOrders.map { it.smartOrderId },
-                    "active_gtt_directions" to conflictingOrders.map { it.triggerDirection },
-                    "active_gtt_quantities" to conflictingOrders.map { it.quantity }
-                ))
-                return@forEach
-            }
-
-            if (existing == null) {
-                if (managedDao.tradesSince(now - 86_400_000L).any {
-                    it.symbol.equals(symbol, true) && it.side == "LONG"
-                }) return@forEach
-                val closedAt = recentlyClosedSymbolsAtMs[symbol]
-                if (closedAt != null) {
-                    if (now - closedAt < PORTFOLIO_REIMPORT_COOLDOWN_MS) return@forEach
-                    recentlyClosedSymbolsAtMs.remove(symbol, closedAt)
+    /**
+     * Quarantine already-imported Groww holdings from prior releases. Never adopt new broker
+     * holdings. If an older app build created a GTT against an external holding, only cancel
+     * that GTT after the broker confirms our own MHS/MTG/MTR order reference.
+     */
+    private suspend fun quarantineExternalHoldings(token: String) {
+        managedDao.openPositions().filterNot(::appOwned).forEach { position ->
+            var working = position
+            val gttId = working.smartOrderId
+            if (!gttId.isNullOrBlank()) {
+                val brokerOrder = runCatching {
+                    apiFactory.groww.smartOrderStatus(
+                        bearer(token), segment = "CASH", smartOrderType = "GTT", smartOrderId = gttId
+                    ).requirePayload("Verify external holding legacy GTT ${position.symbol}")
+                }.getOrNull()
+                if (brokerOrder == null ||
+                    !brokerOrder.tradingSymbol.equals(position.symbol, true) ||
+                    !AppPositionOwnershipPolicy.isAppProtectionReference(brokerOrder.referenceId)
+                ) {
+                    auditLogger.log("SAFETY", "EXTERNAL_GTT_REQUIRES_MANUAL_REVIEW", mapOf(
+                        "symbol" to position.symbol, "gtt_id" to gttId,
+                        "message" to "Cannot confirm app-generated protection GTT; no broker order modified"
+                    ))
+                    return@forEach
                 }
-                val insertedId = managedDao.insertPosition(
-                    ManagedPositionEntity(
-                        engine = ENGINE_PORTFOLIO_HOLDING,
-                        symbol = symbol,
-                        product = "CNC",
-                        side = "LONG",
-                        quantity = quantity,
-                        entryPrice = averagePrice,
-                        stopPrice = HardStopLossPolicy.stopPrice(averagePrice),
-                        targetPrice = null,
-                        strategy = "Existing Groww portfolio holding · common hard -5% floor + shared fixed stepped trailing sell logic",
-                        regime = "PORTFOLIO_LONG",
-                        confidence = 1.0,
-                        sourceEventId = null,
-                        openOrderId = "EXTERNAL_GROWW_HOLDING",
-                        openReferenceId = stableRef("PFH", "$symbol-${holding.isin}"),
-                        openedAtMs = now,
-                        lastPrice = averagePrice,
-                        maxFavourablePrice = averagePrice,
-                        maxAdversePrice = averagePrice,
-                        lastEvaluatedAtMs = now,
-                        trailingArmPct = SteppedTrailingPolicy.ARM_TRIGGER_PCT,
-                        trailingLastRatchetPrice = 0.0,
-                        smartOrderMode = HoldingSmartOrderPolicy.MODE_NONE
-                    )
-                )
-                auditLogger.log("PORTFOLIO_MONITOR", "EXISTING_HOLDING_IMPORTED", mapOf(
-                    "symbol" to symbol,
-                    "position_id" to insertedId,
-                    "quantity" to quantity,
-                    "average_price" to averagePrice,
-                    "existing_active_gtt" to false,
-                    "sell_logic" to "shared_fixed_stepped_trailing_and_overnight_recovery"
-                ))
-                return@forEach
-            }
-
-            val quantityChanged = existing.quantity != quantity
-            val basisChanged = abs(existing.entryPrice - averagePrice) > PORTFOLIO_AVERAGE_PRICE_EPSILON
-            if (!quantityChanged && !basisChanged) return@forEach
-
-            var working = existing
-            if (!working.smartOrderId.isNullOrBlank()) {
-                working = cancelKnownPositionGtt(token, working, "PORTFOLIO_QUANTITY_OR_COST_BASIS_CHANGED", clearIfTerminal = false)
+                working = cancelKnownPositionGtt(token, working, "REMOVE_UNOWNED_PORTFOLIO_PROTECTION", clearIfTerminal = true)
                 if (!working.smartOrderId.isNullOrBlank()) {
-                    blockedSymbols += symbol
-                    logPortfolioConflict(symbol, "Could not safely cancel the old GTT before rebasing portfolio quantity/cost basis.", mapOf(
-                        "position_id" to existing.id,
-                        "old_quantity" to existing.quantity,
-                        "broker_quantity" to quantity,
-                        "old_average_price" to existing.entryPrice,
-                        "broker_average_price" to averagePrice,
-                        "gtt_id" to working.smartOrderId,
-                        "gtt_status" to working.smartOrderStatus
+                    auditLogger.log("SAFETY", "EXTERNAL_GTT_CANCEL_RETRY", mapOf(
+                        "symbol" to position.symbol, "gtt_id" to working.smartOrderId
                     ))
                     return@forEach
                 }
             }
-
-            val referencePrice = working.lastPrice.takeIf { it.isFinite() && it > 0.0 } ?: averagePrice
-            val updated = working.copy(
-                quantity = quantity,
-                entryPrice = averagePrice,
-                stopPrice = HardStopLossPolicy.stopPrice(averagePrice),
-                targetPrice = null,
-                strategy = if (working.strategy.contains("aggregated Groww portfolio", ignoreCase = true)) working.strategy
-                    else working.strategy + " · aggregated Groww portfolio",
-                maxFavourablePrice = max(averagePrice, referencePrice),
-                maxAdversePrice = min(averagePrice, referencePrice),
-                openedAtMs = now,
-                lastEvaluatedAtMs = now,
-                trailingArmPct = SteppedTrailingPolicy.ARM_TRIGGER_PCT,
-                trailingLastRatchetPrice = 0.0,
-                smartOrderId = null,
-                smartOrderMode = HoldingSmartOrderPolicy.MODE_NONE,
-                smartOrderTriggerPrice = null,
-                smartOrderDirection = null,
-                smartOrderStatus = null,
-                smartOrderUpdatedAtMs = now
-            )
-            managedDao.updatePosition(updated)
-            lastTrailStateAuditAtMs.remove(updated.id)
-            lastSmartOrderStatusAtMs.remove(updated.id)
-            auditLogger.log("PORTFOLIO_MONITOR", "HOLDING_REBASED_TO_BROKER_PORTFOLIO", mapOf(
-                "symbol" to symbol,
-                "position_id" to updated.id,
-                "old_quantity" to existing.quantity,
-                "broker_quantity" to quantity,
-                "old_average_price" to existing.entryPrice,
-                "broker_average_price" to averagePrice,
-                "old_gtt_cancelled" to !existing.smartOrderId.isNullOrBlank()
+            managedDao.deletePosition(working.id)
+            auditLogger.log("SAFETY", "EXTERNAL_HOLDING_EXCLUDED_FROM_SELL_MONITOR", mapOf(
+                "symbol" to position.symbol, "engine" to position.engine,
+                "broker_order_untouched" to gttId.isNullOrBlank()
             ))
         }
-        return blockedSymbols
+    }
+
+    /** Broker inventory must consist entirely of this app's one tracked BUY for the symbol. */
+    private suspend fun safeAppSellScope(
+        token: String, position: ManagedPositionEntity,
+        inventory: BrokerInventorySnapshot? = null,
+        forceGttRefresh: Boolean = false
+    ): Boolean {
+        if (!appOwned(position)) return false
+        val openSameSymbol = managedDao.openPositions().filter { it.symbol.equals(position.symbol, true) }
+        if (openSameSymbol.size != 1 || openSameSymbol.single().id != position.id) return false
+        val broker = inventory ?: brokerInventory(token, force = true)
+        val key = position.symbol.uppercase(Locale.US)
+        val demat = broker.holdings[key]?.quantity ?: 0
+        val cnc = broker.positions[key]?.quantity ?: 0
+        if (!AppPositionOwnershipPolicy.exclusiveBrokerQuantity(position.quantity, demat, cnc)) return false
+        val otherActiveGtt = activeGttsBySymbol(token, force = forceGttRefresh).getOrDefault(key, emptyList())
+            .any { it.smartOrderId != position.smartOrderId }
+        return !otherActiveGtt
     }
 
     private suspend fun portfolioMonitorCount(inventory: BrokerInventorySnapshot? = brokerInventorySnapshot): Int {
-        val localSymbols = managedDao.openPositions().map { it.symbol.uppercase(Locale.US) }
-        val brokerSymbols = inventory?.holdings?.values
-            ?.filter { it.quantity > 0 && it.tradingSymbol.isNotBlank() }
-            ?.map { it.tradingSymbol.uppercase(Locale.US) }
-            .orEmpty()
-        return (localSymbols + brokerSymbols).distinct().size.also { activePortfolioMonitorCount = it }
+        // Broker holdings NOT opened by this app must never count as managed holdings.
+        return managedDao.openPositions().count(::appOwned).also { activePortfolioMonitorCount = it }
     }
 
     suspend fun monitorManagedPositions(): Int {
         val token = ensureToken() ?: return portfolioMonitorCount()
         val marketOpen = marketSession() == "OPEN"
         val now = System.currentTimeMillis()
-        if (!marketOpen && now - lastClosedSessionReconcileAtMs < CLOSED_SESSION_RECONCILE_MS) {
+        val managedOpen = managedDao.openPositions().any(::appOwned)
+        val confirmedEmpty = brokerInventorySnapshot?.takeIf { now - it.atMs < 5L * 60_000L }
+            ?.let { it.holdings.isEmpty() && it.positions.isEmpty() } == true &&
+            activeGttSnapshot?.takeIf { now - it.atMs < 5L * 60_000L }
+                ?.bySymbol?.values?.all { it.isEmpty() } == true
+        // A verified empty portfolio needs a slow inventory heartbeat, not fresh holdings,
+        // positions and GTT calls every five seconds. Never apply this to any tracked
+        // position, pending BUY/GTT, unknown broker state or order in flight.
+        val noTrackedPositions = !managedOpen && managedDao.openPositions().isEmpty()
+        val pendingEntry = fixedAutoBuyOrderStore.all().any { !ForecastAutoBuyPolicy.isTerminal(it.status) } ||
+            forecastAutoBuyOrderStore.all().any { !ForecastAutoBuyPolicy.isTerminal(it.status) }
+        if (marketOpen && noTrackedPositions && !pendingEntry && !marketCriticalTradeInFlight &&
+            confirmedEmpty && brokerInventorySnapshot != null &&
+            now - brokerInventorySnapshot!!.atMs < EMPTY_PORTFOLIO_BROKER_RECHECK_MS
+        ) {
+            val auditAt = lastIdlePortfolioAuditAtMs
+            if (now - auditAt >= 60_000L) {
+                lastIdlePortfolioAuditAtMs = now
+                auditLogger.logAsync("PORTFOLIO_MONITOR", "VERIFIED_EMPTY_BROKER_POLL_SKIPPED", mapOf(
+                    "next_reverify_after_ms" to EMPTY_PORTFOLIO_BROKER_RECHECK_MS,
+                    "app_owned_holdings" to 0,
+                    "pending_entries" to 0,
+                    "active_gtts" to 0,
+                    "protective_sell_priority_preserved" to true
+                ))
+            }
+            return portfolioMonitorCount()
+        }
+        val reconcileGap = if (!marketOpen && !managedOpen && confirmedEmpty) 5L * 60_000L
+            else CLOSED_SESSION_RECONCILE_MS
+        if (!marketOpen && now - lastClosedSessionReconcileAtMs < reconcileGap) {
             return portfolioMonitorCount()
         }
         if (!marketOpen) lastClosedSessionReconcileAtMs = now
+        // Maintain external-GTT quarantine when any exposure is possible. This check
+        // must precede reconciliation, but need not run every service heartbeat after close.
+        quarantineExternalHoldings(token)
 
         val inventory = runCatching { brokerInventory(token, force = !marketOpen) }
             .onFailure {
@@ -5330,25 +6129,52 @@ class TradingRepository @Inject constructor(
         val blockedSymbols = mutableSetOf<String>()
         val activeGttsResult = runCatching { activeGttsBySymbol(token) }
         if (activeGttsResult.isSuccess) {
-            blockedSymbols += syncPortfolioHoldings(token, inventory, activeGttsResult.getOrThrow())
+            val activeGtts = activeGttsResult.getOrThrow()
+            val open = managedDao.openPositions()
+            for (position in open) {
+                val symbol = position.symbol.uppercase(Locale.US)
+                val conflict = activeGtts[symbol].orEmpty().any { it.smartOrderId != position.smartOrderId }
+                val exclusive = safeAppSellScope(token, position, inventory)
+                if (conflict || !exclusive) {
+                    blockedSymbols += symbol
+                    logPortfolioConflict(symbol, "Sell protection BLOCKED: not exclusively app-owned or another broker GTT exists", mapOf(
+                        "app_qty" to position.quantity,
+                        "broker_holding_qty" to inventory.holdings[symbol]?.quantity,
+                        "broker_cnc_qty" to inventory.positions[symbol]?.quantity,
+                        "different_gtt_present" to conflict
+                    ))
+                    // An app-created protection GTT might still fire against fungible external shares.
+                    // Cancel only an explicitly verified app-created GTT, never a user's GTT.
+                    val knownId = position.smartOrderId
+                    if (!knownId.isNullOrBlank()) {
+                        val gtt = activeGtts[symbol].orEmpty().firstOrNull { it.smartOrderId == knownId }
+                        if (gtt != null && AppPositionOwnershipPolicy.isAppProtectionReference(gtt.referenceId)) {
+                            runCatching { cancelKnownPositionGtt(token, position, "OWNERSHIP_CONFLICT_STOP_PROTECTION", clearIfTerminal = false) }
+                        } else {
+                            auditLogger.log("SAFETY", "GTT_OWNERSHIP_CONFLICT_MANUAL_REVIEW", mapOf(
+                                "symbol" to symbol, "gtt_id" to knownId
+                            ))
+                        }
+                    }
+                }
+            }
         } else {
             val error = activeGttsResult.exceptionOrNull()
             auditLogger.log("PORTFOLIO_MONITOR", "ACTIVE_GTT_DISCOVERY_ERROR", mapOf(
                 "message" to (error?.message ?: error?.javaClass?.simpleName ?: "Active GTT discovery failed"),
-                "note" to "New portfolio positions will not be adopted until active broker orders can be checked safely."
+                "note" to "No automatic SELL or new protective GTT is permitted without GTT conflict verification."
             ))
             // If broker GTT discovery is unavailable, do not create/modify sell orders for an
             // unprotected local row: an externally created GTT might already cover the same shares.
-            managedDao.openPositions().filter { it.smartOrderId.isNullOrBlank() }
-                .forEach { blockedSymbols += it.symbol.uppercase(Locale.US) }
+            managedDao.openPositions().forEach { blockedSymbols += it.symbol.uppercase(Locale.US) }
         }
 
         val open = managedDao.openPositions()
         val reconciled = mutableListOf<ManagedPositionEntity>()
         for (position in open) {
+            if (!appOwned(position) || position.symbol.uppercase(Locale.US) in blockedSymbols) continue
             try {
                 if (position.side != "LONG") {
-                    if (marketOpen && position.symbol.uppercase(Locale.US) !in blockedSymbols) closeLegacyNonLong(token, position)
                     continue
                 }
                 val afterGtt = finalizeCompletedGttIfNeeded(token, position) ?: continue
@@ -5390,7 +6216,7 @@ class TradingRepository @Inject constructor(
 
         if (!marketOpen) {
             // Keep every managed LONG protected overnight. Existing profitable trailing GTTs are
-            // preserved; an unarmed holding receives the common -5% server-side hard stop. This
+            // preserved; an unarmed holding receives the common -2% server-side hard stop. This
             // also self-recovers protection after an app/service restart or a prior GTT failure.
             var hardStopReady = 0
             var hardStopFailures = 0
@@ -5540,7 +6366,7 @@ class TradingRepository @Inject constructor(
 
     private suspend fun monitorLongHolding(position: ManagedPositionEntity, token: String, ltp: Double) {
         // Common sell protection for every managed CNC LONG, regardless of source:
-        // 1) hard -5% loss floor from the actual holding cost basis;
+        // 1) hard -2% loss floor from the actual holding cost basis;
         // 2) once +0.55% high-water is reached, the existing stepped profitable trail takes over;
         // 3) the active stop only moves upward. There is no averaging-down path.
         val decisionStartedNs = SystemClock.elapsedRealtimeNanos()
@@ -5599,7 +6425,7 @@ class TradingRepository @Inject constructor(
                 working,
                 ltp,
                 if (desiredMode == HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT)
-                    "COMMON_HARD_STOP_MINUS_5_LOCAL_FALLBACK"
+                    "COMMON_HARD_STOP_MINUS_2_LOCAL_FALLBACK"
                 else "LONG_TRAILING_PROFIT_STOP_V7_1_LOCAL_FALLBACK",
                 decisionStartedNs
             )
@@ -5624,7 +6450,7 @@ class TradingRepository @Inject constructor(
                             protected,
                             ltp,
                             if (desiredMode == HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT)
-                                "COMMON_HARD_STOP_MINUS_5_STALE_GTT_FALLBACK"
+                                "COMMON_HARD_STOP_MINUS_2_STALE_GTT_FALLBACK"
                             else "LONG_TRAILING_PROFIT_STOP_V7_1_STALE_GTT_FALLBACK",
                             decisionStartedNs
                         )
@@ -5693,7 +6519,7 @@ class TradingRepository @Inject constructor(
                             cleared,
                             ltp,
                             if (working.smartOrderMode == HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT)
-                                "COMMON_HARD_STOP_MINUS_5_GTT_FAILED_FALLBACK"
+                                "COMMON_HARD_STOP_MINUS_2_GTT_FAILED_FALLBACK"
                             else "LONG_TRAILING_PROFIT_STOP_V7_1_GTT_FAILED_FALLBACK",
                             decisionStartedNs
                         )
@@ -5714,7 +6540,7 @@ class TradingRepository @Inject constructor(
                     working,
                     ltp,
                     if (desiredMode == HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT)
-                        "COMMON_HARD_STOP_MINUS_5_LOCAL_FALLBACK"
+                        "COMMON_HARD_STOP_MINUS_2_LOCAL_FALLBACK"
                     else "LONG_TRAILING_PROFIT_STOP_V7_1_LOCAL_FALLBACK",
                     decisionStartedNs
                 )
@@ -5728,7 +6554,7 @@ class TradingRepository @Inject constructor(
             position.smartOrderMode != HoldingSmartOrderPolicy.MODE_TRAILING_GTT
         if (stopRaised || trailJustArmed) {
             val event = when {
-                desiredMode == HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT && previousProtected == null -> "HARD_STOP_MINUS_5_ARMED"
+                desiredMode == HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT && previousProtected == null -> "HARD_STOP_MINUS_2_ARMED"
                 trailJustArmed -> "V7_1_TRAIL_ARMED"
                 else -> "V7_1_STEP_RATCHET"
             }
@@ -5762,6 +6588,7 @@ class TradingRepository @Inject constructor(
         mode: String
     ): ManagedPositionEntity {
         require(position.side == "LONG" && position.product == "CNC") { "GTT protection is only for tracked CNC LONG holdings" }
+        require(safeAppSellScope(token, position, forceGttRefresh = true)) { "GTT SELL blocked: ${position.symbol} is not exclusively app-bought" }
         require(direction in setOf("UP", "DOWN"))
         require(mode in setOf(
             HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT,
@@ -5856,6 +6683,7 @@ class TradingRepository @Inject constructor(
             HoldingSmartOrderPolicy.MODE_TRAILING_GTT,
             HoldingSmartOrderPolicy.MODE_RECOVERY_GTT
         ))
+        require(safeAppSellScope(token, position, forceGttRefresh = true)) { "GTT modification blocked: ownership not exclusive" }
         val id = position.smartOrderId ?: return createPositionGtt(token, position, triggerPrice, direction, mode)
         if (brokerRetryGuard.gttBlockedUntil(position.symbol) > System.currentTimeMillis()) {
             throw BrokerExecutionRetryGuard.Deferred("GTT modification deferred on ${position.symbol}")
@@ -5981,7 +6809,7 @@ class TradingRepository @Inject constructor(
             ?.takeIf { it.isFinite() && it > 0.0 }
         val exit = brokerExit ?: refreshed.smartOrderTriggerPrice ?: refreshed.lastPrice
         val reason = when (refreshed.smartOrderMode) {
-            HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT -> "COMMON_HARD_STOP_MINUS_5_GTT_EXIT"
+            HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT -> "COMMON_HARD_STOP_MINUS_2_GTT_EXIT"
             HoldingSmartOrderPolicy.MODE_TRAILING_GTT -> "TRAILING_GTT_EXIT"
             HoldingSmartOrderPolicy.MODE_RECOVERY_GTT -> "RECOVERY_GTT_100_NET_EXIT"
             else -> "GTT_EXIT"
@@ -6263,7 +7091,7 @@ class TradingRepository @Inject constructor(
     private fun smartPrice(price: Double): String = String.format(Locale.US, "%.2f", price)
 
     private suspend fun closeLegacyNonLong(token: String, position: ManagedPositionEntity) {
-        if (marketSession() != "OPEN") return
+        if (marketSession() != "OPEN" || !appOwned(position)) return
         val ltp = apiFactory.groww.quote(bearer(token), tradingSymbol = position.symbol)
             .requirePayload("Quote ${position.symbol}").lastPrice ?: position.lastPrice
         val ref = stableRef("LGC", "${position.id}-${position.symbol}")
@@ -6307,6 +7135,13 @@ class TradingRepository @Inject constructor(
             return@withLock null
         }
 
+        if (!safeAppSellScope(token, local, forceGttRefresh = true)) {
+            auditLogger.log("SAFETY", "SELL_BLOCKED_UNOWNED_OR_MIXED", mapOf(
+                "symbol" to local.symbol, "position_id" to local.id, "app_qty" to local.quantity
+            ))
+            closePositionMutexes.remove(local.id, closeMutex)
+            return@withLock null
+        }
         if (brokerRetryGuard.sellBlockedUntil(local.symbol) > System.currentTimeMillis()) {
             closePositionMutexes.remove(local.id, closeMutex)
             return@withLock null
@@ -6407,6 +7242,7 @@ class TradingRepository @Inject constructor(
     ): OrderPayload {
         require(position.side == "LONG") { "Only tracked LONG holdings may be sold" }
         require(position.product == "CNC") { "Only CNC holdings may be sold by the long-only engine" }
+        require(safeAppSellScope(token, position, forceGttRefresh = true)) { "SELL blocked: ${position.symbol} is not exclusively app-bought" }
         return submitMarketOrder(token, position.symbol, "SELL", position.quantity, "CNC", reference, notificationStartedNs)
     }
 
@@ -6539,7 +7375,7 @@ class TradingRepository @Inject constructor(
     }
 
     private suspend fun managedSnapshotLocal(): Snapshot {
-        val open = managedDao.openPositions().filter { it.side == "LONG" }
+        val open = managedDao.openPositions().filter { it.side == "LONG" && appOwned(it) }
         val positions = open.map { p ->
             val ltp = p.lastPrice.takeIf { it.isFinite() && it > 0.0 } ?: p.entryPrice
             val pnl = (ltp - p.entryPrice) * p.quantity
@@ -6593,7 +7429,7 @@ class TradingRepository @Inject constructor(
     }
 
     private suspend fun managedSnapshot(token: String): Snapshot {
-        val open = managedDao.openPositions().filter { it.side == "LONG" }
+        val open = managedDao.openPositions().filter { it.side == "LONG" && appOwned(it) }
         val positions = open.map { p ->
             val ltp = runCatching {
                 apiFactory.groww.quote(bearer(token), tradingSymbol = p.symbol)
@@ -6683,9 +7519,13 @@ class TradingRepository @Inject constructor(
         val researchSnapshots: Int,
         val forecasts: Int,
         val champions: Int,
-        val reports: Int
+        val reports: Int,
+        val positiveEvidence: Int = 0,
+        val archivedFixedOutcomes: Int = 0,
+        val fixedFactorSnapshots: Int = 0
     ) {
-        val total: Int get() = learningCalls + researchSnapshots + forecasts + champions + reports
+        val total: Int get() = learningCalls + researchSnapshots + forecasts + champions + reports +
+            positiveEvidence + archivedFixedOutcomes + fixedFactorSnapshots
     }
 
     /**
@@ -6693,7 +7533,14 @@ class TradingRepository @Inject constructor(
      * Trading state is intentionally excluded: no holdings, orders, execution samples, credentials,
      * ARM flags, broker state or settings are imported.
      */
-    suspend fun restoreLearningFromLogs(uri: Uri): LearningRestoreResult {
+    /** User-driven ZIP import runs entirely on IO, never on the UI or Fixed scanner thread. */
+    suspend fun restoreLearningFromLogs(uri: Uri): LearningRestoreResult = withContext(Dispatchers.IO) {
+        learningRestoreMutex.withLock { restoreLearningFromLogsOnIo(uri) }
+    }
+
+    private suspend fun restoreLearningFromLogsOnIo(uri: Uri): LearningRestoreResult {
+        var restoreStage = "opening learning ZIP"
+        try {
         val entries = linkedMapOf<String, String>()
         var totalBytes = 0L
         appContext.contentResolver.openInputStream(uri)?.use { raw ->
@@ -6723,6 +7570,7 @@ class TradingRepository @Inject constructor(
 
         require(entries.isNotEmpty()) { "This ZIP does not contain Multify learning files" }
         val gson = GsonBuilder().disableHtmlEscaping().create()
+        restoreStage = "Fixed baseline snapshot"
         var restoredFixedSnapshot = false
         entries["fixed_engine_snapshot.json"]?.let { json ->
             if (fixedEngineSnapshotStore.loadOrNull() == null) {
@@ -6737,7 +7585,15 @@ class TradingRepository @Inject constructor(
         var restoredForecasts = 0
         var restoredChampions = 0
         var restoredReports = 0
+        var restoredPositiveEvidence = 0
+        var restoredFixedOutcomes = 0
+        var restoredFixedFactors = 0
+        restoreStage = "40-factor Fixed evidence"
+        entries["fixed_factor_snapshots.jsonl"]?.let { jsonl ->
+            restoredFixedFactors = fixedFactorTelemetry.importArchivedSnapshots(jsonl)
+        }
 
+        restoreStage = "Multify learning calls"
         entries["long_learning.json"]?.let { json ->
             val rows = JsonParser.parseString(json).asJsonArray
             rows.forEach { node ->
@@ -6787,27 +7643,39 @@ class TradingRepository @Inject constructor(
             }
         }
 
+        restoreStage = "Forecast research snapshots"
         entries["forecast_research_snapshots.json"]?.let { json ->
             val imported = gson.fromJson(json, Array<ForecastResearchEntity>::class.java).orEmpty()
             val existingKeys = learningDao.allForecastResearch().map {
                 "${it.researchDate}|${it.scanAtMs}|${it.symbol.uppercase(Locale.US)}|${it.rank}"
             }.toHashSet()
+            // A single Room transaction per bounded batch, rather than >4,000 UI-bound inserts.
+            // Re-running a partially completed restore only imports rows not yet present.
+            val pending = ArrayList<ForecastResearchEntity>(256)
             imported.forEach { row ->
-                if (row.researchDate.isBlank() || row.symbol.isBlank() || row.entryPrice <= 0.0) return@forEach
-                val key = "${row.researchDate}|${row.scanAtMs}|${row.symbol.uppercase(Locale.US)}|${row.rank}"
-                if (key in existingKeys) return@forEach
-                learningDao.insertForecastResearch(row.copy(id = 0, symbol = row.symbol.uppercase(Locale.US)))
-                existingKeys += key
-                restoredResearch++
+                if (row.researchDate.isBlank() || row.symbol.isBlank() ||
+                    !row.entryPrice.isFinite() || row.entryPrice <= 0.0) return@forEach
+                val symbol = row.symbol.uppercase(Locale.US)
+                val key = "${row.researchDate}|${row.scanAtMs}|$symbol|${row.rank}"
+                if (!existingKeys.add(key)) return@forEach
+                pending += row.copy(id = 0, symbol = symbol)
+                if (pending.size >= 256) {
+                    restoredResearch += learningDao.insertForecastResearchBatch(pending).count { it > 0L }
+                    pending.clear()
+                }
+            }
+            if (pending.isNotEmpty()) {
+                restoredResearch += learningDao.insertForecastResearchBatch(pending).count { it > 0L }
             }
         }
 
+        restoreStage = "Forecast recommendation history"
         entries["long_forecasts.json"]?.let { json ->
             val imported = gson.fromJson(json, Array<LongForecastEntity>::class.java).orEmpty()
             imported.forEach { row ->
                 if (row.forecastDate.isBlank() || row.symbol.isBlank() || row.entryPrice <= 0.0) return@forEach
                 val existing = learningDao.longForecastsForDate(row.forecastDate)
-                    .firstOrNull { it.symbol.equals(row.symbol, true) }
+                    .firstOrNull { it.symbol.equals(row.symbol, true) && it.generatedAtMs == row.generatedAtMs }
                 learningDao.upsertLongForecast(
                     row.copy(
                         id = existing?.id ?: 0,
@@ -6819,6 +7687,7 @@ class TradingRepository @Inject constructor(
             }
         }
 
+        restoreStage = "Forecast champions"
         entries["long_champions.json"]?.let { json ->
             val imported = gson.fromJson(json, Array<ForecastChampionEntity>::class.java).orEmpty()
             imported.forEach { row ->
@@ -6828,6 +7697,7 @@ class TradingRepository @Inject constructor(
             }
         }
 
+        restoreStage = "Forecast research reports"
         entries["research.json"]?.let { json ->
             val imported = gson.fromJson(json, Array<com.multify.traderpro.data.local.ResearchReportEntity>::class.java).orEmpty()
             imported.forEach { row ->
@@ -6837,6 +7707,69 @@ class TradingRepository @Inject constructor(
             }
         }
 
+        // Earlier releases exported these two datasets but silently did not restore them.
+        // Keep original evidence keys and only insert missing rows: historical observation is
+        // never permission to trade or to re-arm a broker account.
+        restoreStage = "Forecast positive evidence"
+        entries["forecast_positive_evidence.json"]?.let { json ->
+            val imported = gson.fromJson(json, Array<ForecastPositiveEvidenceEntity>::class.java).orEmpty()
+            val known = learningDao.allForecastPositiveEvidence().map { it.evidenceKey }.toHashSet()
+            imported.forEach { row ->
+                if (row.evidenceKey.isBlank() || row.evidenceDate.isBlank() ||
+                    row.symbol.isBlank() || !row.entryPrice.isFinite() || row.entryPrice <= 0.0 ||
+                    row.evidenceKey in known) return@forEach
+                learningDao.upsertForecastPositiveEvidence(row.copy(symbol = row.symbol.uppercase(Locale.US)))
+                known += row.evidenceKey
+                restoredPositiveEvidence++
+            }
+        }
+
+        // The Fixed engine and its immutable scorer are never rewritten here. We archive the
+        // observed outcomes, never replay active recommendation/order state. Importing the
+        // current day's rows is safe ONLY after market close.
+        restoreStage = "archived Fixed outcomes"
+        entries["fixed_recommendations.json"]?.let { json ->
+            val imported = gson.fromJson(json, Array<FixedRecommendationRecord>::class.java).orEmpty()
+            val now = ZonedDateTime.now(INDIA)
+            val today = now.toLocalDate().toString()
+            val currentSessionClosed = now.toLocalTime() >= LocalTime.of(15, 30)
+            val knownByDate = mutableMapOf<String, MutableSet<String>>()
+            imported.forEach { row ->
+                if (row.recommendationDate.isBlank() || row.symbol.isBlank() ||
+                    row.recommendationDate > today ||
+                    (row.recommendationDate == today && !currentSessionClosed) ||
+                    !row.entryPrice.isFinite() || row.entryPrice <= 0.0 ||
+                    !row.maxFavourablePct.isFinite() || !row.maxAdversePct.isFinite()) return@forEach
+                val symbol = row.symbol.uppercase(Locale.US)
+                val known = knownByDate.getOrPut(row.recommendationDate) {
+                    fixedRecommendationStore.recommendations(row.recommendationDate)
+                        .map { it.symbol.uppercase(Locale.US) }.toMutableSet()
+                }
+                if (!known.add(symbol)) return@forEach
+                fixedRecommendationStore.upsert(row.copy(
+                    id = FixedRecommendationStore.fixedId(row.recommendationDate, symbol),
+                    symbol = symbol,
+                    status = if (row.status == "TARGET_HIT") "TARGET_HIT" else "SESSION_ENDED",
+                    executionEligible = false
+                ))
+                restoredFixedOutcomes++
+            }
+        }
+        // Only verified, completed historical research sessions may count toward the
+        // five-session calibration ledger, never a bare scan or imported outcome claim.
+        restoreStage = "Forecast calibration reconciliation"
+        val verifiedCompletedSessions = learningDao.allForecastResearch()
+            .filter { it.outcomeUpdatedAtMs != null &&
+                it.outcomeMfePct?.isFinite() == true &&
+                it.outcomeMaePct?.isFinite() == true &&
+                it.outcomeClosePct?.isFinite() == true &&
+                it.researchDate < LocalDate.now(INDIA).toString() }
+            .groupBy { it.researchDate }
+            .filterValues { rows -> rows.map { it.symbol }.distinct().size >= FORECAST_CALIBRATION_MIN_COMPLETED_ROWS }
+            .keys
+        verifiedCompletedSessions.forEach { markForecastCalibrationSessionComplete(it) }
+
+        restoreStage = "historical seed and Fixed snapshot validation"
         historicalSeedEnsured = false
         ensureHistoricalSeed()
         if (fixedEngineSnapshotStore.loadOrNull() == null && fixedEngineSnapshotStore.isAwaitingRestore()) {
@@ -6851,7 +7784,12 @@ class TradingRepository @Inject constructor(
             "forecasts" to restoredForecasts,
             "champions" to restoredChampions,
             "reports" to restoredReports,
+            "positive_evidence" to restoredPositiveEvidence,
+            "archived_fixed_outcomes" to restoredFixedOutcomes,
+            "archived_fixed_factor_rows" to restoredFixedFactors,
+            "verified_completed_calibration_sessions" to verifiedCompletedSessions.size,
             "fixed_snapshot_restored_or_captured" to restoredFixedSnapshot,
+            "fixed_factor_rows_never_used_for_trading" to true,
             "trading_state_restored" to false,
             "credentials_restored" to false
         ))
@@ -6860,8 +7798,22 @@ class TradingRepository @Inject constructor(
             researchSnapshots = restoredResearch,
             forecasts = restoredForecasts,
             champions = restoredChampions,
-            reports = restoredReports
+            reports = restoredReports,
+            positiveEvidence = restoredPositiveEvidence,
+            archivedFixedOutcomes = restoredFixedOutcomes,
+            fixedFactorSnapshots = restoredFixedFactors
         )
+        } catch (error: Exception) {
+            if (error is CancellationException) throw error
+            auditLogger.logAsync("MIGRATION", "LEARNING_RESTORE_FAILED", mapOf(
+                "stage" to restoreStage,
+                "exception" to error.javaClass.simpleName,
+                "message" to (error.message ?: "unknown").take(180),
+                "historical_only" to true
+            ))
+            throw IllegalStateException("Restore failed during $restoreStage: " +
+                (error.message ?: error.javaClass.simpleName).take(130) + ". Previously restored rows are safe to retry.", error)
+        }
     }
 
     suspend fun exportCompleteLogs(uri: Uri): LogExportResult {
@@ -6935,11 +7887,16 @@ class TradingRepository @Inject constructor(
                 add("forecast_auto_buy_orders.json", forecastAutoBuyOrders)
                 add("fixed_recommendations.json", fixedRecommendations)
                 add("fixed_auto_buy_orders.json", fixedAutoBuyOrders)
+                fixedFactorTelemetry.appendExportEntry(zip)
                 add("api_usage_snapshot.json", GrowwApiUsageLedger.snapshot())
                 add("groww_recovery_state.json", recoveryGate.status())
                 add("telemetry_metadata.json", mapOf(
                     "exported_at_ms" to System.currentTimeMillis(),
                     "async_audit_dropped_total" to auditLogger.asyncDroppedCount(),
+                    "fixed_factor_telemetry_dropped_total" to fixedFactorTelemetry.droppedCount(),
+                    "fixed_factor_telemetry_written_total" to fixedFactorTelemetry.writtenCount(),
+                    "fixed_factor_telemetry_nonblocking" to true,
+                    "fixed_factor_telemetry_file" to "fixed_factor_snapshots.jsonl",
                     "fixed_scan_profile_event" to "FIXED_SCAN_PROFILE",
                     "forecast_scan_profile_event" to "FORECAST_SCAN_PROFILE",
                     "trailing_profile_event" to "TRAILING_MONITOR_PROFILE",
@@ -6956,7 +7913,7 @@ class TradingRepository @Inject constructor(
                 addText("system_audit.jsonl", auditLogger.readAll())
             }
         } ?: error("Unable to open export destination")
-        return LogExportResult(if (fixedSnapshot != null) 19 else 18, signals.size, trades.size)
+        return LogExportResult(if (fixedSnapshot != null) 20 else 19, signals.size, trades.size)
     }
 
     suspend fun shouldCapturePackage(packageName: String): Boolean {
@@ -7037,7 +7994,18 @@ class TradingRepository @Inject constructor(
         qty: Int,
         reference: String,
         notificationStartedNs: Long? = null
-    ): OrderPayload = submitMarketOrder(token, symbol, "BUY", qty, "CNC", reference, notificationStartedNs)
+    ): OrderPayload = appOwnedBuyMutex.withLock {
+        // Serialize all application CNC entries so two independent engines cannot both buy
+        // the same symbol while the first order is still awaiting broker acknowledgement.
+        val key = symbol.uppercase(Locale.US)
+        val broker = brokerInventory(token, force = true)
+        val demat = broker.holdings[key]?.quantity ?: 0
+        val cnc = broker.positions[key]?.quantity ?: 0
+        require(demat <= 0 && cnc <= 0 && managedDao.openPositions().none { it.symbol.equals(symbol, true) }) {
+            "BUY blocked: $symbol already exists in Groww/app holdings; ownership must stay separate"
+        }
+        submitMarketOrder(token, symbol, "BUY", qty, "CNC", reference, notificationStartedNs)
+    }
 
     private fun LongForecastEntity.toForecastDto() = ForecastDto(
         rank = rank, symbol = symbol, confidence = confidence, score = score, reason = reason,
@@ -7085,12 +8053,13 @@ class TradingRepository @Inject constructor(
         )
     }
 
-    private fun disconnectedDashboard(settings: AppSettings, fixedSnapshot: FixedEngineSnapshot? = null) = DashboardDto(
+    private suspend fun disconnectedDashboard(settings: AppSettings, fixedSnapshot: FixedEngineSnapshot? = null) = DashboardDto(
         armed = settings.armEffective, halted = settings.safetyHalt, marketSession = marketSession(),
         asOf = ZonedDateTime.now(INDIA).format(DateTimeFormatter.ISO_OFFSET_DATE_TIME),
         broker = BrokerStatusDto(configured = hasBrokerCredentials(), connected = false, detail = "Refresh & Authenticate required"),
         risk = RiskStatusDto(maxExposure = settings.holdingBudgetRupees.toDouble(), riskMode = if (settings.safetyHalt) "HALTED" else "DISARMED"),
-        fixedSnapshot = fixedSnapshotDto(fixedSnapshot)
+        fixedSnapshot = fixedSnapshotDto(fixedSnapshot),
+        forecastReferences = runCatching { forecastReferenceStats() }.getOrDefault(ForecastReferenceStatsDto())
     )
 
     private fun marketSession(): String {
@@ -7136,6 +8105,7 @@ class TradingRepository @Inject constructor(
         private const val FORECAST_OUTCOME_BATCH_ATTEMPTS = 2
         private const val FORECAST_OUTCOME_RETRY_BACKOFF_MS = 750L
         private const val FORECAST_SYMBOL_PACING_MS = 150L
+        private const val FORECAST_EVALUATION_TRANCHE_SIZE = 12
         private const val FORECAST_AUTO_BUY_ORDER_PACING_MS = 175L
         private const val FIXED_DIRECT_AUTO_BUY_ORDER_PACING_MS = 175L
         private const val FORECAST_AUTO_BUY_CANCEL_RECHECK_MS = 300L
@@ -7170,8 +8140,8 @@ class TradingRepository @Inject constructor(
         private const val DISCOVERY_CONSECUTIVE_FAILURE_ABORT = 3
         private const val MIN_DISCOVERY_COVERAGE_RATIO = 0.85
         private const val RESEARCH_CAPTURE_TOP_N = 48
-        private const val RESEARCH_BACKFILL_SYMBOL_PACING_MS = 300L
-        private const val RESEARCH_BACKFILL_SYMBOL_BATCH = 10
+        private const val RESEARCH_BACKFILL_SYMBOL_PACING_MS = 1_100L
+        private const val RESEARCH_BACKFILL_SYMBOL_BATCH = 24
         private const val RESEARCH_BACKFILL_NETWORK_ABORT_AFTER = 3
         private const val UNIVERSAL_EVIDENCE_NEAREST_SNAPSHOT_MS = 30L * 60L * 1000L
         private const val UNIVERSAL_EVIDENCE_REPLAY_SYMBOL_PACING_MS = 400L
@@ -7182,9 +8152,12 @@ class TradingRepository @Inject constructor(
             "long_forecasts.json",
             "long_champions.json",
             "research.json",
-            "fixed_engine_snapshot.json"
+            "forecast_positive_evidence.json",
+            "fixed_recommendations.json",
+            "fixed_engine_snapshot.json",
+            "fixed_factor_snapshots.jsonl"
         )
-        private const val MAX_RESTORE_ENTRY_BYTES = 32L * 1024L * 1024L
+        private const val MAX_RESTORE_ENTRY_BYTES = 48L * 1024L * 1024L
         private const val MAX_RESTORE_TOTAL_BYTES = 64L * 1024L * 1024L
         private const val RESEARCH_SESSION_GOAL = 5
         private const val FORECAST_CALIBRATION_MIN_COMPLETED_ROWS = 5
@@ -7202,6 +8175,7 @@ class TradingRepository @Inject constructor(
         private const val BULK_MARKET_DATA_MIN_GAP_MS = 210L
         private const val BULK_MARKET_DATA_429_COOLDOWN_MS = 1_500L
         private const val BROKER_INVENTORY_REFRESH_MS = 5_000L
+        private const val EMPTY_PORTFOLIO_BROKER_RECHECK_MS = 45_000L
         private const val ACTIVE_GTT_REFRESH_MS = 30_000L
         private const val ACTIVE_GTT_PAGE_SIZE = 50
         private const val MAX_ACTIVE_GTT_PAGES = 20

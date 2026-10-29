@@ -2,8 +2,8 @@ package com.multify.traderpro.engine
 
 /** Prevents one-scan noise from consuming the five daily production slots. */
 object ForecastPublicationPolicy {
-    const val DISCOVERED_PRIOR_PRIMARY_HITS = 1
-    const val FALLBACK_PRIOR_PRIMARY_HITS = 2
+    const val DISCOVERED_PRIOR_PRIMARY_HITS = 0
+    const val FALLBACK_PRIOR_PRIMARY_HITS = 1
 
     fun isReady(
         discoveryBaselineReady: Boolean,

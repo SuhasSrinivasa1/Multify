@@ -13,8 +13,14 @@ class MarketPriorityPolicyTest {
 
     @Test
     fun forecastStopsBeforeNextFixedWindow() {
-        assertFalse(MarketPriorityPolicy.canRunForecast(false, false, 30_000, 0, 210, 0, 180, 0, 360))
-        assertTrue(MarketPriorityPolicy.canRunForecast(false, false, 90_000, 20, 210, 10, 180, 20, 360))
+        assertFalse(MarketPriorityPolicy.canRunForecast(false, false, 10_000, 0, 210, 0, 180, 0, 360))
+        assertTrue(MarketPriorityPolicy.canRunForecast(false, false, 30_000, 20, 210, 10, 180, 20, 360))
+    }
+
+    @Test
+    fun capacityAllowsBoundedForecastHeadroomButPreservesHistoricalBrokerLimits() {
+        assertTrue(MarketPriorityPolicy.canRunForecast(false, false, 20_000, 110, 210, 30, 45, 50, 360))
+        assertFalse(MarketPriorityPolicy.canRunForecast(false, false, 20_000, 110, 210, 40, 45, 50, 360))
     }
 
     @Test

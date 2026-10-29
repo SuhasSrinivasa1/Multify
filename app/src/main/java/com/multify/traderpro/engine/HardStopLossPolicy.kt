@@ -6,7 +6,7 @@ package com.multify.traderpro.engine
  * profitable stepped-trailing policy. The trailing stop may only tighten it.
  */
 object HardStopLossPolicy {
-    const val MAX_LOSS_PCT = 5.0
+    const val MAX_LOSS_PCT = 2.0
 
     fun stopPrice(entryPrice: Double): Double {
         require(entryPrice.isFinite() && entryPrice > 0.0) { "Entry price must be positive" }

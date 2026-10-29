@@ -58,6 +58,7 @@ class AppPreferences @Inject constructor(
         val holdingBudgetRupees = longPreferencesKey("daily_budget_rupees")
         val armEnabled = booleanPreferencesKey("live_execution_enabled")
         val forecastScannerEnabled = booleanPreferencesKey("forecast_scanner_enabled")
+        val forecastEarlyEntryMigration = booleanPreferencesKey("forecast_early_entry_v788_enabled")
         val forecastAutoBuyEnabled = booleanPreferencesKey("forecast_auto_buy_enabled")
         val fixedAutoBuyEnabled = booleanPreferencesKey("fixed_auto_buy_enabled")
         val onboardingComplete = booleanPreferencesKey("onboarding_complete")
@@ -124,6 +125,16 @@ class AppPreferences @Inject constructor(
         context.dataStore.edit {
             it[Keys.armEnabled] = value
             it[Keys.armedDate] = if (value) LocalDate.now().toString() else ""
+        }
+    }
+
+    /** Explicit one-time migration: enable Forecast from the next session without enabling trading. */
+    suspend fun activateForecastEarlyEntryOnce() {
+        context.dataStore.edit {
+            if (it[Keys.forecastEarlyEntryMigration] != true) {
+                it[Keys.forecastScannerEnabled] = true
+                it[Keys.forecastEarlyEntryMigration] = true
+            }
         }
     }
 

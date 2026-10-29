@@ -58,6 +58,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import kotlinx.coroutines.delay
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -77,10 +78,12 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.multify.traderpro.BuildConfig
+import com.multify.traderpro.engine.FixedBuyAvailabilityPolicy
 import com.multify.traderpro.data.network.DashboardDto
 import com.multify.traderpro.data.network.ExecutionAverageDto
 import com.multify.traderpro.engine.FixedFinalContract
 import com.multify.traderpro.engine.FixedForecastQualityPolicy
+import com.multify.traderpro.engine.ForecastBuyAvailabilityPolicy
 import com.multify.traderpro.data.network.ForecastDto
 import com.multify.traderpro.data.network.PositionDto
 import com.multify.traderpro.engine.MultifyReverseEngineering
@@ -97,7 +100,7 @@ import java.util.Locale
 private enum class Destination(val label: String, val subtitle: String, val icon: ImageVector) {
     Execution("Execution", "ARM status and app-owned CNC holdings", Icons.Default.Dashboard),
     Averages("Averages", "30-day LONG averages", Icons.Default.Analytics),
-    Forecast("Forecast", "Confirmed PRIMARY LONG recommendations · ≥1% target", Icons.Default.Science),
+    Forecast("Forecast", "Early-entry LONG recommendations · ≥1% target", Icons.Default.Science),
     Fixed("Fixed", "Frozen v7.4.1 recommendation engine", Icons.Default.Shield),
     Settings("Settings", "Broker, ARM, holding budget and device controls", Icons.Default.Settings)
 }
@@ -188,6 +191,8 @@ fun TraderApp(viewModel: TraderViewModel = hiltViewModel()) {
                 Destination.Settings -> SettingsScreen(
                     state = state,
                     onSave = viewModel::saveBrokerSettings,
+                    onSaveBeta = viewModel::saveBetaSettings,
+                    onAuthenticateBeta = viewModel::authenticateBeta,
                     onAuthenticate = viewModel::authenticate,
                     onArmRequested = {
                         if (state.settings.armEffective) viewModel.setArm(false) else showArmConfirm = true
@@ -262,7 +267,7 @@ private fun ExecutionScreen(
             FixedFinalContract.CANONICAL_MULTIFY_MFE_AVG_PCT
         )
     )
-    val fixedDailyAverage = fixedRows.map { it.targetPct }.takeIf { it.isNotEmpty() }?.average()
+    val fixedDailyAverage = dashboard?.fixedOutcomes?.todayTargetAveragePct
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -286,20 +291,17 @@ private fun ExecutionScreen(
         }
         item {
             MetricCard(
-                label = "Multify Today Avg",
-                value = if (learning.todayAveragePct > 0.0)
-                    String.format(Locale.US, "%.2f%%", learning.todayAveragePct)
-                else "—",
-                supporting = if (learning.todayAveragePct > 0.0)
-                    "Today’s locally recorded Multify MFE average"
-                else
-                    "Waiting for completed/MFE-observed Multify calls today",
+                label = "Fixed Observed Avg / Stock · Today",
+                value = dashboard?.fixedOutcomes?.todayObservedAveragePct?.let {
+                    String.format(Locale.US, "%.2f%%", it)
+                } ?: "Learning",
+                supporting = "${dashboard?.fixedOutcomes?.todayObserved ?: 0}/${dashboard?.fixedOutcomes?.todayPublished ?: 0} Fixed stocks sampled after publication (MFE)",
                 modifier = Modifier.fillMaxWidth()
             )
         }
         item {
             MetricCard(
-                label = "Fixed Daily Avg",
+                label = "Fixed Target Avg / Stock · Today",
                 value = fixedDailyAverage?.let { String.format(Locale.US, "%.2f%%", it) } ?: "—",
                 supporting = if (fixedDailyAverage != null)
                     "${fixedRows.size} Fixed recommendation(s) today · frozen target calibration ${String.format(Locale.US, "%.2f%%", fixedSnapshot.fixedTargetPct)}"
@@ -374,7 +376,7 @@ private fun HoldingCard(p: PositionDto) {
             KeyValueRow("Average", money(p.averagePrice))
             KeyValueRow("LTP", p.ltp?.let(::money) ?: "—")
             KeyValueRow("Unrealised", money(p.pnl), pnlColor(p.pnl))
-            KeyValueRow("Sell protection", "hard -5.00% · then +0.55% arm → +0.50% protect · +0.10% steps")
+            KeyValueRow("Sell protection", "hard -2.00% · then +0.55% arm → +0.50% protect · +0.10% steps")
             KeyValueRow(
                 "Arm trigger",
                 p.trailArmPct?.let { "+${String.format(Locale.US, "%.2f", it)}%" } ?: "+0.55%"
@@ -420,7 +422,10 @@ private fun HoldingCard(p: PositionDto) {
 @Composable
 private fun LongAveragesScreen(state: TraderUiState) {
     val learning = state.dashboard?.learning ?: com.multify.traderpro.data.network.LearningStatsDto()
-    val forecastLearning = state.dashboard?.forecastLearning ?: com.multify.traderpro.data.network.ForecastLearningStatsDto()
+    val fixed = state.dashboard?.fixedOutcomes ?: com.multify.traderpro.data.network.FixedOutcomeStatsDto()
+    val rows = state.dashboard?.fixedForecasts.orEmpty()
+    fun percent(v: Double?): String = v?.let { String.format(Locale.US, "%.2f%%", it) } ?: "Learning"
+    fun hitPercent(v: Double?): String = v?.let { String.format(Locale.US, "%.1f%%", it) } ?: "Learning"
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -429,89 +434,102 @@ private fun LongAveragesScreen(state: TraderUiState) {
     ) {
         item {
             SectionTitle(
-                "Multify forecasted upside",
-                "Rolling 30 recommendation trading days using the maximum price reached from Multify entry until its Book Profit/close signal."
+                "Multify benchmark · unchanged",
+                "Rolling 30 recommendation trading days: observed maximum price from Multify entry to its Book Profit/close. Fixed averages below are entirely separate."
             )
         }
         item {
             MetricCard(
                 label = "Multify MFE Avg Upside %",
                 value = String.format(Locale.US, "%.2f%%", learning.longAveragePct),
-                supporting = buildString {
-                    append("${learning.rollingCalls} MFE-observed calls across ${learning.rollingTradingDays} trading days")
-                    if (learning.mfeBackfillPendingCalls > 0) append(" · ${learning.mfeBackfillPendingCalls} historical calls backfilling")
-                },
+                supporting = "${learning.rollingCalls} Multify calls across ${learning.rollingTradingDays} days",
                 modifier = Modifier.fillMaxWidth(),
                 accent = MaterialTheme.colorScheme.primary
             )
         }
         item {
             SectionTitle(
-                "Forecast engine",
-                "Targets have a hard 1.00% minimum. Forecast learning/ranking examples use prior positive-close days only; flat and negative closes remain diagnostic data."
+                "Fixed recommendation averages · NEW BASELINE",
+                "Fresh Fixed-only measurement since this release. One observation per stock recommendation, never per scan. Rolling last 30 Fixed trading days. Averages use the highest sampled post-publication upside, not the frozen target benchmark."
             )
         }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
                 MetricCard(
-                    label = "Today's Avg Target",
-                    value = if (forecastLearning.todayTargetAveragePct > 0.0)
-                        String.format(Locale.US, "%.2f%%", forecastLearning.todayTargetAveragePct)
-                    else "≥1.00%",
-                    supporting = "hard floor ${String.format(Locale.US, "%.2f%%", forecastLearning.targetFloorPct)}",
+                    label = "Today's Avg Fixed Target / Stock",
+                    value = percent(fixed.todayTargetAveragePct),
+                    supporting = "${fixed.todayPublished} distinct Fixed stock calls today",
+                    modifier = Modifier.weight(1f)
+                )
+                MetricCard(
+                    label = "Today's Observed Fixed Avg / Stock",
+                    value = percent(fixed.todayObservedAveragePct),
+                    supporting = "${fixed.todayObserved}/${fixed.todayPublished} sampled after publication",
+                    modifier = Modifier.weight(1f),
+                    accent = MaterialTheme.colorScheme.primary
+                )
+            }
+        }
+        item {
+            MetricCard(
+                label = "Fixed Rolling Observed Avg / Stock",
+                value = percent(fixed.rollingObservedAveragePct),
+                supporting = "${fixed.observed}/${fixed.published} observed Fixed recommendations · fresh baseline only",
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                MetricCard(
+                    label = "Reached +0.55% · Fixed",
+                    value = hitPercent(fixed.armHitRatePct),
+                    supporting = "${fixed.armHits}/${fixed.observed} · avg achieved ${percent(fixed.armHitMeanMfePct)}",
+                    modifier = Modifier.weight(1f)
+                )
+                MetricCard(
+                    label = "Reached +1.00% · Fixed",
+                    value = hitPercent(fixed.onePctHitRatePct),
+                    supporting = "${fixed.onePctHits}/${fixed.observed} · avg achieved ${percent(fixed.onePctHitMeanMfePct)}",
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        }
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                MetricCard(
+                    label = "Full Fixed Target Hit",
+                    value = hitPercent(fixed.fullTargetHitRatePct),
+                    supporting = "${fixed.fullTargetHits}/${fixed.observed} · avg achieved ${percent(fixed.fullHitMeanMfePct)} · individual published target",
                     modifier = Modifier.weight(1f),
                     accent = MaterialTheme.colorScheme.primary
                 )
                 MetricCard(
-                    label = "Observed Forecast MFE",
-                    value = if (forecastLearning.completedForecasts > 0)
-                        String.format(Locale.US, "%.2f%%", forecastLearning.longAveragePct)
-                    else "Learning",
-                    supporting = if (forecastLearning.completedForecasts > 0)
-                        "${forecastLearning.completedForecasts} completed forecasts"
-                    else "full-session tracking",
+                    label = "Fixed Observed MFE Distribution",
+                    value = fixed.medianPct?.let { "${percent(it)} median" } ?: "Learning",
+                    supporting = "P25 ${percent(fixed.p25Pct)} · P75 ${percent(fixed.p75Pct)}",
                     modifier = Modifier.weight(1f)
                 )
             }
         }
         item {
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                MetricCard(
-                    label = "Reached +0.55%",
-                    value = if (forecastLearning.evaluatedCompletedForecasts > 0)
-                        String.format(Locale.US, "%.1f%%", forecastLearning.trailArmHitRatePct)
-                    else "Learning",
-                    supporting = "trail-arm opportunity rate · all completed forecasts",
-                    modifier = Modifier.weight(1f)
-                )
-                MetricCard(
-                    label = "Reached +1.00%",
-                    value = if (forecastLearning.evaluatedCompletedForecasts > 0)
-                        String.format(Locale.US, "%.1f%%", forecastLearning.onePctHitRatePct)
-                    else "Learning",
-                    supporting = "all completed forecasts",
-                    modifier = Modifier.weight(1f)
-                )
-            }
+            SectionTitle("Today's Fixed calls · per-stock evidence",
+                "Fixed recommendation entry and highest observed price after publication. '—' means a price has not yet been observed; missing evidence is not counted as a missed target.")
         }
         item {
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                MetricCard(
-                    label = "Full target hit",
-                    value = if (forecastLearning.evaluatedCompletedForecasts > 0)
-                        String.format(Locale.US, "%.1f%%", forecastLearning.targetHitRatePct)
-                    else "Learning",
-                    supporting = "${forecastLearning.evaluatedCompletedForecasts} completed evaluations",
-                    modifier = Modifier.weight(1f)
-                )
-                MetricCard(
-                    label = "MFE distribution",
-                    value = if (forecastLearning.evaluatedCompletedForecasts > 0)
-                        String.format(Locale.US, "%.2f%% median", forecastLearning.mfeMedianPct)
-                    else "Learning",
-                    supporting = String.format(Locale.US, "P25 %.2f%% · P75 %.2f%%", forecastLearning.mfeP25Pct, forecastLearning.mfeP75Pct),
-                    modifier = Modifier.weight(1f)
-                )
+            Card(shape = RoundedCornerShape(20.dp)) {
+                Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                    if (rows.isEmpty()) {
+                        Text("No Fixed calls recorded today", style = MaterialTheme.typography.bodySmall)
+                    } else rows.forEach { f ->
+                        val sampled = f.observedAfterPublication
+                        KeyValueRow(
+                            f.symbol,
+                            "Target ${percent(f.targetPct)} · MFE " +
+                                (if (sampled) percent(f.maxFavourablePct) else "—") +
+                                " · ${f.status.replace('_', ' ')}"
+                        )
+                    }
+                }
             }
         }
     }
@@ -529,6 +547,13 @@ private fun ForecastScreen(
     val learning = dashboard?.learning ?: com.multify.traderpro.data.network.LearningStatsDto()
     val forecastLearning = dashboard?.forecastLearning ?: com.multify.traderpro.data.network.ForecastLearningStatsDto()
     val report = dashboard?.research ?: com.multify.traderpro.data.network.ResearchDto()
+    var forecastClockMs by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(2_000L)
+            forecastClockMs = System.currentTimeMillis()
+        }
+    }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -538,7 +563,7 @@ private fun ForecastScreen(
         item {
             SectionTitle(
                 "LONG holding forecast",
-                "First five completed live trading sessions are calibration-only. Forecast runs only on spare API capacity, learns in shadow mode, and publishes no live recommendations until session 5 is complete; after unlock, every newly confirmed PRIMARY candidate can publish."
+                "EARLY ENTRY · entire NSE market screened by bulk prices, then candidates evaluated with 1-minute candles and 5/15/30-minute context. Qualified early setups publish immediately; five-session learning continues without blocking notifications."
             )
         }
         item {
@@ -550,9 +575,9 @@ private fun ForecastScreen(
                     Text("Forecast engine · AUTOMATIC DISCOVERY", fontWeight = FontWeight.SemiBold)
                     Text(
                         if (state.settings.forecastAutoBuyEnabled)
-                            "Forecast uses only leftover API capacity after sell protection, Multify execution and Fixed. Its own toggle independently enables direct CNC MARKET BUY after the five-session calibration lock is satisfied."
+                            "Forecast screens the entire NSE universe but uses only spare API capacity after SELL, Multify and Fixed. Automatic CNC BUY remains gated behind five completed calibration sessions."
                         else
-                            "Forecast shadow learning/discovery continues only in spare capacity and can notify recommendations, but no Forecast entry is placed unless the Forecast auto-buy toggle is enabled.",
+                            "EARLY ENTRY alerts publish during calibration. Forecast automatic buying is OFF; optional manual BUY still needs broker readiness. Multiple separate setups in the same stock may appear after a completed target and new pullback.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -611,13 +636,26 @@ private fun ForecastScreen(
                 OutlinedButton(onClick = onResearch, modifier = Modifier.weight(1f)) { Text("Run research") }
             }
         }
-        item { ForecastTable(rows, onBuy, state.settings.brokerAuthenticated && state.settings.staticIpMatched && state.settings.brokerDdpiEnabled && !state.settings.safetyHalt) }
+        item { ForecastTable(rows, onBuy, state.settings.brokerAuthenticated && state.settings.staticIpMatched && state.settings.brokerDdpiEnabled && !state.settings.safetyHalt, fixedClockMsForTable = forecastClockMs) }
         item {
             Card(
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                 shape = RoundedCornerShape(20.dp)
             ) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                    Text("Multify reference · cumulative", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    KeyValueRow("Reference total", state.dashboard?.forecastReferences?.totalCalls?.toString() ?: "107")
+                    KeyValueRow("Frozen historical baseline", state.dashboard?.forecastReferences?.frozenCases?.toString() ?: "107")
+                    KeyValueRow("New Multify BUY calls", state.dashboard?.forecastReferences?.appendedCalls?.toString() ?: "—")
+                    KeyValueRow("New calls with Book Profit", state.dashboard?.forecastReferences?.liveCompleted?.toString() ?: "—")
+                    KeyValueRow("New calls with measured MFE", state.dashboard?.forecastReferences?.liveMfeMeasured?.toString() ?: "—")
+                    KeyValueRow("New calls awaiting exit", state.dashboard?.forecastReferences?.livePendingOutcome?.toString() ?: "—")
+                    Text(
+                        "Each new verified Multify BUY notification adds one reference event; Book Profit and after-market high-price evidence enrich the same event. Fixed stays frozen at 107. These cases help Forecast ranking context, not pre-spike proof or a restriction on NSE coverage.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    HorizontalDivider()
                     Text("Multify DNA", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                     Text(
                         "Forecast keeps the 40 observable factors and three families. Prior positive Fixed outcomes are the main one-way transfer signal; positive Multify outcomes may add a smaller assistance bonus. Negative/flat Fixed or Multify outcomes never subtract from ranking. Fixed never reads Forecast feedback.",
@@ -626,7 +664,7 @@ private fun ForecastScreen(
                     )
                     KeyValueRow("Factor families", "3")
                     KeyValueRow("Observable factors", "40")
-                    KeyValueRow("Positive reference cases", MultifyReverseEngineering.positiveCases.size.toString())
+                    KeyValueRow("Fundamental example cases", MultifyReverseEngineering.positiveCases.size.toString())
                 }
             }
         }
@@ -673,6 +711,15 @@ private fun FixedScreen(
         )
     )
     val health = dashboard?.fixedHealth ?: com.multify.traderpro.data.network.EngineHealthDto()
+
+    var fixedClockMs by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(2_000L)
+            fixedClockMs = System.currentTimeMillis()
+        }
+    }
+    val fixedMarketOpen = FixedBuyAvailabilityPolicy.nseRegularSession(fixedClockMs)
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -760,7 +807,10 @@ private fun FixedScreen(
                 ) { Text("Learning locked") }
             }
         }
-        item { ForecastTable(rows, onBuy, state.settings.brokerAuthenticated && state.settings.staticIpMatched && state.settings.brokerDdpiEnabled && !state.settings.safetyHalt) }
+        item { ForecastTable(rows, onBuy,
+            state.settings.brokerAuthenticated && state.settings.staticIpMatched && state.settings.brokerDdpiEnabled && !state.settings.safetyHalt,
+            fixed = true, fixedMarketOpen = fixedMarketOpen, fixedClockMsForTable = fixedClockMs
+        ) }
         item {
             Card(
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -780,7 +830,10 @@ private fun FixedScreen(
 }
 
 @Composable
-private fun ForecastTable(rows: List<ForecastDto>, onBuy: (String) -> Unit, executionReady: Boolean) {
+private fun ForecastTable(
+    rows: List<ForecastDto>, onBuy: (String) -> Unit, executionReady: Boolean,
+    fixed: Boolean = false, fixedMarketOpen: Boolean = true, fixedClockMsForTable: Long = 0L
+) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha=.24f)),
@@ -831,15 +884,33 @@ private fun ForecastTable(rows: List<ForecastDto>, onBuy: (String) -> Unit, exec
                     )
                     Button(
                         onClick = { onBuy(f.symbol) },
-                        enabled = executionReady && f.status == "ACTIVE" && f.executionEligible,
+                        enabled = if (fixed) FixedBuyAvailabilityPolicy.canBuy(
+                            fixedClockMsForTable, executionReady, f.status, f.executionEligible
+                        ) else ForecastBuyAvailabilityPolicy.canBuy(
+                            fixedClockMsForTable, executionReady, f.status, f.executionEligible
+                        ),
                         modifier = Modifier.fillMaxWidth().padding(top = 7.dp)
                     ) {
                         Text(
                             when {
+                                fixed && f.status == "TARGET_HIT" -> "TARGET HIT · BUY disabled"
+                                fixed && f.status != "ACTIVE" -> "Session ended · BUY disabled"
+                                !fixed && f.status == "TARGET_HIT" -> "TARGET HIT · BUY disabled"
+                                !fixed && f.status != "ACTIVE" -> "Finished · BUY disabled"
+                                !fixed && !com.multify.traderpro.engine.FixedBuyAvailabilityPolicy.nseRegularSession(fixedClockMsForTable) -> "Market closed · BUY disabled"
+                                fixed && !fixedMarketOpen -> "Market closed · BUY disabled"
                                 !f.executionEligible -> f.qualityTier + " · observation only"
                                 !executionReady -> "Broker readiness required · " + f.symbol
                                 else -> "BUY " + f.symbol + " · CNC"
                             }
+                        )
+                    }
+                    if (fixed) {
+                        Text(
+                            "Fixed status: ${f.status.replace('_', ' ')} · observed high " +
+                                (if (f.observedAfterPublication) "+${String.format(Locale.US, "%.2f", f.maxFavourablePct)}%" else "—"),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                     if (index != rows.lastIndex) HorizontalDivider(
@@ -856,6 +927,8 @@ private fun ForecastTable(rows: List<ForecastDto>, onBuy: (String) -> Unit, exec
 private fun SettingsScreen(
     state: TraderUiState,
     onSave: (String, String, String, String, String) -> Unit,
+    onSaveBeta: (String, String) -> Unit,
+    onAuthenticateBeta: () -> Unit,
     onAuthenticate: () -> Unit,
     onArmRequested: () -> Unit,
     onBudgetChanged: (Long) -> Unit,
@@ -869,6 +942,8 @@ private fun SettingsScreen(
 ) {
     val context = LocalContext.current
     var apiKey by remember { mutableStateOf("") }
+    var betaApiKey by remember { mutableStateOf("") }
+    var betaTotpSecret by remember { mutableStateOf("") }
     var totpSecret by remember { mutableStateOf("") }
     var staticIp by remember(state.settings.expectedStaticIp) { mutableStateOf(state.settings.expectedStaticIp) }
     var packageFilter by remember(state.settings.packageFilter) { mutableStateOf(state.settings.packageFilter) }
@@ -885,7 +960,7 @@ private fun SettingsScreen(
         contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp, 14.dp, 16.dp, 32.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        item { SectionTitle("Broker connection", "Groww authentication and the fixed network identity used by ARM.") }
+        item { SectionTitle("Alpha — trading account", "Fixed, Multify, all BUY/SELL/GTT, portfolio and static IP remain on Alpha.") }
         item {
             Card(
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -907,6 +982,43 @@ private fun SettingsScreen(
                     KeyValueRow("Groww", if (state.settings.brokerAuthenticated) "Authenticated" else "Reconnect Groww — trading and broker monitoring paused; verify holdings/GTT in Groww")
                     KeyValueRow("DDPI", if (state.settings.brokerDdpiEnabled) "Enabled" else "Required for ARM")
                     KeyValueRow("Static IP", if (state.settings.staticIpMatched) "Verified" else "Not verified")
+                    Text(
+                        "A toggle being ON does not confirm an order was placed. Groww must accept quotes, margin requests and BUY orders; broker cooldowns can temporarily block entries.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+
+        item { SectionTitle("Beta — Forecast research only", "Separate Groww account. No static IP field, no orders, no holdings access.") }
+        item {
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha=.24f)),
+                shape = RoundedCornerShape(20.dp)) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedTextField(betaApiKey, { betaApiKey = it }, Modifier.fillMaxWidth(),
+                        label = { Text("Beta Groww TOTP API key") },
+                        visualTransformation = PasswordVisualTransformation(), singleLine = true)
+                    OutlinedTextField(betaTotpSecret, { betaTotpSecret = it }, Modifier.fillMaxWidth(),
+                        label = { Text("Beta Groww TOTP secret") },
+                        visualTransformation = PasswordVisualTransformation(), singleLine = true)
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        OutlinedButton(onClick = { onSaveBeta(betaApiKey, betaTotpSecret) },
+                            modifier = Modifier.weight(1f)) { Text("Save Beta") }
+                        Button(onClick = onAuthenticateBeta, enabled = state.betaConfigured,
+                            modifier = Modifier.weight(1f)) { Text("Authenticate Beta") }
+                    }
+                    KeyValueRow("Beta research", when {
+                        state.betaAuthenticated -> "Authenticated — read-only market data"
+                        state.betaConfigured -> "Configured — authenticate for research"
+                        else -> "Not configured — Forecast uses Alpha's spare capacity"
+                    })
+                    Text("Beta is strictly market-data only. All trading and protective orders remain on Alpha. " +
+                        "When Beta is configured but unauthenticated, Forecast pauses instead of consuming Alpha quota. " +
+                        "Separate API keys do not guarantee separate broker rate limits.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }
@@ -927,7 +1039,7 @@ private fun SettingsScreen(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
-                        Switch(checked = armed, onCheckedChange = { onArmRequested() }, enabled = armed || canArm)
+                        Switch(checked = armed, onCheckedChange = { onArmRequested() }, enabled = true) // Allow tap to display the ARM rejection reason.
                     }
                     Text("Per-call holding budget · " + money(budget.toDouble()))
                     Slider(
@@ -970,7 +1082,7 @@ private fun SettingsScreen(
                     }
                     KeyValueRow(
                         "Forecast auto-buy",
-                        if (state.settings.forecastAutoBuyEnabled) "ACTIVE · independent" else "OFF · manual BUY only"
+                        if (state.settings.forecastAutoBuyEnabled) "ON · execution subject to broker and calibration guards" else "OFF · five completed sessions required before activation"
                     )
                     Text(
                         "Entry control: no Fixed entry GTT. Auto-buy uses a fresh quote for sizing and sends a direct CNC MARKET BUY immediately. The actual broker fill becomes the holding average and trailing anchor; the live execution target keeps the frozen recommendation target percentage but is anchored to that actual fill.",
@@ -994,10 +1106,10 @@ private fun SettingsScreen(
                     }
                     KeyValueRow(
                         "Fixed auto-buy",
-                        if (state.settings.fixedAutoBuyEnabled) "ACTIVE · independent" else "OFF · manual BUY only"
+                        if (state.settings.fixedAutoBuyEnabled) "ON · entries require fresh call and broker readiness" else "OFF · manual BUY only"
                     )
                     Text(
-                        "Fixed remains immutable. Forecast may read prior positive Fixed outcomes, but can never write into Fixed or change its v7.4.1 rules. Every app-owned Multify, Fixed and Forecast LONG uses the same sell protection: hard -5% loss floor, then the existing +0.55% arm → +0.50% protected gain → +0.10% ratchet when profitable. No averaging down.",
+                        "Fixed remains immutable. Forecast may read prior positive Fixed outcomes, but can never write into Fixed or change its v7.4.1 rules. Every app-owned Multify, Fixed and Forecast LONG uses the same sell protection: hard -2% loss floor, then the existing +0.55% arm → +0.50% protected gain → +0.10% ratchet when profitable. No averaging down.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )

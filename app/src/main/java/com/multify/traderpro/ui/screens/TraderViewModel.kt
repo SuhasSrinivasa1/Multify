@@ -25,6 +25,8 @@ data class TraderUiState(
     val dashboard: DashboardDto? = null,
     val loading: Boolean = false,
     val credentialsConfigured: Boolean = false,
+    val betaConfigured: Boolean = false,
+    val betaAuthenticated: Boolean = false,
     val message: String? = null,
     val error: String? = null
 )
@@ -46,6 +48,8 @@ class TraderViewModel @Inject constructor(
             dashboard = r.dashboard,
             loading = r.loading,
             credentialsConfigured = repository.hasBrokerCredentials(),
+            betaConfigured = repository.betaCredentialsConfigured(),
+            betaAuthenticated = repository.betaResearchAuthenticated(),
             message = r.message,
             error = r.error
         )
@@ -100,6 +104,25 @@ class TraderViewModel @Inject constructor(
             }.onFailure {
                 remote.value = remote.value.copy(loading = false, error = it.userMessage())
             }
+        }
+    }
+
+    fun saveBetaSettings(key: String, secret: String) {
+        viewModelScope.launch {
+            remote.value = remote.value.copy(loading = true, error = null)
+            runCatching { repository.saveBetaResearchSettings(key, secret) }
+                .onSuccess { remote.value = remote.value.copy(loading = false,
+                    message = "Beta credentials encrypted; authenticate Beta separately", error = null) }
+                .onFailure { remote.value = remote.value.copy(loading = false, error = it.userMessage()) }
+        }
+    }
+
+    fun authenticateBeta() {
+        viewModelScope.launch {
+            remote.value = remote.value.copy(loading = true, error = null)
+            runCatching { repository.authenticateBetaResearch() }
+                .onSuccess { remote.value = remote.value.copy(loading = false, message = it, error = null) }
+                .onFailure { remote.value = remote.value.copy(loading = false, error = it.userMessage()) }
         }
     }
 
@@ -312,7 +335,7 @@ class TraderViewModel @Inject constructor(
                 .onSuccess { result ->
                     remote.value = remote.value.copy(
                         loading = false,
-                        message = "Learning restored · ${result.learningCalls} Multify rows · ${result.researchSnapshots} research snapshots · ${result.forecasts} forecasts · ${result.champions} champions · ${result.reports} reports. Trading state was not restored.",
+                        message = "Learning restored · ${result.learningCalls} Multify rows · ${result.researchSnapshots} research snapshots · ${result.forecasts} forecasts · ${result.champions} champions · ${result.reports} reports · ${result.positiveEvidence} positive examples · ${result.archivedFixedOutcomes} archived Fixed outcomes · ${result.fixedFactorSnapshots} Fixed factor snapshots. Trading state was not restored.",
                         error = null
                     )
                     refresh(silent = true)

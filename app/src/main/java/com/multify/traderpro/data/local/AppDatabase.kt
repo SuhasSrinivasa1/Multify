@@ -19,7 +19,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         ForecastChampionEntity::class,
         ResearchReportEntity::class
     ],
-    version = 15,
+    version = 16,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -28,6 +28,13 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun learningDao(): LearningDao
 
     companion object {
+        val MIGRATION_15_16 = object : Migration(15, 16) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("DROP INDEX IF EXISTS index_long_forecasts_forecastDate_symbol")
+                db.execSQL("CREATE INDEX index_long_forecasts_forecastDate_symbol ON long_forecasts(forecastDate,symbol)")
+            }
+        }
+
         val MIGRATION_7_8 = object : Migration(7, 8) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("""CREATE TABLE learning_calls_new (

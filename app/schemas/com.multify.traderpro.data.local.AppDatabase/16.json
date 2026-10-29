@@ -1,0 +1,1669 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 16,
+    "identityHash": "1e3b9efbaf05189b86ac88549eb046f5",
+    "entities": [
+      {
+        "tableName": "signal_events",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `fingerprint` TEXT NOT NULL, `receivedAtMs` INTEGER NOT NULL, `postedAtMs` INTEGER NOT NULL, `sourcePackage` TEXT NOT NULL, `appLabel` TEXT NOT NULL, `title` TEXT NOT NULL, `text` TEXT NOT NULL, `bigText` TEXT NOT NULL, `signalType` TEXT NOT NULL, `symbol` TEXT, `summary` TEXT NOT NULL, `confidence` REAL NOT NULL, `forwardingState` TEXT NOT NULL, `backendAction` TEXT, `backendReason` TEXT, `lastError` TEXT)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "fingerprint",
+            "columnName": "fingerprint",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "receivedAtMs",
+            "columnName": "receivedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "postedAtMs",
+            "columnName": "postedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourcePackage",
+            "columnName": "sourcePackage",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "appLabel",
+            "columnName": "appLabel",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "title",
+            "columnName": "title",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "text",
+            "columnName": "text",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "bigText",
+            "columnName": "bigText",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "signalType",
+            "columnName": "signalType",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "symbol",
+            "columnName": "symbol",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "summary",
+            "columnName": "summary",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "confidence",
+            "columnName": "confidence",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "forwardingState",
+            "columnName": "forwardingState",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "backendAction",
+            "columnName": "backendAction",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "backendReason",
+            "columnName": "backendReason",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "lastError",
+            "columnName": "lastError",
+            "affinity": "TEXT",
+            "notNull": false
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_signal_events_fingerprint",
+            "unique": true,
+            "columnNames": [
+              "fingerprint"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_signal_events_fingerprint` ON `${TABLE_NAME}` (`fingerprint`)"
+          },
+          {
+            "name": "index_signal_events_receivedAtMs",
+            "unique": false,
+            "columnNames": [
+              "receivedAtMs"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_signal_events_receivedAtMs` ON `${TABLE_NAME}` (`receivedAtMs`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "managed_positions",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `engine` TEXT NOT NULL, `symbol` TEXT NOT NULL, `product` TEXT NOT NULL, `side` TEXT NOT NULL, `quantity` INTEGER NOT NULL, `entryPrice` REAL NOT NULL, `stopPrice` REAL, `targetPrice` REAL, `strategy` TEXT NOT NULL, `regime` TEXT NOT NULL, `confidence` REAL NOT NULL, `sourceEventId` INTEGER, `openOrderId` TEXT NOT NULL, `openReferenceId` TEXT NOT NULL, `smartOrderId` TEXT, `openedAtMs` INTEGER NOT NULL, `lastPrice` REAL NOT NULL, `maxFavourablePrice` REAL NOT NULL, `maxAdversePrice` REAL NOT NULL, `lastEvaluatedAtMs` INTEGER NOT NULL, `trailingArmPct` REAL NOT NULL, `trailingLastRatchetPrice` REAL NOT NULL, `status` TEXT NOT NULL, `smartOrderMode` TEXT NOT NULL, `smartOrderTriggerPrice` REAL, `smartOrderDirection` TEXT, `smartOrderStatus` TEXT, `smartOrderUpdatedAtMs` INTEGER)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "engine",
+            "columnName": "engine",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "symbol",
+            "columnName": "symbol",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "product",
+            "columnName": "product",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "side",
+            "columnName": "side",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "quantity",
+            "columnName": "quantity",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "entryPrice",
+            "columnName": "entryPrice",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "stopPrice",
+            "columnName": "stopPrice",
+            "affinity": "REAL",
+            "notNull": false
+          },
+          {
+            "fieldPath": "targetPrice",
+            "columnName": "targetPrice",
+            "affinity": "REAL",
+            "notNull": false
+          },
+          {
+            "fieldPath": "strategy",
+            "columnName": "strategy",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "regime",
+            "columnName": "regime",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "confidence",
+            "columnName": "confidence",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceEventId",
+            "columnName": "sourceEventId",
+            "affinity": "INTEGER",
+            "notNull": false
+          },
+          {
+            "fieldPath": "openOrderId",
+            "columnName": "openOrderId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "openReferenceId",
+            "columnName": "openReferenceId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "smartOrderId",
+            "columnName": "smartOrderId",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "openedAtMs",
+            "columnName": "openedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastPrice",
+            "columnName": "lastPrice",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "maxFavourablePrice",
+            "columnName": "maxFavourablePrice",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "maxAdversePrice",
+            "columnName": "maxAdversePrice",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastEvaluatedAtMs",
+            "columnName": "lastEvaluatedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "trailingArmPct",
+            "columnName": "trailingArmPct",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "trailingLastRatchetPrice",
+            "columnName": "trailingLastRatchetPrice",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "smartOrderMode",
+            "columnName": "smartOrderMode",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "smartOrderTriggerPrice",
+            "columnName": "smartOrderTriggerPrice",
+            "affinity": "REAL",
+            "notNull": false
+          },
+          {
+            "fieldPath": "smartOrderDirection",
+            "columnName": "smartOrderDirection",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "smartOrderStatus",
+            "columnName": "smartOrderStatus",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "smartOrderUpdatedAtMs",
+            "columnName": "smartOrderUpdatedAtMs",
+            "affinity": "INTEGER",
+            "notNull": false
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_managed_positions_engine_symbol_status",
+            "unique": false,
+            "columnNames": [
+              "engine",
+              "symbol",
+              "status"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_managed_positions_engine_symbol_status` ON `${TABLE_NAME}` (`engine`, `symbol`, `status`)"
+          },
+          {
+            "name": "index_managed_positions_product_symbol_status",
+            "unique": false,
+            "columnNames": [
+              "product",
+              "symbol",
+              "status"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_managed_positions_product_symbol_status` ON `${TABLE_NAME}` (`product`, `symbol`, `status`)"
+          },
+          {
+            "name": "index_managed_positions_openedAtMs",
+            "unique": false,
+            "columnNames": [
+              "openedAtMs"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_managed_positions_openedAtMs` ON `${TABLE_NAME}` (`openedAtMs`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "managed_trades",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `engine` TEXT NOT NULL, `symbol` TEXT NOT NULL, `product` TEXT NOT NULL, `side` TEXT NOT NULL, `quantity` INTEGER NOT NULL, `entryPrice` REAL NOT NULL, `exitPrice` REAL NOT NULL, `grossPnl` REAL NOT NULL, `estimatedCosts` REAL NOT NULL, `netPnl` REAL NOT NULL, `exitReason` TEXT NOT NULL, `strategy` TEXT NOT NULL, `regime` TEXT NOT NULL, `confidence` REAL NOT NULL, `mfeRupees` REAL NOT NULL, `maeRupees` REAL NOT NULL, `sourceEventId` INTEGER, `openOrderId` TEXT NOT NULL, `closeOrderId` TEXT NOT NULL, `openedAtMs` INTEGER NOT NULL, `closedAtMs` INTEGER NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "engine",
+            "columnName": "engine",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "symbol",
+            "columnName": "symbol",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "product",
+            "columnName": "product",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "side",
+            "columnName": "side",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "quantity",
+            "columnName": "quantity",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "entryPrice",
+            "columnName": "entryPrice",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "exitPrice",
+            "columnName": "exitPrice",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "grossPnl",
+            "columnName": "grossPnl",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "estimatedCosts",
+            "columnName": "estimatedCosts",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "netPnl",
+            "columnName": "netPnl",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "exitReason",
+            "columnName": "exitReason",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "strategy",
+            "columnName": "strategy",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "regime",
+            "columnName": "regime",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "confidence",
+            "columnName": "confidence",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "mfeRupees",
+            "columnName": "mfeRupees",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "maeRupees",
+            "columnName": "maeRupees",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceEventId",
+            "columnName": "sourceEventId",
+            "affinity": "INTEGER",
+            "notNull": false
+          },
+          {
+            "fieldPath": "openOrderId",
+            "columnName": "openOrderId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "closeOrderId",
+            "columnName": "closeOrderId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "openedAtMs",
+            "columnName": "openedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "closedAtMs",
+            "columnName": "closedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_managed_trades_engine_closedAtMs",
+            "unique": false,
+            "columnNames": [
+              "engine",
+              "closedAtMs"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_managed_trades_engine_closedAtMs` ON `${TABLE_NAME}` (`engine`, `closedAtMs`)"
+          },
+          {
+            "name": "index_managed_trades_symbol_closedAtMs",
+            "unique": false,
+            "columnNames": [
+              "symbol",
+              "closedAtMs"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_managed_trades_symbol_closedAtMs` ON `${TABLE_NAME}` (`symbol`, `closedAtMs`)"
+          },
+          {
+            "name": "index_managed_trades_closedAtMs",
+            "unique": false,
+            "columnNames": [
+              "closedAtMs"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_managed_trades_closedAtMs` ON `${TABLE_NAME}` (`closedAtMs`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "execution_samples",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `transactionType` TEXT NOT NULL, `symbol` TEXT NOT NULL, `quantity` INTEGER NOT NULL, `product` TEXT NOT NULL, `orderId` TEXT NOT NULL, `submittedAtMs` INTEGER NOT NULL, `filledAtMs` INTEGER NOT NULL, `totalExecutionMs` INTEGER NOT NULL, `appDispatchMicros` INTEGER NOT NULL, `brokerAckMs` INTEGER NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "transactionType",
+            "columnName": "transactionType",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "symbol",
+            "columnName": "symbol",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "quantity",
+            "columnName": "quantity",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "product",
+            "columnName": "product",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "orderId",
+            "columnName": "orderId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "submittedAtMs",
+            "columnName": "submittedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "filledAtMs",
+            "columnName": "filledAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "totalExecutionMs",
+            "columnName": "totalExecutionMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "appDispatchMicros",
+            "columnName": "appDispatchMicros",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "brokerAckMs",
+            "columnName": "brokerAckMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_execution_samples_transactionType_filledAtMs",
+            "unique": false,
+            "columnNames": [
+              "transactionType",
+              "filledAtMs"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_execution_samples_transactionType_filledAtMs` ON `${TABLE_NAME}` (`transactionType`, `filledAtMs`)"
+          },
+          {
+            "name": "index_execution_samples_filledAtMs",
+            "unique": false,
+            "columnNames": [
+              "filledAtMs"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_execution_samples_filledAtMs` ON `${TABLE_NAME}` (`filledAtMs`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "learning_calls",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `callDate` TEXT NOT NULL, `symbol` TEXT NOT NULL, `source` TEXT NOT NULL, `action` TEXT NOT NULL, `entryPrice` REAL NOT NULL, `targetPrice` REAL, `targetPct` REAL, `multifyExitPrice` REAL, `longRealizedPct` REAL, `multifyMaxPrice` REAL, `multifyMfePct` REAL, `buyEventId` INTEGER, `sellEventId` INTEGER, `buyAtMs` INTEGER NOT NULL, `sellAtMs` INTEGER, `updatedAtMs` INTEGER NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "callDate",
+            "columnName": "callDate",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "symbol",
+            "columnName": "symbol",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "source",
+            "columnName": "source",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "action",
+            "columnName": "action",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "entryPrice",
+            "columnName": "entryPrice",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "targetPrice",
+            "columnName": "targetPrice",
+            "affinity": "REAL",
+            "notNull": false
+          },
+          {
+            "fieldPath": "targetPct",
+            "columnName": "targetPct",
+            "affinity": "REAL",
+            "notNull": false
+          },
+          {
+            "fieldPath": "multifyExitPrice",
+            "columnName": "multifyExitPrice",
+            "affinity": "REAL",
+            "notNull": false
+          },
+          {
+            "fieldPath": "longRealizedPct",
+            "columnName": "longRealizedPct",
+            "affinity": "REAL",
+            "notNull": false
+          },
+          {
+            "fieldPath": "multifyMaxPrice",
+            "columnName": "multifyMaxPrice",
+            "affinity": "REAL",
+            "notNull": false
+          },
+          {
+            "fieldPath": "multifyMfePct",
+            "columnName": "multifyMfePct",
+            "affinity": "REAL",
+            "notNull": false
+          },
+          {
+            "fieldPath": "buyEventId",
+            "columnName": "buyEventId",
+            "affinity": "INTEGER",
+            "notNull": false
+          },
+          {
+            "fieldPath": "sellEventId",
+            "columnName": "sellEventId",
+            "affinity": "INTEGER",
+            "notNull": false
+          },
+          {
+            "fieldPath": "buyAtMs",
+            "columnName": "buyAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sellAtMs",
+            "columnName": "sellAtMs",
+            "affinity": "INTEGER",
+            "notNull": false
+          },
+          {
+            "fieldPath": "updatedAtMs",
+            "columnName": "updatedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_learning_calls_callDate",
+            "unique": false,
+            "columnNames": [
+              "callDate"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_learning_calls_callDate` ON `${TABLE_NAME}` (`callDate`)"
+          },
+          {
+            "name": "index_learning_calls_symbol_callDate",
+            "unique": false,
+            "columnNames": [
+              "symbol",
+              "callDate"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_learning_calls_symbol_callDate` ON `${TABLE_NAME}` (`symbol`, `callDate`)"
+          },
+          {
+            "name": "index_learning_calls_source",
+            "unique": false,
+            "columnNames": [
+              "source"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_learning_calls_source` ON `${TABLE_NAME}` (`source`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "price_observations",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `eventId` INTEGER NOT NULL, `symbol` TEXT NOT NULL, `phase` TEXT NOT NULL, `offsetSeconds` INTEGER NOT NULL, `observedAtMs` INTEGER NOT NULL, `price` REAL NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "eventId",
+            "columnName": "eventId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "symbol",
+            "columnName": "symbol",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "phase",
+            "columnName": "phase",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "offsetSeconds",
+            "columnName": "offsetSeconds",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "observedAtMs",
+            "columnName": "observedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "price",
+            "columnName": "price",
+            "affinity": "REAL",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_price_observations_eventId_phase_offsetSeconds",
+            "unique": true,
+            "columnNames": [
+              "eventId",
+              "phase",
+              "offsetSeconds"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_price_observations_eventId_phase_offsetSeconds` ON `${TABLE_NAME}` (`eventId`, `phase`, `offsetSeconds`)"
+          },
+          {
+            "name": "index_price_observations_symbol_observedAtMs",
+            "unique": false,
+            "columnNames": [
+              "symbol",
+              "observedAtMs"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_price_observations_symbol_observedAtMs` ON `${TABLE_NAME}` (`symbol`, `observedAtMs`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "long_forecasts",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `forecastDate` TEXT NOT NULL, `rank` INTEGER NOT NULL, `symbol` TEXT NOT NULL, `entryPrice` REAL NOT NULL, `targetPct` REAL NOT NULL, `targetPrice` REAL NOT NULL, `confidence` REAL NOT NULL, `score` REAL NOT NULL, `strategy` TEXT NOT NULL, `regime` TEXT NOT NULL, `marketRegime` TEXT NOT NULL, `sectorRegime` TEXT NOT NULL, `championKey` TEXT NOT NULL, `reason` TEXT NOT NULL, `generatedAtMs` INTEGER NOT NULL, `status` TEXT NOT NULL, `targetHitAtMs` INTEGER, `lastPrice` REAL NOT NULL, `maxFavourablePct` REAL NOT NULL, `maxAdversePct` REAL NOT NULL, `lastObservedAtMs` INTEGER NOT NULL, `notified` INTEGER NOT NULL, `multifyMatched` INTEGER NOT NULL, `qualityTier` TEXT NOT NULL, `executionEligible` INTEGER NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "forecastDate",
+            "columnName": "forecastDate",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "rank",
+            "columnName": "rank",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "symbol",
+            "columnName": "symbol",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "entryPrice",
+            "columnName": "entryPrice",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "targetPct",
+            "columnName": "targetPct",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "targetPrice",
+            "columnName": "targetPrice",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "confidence",
+            "columnName": "confidence",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "score",
+            "columnName": "score",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "strategy",
+            "columnName": "strategy",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "regime",
+            "columnName": "regime",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "marketRegime",
+            "columnName": "marketRegime",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sectorRegime",
+            "columnName": "sectorRegime",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "championKey",
+            "columnName": "championKey",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "reason",
+            "columnName": "reason",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "generatedAtMs",
+            "columnName": "generatedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "targetHitAtMs",
+            "columnName": "targetHitAtMs",
+            "affinity": "INTEGER",
+            "notNull": false
+          },
+          {
+            "fieldPath": "lastPrice",
+            "columnName": "lastPrice",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "maxFavourablePct",
+            "columnName": "maxFavourablePct",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "maxAdversePct",
+            "columnName": "maxAdversePct",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastObservedAtMs",
+            "columnName": "lastObservedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "notified",
+            "columnName": "notified",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "multifyMatched",
+            "columnName": "multifyMatched",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "qualityTier",
+            "columnName": "qualityTier",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "executionEligible",
+            "columnName": "executionEligible",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_long_forecasts_forecastDate_rank",
+            "unique": true,
+            "columnNames": [
+              "forecastDate",
+              "rank"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_long_forecasts_forecastDate_rank` ON `${TABLE_NAME}` (`forecastDate`, `rank`)"
+          },
+          {
+            "name": "index_long_forecasts_forecastDate_symbol",
+            "unique": false,
+            "columnNames": [
+              "forecastDate",
+              "symbol"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_long_forecasts_forecastDate_symbol` ON `${TABLE_NAME}` (`forecastDate`, `symbol`)"
+          },
+          {
+            "name": "index_long_forecasts_status_forecastDate",
+            "unique": false,
+            "columnNames": [
+              "status",
+              "forecastDate"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_long_forecasts_status_forecastDate` ON `${TABLE_NAME}` (`status`, `forecastDate`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "forecast_research_snapshots",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `researchDate` TEXT NOT NULL, `scanAtMs` INTEGER NOT NULL, `symbol` TEXT NOT NULL, `rank` INTEGER NOT NULL, `qualityTier` TEXT NOT NULL, `publishEligible` INTEGER NOT NULL, `executionEligible` INTEGER NOT NULL, `targetPct` REAL NOT NULL, `entryPrice` REAL NOT NULL, `regime` TEXT NOT NULL, `marketRegime` TEXT NOT NULL, `strategy` TEXT NOT NULL, `directionalScore` REAL NOT NULL, `confidence` REAL NOT NULL, `rejectionReason` TEXT NOT NULL, `featureJson` TEXT NOT NULL, `voteJson` TEXT NOT NULL, `multifyMatched` INTEGER NOT NULL, `multifyEventId` INTEGER, `multifyAtMs` INTEGER, `outcomeMfePct` REAL, `outcomeMaePct` REAL, `outcomeClosePct` REAL, `outcomeTargetHit` INTEGER, `outcomeUpdatedAtMs` INTEGER)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "researchDate",
+            "columnName": "researchDate",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "scanAtMs",
+            "columnName": "scanAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "symbol",
+            "columnName": "symbol",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "rank",
+            "columnName": "rank",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "qualityTier",
+            "columnName": "qualityTier",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "publishEligible",
+            "columnName": "publishEligible",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "executionEligible",
+            "columnName": "executionEligible",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "targetPct",
+            "columnName": "targetPct",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "entryPrice",
+            "columnName": "entryPrice",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "regime",
+            "columnName": "regime",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "marketRegime",
+            "columnName": "marketRegime",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "strategy",
+            "columnName": "strategy",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "directionalScore",
+            "columnName": "directionalScore",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "confidence",
+            "columnName": "confidence",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "rejectionReason",
+            "columnName": "rejectionReason",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "featureJson",
+            "columnName": "featureJson",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "voteJson",
+            "columnName": "voteJson",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "multifyMatched",
+            "columnName": "multifyMatched",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "multifyEventId",
+            "columnName": "multifyEventId",
+            "affinity": "INTEGER",
+            "notNull": false
+          },
+          {
+            "fieldPath": "multifyAtMs",
+            "columnName": "multifyAtMs",
+            "affinity": "INTEGER",
+            "notNull": false
+          },
+          {
+            "fieldPath": "outcomeMfePct",
+            "columnName": "outcomeMfePct",
+            "affinity": "REAL",
+            "notNull": false
+          },
+          {
+            "fieldPath": "outcomeMaePct",
+            "columnName": "outcomeMaePct",
+            "affinity": "REAL",
+            "notNull": false
+          },
+          {
+            "fieldPath": "outcomeClosePct",
+            "columnName": "outcomeClosePct",
+            "affinity": "REAL",
+            "notNull": false
+          },
+          {
+            "fieldPath": "outcomeTargetHit",
+            "columnName": "outcomeTargetHit",
+            "affinity": "INTEGER",
+            "notNull": false
+          },
+          {
+            "fieldPath": "outcomeUpdatedAtMs",
+            "columnName": "outcomeUpdatedAtMs",
+            "affinity": "INTEGER",
+            "notNull": false
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_forecast_research_snapshots_researchDate_scanAtMs",
+            "unique": false,
+            "columnNames": [
+              "researchDate",
+              "scanAtMs"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_forecast_research_snapshots_researchDate_scanAtMs` ON `${TABLE_NAME}` (`researchDate`, `scanAtMs`)"
+          },
+          {
+            "name": "index_forecast_research_snapshots_researchDate_symbol",
+            "unique": false,
+            "columnNames": [
+              "researchDate",
+              "symbol"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_forecast_research_snapshots_researchDate_symbol` ON `${TABLE_NAME}` (`researchDate`, `symbol`)"
+          },
+          {
+            "name": "index_forecast_research_snapshots_qualityTier",
+            "unique": false,
+            "columnNames": [
+              "qualityTier"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_forecast_research_snapshots_qualityTier` ON `${TABLE_NAME}` (`qualityTier`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "forecast_positive_evidence",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`evidenceKey` TEXT NOT NULL, `source` TEXT NOT NULL, `evidenceDate` TEXT NOT NULL, `eventAtMs` INTEGER NOT NULL, `symbol` TEXT NOT NULL, `strategy` TEXT NOT NULL, `regime` TEXT NOT NULL, `marketRegime` TEXT NOT NULL, `sectorRegime` TEXT NOT NULL, `capBucket` TEXT NOT NULL, `timeBucket` TEXT NOT NULL, `dominantFamily` TEXT NOT NULL, `familyConsensus` REAL NOT NULL, `momentumFamilyScore` REAL NOT NULL, `participationFamilyScore` REAL NOT NULL, `structureFamilyScore` REAL NOT NULL, `factorJson` TEXT NOT NULL, `voteJson` TEXT NOT NULL, `entryPrice` REAL NOT NULL, `targetPct` REAL, `maxFavourablePct` REAL NOT NULL, `maxAdversePct` REAL NOT NULL, `closePct` REAL, `realizedPct` REAL, `protectedTrailPct` REAL, `trailArmed` INTEGER NOT NULL, `targetHit` INTEGER NOT NULL, `positiveReason` TEXT NOT NULL, `qualityTier` TEXT NOT NULL, `reconstructionQuality` TEXT NOT NULL, `updatedAtMs` INTEGER NOT NULL, PRIMARY KEY(`evidenceKey`))",
+        "fields": [
+          {
+            "fieldPath": "evidenceKey",
+            "columnName": "evidenceKey",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "source",
+            "columnName": "source",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "evidenceDate",
+            "columnName": "evidenceDate",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "eventAtMs",
+            "columnName": "eventAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "symbol",
+            "columnName": "symbol",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "strategy",
+            "columnName": "strategy",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "regime",
+            "columnName": "regime",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "marketRegime",
+            "columnName": "marketRegime",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sectorRegime",
+            "columnName": "sectorRegime",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "capBucket",
+            "columnName": "capBucket",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "timeBucket",
+            "columnName": "timeBucket",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "dominantFamily",
+            "columnName": "dominantFamily",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "familyConsensus",
+            "columnName": "familyConsensus",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "momentumFamilyScore",
+            "columnName": "momentumFamilyScore",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "participationFamilyScore",
+            "columnName": "participationFamilyScore",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "structureFamilyScore",
+            "columnName": "structureFamilyScore",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "factorJson",
+            "columnName": "factorJson",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "voteJson",
+            "columnName": "voteJson",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "entryPrice",
+            "columnName": "entryPrice",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "targetPct",
+            "columnName": "targetPct",
+            "affinity": "REAL",
+            "notNull": false
+          },
+          {
+            "fieldPath": "maxFavourablePct",
+            "columnName": "maxFavourablePct",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "maxAdversePct",
+            "columnName": "maxAdversePct",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "closePct",
+            "columnName": "closePct",
+            "affinity": "REAL",
+            "notNull": false
+          },
+          {
+            "fieldPath": "realizedPct",
+            "columnName": "realizedPct",
+            "affinity": "REAL",
+            "notNull": false
+          },
+          {
+            "fieldPath": "protectedTrailPct",
+            "columnName": "protectedTrailPct",
+            "affinity": "REAL",
+            "notNull": false
+          },
+          {
+            "fieldPath": "trailArmed",
+            "columnName": "trailArmed",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "targetHit",
+            "columnName": "targetHit",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "positiveReason",
+            "columnName": "positiveReason",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "qualityTier",
+            "columnName": "qualityTier",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "reconstructionQuality",
+            "columnName": "reconstructionQuality",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAtMs",
+            "columnName": "updatedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "evidenceKey"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_forecast_positive_evidence_source_evidenceDate",
+            "unique": false,
+            "columnNames": [
+              "source",
+              "evidenceDate"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_forecast_positive_evidence_source_evidenceDate` ON `${TABLE_NAME}` (`source`, `evidenceDate`)"
+          },
+          {
+            "name": "index_forecast_positive_evidence_marketRegime_regime_strategy",
+            "unique": false,
+            "columnNames": [
+              "marketRegime",
+              "regime",
+              "strategy"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_forecast_positive_evidence_marketRegime_regime_strategy` ON `${TABLE_NAME}` (`marketRegime`, `regime`, `strategy`)"
+          },
+          {
+            "name": "index_forecast_positive_evidence_capBucket_dominantFamily",
+            "unique": false,
+            "columnNames": [
+              "capBucket",
+              "dominantFamily"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_forecast_positive_evidence_capBucket_dominantFamily` ON `${TABLE_NAME}` (`capBucket`, `dominantFamily`)"
+          },
+          {
+            "name": "index_forecast_positive_evidence_symbol_evidenceDate",
+            "unique": false,
+            "columnNames": [
+              "symbol",
+              "evidenceDate"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_forecast_positive_evidence_symbol_evidenceDate` ON `${TABLE_NAME}` (`symbol`, `evidenceDate`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "forecast_champions",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`key` TEXT NOT NULL, `marketRegime` TEXT NOT NULL, `sectorRegime` TEXT NOT NULL, `regime` TEXT NOT NULL, `strategy` TEXT NOT NULL, `wins` INTEGER NOT NULL, `losses` INTEGER NOT NULL, `sampleCount` INTEGER NOT NULL, `distinctDays` INTEGER NOT NULL, `distinctSymbols` INTEGER NOT NULL, `frozen` INTEGER NOT NULL, `firstSeenAtMs` INTEGER NOT NULL, `lastUpdatedAtMs` INTEGER NOT NULL, PRIMARY KEY(`key`))",
+        "fields": [
+          {
+            "fieldPath": "key",
+            "columnName": "key",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "marketRegime",
+            "columnName": "marketRegime",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sectorRegime",
+            "columnName": "sectorRegime",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "regime",
+            "columnName": "regime",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "strategy",
+            "columnName": "strategy",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "wins",
+            "columnName": "wins",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "losses",
+            "columnName": "losses",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sampleCount",
+            "columnName": "sampleCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "distinctDays",
+            "columnName": "distinctDays",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "distinctSymbols",
+            "columnName": "distinctSymbols",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "frozen",
+            "columnName": "frozen",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "firstSeenAtMs",
+            "columnName": "firstSeenAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastUpdatedAtMs",
+            "columnName": "lastUpdatedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "key"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_forecast_champions_marketRegime_regime_strategy",
+            "unique": true,
+            "columnNames": [
+              "marketRegime",
+              "regime",
+              "strategy"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_forecast_champions_marketRegime_regime_strategy` ON `${TABLE_NAME}` (`marketRegime`, `regime`, `strategy`)"
+          }
+        ],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "research_reports",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `reportDate` TEXT NOT NULL, `generatedAtMs` INTEGER NOT NULL, `title` TEXT NOT NULL, `summary` TEXT NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "reportDate",
+            "columnName": "reportDate",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "generatedAtMs",
+            "columnName": "generatedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "title",
+            "columnName": "title",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "summary",
+            "columnName": "summary",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_research_reports_reportDate",
+            "unique": true,
+            "columnNames": [
+              "reportDate"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_research_reports_reportDate` ON `${TABLE_NAME}` (`reportDate`)"
+          }
+        ],
+        "foreignKeys": []
+      }
+    ],
+    "views": [],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '1e3b9efbaf05189b86ac88549eb046f5')"
+    ]
+  }
+}

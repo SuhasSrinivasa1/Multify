@@ -5,10 +5,10 @@ package com.multify.traderpro.engine
  * it only decides whether adaptive Forecast work may consume spare API capacity.
  */
 object MarketPriorityPolicy {
-    const val FIXED_GUARD_WINDOW_MS = 45_000L
-    const val FORECAST_MAX_LIVE_UTILIZATION_PCT = 45
-    const val FORECAST_MAX_HISTORICAL_UTILIZATION_PCT = 30
-    const val FORECAST_MAX_NON_TRADING_UTILIZATION_PCT = 40
+    const val FIXED_GUARD_WINDOW_MS = 15_000L
+    const val FORECAST_MAX_LIVE_UTILIZATION_PCT = 80
+    const val FORECAST_MAX_HISTORICAL_UTILIZATION_PCT = 85
+    const val FORECAST_MAX_NON_TRADING_UTILIZATION_PCT = 70
     const val LIVE_FORECAST_UNLOCK_SESSIONS = 5
 
     fun canRunForecast(

@@ -6,6 +6,9 @@ import com.multify.traderpro.data.preferences.AppPreferences
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
+import okhttp3.Request
+import java.io.IOException
 import com.multify.traderpro.engine.GrowwApiBudgetPolicy
 import okhttp3.Interceptor
 import okhttp3.Response
@@ -24,7 +27,8 @@ internal class GrowwRateLimitInterceptor(
         val minute: ArrayDeque<Long> = ArrayDeque(),
         var cooldownUntilMs: Long = 0L
     )
-    private data class PermitResult(val waitedMs: Long, val dominantReason: String)
+    /** An Alpha request granted a coroutine permit before occupying an OkHttp dispatcher thread. */
+    internal class PreAdmitted
 
     private val lock = Any()
     private val lastBlockedAuditMs = EnumMap<GrowwApiUsageLedger.Category, Long>(GrowwApiUsageLedger.Category::class.java)
@@ -42,22 +46,11 @@ internal class GrowwRateLimitInterceptor(
             auditBlocked(category, path, blocked)
             throw blocked
         }
-        val permit = awaitPermit(category)
-        if (permit.waitedMs >= AUDIT_WAIT_THRESHOLD_MS) {
-            val row = GrowwApiUsageLedger.snapshot().categories.first { it.category == category }
-            auditLogger.logAsync("API_RATE_LIMIT", "CLIENT_GOVERNOR_WAIT", mapOf(
-                "method" to request.method,
-                "path" to path,
-                "category" to category.name,
-                "wait_ms" to permit.waitedMs,
-                "reason" to permit.dominantReason,
-                "used_1s" to row.usedLastSecond,
-                "used_60s" to row.usedLastMinute,
-                "app_limit_1s" to row.appPerSecondLimit,
-                "app_limit_60s" to row.appPerMinuteLimit,
-                "hard_limit_1s" to row.hardPerSecondLimit,
-                "hard_limit_60s" to row.hardPerMinuteLimit
-            ))
+        // Fail closed if somebody bypasses the asynchronous Alpha Call.Factory. This ensures
+        // every outbound request passes the same rate and recovery gates, with no Thread.sleep
+        // occupying OkHttp's dispatcher while waiting for permits.
+        if (request.tag(PreAdmitted::class.java) == null) {
+            throw IOException("Alpha call missing asynchronous API admission")
         }
 
         try { recoveryGate.reserveRequest(category) }
@@ -125,11 +118,19 @@ internal class GrowwRateLimitInterceptor(
         ))
     }
 
-    private fun awaitPermit(category: GrowwApiUsageLedger.Category): PermitResult {
+    /** Reserve the exact same per-second/per-minute budget *before* network dispatch. */
+    internal suspend fun acquirePermit(request: Request) {
+        val path = request.url.encodedPath
+        val category = classify(request.method, path)
         val limits = limits(category)
         var totalWaitMs = 0L
         var dominantReason = "NONE"
         while (true) {
+            try { recoveryGate.checkRequestAllowed(category) }
+            catch (blocked: GrowwRecoveryGate.LocallyBlocked) {
+                auditBlocked(category, path, blocked)
+                throw blocked
+            }
             var reason = "NONE"
             val waitMs = synchronized(lock) {
                 val now = SystemClock.elapsedRealtime()
@@ -155,13 +156,28 @@ internal class GrowwRateLimitInterceptor(
                 } else wait
             }
             if (waitMs <= 0L) {
-                if (totalWaitMs > 0L) GrowwApiUsageLedger.recordPermitWait(category, totalWaitMs)
-                return PermitResult(totalWaitMs, dominantReason)
+                if (totalWaitMs > 0L) {
+                    GrowwApiUsageLedger.recordPermitWait(category, totalWaitMs)
+                    if (totalWaitMs >= AUDIT_WAIT_THRESHOLD_MS) {
+                        val row = GrowwApiUsageLedger.snapshot().categories.first { it.category == category }
+                        auditLogger.logAsync("API_RATE_LIMIT", "CLIENT_GOVERNOR_WAIT", mapOf(
+                            "method" to request.method, "path" to path,
+                            "category" to category.name, "wait_ms" to totalWaitMs,
+                            "reason" to dominantReason, "used_1s" to row.usedLastSecond,
+                            "used_60s" to row.usedLastMinute,
+                            "app_limit_1s" to row.appPerSecondLimit,
+                            "app_limit_60s" to row.appPerMinuteLimit,
+                            "hard_limit_1s" to row.hardPerSecondLimit,
+                            "hard_limit_60s" to row.hardPerMinuteLimit
+                        ))
+                    }
+                }
+                return
             }
             dominantReason = reason
-            val slept = waitMs.coerceAtLeast(5L)
-            Thread.sleep(slept)
-            totalWaitMs += slept
+            val sleep = waitMs.coerceAtLeast(5L)
+            delay(sleep) // Suspending: consumes no OkHttp dispatcher worker.
+            totalWaitMs += sleep
         }
     }
 

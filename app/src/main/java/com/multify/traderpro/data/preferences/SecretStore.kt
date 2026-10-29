@@ -36,6 +36,18 @@ class SecretStore @Inject constructor(
 
     fun clearAccessToken() = clear("access_token")
 
+    fun hasBetaCredentials(): Boolean = prefs.contains(key("beta_api_key", "ciphertext")) &&
+        prefs.contains(key("beta_totp_secret", "ciphertext"))
+    fun putBetaApiKey(value: String) = put("beta_api_key", value)
+    fun putBetaTotpSecret(value: String) = put("beta_totp_secret", value)
+    fun putBetaAccessToken(value: String) = put("beta_access_token", value)
+    fun getBetaApiKey(): String? = get("beta_api_key")
+    fun getBetaTotpSecret(): String? = get("beta_totp_secret")
+    fun getBetaAccessToken(): String? = get("beta_access_token")
+    fun putBetaUcc(value: String) = put("beta_ucc", value)
+    fun getBetaUcc(): String? = get("beta_ucc")
+    fun clearBetaAccessToken() = clear("beta_access_token")
+
     fun clearAll() {
         prefs.edit().clear().apply()
     }

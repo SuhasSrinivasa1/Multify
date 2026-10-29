@@ -9,14 +9,13 @@ class ForecastPublicationPolicyTest {
         assertFalse(ForecastPublicationPolicy.isReady(false, true, true, 5))
     }
 
-    @Test fun discoveredPrimaryNeedsOnePriorConfirmation() {
-        assertFalse(ForecastPublicationPolicy.isReady(true, true, true, 0))
-        assertTrue(ForecastPublicationPolicy.isReady(true, true, true, 1))
+    @Test fun marketWideDiscoveredEarlyPrimaryCanPublishWithoutAnotherScan() {
+        assertTrue(ForecastPublicationPolicy.isReady(true, true, true, 0))
     }
 
-    @Test fun fallbackPrimaryNeedsTwoPriorConfirmations() {
-        assertFalse(ForecastPublicationPolicy.isReady(true, true, false, 1))
-        assertTrue(ForecastPublicationPolicy.isReady(true, true, false, 2))
+    @Test fun fallbackPrimaryRetainsOnePriorConfirmation() {
+        assertFalse(ForecastPublicationPolicy.isReady(true, true, false, 0))
+        assertTrue(ForecastPublicationPolicy.isReady(true, true, false, 1))
     }
 
     @Test fun nonPrimaryNeverPublishes() {

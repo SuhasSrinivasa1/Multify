@@ -53,7 +53,7 @@ data class PriceObservationEntity(
     tableName = "long_forecasts",
     indices = [
         Index(value = ["forecastDate", "rank"], unique = true),
-        Index(value = ["forecastDate", "symbol"], unique = true),
+        Index(value = ["forecastDate", "symbol"]),
         Index(value = ["status", "forecastDate"])
     ]
 )

@@ -74,6 +74,10 @@ interface LearningDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertForecastResearch(item: ForecastResearchEntity): Long
 
+    /** Bounded transaction for historical ZIP restoration. Never used by live trading. */
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertForecastResearchBatch(items: List<ForecastResearchEntity>): List<Long>
+
     @Update
     suspend fun updateForecastResearch(item: ForecastResearchEntity)
 

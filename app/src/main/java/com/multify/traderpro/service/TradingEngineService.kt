@@ -51,6 +51,8 @@ class TradingEngineService : Service() {
     @Volatile private var lastManagedMonitorSucceeded = true
     private var lastAfterHoursResearchAtMs = 0L
     private var lastAfterHoursMaintenanceAtMs = 0L
+    private var lastFixedOutcomePollAtMs = 0L
+    private var lastForecastOutcomePollAtMs = 0L
     private var lastApiUsageAuditAtMs = 0L
     private var positionProfileWindowStartedAtMs = 0L
     private var positionProfilePasses = 0
@@ -148,6 +150,7 @@ class TradingEngineService : Service() {
             runCatching { repository.ensureFixedEngineSnapshot() }
                 .onFailure { auditLogger.log("RUNTIME", "FIXED_SNAPSHOT_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
             runCatching { repository.ensureHistoricalSeed() }
+            runCatching { repository.activateForecastEarlyEntryOnce() }
 
             var lastHeartbeatAtMs = 0L
             while (isActive) {
@@ -219,6 +222,21 @@ class TradingEngineService : Service() {
                                     auditLogger.log("RUNTIME", "FORECAST_OUTCOME_MONITOR_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName)))
                                 }
                             }.getOrDefault(lastForecastOutcomeCount)
+                    }
+
+                    if (regularSession && nowMs - lastForecastOutcomePollAtMs >= 60_000L &&
+                        repository.forecastBackgroundScanningEnabled()
+                    ) {
+                        lastForecastOutcomePollAtMs = nowMs
+                        lastForecastOutcomeCount = runCatching { repository.monitorForecastOutcomes() }
+                            .onFailure { if (it !is CancellationException) auditLogger.log(
+                                "RUNTIME", "FORECAST_LIVE_OUTCOME_ERROR",
+                                mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
+                            .getOrDefault(lastForecastOutcomeCount)
+                    }
+
+                    if (nowMs - lastFixedOutcomePollAtMs >= 15_000L) {
+                        lastFixedOutcomePollAtMs = nowMs
                         lastFixedOutcomeCount = runCatching { repository.monitorFixedOutcomes() }
                             .onFailure {
                                 if (it !is CancellationException) {
@@ -427,6 +445,7 @@ class TradingEngineService : Service() {
                         }
                         val usageBefore = GrowwApiUsageLedger.snapshot()
                         val cacheHitsBefore = GrowwApiUsageLedger.cacheHitCount()
+                        val historicalBefore = repository.fixedHistoricalRequestCounters()
                         val startedAt = System.currentTimeMillis()
                         val scanned = runCatching { repository.runFixedPriorityCycle() }
                             .onFailure {
@@ -442,6 +461,7 @@ class TradingEngineService : Service() {
                                 val after = usageAfter.categories.first { it.category == category }.totalRequests
                                 return (after - before).coerceAtLeast(0L)
                             }
+                            val historicalAfter = repository.fixedHistoricalRequestCounters()
                             auditLogger.logAsync("RUNTIME", "FIXED_SCAN_PROFILE", mapOf(
                                 "elapsed_ms" to elapsed,
                                 "live_network_requests" to requestDelta(GrowwApiUsageLedger.Category.LIVE_DATA),
@@ -462,6 +482,9 @@ class TradingEngineService : Service() {
                                         usageBefore.categories.first { it.category == GrowwApiUsageLedger.Category.HISTORICAL }.permitWaitMs).coerceAtLeast(0L)
                                     ),
                                 "cache_hits" to (GrowwApiUsageLedger.cacheHitCount() - cacheHitsBefore).coerceAtLeast(0L),
+                                "fixed_incremental_history_requests" to (historicalAfter.second - historicalBefore.second).coerceAtLeast(0L),
+                                "fixed_full_history_requests" to (historicalAfter.first - historicalBefore.first).coerceAtLeast(0L),
+                                "fixed_history_stitch_fallbacks" to (historicalAfter.third - historicalBefore.third).coerceAtLeast(0L),
                                 "evaluation_concurrency_high_end" to 8,
                                 "fixed_formula_changed" to false
                             ))
@@ -486,6 +509,18 @@ class TradingEngineService : Service() {
                             ))
                             scope.launch {
                                 notifyNewFixedRecommendationsAfterOrderPath()
+                            }
+                            // Give Forecast a bounded, broker-budget-aware chance immediately
+                            // after Fixed releases the shared scan mutex. It cannot block the
+                            // Fixed notification path or the portfolio protection monitor.
+                            scope.launch {
+                                if (repository.forecastBackgroundScanningEnabled()) {
+                                    val clock = ZonedDateTime.now(INDIA)
+                                    if (clock.dayOfWeek.value < 6 && clock.toLocalTime() <= LocalTime.of(15, 0)) {
+                                        runCatching { repository.runForecastOpportunisticCycle(postFixedOpportunity = true) }
+                                            .onFailure { err -> auditLogger.logAsync("FORECAST_SCHEDULER", "POST_FIXED_OPPORTUNITY_ERROR", mapOf("message" to (err.message ?: err.javaClass.simpleName))) }
+                                    }
+                                }
                             }
                         }
                     }
