@@ -17,7 +17,7 @@ on:
       - 'v7917/**'
   workflow_dispatch:
 permissions:
-  contents: read
+  contents: write
 jobs:
   android:
     runs-on: ubuntu-latest
@@ -39,6 +39,7 @@ jobs:
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
       - name: Apply v788 baseline and independent v790 Forecast patch
+        if: hashFiles('SOURCE_V7917_MATERIALIZED') == ''
         shell: bash
         run: |
           set -euo pipefail
@@ -149,6 +150,7 @@ jobs:
           print('FIXED protected rules preserved except explicitly approved 5-minute data inputs; Multify handler identical')
           PY
       - name: Apply v796 bounded Fixed incremental history and post-Fixed Forecast fairness
+        if: hashFiles('SOURCE_V7917_MATERIALIZED') == ''
         shell: bash
         run: |
           set -euo pipefail
@@ -186,6 +188,7 @@ jobs:
           print('v796: Fixed scorer, Multify BUY, SELL ownership, and 5m/1m candle settings verified')
           PY
       - name: Apply v797 targeted ARM, Forecast retry and Fixed history eligibility fixes
+        if: hashFiles('SOURCE_V7917_MATERIALIZED') == ''
         shell: bash
         run: |
           set -euo pipefail
@@ -226,6 +229,7 @@ jobs:
           print('Fixed 5m protected rules, Forecast 1m, Multify BUY, ownership guard preserved')
           PY
       - name: Apply v798 null-safe broker inventory without changing Fixed engine
+        if: hashFiles('SOURCE_V7917_MATERIALIZED') == ''
         shell: bash
         run: |
           set -euo pipefail
@@ -257,6 +261,7 @@ jobs:
           print('v798: Fixed protected scoring, 5-minute candles, Multify buying and ownership SELL rules unchanged')
           PY
       - name: Apply v799 Fixed cooldown guard and complete learning restore
+        if: hashFiles('SOURCE_V7917_MATERIALIZED') == ''
         shell: bash
         run: |
           set -euo pipefail
@@ -301,6 +306,7 @@ jobs:
           print('v799 locked Fixed scorer, 150s cadence, 5m/1m inputs, Multify BUY, SELL protections PASS')
           PY
       - name: Apply v799 resumable research replay retry policy
+        if: hashFiles('SOURCE_V7917_MATERIALIZED') == ''
         shell: bash
         run: |
           set -euo pipefail
@@ -317,6 +323,7 @@ jobs:
           print('v799 replay: rotating backfill retries enabled, Fixed cadence unchanged')
           PY
       - name: Apply v7910 BUY toggle, ARM and entry safety update
+        if: hashFiles('SOURCE_V7917_MATERIALIZED') == ''
         shell: bash
         run: |
           set -euo pipefail
@@ -373,6 +380,7 @@ jobs:
           print('v7910: Fixed LOCK, scorer and trailing unchanged; ARM, Fixed and Forecast BUY safety fixes verified')
           PY
       - name: Apply common minus two percent hard stop (Multify, Fixed, Forecast)
+        if: hashFiles('SOURCE_V7917_MATERIALIZED') == ''
         shell: bash
         run: |
           set -euo pipefail
@@ -411,6 +419,7 @@ jobs:
           print('v7911: -2% common GTT + direct SELL fallback, protected Fixed decision/scorer and profitable trailing intact')
           PY
       - name: Apply v7912 nonblocking shadow factor telemetry
+        if: hashFiles('SOURCE_V7917_MATERIALIZED') == ''
         shell: bash
         run: |
           set -euo pipefail
@@ -463,6 +472,7 @@ jobs:
           print('Frozen Fixed formula, 150s cadence, 5m/1m candles, SELL -2%, UI and BUY toggles preserved; 40-factor telemetry nonblocking')
           PY
       - name: Apply v7913 Forecast paired-admission and Fixed history eligibility fix
+        if: hashFiles('SOURCE_V7917_MATERIALIZED') == ''
         shell: bash
         run: |
           set -euo pipefail
@@ -501,6 +511,7 @@ jobs:
           print('v7913: Fixed decisions, timing, 5m candles, Multify, SELL untouched; Forecast yields non-consumptively and historical cache fallback authoritative')
           PY
       - name: Apply v7914 background and batched historical learning restore
+        if: hashFiles('SOURCE_V7917_MATERIALIZED') == ''
         shell: bash
         run: |
           set -euo pipefail
@@ -546,6 +557,7 @@ jobs:
           print('Restore safely moved to IO and batches. Frozen Fixed, 150s cadence, GTT -2%, profit trailing and Multify unchanged.')
           PY
       - name: Apply v7915 Fixed-first API capacity and bounded Forecast research windows
+        if: hashFiles('SOURCE_V7917_MATERIALIZED') == ''
         shell: bash
         run: |
           set -euo pipefail
@@ -588,6 +600,7 @@ jobs:
           print('Fixed scoring and scan lock unchanged; Multify unchanged; stop and trailing unchanged; conservative Forecast and empty-inventory traffic optimizations')
           PY
       - name: Apply v7916 Alpha/Beta read-only account separation and 1m/5m Forecast shadow
+        if: hashFiles('SOURCE_V7917_MATERIALIZED') == ''
         shell: bash
         run: |
           set -euo pipefail
@@ -636,6 +649,7 @@ jobs:
           print('Unchanged Fixed/Multify/SELL paths; Beta endpoint denylist is strict allowlist; beta research 1m + derived 5m')
           PY
       - name: Apply v7917 nonblocking Alpha admission, account-scoped singleflight and independent Beta research
+        if: hashFiles('SOURCE_V7917_MATERIALIZED') == ''
         shell: bash
         run: |
           set -euo pipefail
@@ -689,6 +703,30 @@ jobs:
           assert 'MAX_LOSS_PCT = 2.0' in (root/'engine/HardStopLossPolicy.kt').read_text()
           print('Fixed frozen, Multify and SELL unchanged; async Alpha; account-and-token scoped market cache; independent Beta research mutex')
           PY
+      - name: Mark and verify expanded v7.9.17 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          repo=Path('app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt').read_text()
+          assert 'versionCode = 7917' in Path('app/build.gradle.kts').read_text()
+          assert 'FixedLocalStrategyEngine.buildFeatures(quote, historical, 5)' in repo
+          assert 'LocalStrategyEngine.buildFeatures(quote, historical, 1)' in repo
+          assert 'betaForecastCycleMutex' in repo
+          assert 'forecastResearchHitRate >= (fixedHitRate * 1.20)' in repo
+          limiter=Path('app/src/main/java/com/multify/traderpro/data/network/GrowwRateLimitInterceptor.kt').read_text()
+          assert 'suspend fun acquirePermit' in limiter and 'delay(sleep)' in limiter
+          assert 'Thread.sleep(' not in limiter
+          cache=Path('app/src/main/java/com/multify/traderpro/data/network/GrowwHotDataCacheInterceptor.kt').read_text()
+          assert 'SINGLE_FLIGHT' in cache and 'MessageDigest.getInstance("SHA-256")' in cache
+          factory=Path('app/src/main/java/com/multify/traderpro/data/network/GrowwApiFactory.kt').read_text()
+          assert 'AlphaAsyncCallFactory(client, alphaGovernor, alphaHotCache)' in factory
+          assert 'BetaReadOnlyInterceptor()' in factory
+          assert 'versionCode = 7917' in Path('app/build.gradle.kts').read_text()
+          Path('SOURCE_V7917_MATERIALIZED').write_text('Expanded v7.9.17 source has been verified and committed by CI.\\n')
+          print('Expanded v7.9.17 source invariants verified.')
+          PY
       - name: Backend tests
         shell: bash
         run: |
@@ -716,6 +754,19 @@ jobs:
               if not p.is_file() or any(s in {'.git','.gradle','build','dist','v788','v789','v790','v791','v792','v793','v794','v795','v796','v797','v798','v799','v7910','v7911','v7912','v7913','v7914','v7915','v7916','v7917'} for s in p.parts):continue
               z.write(p,p.as_posix())
           PY
+      - name: Commit expanded v7.9.17 source tree to branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/src app/build.gradle.kts app/schemas SOURCE_V7917_MATERIALIZED
+          if git diff --cached --quiet; then
+            echo "Expanded source already committed."
+          else
+            git commit -m "source: materialize v7.9.17 Fixed-first implementation"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:
