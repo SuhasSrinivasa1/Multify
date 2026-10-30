@@ -50,6 +50,8 @@ import com.multify.traderpro.data.network.OrderCreateRequest
 import com.multify.traderpro.data.network.OrderPayload
 import com.multify.traderpro.data.network.OrderListPayload
 import com.multify.traderpro.data.network.OrderTradeRecord
+import com.multify.traderpro.data.network.OrderListPayload
+import com.multify.traderpro.data.network.OrderTradeRecord
 import com.multify.traderpro.data.network.PositionDto
 import com.multify.traderpro.data.network.QuotePayload
 import com.multify.traderpro.data.network.RecentDecisionDto
@@ -85,6 +87,8 @@ import com.multify.traderpro.engine.FixedPositiveTransferCase
 import com.multify.traderpro.engine.ForecastQualityDecision
 import com.multify.traderpro.engine.ForecastQualityPolicy
 import com.multify.traderpro.engine.ForecastTargetExpansionPolicy
+import com.multify.traderpro.engine.ForecastTargetMaturityPolicy
+import com.multify.traderpro.engine.NetProfitProtectionPolicy
 import com.multify.traderpro.engine.ForecastTargetMaturityPolicy
 import com.multify.traderpro.engine.NetProfitProtectionPolicy
 import com.multify.traderpro.engine.ForecastUniversalPositiveEvidencePolicy
@@ -250,6 +254,7 @@ class TradingRepository @Inject constructor(
     private var brokerInventorySnapshot: BrokerInventorySnapshot? = null
     @Volatile private var activeGttSnapshot: ActiveGttSnapshot? = null
     @Volatile private var orderListSnapshot: OrderListSnapshot? = null
+    @Volatile private var orderListSnapshot: OrderListSnapshot? = null
     private var lastClosedSessionReconcileAtMs = 0L
     private var lastIdlePortfolioAuditAtMs = 0L
     private val lastPortfolioConflictAuditAtMs = ConcurrentHashMap<String, Long>()
@@ -332,6 +337,19 @@ class TradingRepository @Inject constructor(
     private data class ActiveGttSnapshot(
         val bySymbol: Map<String, List<SmartOrderPayload>>,
         val atMs: Long
+    )
+
+    private data class OrderListSnapshot(
+        val orders: List<OrderPayload>,
+        val atMs: Long
+    )
+
+    private data class GttChildFillStats(
+        val filledQuantity: Int,
+        val averageFillPrice: Double?,
+        val terminal: Boolean,
+        val status: String,
+        val order: OrderPayload
     )
 
     private data class OrderListSnapshot(
@@ -6551,22 +6569,22 @@ class TradingRepository @Inject constructor(
     }
 
     private suspend fun monitorLongHolding(position: ManagedPositionEntity, token: String, ltp: Double) {
-        // Common sell protection for every managed CNC LONG, regardless of source:
-        // 1) hard -2% loss floor from the actual holding cost basis;
-        // 2) once +0.55% high-water is reached, the existing stepped profitable trail takes over;
-        // 3) the active stop only moves upward. There is no averaging-down path.
+        // Common CNC LONG protection. The -2% hard stop remains until estimated net +0.50%
+        // plus a 25 bps execution reserve has been reached. Existing 0.10% ratchet steps remain.
+        // The BUY submission path is deliberately unchanged.
         val decisionStartedNs = SystemClock.elapsedRealtimeNanos()
         val previousHighWater = position.maxFavourablePrice
         val highWater = max(position.maxFavourablePrice, ltp)
         val lowWater = min(position.maxAdversePrice, ltp)
         val hardStopPrice = HardStopLossPolicy.stopPrice(position.entryPrice)
-        val desiredTrailGainPct = SteppedTrailingPolicy.stopGainPctForHighWater(position.entryPrice, highWater)
-        val desiredTrailPrice = desiredTrailGainPct?.let { SteppedTrailingPolicy.stopPrice(position.entryPrice, it) }
-        val desiredMode = if (desiredTrailPrice != null) {
+        val netDecision = NetProfitProtectionPolicy.evaluate(position.entryPrice, position.quantity, highWater)
+        val legacyTrailing = position.smartOrderMode == HoldingSmartOrderPolicy.MODE_TRAILING_GTT
+        val desiredTrailGainPct = netDecision.netTargetPct.takeIf { netDecision.armed } ?: position.netProfitTargetPct
+        val desiredTrailPrice = netDecision.triggerPrice.takeIf { netDecision.armed }
+            ?: position.smartOrderTriggerPrice.takeIf { legacyTrailing }
+        val desiredMode = if (netDecision.armed || legacyTrailing) {
             HoldingSmartOrderPolicy.MODE_TRAILING_GTT
-        } else {
-            HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT
-        }
+        } else HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT
         val previousProtected = listOfNotNull(
             position.smartOrderTriggerPrice?.takeIf {
                 position.smartOrderMode == HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT ||
@@ -6579,16 +6597,17 @@ class TradingRepository @Inject constructor(
             desiredTrailPrice ?: hardStopPrice,
             previousProtected ?: hardStopPrice
         )
+        val netFloorPrice = netDecision.netFloorPrice.takeIf { netDecision.armed } ?: position.netProfitFloorPrice
 
         var working = position.copy(
             lastPrice = ltp,
             maxFavourablePrice = highWater,
             maxAdversePrice = lowWater,
             stopPrice = previousProtected ?: hardStopPrice,
-            trailingArmPct = SteppedTrailingPolicy.ARM_TRIGGER_PCT,
-            trailingLastRatchetPrice = desiredTrailGainPct?.let {
-                position.entryPrice * (1.0 + (it + SteppedTrailingPolicy.TRIGGER_BUFFER_PCT) / 100.0)
-            } ?: position.trailingLastRatchetPrice,
+            trailingArmPct = NetProfitProtectionPolicy.MIN_NET_RETURN_PCT,
+            trailingLastRatchetPrice = desiredTrailPrice ?: position.trailingLastRatchetPrice,
+            netProfitFloorPrice = netFloorPrice,
+            netProfitTargetPct = desiredTrailGainPct,
             lastEvaluatedAtMs = System.currentTimeMillis()
         )
 
