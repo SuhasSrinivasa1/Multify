@@ -6334,7 +6334,28 @@ class TradingRepository @Inject constructor(
             managedDao.updatePosition(pending)
             return null
         }
-        val stats = fetchGttChildFillStats(token, childId, position.symbol)
+        var stats = fetchGttChildFillStats(token, childId, position.symbol)
+        val triggeredAt = position.smartOrderTriggeredAtMs ?: position.smartOrderUpdatedAtMs ?: pollNow
+        if (!stats.terminal && pollNow - triggeredAt >= 15_000L &&
+            stats.status in setOf("OPEN", "PENDING", "PARTIALLY_FILLED", "TRIGGERED")
+        ) {
+            val cancelled = runCatching {
+                apiFactory.groww.cancelOrder(
+                    bearer(token), OrderCancelRequest(growwOrderId = childId)
+                ).requirePayload("Cancel stalled GTT child market order $childId")
+            }
+            orderListSnapshot = null
+            auditLogger.log("GTT", if (cancelled.isSuccess) "GTT_CHILD_MARKET_TIMEOUT_CANCEL_REQUESTED"
+                else "GTT_CHILD_MARKET_TIMEOUT_CANCEL_FAILED", mapOf(
+                "symbol" to position.symbol, "child_order_id" to childId,
+                "status_before_cancel" to stats.status,
+                "age_ms" to (pollNow - triggeredAt),
+                "message" to cancelled.exceptionOrNull()?.message
+            ))
+            // Re-read status/trades after cancellation; never submit a second SELL until
+            // the broker confirms this child order is terminal and its fills are known.
+            stats = fetchGttChildFillStats(token, childId, position.symbol)
+        }
         val working = position.copy(
             status = "EXIT_PENDING_RECONCILIATION",
             smartOrderChildOrderId = childId,
