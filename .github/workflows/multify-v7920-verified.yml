@@ -91,7 +91,7 @@ jobs:
           '''
                   return text.replace(block,'')
               if label == 'Fixed Auto BUY scheduler':
-                  return text.replace('            if (!autoBuyEntryPriceAllowed("FIXED_AUTO_BUY", row.symbol, row.entryPrice, ltp)) continue\\n','')
+                  return text.replace('            if (!autoBuyEntryPriceAllowed("FIXED_AUTO_BUY", row.symbol, row.entryPrice, ltp)) continue\n','')
               return text
           for start,end,label in checks:
               old_region=region(older(p),start,end)
