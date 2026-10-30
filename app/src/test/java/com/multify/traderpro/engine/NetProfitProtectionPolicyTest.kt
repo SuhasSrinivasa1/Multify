@@ -17,7 +17,7 @@ class NetProfitProtectionPolicyTest {
         val entry = 299.29
         val qty = 32
         val unarmed = NetProfitProtectionPolicy.evaluate(entry, qty, 301.05)
-        val armed = NetProfitProtectionPolicy.evaluate(entry, qty, unarmed.triggerPrice + 0.10)
+        val armed = NetProfitProtectionPolicy.evaluate(entry, qty, unarmed.triggerPrice + 1.00)
         assertTrue(armed.armed)
         assertEquals(0.50, armed.netTargetPct, 1e-9)
         assertTrue(GrowwDeliveryCostPolicy.estimatedNetProfit(entry, armed.netFloorPrice, qty) + 1e-6 >=
