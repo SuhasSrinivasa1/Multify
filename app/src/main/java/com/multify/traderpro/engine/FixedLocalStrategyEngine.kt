@@ -7,6 +7,10 @@ import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sqrt
+import java.time.Instant
+import java.time.LocalDate
+import java.time.LocalTime
+import java.time.ZoneId
 
 data class FixedCandle(
     val ts: Long,
@@ -60,7 +64,8 @@ data class FixedFeatureSnapshot(
     val prevHigh: Double?,
     val prevLow: Double?,
     val prevClose: Double?,
-    val candles: List<FixedCandle>
+    val candles: List<FixedCandle>,
+    val sessionCandleCount: Int = 0
 )
 
 data class FixedStrategyVote(val name: String, val score: Double, val note: String)
@@ -76,20 +81,29 @@ data class FixedStrategyEvaluation(
 )
 
 object FixedLocalStrategyEngine {
-    fun buildFeatures(quote: QuotePayload, historical: HistoricalPayload, intervalMinutes: Int = historical.intervalInMinutes ?: 5): FixedFeatureSnapshot {
-        val candles = historical.candles.mapIndexedNotNull { index, x ->
+    private val NSE_ZONE: ZoneId = ZoneId.of("Asia/Kolkata")
+    fun buildFeatures(
+        quote: QuotePayload,
+        historical: HistoricalPayload,
+        intervalMinutes: Int = historical.intervalInMinutes ?: 5,
+        sessionDate: LocalDate = LocalDate.now(NSE_ZONE)
+    ): FixedFeatureSnapshot {
+        val parsedCandles = historical.candles.mapNotNull { x ->
             if (x.size < 6) null else runCatching {
                 FixedCandle(
-                    // Groww has returned both epoch-like and textual timestamps across historical APIs.
-                    // Timestamp is not used for signal math, so keep a stable fallback when it is textual.
-                    ts = x[0].takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isNumber }?.asLong ?: index.toLong(),
-                    open = x[1].asDouble,
-                    high = x[2].asDouble,
-                    low = x[3].asDouble,
-                    close = x[4].asDouble,
-                    volume = x[5].asDouble
+                    ts = MarketCandleTimestampParser.toEpochMillis(x[0]) ?: 0L,
+                    open = x[1].asDouble, high = x[2].asDouble, low = x[3].asDouble,
+                    close = x[4].asDouble, volume = x[5].asDouble
                 )
             }.getOrNull()
+        }
+        val candles = if (parsedCandles.all { it.ts > 0L }) parsedCandles.sortedBy { it.ts } else parsedCandles
+        val sessionCandles = candles.filter { candle ->
+            if (candle.ts <= 0L) false else {
+                val local = Instant.ofEpochMilli(candle.ts).atZone(NSE_ZONE)
+                local.toLocalDate() == sessionDate &&
+                    local.toLocalTime() >= LocalTime.of(9, 15) && local.toLocalTime() < LocalTime.of(15, 30)
+            }
         }
         val ltp = quote.lastPrice ?: candles.lastOrNull()?.close ?: error("Groww quote does not contain LTP")
         val closes = candles.map { it.close }
@@ -101,8 +115,8 @@ object FixedLocalStrategyEngine {
             val base = vols.dropLast(1).takeLast(20).average().takeIf { it > 0.0 }
             base?.let { vols.last() / it }
         } else null
-        val (o5h, o5l) = openingRange(candles, 5, intervalMinutes)
-        val (o15h, o15l) = openingRange(candles, 15, intervalMinutes)
+        val (o5h, o5l) = openingRange(sessionCandles, 5, intervalMinutes)
+        val (o15h, o15l) = openingRange(sessionCandles, 15, intervalMinutes)
         val bid = quote.bidPrice
         val ask = quote.offerPrice
         val atrNow = atr(candles, 14)
@@ -111,8 +125,8 @@ object FixedLocalStrategyEngine {
         val ema50Now = ema(closes, 50)
         val ema9Prev = ema(closes.dropLast(1), 9)
         val ema20Prev = ema(closes.dropLast(1), 20)
-        val vwapNow = vwap(candles)
-        val vwapPrev = vwap(candles.dropLast(1))
+        val vwapNow = vwap(sessionCandles)
+        val vwapPrev = vwap(sessionCandles.dropLast(1))
         val macdNow = macdHistogram(closes)
         val macdPrev = macdHistogram(closes.dropLast(1))
         val rsiNow = rsi(closes, 14)
@@ -132,13 +146,13 @@ object FixedLocalStrategyEngine {
         val greenVol = recentTen.filter { it.close >= it.open }.sumOf { it.volume }
         val redVol = recentTen.filter { it.close < it.open }.sumOf { it.volume }
         val greenShare = if (greenVol + redVol > 0.0) greenVol / (greenVol + redVol) else null
-        val sessionHigh = candles.maxOfOrNull { it.high }
-        val sessionLow = candles.minOfOrNull { it.low }
+        val sessionHigh = sessionCandles.maxOfOrNull { it.high }
+        val sessionLow = sessionCandles.minOfOrNull { it.low }
         return FixedFeatureSnapshot(
             ltp = ltp,
             bid = bid,
             ask = ask,
-            spreadBps = if (bid != null && ask != null && ltp > 0) max(0.0, ask - bid) / ltp * 10_000.0 else null,
+            spreadBps = if (bid != null && ask != null && bid > 0.0 && ask >= bid && ltp > 0.0) (ask - bid) / ltp * 10_000.0 else null,
             orderBookImbalance = run {
                 val b = quote.totalBuyQuantity ?: quote.bidQuantity
                 val a = quote.totalSellQuantity ?: quote.offerQuantity
@@ -176,7 +190,8 @@ object FixedLocalStrategyEngine {
             orb15High = o15h, orb15Low = o15l,
             lastOpen = last?.open, lastHigh = last?.high, lastLow = last?.low, lastClose = last?.close,
             prevOpen = prev?.open, prevHigh = prev?.high, prevLow = prev?.low, prevClose = prev?.close,
-            candles = candles
+            candles = candles,
+            sessionCandleCount = sessionCandles.size
         )
     }
 
@@ -367,8 +382,8 @@ object FixedLocalStrategyEngine {
     }
 
     private fun openingRange(c: List<FixedCandle>, minutes: Int, intervalMinutes: Int): Pair<Double?, Double?> {
-        if (c.isEmpty()) return null to null
         val count = max(1, kotlin.math.ceil(minutes.toDouble() / max(1, intervalMinutes)).toInt())
+        if (c.size < count) return null to null
         val selected = c.take(count)
         return selected.maxOfOrNull { it.high } to selected.minOfOrNull { it.low }
     }
