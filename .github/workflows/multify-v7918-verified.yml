@@ -717,6 +717,7 @@ jobs:
           assert 'versionCode = 7918' in Path('app/build.gradle.kts').read_text()
           fixed=(root/'engine/FixedLocalStrategyEngine.kt').read_text()
           assert 'MarketCandleTimestampParser.toEpochMillis(x[0])' in fixed
+          assert 'Instant.ofEpochSecond(candle.ts)' in fixed and 'it.ts * 1000L' in fixed
           assert 'val sessionCandles = candles.filter' in fixed
           assert 'val completedSessionCandles = sessionCandles.filter' in fixed
           assert 'vwap(sessionCandles)' in fixed
@@ -728,6 +729,7 @@ jobs:
           forecast=(root/'engine/ForecastEarlyEntryPolicy.kt').read_text()
           assert 'FiveMinuteCandleAggregator.aggregate' in forecast and 'bars.size<6' in forecast
           assert 'latestFiveClose/previousFiveClose' in forecast and 'currentExtensionFromFiveClosePct' in forecast
+          assert 'it.ts*1000L' in forecast
           assert 'completedOneMinuteBars' in forecast and 'currentExtensionFromOneMinuteClosePct' in forecast
           assert 'MarketCandleTimestampParser.toEpochMillis' in (root/'engine/ForecastCandleShadow.kt').read_text()
           code=(root/'data/repository/TradingRepository.kt').read_text()
