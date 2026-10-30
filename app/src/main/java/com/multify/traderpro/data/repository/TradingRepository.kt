@@ -3043,24 +3043,9 @@ class TradingRepository @Inject constructor(
         }
         fixedHistoricalWindowStore.remember(historyKey, start, historical, SystemClock.elapsedRealtime())
         require(historical.candles.size >= 5) { "Insufficient fixed forecast candles" }
-        val features = FixedLocalStrategyEngine.buildFeatures(quote, historical, 5, now.toLocalDate(), now.toInstant().toEpochMilli())
+        val features = FixedLocalStrategyEngine.buildFeatures(quote, historical, 5)
         val signal = ParsedSignal(SignalType.TRADE_RELEASE, symbol = symbol, rawText = "fixed-forecast", confidence = 1.0)
         val evaluation = FixedLocalStrategyEngine.evaluateLong(signal, features, includeEventPrior = false)
-        val entrySafety = FixedEntrySafetyOverlay.assess(features)
-        auditLogger.logAsync("FIXED_ENTRY_SAFETY", "ASSESSMENT", mapOf(
-            "version" to FixedEntrySafetyOverlay.VERSION, "symbol" to symbol,
-            "eligible" to entrySafety.eligible, "reasons" to entrySafety.reasons,
-            "session_candle_count" to features.sessionCandleCount, "spread_bps" to features.spreadBps,
-            "vwap_extension_atr" to entrySafety.vwapExtensionAtr,
-            "ema20_extension_atr" to entrySafety.ema20ExtensionAtr,
-            "recent_impulse_atr" to entrySafety.recentImpulseAtr
-        ))
-        if (quote.bidPrice == null || quote.offerPrice == null) {
-            auditLogger.logAsync("FIXED_RESEARCH", "QUOTE_SPREAD_UNAVAILABLE", mapOf(
-                "symbol" to symbol, "bid_present" to (quote.bidPrice != null),
-                "offer_present" to (quote.offerPrice != null)
-            ))
-        }
         // Diagnostic-only, O(1) non-blocking queue offer. All 40 factor calculations and disk
         // writes execute later on a low-priority worker; never delay Fixed recommendations.
         fixedFactorTelemetry.tryRecord(symbol, evaluation, lastFixedScanAtMs)
