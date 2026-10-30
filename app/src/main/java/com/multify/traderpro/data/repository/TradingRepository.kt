@@ -6272,7 +6272,7 @@ class TradingRepository @Inject constructor(
         val marketOpen = marketSession() == "OPEN"
         val now = System.currentTimeMillis()
         val managedOpen = managedDao.openPositions().any(::appOwned)
-        val nonTradingCooldownUntil = recoveryGate.status().categoryCooldownUntilMs["NON_TRADING"] ?: 0L
+        val nonTradingCooldownUntil = recoveryGate.status().categoryCooldownUntilMs[GrowwApiUsageLedger.Category.NON_TRADING] ?: 0L
         if (nonTradingCooldownUntil > now) {
             val cooldownAuditKey = "__NON_TRADING_COOLDOWN__"
             val lastCooldownAudit = lastPortfolioConflictAuditAtMs[cooldownAuditKey] ?: 0L
@@ -7051,7 +7051,7 @@ class TradingRepository @Inject constructor(
             val confirmed = position.copy(
                 smartOrderStatus = parent.status.ifBlank { position.smartOrderStatus },
                 smartOrderUpdatedAtMs = now,
-                smartOrderTriggerPrice = parent.triggerPrice?.takeIf { it.isFinite() && it > 0.0 }
+                smartOrderTriggerPrice = parent.triggerPrice?.toDoubleOrNull()?.takeIf { it.isFinite() && it > 0.0 }
                     ?: position.smartOrderTriggerPrice
             )
             managedDao.updatePosition(confirmed)
@@ -7101,6 +7101,15 @@ class TradingRepository @Inject constructor(
                     "broker_quantity" to brokerQuantity,
                     "tracked_quantity" to confirmed.quantity,
                     "partial_fill_qty_observed" to partial.sumOf { it.filledQuantity },
+                    "same_symbol_sell_order_count" to brokerOrders.count {
+                        it.tradingSymbol.equals(confirmed.symbol, true) &&
+                            it.transactionType.equals("SELL", true) && it.product.equals("CNC", true)
+                    },
+                    "same_symbol_sell_reference_ids" to brokerOrders.filter {
+                        it.tradingSymbol.equals(confirmed.symbol, true) &&
+                            it.transactionType.equals("SELL", true) && it.product.equals("CNC", true)
+                    }.map { it.orderReferenceId }.distinct().take(8),
+                    "expected_gtt_reference_id" to expectedReference,
                     "unique_full_order_match" to (full != null),
                     "manual_review_if_persistent" to true,
                     "duplicate_sell_allowed" to false
