@@ -75,7 +75,7 @@ jobs:
           assert 'require(forecastLiveUnlocked())' in current(p)
           assert 'allowIndependentBetaDuringFixed = true' in current(p)
           assert 'normalTrancheSize.coerceAtMost(2)' in current(p)
-          assert 'val cutoffMs = System.currentTimeMillis() - 20L * 60_000L' in current(p)
+          assert 'val cutoff = System.currentTimeMillis() - 20L * 60_000L' in current(p)
           ui='app/src/main/java/com/multify/traderpro/ui/screens/TraderApp.kt'
           assert 'PROVISIONAL · SECONDARY' in current(ui)
           assert 'PROVISIONAL WATCH · BUY disabled' in current(ui)
