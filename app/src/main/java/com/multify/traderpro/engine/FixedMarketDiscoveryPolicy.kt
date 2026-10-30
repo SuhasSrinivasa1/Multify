@@ -39,16 +39,7 @@ object FixedMarketDiscoveryPolicy {
             FixedMarketDiscoveryCandidate(symbol, ltp, pulsePct, sessionPct,
                 sessionPct * 0.65 + pulsePct * 0.35, "MOMENTUM")
         }
-        val momentum = candidates.asSequence()
-            .filter { it.pulsePct > 0.0 && it.sessionPct > 0.0 }
-            .sortedWith(compareByDescending<FixedMarketDiscoveryCandidate> { it.score }
-                .thenByDescending { it.sessionPct }.thenByDescending { it.pulsePct })
-            .toList()
-        val momentumSlots = (limit * MOMENTUM_SHARE).toInt().coerceAtLeast(1).coerceAtMost(limit)
-        val selectedMomentum = momentum.take(momentumSlots)
-        val selectedSymbols = selectedMomentum.mapTo(mutableSetOf()) { it.symbol.uppercase() }
-        val early = candidates.asSequence()
-            .filter { it.symbol.uppercase() !in selectedSymbols }
+        val earlyPool = candidates.asSequence()
             .filter { it.pulsePct in EARLY_PULSE_MIN_PCT..EARLY_PULSE_MAX_PCT }
             .filter { it.sessionPct in EARLY_SESSION_MIN_PCT..EARLY_SESSION_MAX_PCT }
             .filter { it.sessionPct >= 0.0 || it.pulsePct >= 0.05 }
@@ -57,6 +48,19 @@ object FixedMarketDiscoveryPolicy {
                     EARLY_SESSION_MIN_PCT, EARLY_SESSION_MAX_PCT) * 0.015) }
             .sortedWith(compareBy<FixedMarketDiscoveryCandidate> { abs(it.pulsePct - 0.12) }
                 .thenByDescending { it.sessionPct }.thenByDescending { it.pulsePct })
+            .toList()
+        val earlySymbols = earlyPool.mapTo(mutableSetOf()) { it.symbol.uppercase() }
+        val momentum = candidates.asSequence()
+            .filter { it.pulsePct > 0.0 && it.sessionPct > 0.0 }
+            .filter { it.symbol.uppercase() !in earlySymbols }
+            .sortedWith(compareByDescending<FixedMarketDiscoveryCandidate> { it.score }
+                .thenByDescending { it.sessionPct }.thenByDescending { it.pulsePct })
+            .toList()
+        val momentumSlots = (limit * MOMENTUM_SHARE).toInt().coerceAtLeast(1).coerceAtMost(limit)
+        val selectedMomentum = momentum.take(momentumSlots)
+        val selectedSymbols = selectedMomentum.mapTo(mutableSetOf()) { it.symbol.uppercase() }
+        val early = earlyPool.asSequence()
+            .filter { it.symbol.uppercase() !in selectedSymbols }
             .take((limit - momentumSlots).coerceAtLeast(0))
             .toList()
         val combined = (selectedMomentum + early).toMutableList()
