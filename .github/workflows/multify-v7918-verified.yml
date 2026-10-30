@@ -647,15 +647,6 @@ jobs:
           assert 'request.method' in policy and 'permits(' in policy
           assert 'v1/order/create' not in policy
           assert 'MAX_LOSS_PCT = 2.0' in (root/'engine/HardStopLossPolicy.kt').read_text()
-          models=(root/'data/network/GrowwModels.kt').read_text()
-          assert 'data class QuoteMarketDepth' in models and '@SerializedName("depth") val depth' in models
-          for p in ['engine/FixedLocalStrategyEngine.kt','engine/LocalStrategyEngine.kt']:
-            source=(root/p).read_text()
-            assert 'quote.depth?.buy?.mapNotNull' in source and 'quote.depth?.sell?.mapNotNull' in source
-          beta=(root/'data/network/BetaResearchGate.kt').read_text()
-          assert 'private val histMinute = 20' in beta and 'Retry-After' in beta
-          assert 'RESEARCH_BACKFILL_SYMBOL_PACING_MS = 2_500L' in code
-          assert 'RESEARCH_BACKFILL_SYMBOL_BATCH = 12' in code
           assert 'versionCode = 7916' in Path('app/build.gradle.kts').read_text()
           print('Unchanged Fixed/Multify/SELL paths; Beta endpoint denylist is strict allowlist; beta research 1m + derived 5m')
           PY
@@ -749,6 +740,15 @@ jobs:
           ui=(root/'ui/screens/TraderApp.kt').read_text()
           assert 'ALPHA · AUTH OK · IP OK' in ui and 'BETA · AUTH OK · READ-ONLY' in ui
           assert 'MAX_LOSS_PCT = 2.0' in (root/'engine/HardStopLossPolicy.kt').read_text()
+          models=(root/'data/network/GrowwModels.kt').read_text()
+          assert 'data class QuoteMarketDepth' in models and '@SerializedName("depth") val depth' in models
+          for p in ['engine/FixedLocalStrategyEngine.kt','engine/LocalStrategyEngine.kt']:
+            source=(root/p).read_text()
+            assert 'quote.depth?.buy?.mapNotNull' in source and 'quote.depth?.sell?.mapNotNull' in source
+          beta=(root/'data/network/BetaResearchGate.kt').read_text()
+          assert 'private val histMinute = 20' in beta and 'Retry-After' in beta
+          assert 'RESEARCH_BACKFILL_SYMBOL_PACING_MS = 2_500L' in code
+          assert 'RESEARCH_BACKFILL_SYMBOL_BATCH = 12' in code
           base='07278226b851262d3b10762de73dbcf1443d8887'
           def git_file(ref,path): return subprocess.check_output(['git','show',f'{ref}:{path}'],text=True)
           def section(text,start,end):
