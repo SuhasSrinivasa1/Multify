@@ -287,6 +287,7 @@ class TradingRepository @Inject constructor(
     private val lastTrailStateAuditAtMs = ConcurrentHashMap<Long, Long>()
     private val lastTrailStateAuditSignature = ConcurrentHashMap<Long, String>()
     private val lastSmartOrderStatusAtMs = ConcurrentHashMap<Long, Long>()
+    private val lastGttChildReconcileAuditAtMs = ConcurrentHashMap<String, Long>()
 
     private data class MarketDiscoveryPass(
         val symbols: List<String>,
@@ -6188,7 +6189,7 @@ class TradingRepository @Inject constructor(
 
     private suspend fun growwOrderList(token: String, force: Boolean = false): List<OrderPayload> {
         val now = System.currentTimeMillis()
-        orderListSnapshot?.takeIf { !force && now - it.atMs < 2_000L }?.let { return it.orders }
+        orderListSnapshot?.takeIf { !force && now - it.atMs < 5_000L }?.let { return it.orders }
         val all = mutableListOf<OrderPayload>()
         for (page in 0 until 5) {
             val rows = apiFactory.groww.orderList(
@@ -6212,7 +6213,7 @@ class TradingRepository @Inject constructor(
         token: String,
         position: ManagedPositionEntity
     ): OrderPayload? {
-        val orders = growwOrderList(token, force = true)
+        val orders = growwOrderList(token, force = false)
         val reference = position.smartOrderReferenceId
         val exact = if (!reference.isNullOrBlank()) {
             orders.filter { isMatchingGttChildOrder(it, position) && it.orderReferenceId == reference }
@@ -6233,14 +6234,20 @@ class TradingRepository @Inject constructor(
                 createdAt >= position.openedAtMs
         }
         if (fallback.size == 1) return fallback.single()
-        auditLogger.log("GTT", if (fallback.isEmpty()) "GTT_CHILD_ORDER_NOT_YET_VISIBLE"
-            else "GTT_CHILD_ORDER_MATCH_AMBIGUOUS", mapOf(
-            "symbol" to position.symbol, "gtt_id" to position.smartOrderId,
-            "reference_id" to reference, "triggered_at_ms" to triggerAt,
-            "candidate_order_ids" to fallback.map { it.growwOrderId },
-            "candidate_count" to fallback.size,
-            "note" to "No SELL or new GTT is submitted while the broker-triggered child order is unresolved."
-        ))
+        val auditKey = position.symbol.uppercase(Locale.US)
+        val auditNow = System.currentTimeMillis()
+        val auditLast = lastGttChildReconcileAuditAtMs[auditKey] ?: 0L
+        if (auditNow - auditLast >= 30_000L) {
+            lastGttChildReconcileAuditAtMs[auditKey] = auditNow
+            auditLogger.log("GTT", if (fallback.isEmpty()) "GTT_CHILD_ORDER_NOT_YET_VISIBLE"
+                else "GTT_CHILD_ORDER_MATCH_AMBIGUOUS", mapOf(
+                "symbol" to position.symbol, "gtt_id" to position.smartOrderId,
+                "reference_id" to reference, "triggered_at_ms" to triggerAt,
+                "candidate_order_ids" to fallback.map { it.growwOrderId },
+                "candidate_count" to fallback.size,
+                "note" to "No SELL or new GTT is submitted while the broker-triggered child order is unresolved."
+            ))
+        }
         return null
     }
 
@@ -6303,12 +6310,18 @@ class TradingRepository @Inject constructor(
         )
         managedDao.updatePosition(working)
         if (!stats.terminal) {
-            auditLogger.log("GTT", "GTT_CHILD_ORDER_PENDING", mapOf(
-                "symbol" to position.symbol, "gtt_id" to position.smartOrderId,
-                "child_order_id" to childId, "status" to stats.status,
-                "filled_quantity" to stats.filledQuantity,
-                "requested_quantity" to position.quantity
-            ))
+            val auditKey = position.symbol.uppercase(Locale.US)
+            val auditNow = System.currentTimeMillis()
+            val auditLast = lastGttChildReconcileAuditAtMs[auditKey] ?: 0L
+            if (auditNow - auditLast >= 30_000L) {
+                lastGttChildReconcileAuditAtMs[auditKey] = auditNow
+                auditLogger.log("GTT", "GTT_CHILD_ORDER_PENDING", mapOf(
+                    "symbol" to position.symbol, "gtt_id" to position.smartOrderId,
+                    "child_order_id" to childId, "status" to stats.status,
+                    "filled_quantity" to stats.filledQuantity,
+                    "requested_quantity" to position.quantity
+                ))
+            }
             return null
         }
         val filled = stats.filledQuantity
@@ -6815,12 +6828,9 @@ class TradingRepository @Inject constructor(
             working = cancelKnownPositionGtt(token, working, "$reason-REPLACE_EXISTING_GTT", clearIfTerminal = false)
             if (!working.smartOrderId.isNullOrBlank()) return working
         }
-        working = working.copy(
+        working = clearManagedGttState(working).copy(
+            status = "OPEN",
             stopPrice = hardStop,
-            smartOrderMode = HoldingSmartOrderPolicy.MODE_NONE,
-            smartOrderTriggerPrice = null,
-            smartOrderDirection = null,
-            smartOrderStatus = null,
             smartOrderUpdatedAtMs = System.currentTimeMillis(),
             lastEvaluatedAtMs = System.currentTimeMillis()
         )
@@ -7335,8 +7345,15 @@ class TradingRepository @Inject constructor(
             ).requirePayload("GTT status before cancel ${position.symbol}")
         }.getOrNull()
         val status = statusPayload?.status?.uppercase(Locale.US)
-        if (!clearIfTerminal && status in setOf("TRIGGERED", "COMPLETED")) {
-            val waiting = position.copy(smartOrderStatus = status, smartOrderUpdatedAtMs = System.currentTimeMillis())
+        if (status in setOf("TRIGGERED", "COMPLETED")) {
+            val waiting = position.copy(
+                status = "EXIT_PENDING_RECONCILIATION",
+                smartOrderStatus = status,
+                smartOrderUpdatedAtMs = System.currentTimeMillis(),
+                smartOrderReferenceId = statusPayload?.referenceId ?: position.smartOrderReferenceId,
+                smartOrderTriggeredAtMs = position.smartOrderTriggeredAtMs
+                    ?: parseGrowwTimestampMs(statusPayload?.triggeredAt) ?: System.currentTimeMillis()
+            )
             managedDao.updatePosition(waiting)
             auditLogger.log("GTT", "GTT_EXECUTION_IN_PROGRESS", mapOf(
                 "symbol" to position.symbol,
@@ -7380,12 +7397,8 @@ class TradingRepository @Inject constructor(
                 "status" to status
             ))
         }
-        val cleared = position.copy(
-            smartOrderId = null,
-            smartOrderMode = HoldingSmartOrderPolicy.MODE_NONE,
-            smartOrderTriggerPrice = null,
-            smartOrderDirection = null,
-            smartOrderStatus = null,
+        val cleared = clearManagedGttState(position).copy(
+            status = "OPEN",
             smartOrderUpdatedAtMs = System.currentTimeMillis()
         )
         managedDao.updatePosition(cleared)
