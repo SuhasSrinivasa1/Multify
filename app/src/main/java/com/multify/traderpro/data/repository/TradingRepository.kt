@@ -6210,12 +6210,16 @@ class TradingRepository @Inject constructor(
         return all
     }
 
-    private fun isMatchingGttChildOrder(order: OrderPayload, position: ManagedPositionEntity): Boolean =
-        order.growwOrderId.isNotBlank() &&
+    private fun isMatchingGttChildOrder(order: OrderPayload, position: ManagedPositionEntity): Boolean {
+        val expectedOrderType = if (position.smartOrderMode == HoldingSmartOrderPolicy.MODE_RECOVERY_GTT)
+            "LIMIT" else "MARKET"
+        return order.growwOrderId.isNotBlank() &&
             order.tradingSymbol.equals(position.symbol, true) &&
             order.transactionType.equals("SELL", true) &&
             order.product.equals("CNC", true) &&
-            (order.quantity == null || order.quantity in 1..position.quantity)
+            (order.quantity == null || order.quantity in 1..position.quantity) &&
+            (order.orderType.isBlank() || order.orderType.equals(expectedOrderType, true))
+    }
 
     private suspend fun findTriggeredGttChildOrder(
         token: String,
@@ -6249,11 +6253,15 @@ class TradingRepository @Inject constructor(
             return null
         }
         val triggerAt = position.smartOrderTriggeredAtMs ?: position.smartOrderUpdatedAtMs ?: position.openedAtMs
+        val expectedOrderType = if (position.smartOrderMode == HoldingSmartOrderPolicy.MODE_RECOVERY_GTT)
+            "LIMIT" else "MARKET"
         val fallback = orders.filter { order ->
             if (!isMatchingGttChildOrder(order, position)) return@filter false
+            if (!order.orderType.equals(expectedOrderType, true)) return@filter false
+            if (order.quantity != position.quantity) return@filter false
             val createdAt = parseGrowwTimestampMs(order.createdAt ?: order.orderDateTime)
                 ?: return@filter false
-            createdAt >= triggerAt - 60_000L && createdAt <= System.currentTimeMillis() + 10_000L &&
+            createdAt >= triggerAt - 5_000L && createdAt <= triggerAt + 30_000L &&
                 createdAt >= position.openedAtMs
         }
         if (fallback.size == 1) return fallback.single()
@@ -6268,7 +6276,8 @@ class TradingRepository @Inject constructor(
                 "reference_id" to reference, "triggered_at_ms" to triggerAt,
                 "candidate_order_ids" to fallback.map { it.growwOrderId },
                 "candidate_count" to fallback.size,
-                "note" to "No SELL or new GTT is submitted while the broker-triggered child order is unresolved."
+                "fallback_window_ms" to 30_000,
+                "note" to "Only one exact-size, expected-order-type child order in the immediate trigger window can be matched; no SELL or new GTT is submitted while unresolved."
             ))
         }
         return null
