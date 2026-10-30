@@ -26,13 +26,14 @@ class BetaResearchGate @Inject constructor() {
         var cooldownUntil: Long = 0L
     )
     private val lock = Mutex()
+    private val historicalInFlight = Mutex()
     private val windows = Type.values().associateWith { Window() }
     private val liveSec = 9
     private val liveMinute = 285
     private val histSec = 1
-    // Historical endpoint-specific ceilings are not published in Groww's main rate-limit table.
-    // The former 42/min profile produced replay 429s; hold 20/min until telemetry proves headroom.
-    private val histMinute = 20
+    // Latest live export recorded nine historical 429s at 20/min. Serialize and pace
+    // read-only Beta history conservatively; Fixed/SELL use separate Alpha scheduling.
+    private val histMinute = 12
     private val liveRequests = AtomicLong()
     private val historicalRequests = AtomicLong()
     private val liveFailures = AtomicLong()
@@ -41,7 +42,11 @@ class BetaResearchGate @Inject constructor() {
     private val historicalRateLimits = AtomicLong()
     private val lastLatencyMs = AtomicLong()
 
-    suspend fun <T> read(type: Type, block: suspend () -> T): T {
+    suspend fun <T> read(type: Type, block: suspend () -> T): T =
+        if (type == Type.HISTORICAL) historicalInFlight.withLock { readRateLimited(type, block) }
+        else readRateLimited(type, block)
+
+    private suspend fun <T> readRateLimited(type: Type, block: suspend () -> T): T {
         while (true) {
             val waitMs = lock.withLock {
                 val w = windows.getValue(type)

@@ -30,8 +30,8 @@ android {
         applicationId = "com.multify.traderpro.vivoy73final"
         minSdk = 26
         targetSdk = 35
-        versionCode = 7920
-        versionName = "7.9.20-gtt-net-trail-fixed-forecast-diagnostics"
+        versionCode = 7921
+        versionName = "7.9.21-prespike-forecast-calibration-gtt-safe-monitor"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
     }

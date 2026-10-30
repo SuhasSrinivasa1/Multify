@@ -15,6 +15,9 @@ data class ForecastQualityDecision(
 
 object ForecastQualityPolicy {
     const val MIN_TARGET_PCT = 1.0
+    const val TARGET_CALIBRATION_MIN_ROWS = 30
+    const val TARGET_CALIBRATION_MIN_DISTINCT_DAYS = 5
+    const val TARGET_CALIBRATION_MIN_DISTINCT_SYMBOLS = 10
 
     const val PRIMARY_MIN_CONFIDENCE = 0.63
     const val PRIMARY_MIN_DIRECTIONAL_SCORE = 0.28
@@ -30,9 +33,18 @@ object ForecastQualityPolicy {
     const val WEAK_BREADTH_MIN_CONFIDENCE = 0.68
     const val WEAK_BREADTH_MIN_DIRECTIONAL_SCORE = 0.35
 
-    fun adaptiveTargetPct(multifyMfeAveragePct: Double, priorForecastMfePct: List<Double>): Double {
+    fun adaptiveTargetPct(
+        multifyMfeAveragePct: Double,
+        priorForecastMfePct: List<Double>,
+        priorForecastDistinctDays: Int = 0,
+        priorForecastDistinctSymbols: Int = 0
+    ): Double {
         val prior = priorForecastMfePct.filter { it.isFinite() && it >= 0.0 && it < 25.0 }
-        val robustForecastMfe = if (prior.isEmpty()) 0.0 else max(
+        // A handful of unusually large historical winners must not inflate today's required move.
+        val calibrated = prior.size >= TARGET_CALIBRATION_MIN_ROWS &&
+            priorForecastDistinctDays >= TARGET_CALIBRATION_MIN_DISTINCT_DAYS &&
+            priorForecastDistinctSymbols >= TARGET_CALIBRATION_MIN_DISTINCT_SYMBOLS
+        val robustForecastMfe = if (!calibrated) 0.0 else max(
             AdaptiveLearningMath.median(prior, 0.0),
             AdaptiveLearningMath.trimmedMean(prior, 0.0)
         )
