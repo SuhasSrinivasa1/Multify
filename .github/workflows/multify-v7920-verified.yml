@@ -77,8 +77,28 @@ jobs:
               ('private suspend fun placeCncBuy(', '    private fun LongForecastEntity.toForecastDto()', 'CNC BUY submission'),
               ('private suspend fun safeAppSellScope(', '    private suspend fun portfolioMonitorCount(', 'SELL ownership guard'),
           ]
+          def strip_entry_guard(text, label):
+              if label == 'Forecast BUY entry path':
+                  block='''        require(autoBuyEntryPriceAllowed("FORECAST_AUTO_BUY", row.symbol, row.entryPrice, ltp)) {
+                      "Forecast BUY blocked: live price exceeds the recommended entry by more than 0.35%"
+                  }
+          '''
+                  return text.replace(block,'')
+              if label == 'Fixed BUY entry path':
+                  block='''        require(autoBuyEntryPriceAllowed("FIXED_AUTO_BUY", row.symbol, row.entryPrice, ltp)) {
+                      "Fixed BUY blocked: live price exceeds the recommended entry by more than 0.35%"
+                  }
+          '''
+                  return text.replace(block,'')
+              if label == 'Fixed Auto BUY scheduler':
+                  return text.replace('            if (!autoBuyEntryPriceAllowed("FIXED_AUTO_BUY", row.symbol, row.entryPrice, ltp)) continue\\n','')
+              return text
           for start,end,label in checks:
-              assert region(older(p),start,end)==region(current(p),start,end),label+' changed'
+              old_region=region(older(p),start,end)
+              new_region=region(current(p),start,end)
+              assert old_region==strip_entry_guard(new_region,label),label+' changed beyond the approved no-extra-request entry guard'
+          assert 'extra_market_data_requests" to 0' in current(p)
+          assert 'MAX_POSITIVE_SLIPPAGE_PCT = 0.35' in current('app/src/main/java/com/multify/traderpro/engine/AutoBuyEntryPricePolicy.kt')
           # The locked Fixed routine may gain non-functional diagnostics, but its actual
           # scoring/target engine, quality overlay, MFE benchmark and BUY path are frozen above.
           assert region(older(p), 'private fun fixedSnapshotMultifyMfeAverage(', '    private suspend fun fixedForecastEvaluation(') == region(current(p), 'private fun fixedSnapshotMultifyMfeAverage(', '    private suspend fun fixedForecastEvaluation('), 'Fixed Multify MFE benchmark changed'
