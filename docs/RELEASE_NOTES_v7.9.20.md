@@ -2,7 +2,7 @@
 
 ## Protected Fixed and BUY paths
 - The Fixed 40-factor scoring engine, recommendation target contract, entry-quality overlay, 150-second cadence, and five-minute candle input remain unchanged.
-- The Multify, Fixed and Forecast BUY submission and Auto Buy scheduling paths remain unchanged. Only Multify holding trailing metadata is updated to describe the net-profit policy.
+- The Multify BUY handler and Groww order-submission mechanism remain unchanged. Fixed/Forecast Auto Buy add a local +0.35% maximum positive entry-slippage check using the quote already fetched; no extra market-data request is added.
 - Fixed market discovery reserves a portion of the same candidate budget for low-pulse pre-spike/consolidation and second-peak pullback setups (session move up to 20%). The existing full scoring and entry safety checks still decide publication.
 
 ## SELL execution and reconciliation
