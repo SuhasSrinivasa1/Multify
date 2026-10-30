@@ -6268,6 +6268,14 @@ class TradingRepository @Inject constructor(
         val order = apiFactory.groww.orderStatus(
             bearer(token), orderId = orderId, segment = "CASH"
         ).requirePayload("GTT child order status $symbol")
+        val status = order.orderStatus.uppercase(Locale.US)
+        val terminalStatus = status in setOf("EXECUTED", "COMPLETED", "CANCELLED", "REJECTED", "FAILED", "EXPIRED") ||
+            (order.remainingQuantity == 0 && (order.filledQuantity ?: 0) > 0)
+        // Avoid a second API request while a market child order is simply still open and has
+        // no reported fills. Trade history is fetched only for partial/terminal executions.
+        if ((order.filledQuantity ?: 0) <= 0 && !terminalStatus) {
+            return GttChildFillStats(0, null, false, status, order)
+        }
         val trades = mutableListOf<OrderTradeRecord>()
         for (page in 0 until 5) {
             val rows = apiFactory.groww.orderTrades(
@@ -6289,12 +6297,7 @@ class TradingRepository @Inject constructor(
         } else null
         val filledQuantity = max(tradeQuantity, order.filledQuantity ?: 0)
         val averageFillPrice = tradeAverage ?: order.averageFillPrice?.takeIf { it.isFinite() && it > 0.0 }
-        val status = order.orderStatus.uppercase(Locale.US)
-        val terminal = status in setOf("EXECUTED", "COMPLETED", "CANCELLED", "REJECTED", "FAILED", "EXPIRED") ||
-            (order.remainingQuantity == 0 && filledQuantity > 0)
-        if ((order.filledQuantity ?: 0) <= 0 && tradeQuantity == 0 && !terminal) {
-            return GttChildFillStats(0, null, false, status, order)
-        }
+        val terminal = terminalStatus || (order.remainingQuantity == 0 && filledQuantity > 0)
         return GttChildFillStats(filledQuantity, averageFillPrice, terminal, status, order)
     }
 
@@ -7233,7 +7236,8 @@ class TradingRepository @Inject constructor(
             smartOrderDirection = direction,
             smartOrderStatus = payload.status.ifBlank { position.smartOrderStatus ?: "ACTIVE" },
             smartOrderUpdatedAtMs = now,
-            smartOrderReferenceId = position.smartOrderReferenceId ?: stableRef(referencePrefix, "${position.id}-${position.symbol}-${position.openedAtMs}"),
+            smartOrderReferenceId = payload.referenceId ?: position.smartOrderReferenceId
+                ?: stableRef(referencePrefix, "${position.id}-${position.symbol}-${position.openedAtMs}"),
             smartOrderTriggeredAtMs = null,
             smartOrderChildOrderId = null,
             smartOrderChildStatus = null,
