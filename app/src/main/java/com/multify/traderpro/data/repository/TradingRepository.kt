@@ -3928,8 +3928,11 @@ class TradingRepository @Inject constructor(
     ): Int {
         var batchErrors = forecastDiscoveryBatchErrors
         for (index in forecastDiscoveryNextBatch until chunks.size) {
-            if (fixedApiPriorityRequested || marketCriticalTradeInFlight || millisUntilNextFixedScan() <= forecastFixedGuardMs()) {
-                auditLogger.log("FORECAST_DISCOVERY", "YIELD_TO_FIXED_PRIORITY", mapOf("batch_index" to index))
+            if (!forecastMarketCapacityAvailable()) {
+                auditLogger.log("FORECAST_DISCOVERY", "YIELD_TO_FIXED_PRIORITY", mapOf("batch_index" to index,
+                    "fixed_priority" to fixedApiPriorityRequested,
+                    "fixed_deferred_for_broker" to fixedScanDeferredBroker,
+                    "beta_configured" to secretStore.hasBetaCredentials()))
                 break
             }
             val payload = fetchDiscoveryLtpBatch(token, chunks[index], index)
