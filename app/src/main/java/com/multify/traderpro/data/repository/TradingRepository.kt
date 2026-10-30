@@ -48,6 +48,7 @@ import com.multify.traderpro.data.network.LearningStatsDto
 import com.multify.traderpro.data.network.OrderCancelRequest
 import com.multify.traderpro.data.network.OrderCreateRequest
 import com.multify.traderpro.data.network.OrderPayload
+import com.multify.traderpro.data.network.GrowwOrderBookRow
 import com.multify.traderpro.data.network.PositionDto
 import com.multify.traderpro.data.network.QuotePayload
 import com.multify.traderpro.data.network.RecentDecisionDto
@@ -118,6 +119,8 @@ import com.multify.traderpro.engine.MultifyFactorModel
 import com.multify.traderpro.engine.MultifyReverseEngineering
 import com.multify.traderpro.engine.PositiveCloseForecastPolicy
 import com.multify.traderpro.engine.SteppedTrailingPolicy
+import com.multify.traderpro.engine.NetGainTrailingPolicy
+import com.multify.traderpro.engine.GttExitReconciliationPolicy
 import com.multify.traderpro.engine.StrategyEvaluation
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
@@ -248,6 +251,7 @@ class TradingRepository @Inject constructor(
     private var lastClosedSessionReconcileAtMs = 0L
     private var lastIdlePortfolioAuditAtMs = 0L
     private val lastPortfolioConflictAuditAtMs = ConcurrentHashMap<String, Long>()
+    private val gttExitReconcileLastAttemptAtMs = ConcurrentHashMap<Long, Long>()
     private val recentlyClosedSymbolsAtMs = ConcurrentHashMap<String, Long>()
     private var lastArmHotAuditAtMs = 0L
     private var lastMfeBackfillAtMs = 0L
@@ -2530,6 +2534,21 @@ class TradingRepository @Inject constructor(
                 .thenByDescending { it.economics.riskAdjustedScore }
         )
 
+        // Research-only visibility: never relax PRIMARY or enable a research BUY.
+        auditLogger.log("FORECAST_RESEARCH", "PRODUCTION_REJECTION_PROFILE", mapOf(
+            "date" to today,
+            "evaluated" to evaluated.size,
+            "primary" to ranked.count { it.quality.tier == "PRIMARY" },
+            "secondary" to ranked.count { it.quality.tier == "SECONDARY" },
+            "research" to ranked.count { it.quality.tier == "RESEARCH" },
+            "spread_unavailable" to ranked.count { it.evaluation.features.spreadBps == null },
+            "net_economics_unprofitable" to ranked.count { !it.economics.profitableAfterCosts },
+            "top_quality_reasons" to ranked.asSequence()
+                .filter { it.quality.tier != "PRIMARY" }.map { it.quality.reason.take(150) }
+                .take(6).toList(),
+            "production_quality_relaxed" to false,
+            "research_account" to if (secretStore.hasBetaCredentials()) "BETA" else "ALPHA"
+        ))
         val capturedResearchDates = learningDao.forecastResearchDates()
             .filter { it >= V7_RESEARCH_COHORT_START_DATE }
         // Shadow research continues after the five-session live unlock so Forecast can keep
@@ -2922,6 +2941,29 @@ class TradingRepository @Inject constructor(
             }.thenByDescending { it.score }
         )
 
+        // Visibility only: explain why initially PRIMARY Fixed candidates are withheld.
+        val fixedPrimary = ranked.filter { it.quality.tier == "PRIMARY" }
+        auditLogger.log("FIXED_ENGINE", "PUBLICATION_GUARD_PROFILE", mapOf(
+            "date" to today,
+            "primary_before_overlay" to fixedPrimary.size,
+            "primary_entry_safety_held" to fixedPrimary.count { !it.quality.publishEligible },
+            "primary_entry_safe" to fixedPrimary.count { it.quality.publishEligible },
+            "entry_hold_reasons" to fixedPrimary.filter { !it.quality.publishEligible }
+                .flatMap { it.quality.failedRules }.groupingBy { it }.eachCount(),
+            "baseline_ready" to discoveryPass.baselineReady,
+            "primary_needing_repeat_confirmation" to fixedPrimary.count { item ->
+                item.quality.publishEligible &&
+                    priorTodayResearch.none { prev ->
+                        prev.symbol.equals(item.symbol, true) && prev.qualityTier == "PRIMARY" &&
+                            prev.publishEligible && prev.executionEligible
+                    }
+            },
+            "primary_safe_symbols_observation_only" to fixedPrimary.filter {
+                it.quality.publishEligible
+            }.take(12).map { it.symbol },
+            "fixed_40_factor_model_changed" to false,
+            "publication_rules_relaxed" to false
+        ))
         fixedRecommendationStore.appendObservations(
             ranked.take(FIXED_V741_RESEARCH_CAPTURE_TOP_N).map { item ->
                 FixedScanObservation(
@@ -6496,7 +6538,13 @@ class TradingRepository @Inject constructor(
         val lowWater = min(position.maxAdversePrice, ltp)
         val hardStopPrice = HardStopLossPolicy.stopPrice(position.entryPrice)
         val desiredTrailGainPct = SteppedTrailingPolicy.stopGainPctForHighWater(position.entryPrice, highWater)
-        val desiredTrailPrice = desiredTrailGainPct?.let { SteppedTrailingPolicy.stopPrice(position.entryPrice, it) }
+        val desiredTrailPrice = desiredTrailGainPct?.let { gain ->
+            // Add net-profit protection only when reached; never loosen the proven gross trail.
+            NetGainTrailingPolicy.additionalNetGainProtection(
+                position.entryPrice, position.quantity, highWater,
+                SteppedTrailingPolicy.stopPrice(position.entryPrice, gain)
+            )
+        }
         val desiredMode = if (desiredTrailPrice != null) {
             HoldingSmartOrderPolicy.MODE_TRAILING_GTT
         } else {
@@ -7201,6 +7249,16 @@ class TradingRepository @Inject constructor(
             "hard_stop_loss_pct" to -HardStopLossPolicy.MAX_LOSS_PCT,
             "hard_stop_price" to HardStopLossPolicy.stopPrice(position.entryPrice),
             "hard_stop_enabled" to true,
+            "estimated_net_pnl_at_high_water" to GrowwDeliveryCostPolicy.estimatedNetProfit(
+                position.entryPrice, position.maxFavourablePrice, position.quantity),
+            "estimated_net_pnl_at_active_stop" to position.stopPrice?.let {
+                GrowwDeliveryCostPolicy.estimatedNetProfit(position.entryPrice, it, position.quantity)
+            },
+            "net_half_percent_slippage_adjusted_stop" to NetGainTrailingPolicy.minimumNetTargetTrigger(
+                position.entryPrice, position.quantity),
+            "net_target_pct" to NetGainTrailingPolicy.MIN_NET_RETURN_PCT,
+            "net_slippage_allowance_bps" to NetGainTrailingPolicy.DEFAULT_SLIPPAGE_ALLOWANCE_BPS,
+            "net_floor_is_market_not_guarantee" to true,
             "averaging_down_disabled" to true,
             "local_fallback_only_if_no_active_gtt" to true
         ))
