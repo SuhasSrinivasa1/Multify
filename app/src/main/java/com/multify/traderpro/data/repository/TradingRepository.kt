@@ -120,6 +120,7 @@ import com.multify.traderpro.engine.MultifyReverseEngineering
 import com.multify.traderpro.engine.PositiveCloseForecastPolicy
 import com.multify.traderpro.engine.SteppedTrailingPolicy
 import com.multify.traderpro.engine.NetGainTrailingPolicy
+import com.multify.traderpro.engine.ForecastCalibrationCompletionPolicy
 import com.multify.traderpro.engine.GttExitReconciliationPolicy
 import com.multify.traderpro.engine.StrategyEvaluation
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -5451,6 +5452,27 @@ class TradingRepository @Inject constructor(
         val today = now.toLocalDate().toString()
         val rows = learningDao.longForecastsForDate(today)
         if (rows.isEmpty()) return 0
+        // During closed hours, repeated LTP requests cannot reconstruct the full intraday
+        // move. They previously generated 131 Fixed-priority errors after 15:30.
+        // Close the displayed session once, without fabricating a winning/losing label.
+        // Full-session research outcomes are recovered from mature candles off-hours.
+        val regularSession = now.dayOfWeek.value < 6 &&
+            !now.toLocalTime().isBefore(LocalTime.of(9, 15)) &&
+            now.toLocalTime().isBefore(LocalTime.of(15, 30))
+        if (!regularSession) {
+            val unfinished = rows.filter { it.status == "ACTIVE" }
+            unfinished.forEach { learningDao.updateLongForecast(it.copy(status = "SESSION_ENDED")) }
+            if (unfinished.isNotEmpty()) {
+                auditLogger.logAsync("FORECAST_RESEARCH", "SESSION_CLOSED_AWAITING_OUTCOME_REPLAY", mapOf(
+                    "date" to today,
+                    "closed_without_claiming_target_miss" to unfinished.size,
+                    "intraday_history_required" to true,
+                    "live_ltp_requests_sent" to 0,
+                    "forecast_trading_eligibility_changed" to false
+                ))
+            }
+            return 0
+        }
         // Outcomes are Forecast research, not order execution. Use Beta if configured;
         // an unauthenticated Beta must never silently borrow Alpha's request budget.
         val token = forecastMarketToken() ?: return rows.count { it.status == "ACTIVE" }
@@ -5933,11 +5955,34 @@ class TradingRepository @Inject constructor(
                 }
                 .getOrDefault(0)
         } else 0
-        val todayCompletedResearchRows = learningDao.forecastResearchForDate(today)
-            .count { it.outcomeUpdatedAtMs != null }
-        if (todayCompletedResearchRows >= FORECAST_CALIBRATION_MIN_COMPLETED_ROWS) {
-            markForecastCalibrationSessionComplete(today)
-        }
+        // Reconcile ALL mature days, not only today's outcomes. v7.9.25 already
+        // rotates replay across historical dates; those completed sessions must count.
+        // A mere captured research scan never advances calibration.
+        val qualifiedDates = ForecastCalibrationCompletionPolicy.qualifyingDates(
+            rows = learningDao.allForecastResearch().map { row ->
+                ForecastCalibrationCompletionPolicy.CompletedOutcome(
+                    date = row.researchDate,
+                    symbol = row.symbol,
+                    updatedAtMs = row.outcomeUpdatedAtMs,
+                    mfePct = row.outcomeMfePct,
+                    maePct = row.outcomeMaePct,
+                    closePct = row.outcomeClosePct
+                )
+            },
+            today = today,
+            todayFullSessionMature = ZonedDateTime.now(INDIA).toLocalTime() >= LocalTime.of(15, 35),
+            minimumDistinctSymbols = FORECAST_CALIBRATION_MIN_COMPLETED_ROWS
+        )
+        val completedBefore = forecastCalibrationDates()
+        qualifiedDates.minus(completedBefore).sorted().forEach(::markForecastCalibrationSessionComplete)
+        auditLogger.log("FORECAST_RESEARCH", "CALIBRATION_HISTORICAL_DATES_RECONCILED", mapOf(
+            "qualified_dates" to qualifiedDates.sorted(),
+            "newly_completed_sessions" to (qualifiedDates - completedBefore).size,
+            "completed_sessions_after" to forecastCalibrationDates().size,
+            "goal" to MarketPriorityPolicy.LIVE_FORECAST_UNLOCK_SESSIONS,
+            "captured_only_not_counted" to true,
+            "synthetic_outcomes_added" to false
+        ))
 
         val existing = learningDao.latestResearchReport()
         if (!force && existing?.reportDate == today && researchUpdated == 0 &&

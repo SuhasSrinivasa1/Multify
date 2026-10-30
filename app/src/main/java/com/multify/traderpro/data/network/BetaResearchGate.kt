@@ -31,9 +31,10 @@ class BetaResearchGate @Inject constructor() {
     private val liveSec = 9
     private val liveMinute = 285
     private val histSec = 1
-    // Latest live export recorded nine historical 429s at 20/min. Serialize and pace
-    // read-only Beta history conservatively; Fixed/SELL use separate Alpha scheduling.
-    private val histMinute = 12
+    // The 18:24 day-end log still recorded three Beta historical HTTP 429s at 12/min.
+    // Reduce request bursts while the cross-date after-hours replay catches up;
+    // Alpha's fast Multify BUY and all SELL paths are independent and unchanged.
+    private val histMinute = 8
     private val liveRequests = AtomicLong()
     private val historicalRequests = AtomicLong()
     private val liveFailures = AtomicLong()
