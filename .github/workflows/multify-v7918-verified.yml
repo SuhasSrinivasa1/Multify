@@ -722,10 +722,12 @@ jobs:
           assert 'vwap(sessionCandles)' in fixed
           assert 'openingRange(completedSessionCandles, 15, intervalMinutes)' in fixed
           assert 'sessionCandleCount = completedSessionCandles.size' in fixed
-          assert 'FIXED_ENTRY_SAFETY_V1' in (root/'engine/FixedEntrySafetyOverlay.kt').read_text()
+          overlay=(root/'engine/FixedEntrySafetyOverlay.kt').read_text()
+          assert 'FIXED_ENTRY_SAFETY_V1' in overlay and 'RSI_EXHAUSTION=75.0' in overlay
           assert 'FixedEntrySafetyOverlay.assess(f)' in (root/'engine/FixedForecastQualityPolicy.kt').read_text()
           forecast=(root/'engine/ForecastEarlyEntryPolicy.kt').read_text()
           assert 'FiveMinuteCandleAggregator.aggregate' in forecast and 'bars.size<6' in forecast
+          assert 'latestFiveClose/previousFiveClose' in forecast and 'currentExtensionFromFiveClosePct' in forecast
           assert 'MarketCandleTimestampParser.toEpochMillis' in (root/'engine/ForecastCandleShadow.kt').read_text()
           code=(root/'data/repository/TradingRepository.kt').read_text()
           assert 'BETA_FORECAST_FIXED_GUARD_MS = 10_000L' in code
