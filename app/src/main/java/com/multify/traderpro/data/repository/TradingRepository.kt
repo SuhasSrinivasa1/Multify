@@ -1735,13 +1735,13 @@ class TradingRepository @Inject constructor(
         val filled = order.filledQuantity?.takeIf { it > 0 } ?: qty
         val entry = order.averageFillPrice?.takeIf { it > 0.0 } ?: referencePrice
         val investedAmount = entry * filled
-        val trailArmPct = SteppedTrailingPolicy.ARM_TRIGGER_PCT
+        val trailArmPct = NetProfitProtectionPolicy.MIN_NET_RETURN_PCT
         managedDao.insertPosition(
             ManagedPositionEntity(
                 engine = ENGINE_MULTIFY_HOLDING, symbol = symbol, product = "CNC", side = "LONG", quantity = filled,
                 entryPrice = entry, stopPrice = HardStopLossPolicy.stopPrice(entry),
                 targetPrice = signal.target,
-                strategy = "Multify ARM holding · hard -2% floor · v7 fixed stepped trail 0.55→0.50 then +0.10%",
+                strategy = "Multify ARM holding · hard -2% floor · cost-aware net +0.50% trail +25bps slippage reserve, +0.10% steps",
                 regime = "HOLDING_LONG", confidence = 1.0, sourceEventId = eventId,
                 openOrderId = order.growwOrderId, openReferenceId = ref, openedAtMs = System.currentTimeMillis(),
                 lastPrice = entry, maxFavourablePrice = entry, maxAdversePrice = entry, lastEvaluatedAtMs = System.currentTimeMillis(),
@@ -1755,14 +1755,15 @@ class TradingRepository @Inject constructor(
         )
         dao.updateForwarding(
             eventId, "DELIVERED", "CNC_LONG_BOUGHT",
-            "ARM bought $filled $symbol into holdings @ ₹${fmt(entry)}. Fixed trailing arms when gain reaches +0.55%, protecting +0.50%, then ratchets by +0.10% steps.",
+            "ARM bought $filled $symbol into holdings @ ₹${fmt(entry)}. Net trailing arms after estimated +0.50% net plus 25bps execution reserve; it ratchets in +0.10% net steps. The common -2% hard stop remains active until then.",
             null
         )
         auditLogger.log("HOLDING", "MULTIFY_LONG_OPENED", mapOf(
             "symbol" to symbol, "qty" to filled, "entry" to entry,
             "invested_amount" to investedAmount,
             "trail_arm_trigger_pct" to trailArmPct,
-            "initial_protected_gain_pct" to SteppedTrailingPolicy.INITIAL_STOP_GAIN_PCT,
+            "initial_protected_net_pct" to NetProfitProtectionPolicy.MIN_NET_RETURN_PCT,
+            "slippage_allowance_bps" to NetProfitProtectionPolicy.SLIPPAGE_ALLOWANCE_BPS,
             "trail_step_pct" to SteppedTrailingPolicy.STEP_PCT
         ))
     }
@@ -6901,7 +6902,7 @@ class TradingRepository @Inject constructor(
                 ltp,
                 if (desiredMode == HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT)
                     "COMMON_HARD_STOP_MINUS_2_LOCAL_FALLBACK"
-                else "LONG_TRAILING_PROFIT_STOP_V7_1_LOCAL_FALLBACK",
+                else "NET_050_TRAILING_GTT_LOCAL_FALLBACK",
                 decisionStartedNs
             )
             return
@@ -6926,7 +6927,7 @@ class TradingRepository @Inject constructor(
                             ltp,
                             if (desiredMode == HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT)
                                 "COMMON_HARD_STOP_MINUS_2_STALE_GTT_FALLBACK"
-                            else "LONG_TRAILING_PROFIT_STOP_V7_1_STALE_GTT_FALLBACK",
+                            else "NET_050_TRAILING_GTT_STALE_PROTECTION_FALLBACK",
                             decisionStartedNs
                         )
                         return
@@ -6995,7 +6996,7 @@ class TradingRepository @Inject constructor(
                             ltp,
                             if (working.smartOrderMode == HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT)
                                 "COMMON_HARD_STOP_MINUS_2_GTT_FAILED_FALLBACK"
-                            else "LONG_TRAILING_PROFIT_STOP_V7_1_GTT_FAILED_FALLBACK",
+                            else "NET_050_TRAILING_GTT_FAILED_FALLBACK",
                             decisionStartedNs
                         )
                     }
@@ -7030,8 +7031,8 @@ class TradingRepository @Inject constructor(
         if (stopRaised || trailJustArmed) {
             val event = when {
                 desiredMode == HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT && previousProtected == null -> "HARD_STOP_MINUS_2_ARMED"
-                trailJustArmed -> "V7_1_TRAIL_ARMED"
-                else -> "V7_1_STEP_RATCHET"
+                trailJustArmed -> "NET_050_TRAIL_ARMED"
+                else -> "NET_PROFIT_STEP_RATCHET"
             }
             auditLogger.log("TRAILING_STOP", event, mapOf(
                 "symbol" to working.symbol,
@@ -7043,6 +7044,10 @@ class TradingRepository @Inject constructor(
                 "old_high_water" to previousHighWater,
                 "new_high_water" to highWater,
                 "high_water_gain_pct" to SteppedTrailingPolicy.gainPct(working.entryPrice, highWater),
+                "net_profit_target_pct" to working.netProfitTargetPct,
+                "net_profit_floor_price" to working.netProfitFloorPrice,
+                "net_profit_trigger_price" to activeStop,
+                "net_slippage_allowance_bps" to NetProfitProtectionPolicy.SLIPPAGE_ALLOWANCE_BPS,
                 "protected_gain_pct" to activeStop?.let { SteppedTrailingPolicy.gainPct(working.entryPrice, it) },
                 "active_stop" to activeStop,
                 "gtt_id" to working.smartOrderId,
@@ -7556,7 +7561,13 @@ class TradingRepository @Inject constructor(
         val highGainPct = SteppedTrailingPolicy.gainPct(position.entryPrice, position.maxFavourablePrice)
         val protectedGainPct = position.stopPrice?.takeIf { it > position.entryPrice }
             ?.let { SteppedTrailingPolicy.gainPct(position.entryPrice, it) }
-        val nextGain = SteppedTrailingPolicy.nextTriggerGainPct(protectedGainPct)
+        val nextNetTargetPct = (position.netProfitTargetPct ?: NetProfitProtectionPolicy.MIN_NET_RETURN_PCT) +
+            SteppedTrailingPolicy.STEP_PCT
+        val nextNetTriggerPrice = GrowwDeliveryCostPolicy.recoverySellPrice(
+            position.entryPrice, position.quantity,
+            position.entryPrice * position.quantity *
+                (nextNetTargetPct + NetProfitProtectionPolicy.SLIPPAGE_ALLOWANCE_BPS / 100.0) / 100.0
+        )
         auditLogger.log("TRAILING_STATE", "STOCK_TRAIL_STATE", mapOf(
             "symbol" to position.symbol,
             "engine" to position.engine,
@@ -7565,13 +7576,18 @@ class TradingRepository @Inject constructor(
             "gain_pct" to gainPct,
             "high_water" to position.maxFavourablePrice,
             "high_water_gain_pct" to highGainPct,
-            "arm_trigger_pct" to SteppedTrailingPolicy.ARM_TRIGGER_PCT,
-            "armed" to (protectedGainPct != null),
-            "desired_protected_gain_pct" to desiredStopGainPct,
+            "legacy_gross_arm_trigger_pct" to SteppedTrailingPolicy.ARM_TRIGGER_PCT,
+            "net_profit_minimum_pct" to NetProfitProtectionPolicy.MIN_NET_RETURN_PCT,
+            "net_profit_target_pct" to position.netProfitTargetPct,
+            "net_profit_floor_price" to position.netProfitFloorPrice,
+            "net_profit_trigger_price" to position.smartOrderTriggerPrice,
+            "net_slippage_allowance_bps" to NetProfitProtectionPolicy.SLIPPAGE_ALLOWANCE_BPS,
+            "armed" to (position.smartOrderMode == HoldingSmartOrderPolicy.MODE_TRAILING_GTT),
+            "desired_net_protected_pct" to desiredStopGainPct,
             "active_stop_price" to position.stopPrice,
             "protected_gain_pct" to protectedGainPct,
-            "next_ratchet_trigger_gain_pct" to nextGain,
-            "next_ratchet_trigger_price" to (position.entryPrice * (1.0 + nextGain / 100.0)),
+            "next_net_ratchet_target_pct" to nextNetTargetPct,
+            "next_net_ratchet_trigger_price" to nextNetTriggerPrice,
             "gtt_id" to position.smartOrderId,
             "gtt_mode" to position.smartOrderMode,
             "gtt_status" to position.smartOrderStatus,
