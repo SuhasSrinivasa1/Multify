@@ -85,6 +85,13 @@ data class GrowwPosition(
     @SerializedName("debit_price") val debitPrice: Double = 0.0
 )
 
+data class QuoteDepthLevel(val price: Double? = null, val quantity: Double? = null)
+
+data class QuoteMarketDepth(
+    val buy: List<QuoteDepthLevel> = emptyList(),
+    val sell: List<QuoteDepthLevel> = emptyList()
+)
+
 data class QuotePayload(
     @SerializedName("average_price") val averagePrice: Double? = null,
     @SerializedName("bid_price") val bidPrice: Double? = null,
@@ -102,7 +109,8 @@ data class QuotePayload(
     val open: Double? = null,
     val high: Double? = null,
     val low: Double? = null,
-    val close: Double? = null
+    val close: Double? = null,
+    @SerializedName("depth") val depth: QuoteMarketDepth? = null
 )
 
 data class HistoricalPayload(

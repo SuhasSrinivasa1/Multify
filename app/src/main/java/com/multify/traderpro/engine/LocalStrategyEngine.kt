@@ -99,8 +99,10 @@ object LocalStrategyEngine {
         } else null
         val (o5h, o5l) = openingRange(candles, 5, intervalMinutes)
         val (o15h, o15l) = openingRange(candles, 15, intervalMinutes)
-        val bid = quote.bidPrice
-        val ask = quote.offerPrice
+        val bid = quote.bidPrice?.takeIf { it.isFinite() && it > 0.0 }
+            ?: quote.depth?.buy?.mapNotNull { level -> level.price?.takeIf { it.isFinite() && it > 0.0 } }?.maxOrNull()
+        val ask = quote.offerPrice?.takeIf { it.isFinite() && it > 0.0 }
+            ?: quote.depth?.sell?.mapNotNull { level -> level.price?.takeIf { it.isFinite() && it > 0.0 } }?.minOrNull()
         val atrNow = atr(candles, 14)
         val ema9Now = ema(closes, 9)
         val ema20Now = ema(closes, 20)
@@ -137,7 +139,9 @@ object LocalStrategyEngine {
             spreadBps = if (bid != null && ask != null && bid > 0.0 && ask >= bid && ltp > 0.0) (ask - bid) / ltp * 10_000.0 else null,
             orderBookImbalance = run {
                 val b = quote.totalBuyQuantity ?: quote.bidQuantity
+                    ?: quote.depth?.buy?.sumOf { it.quantity ?: 0.0 }
                 val a = quote.totalSellQuantity ?: quote.offerQuantity
+                    ?: quote.depth?.sell?.sumOf { it.quantity ?: 0.0 }
                 if (b != null && a != null && b + a > 0.0) (b - a) / (b + a) else null
             },
             dayChangePct = quote.dayChangePct,

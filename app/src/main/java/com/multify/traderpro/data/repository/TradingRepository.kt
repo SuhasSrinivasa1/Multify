@@ -4168,11 +4168,16 @@ class TradingRepository @Inject constructor(
                 alphaCall = { apiFactory.groww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Quote $symbol") },
                 betaCall = { apiFactory.betaGroww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Beta quote $symbol") })
         }
-        if (quote.bidPrice == null || quote.offerPrice == null || quote.bidPrice <= 0.0 ||
-            quote.offerPrice < (quote.bidPrice ?: Double.POSITIVE_INFINITY)) {
+        val bestBid = quote.bidPrice?.takeIf { it.isFinite() && it > 0.0 }
+            ?: quote.depth?.buy?.mapNotNull { level -> level.price?.takeIf { it.isFinite() && it > 0.0 } }?.maxOrNull()
+        val bestAsk = quote.offerPrice?.takeIf { it.isFinite() && it > 0.0 }
+            ?: quote.depth?.sell?.mapNotNull { level -> level.price?.takeIf { it.isFinite() && it > 0.0 } }?.minOrNull()
+        if (bestBid == null || bestAsk == null || bestBid <= 0.0 || bestAsk < bestBid) {
             auditLogger.logAsync("FORECAST_RESEARCH", "QUOTE_SPREAD_UNAVAILABLE", mapOf(
                 "symbol" to symbol, "account" to (if (forecastUsesBeta(token)) "BETA" else "ALPHA"),
-                "bid_present" to (quote.bidPrice != null), "offer_present" to (quote.offerPrice != null)
+                "bid_present" to (bestBid != null), "offer_present" to (bestAsk != null),
+                "depth_buy_levels" to quote.depth?.buy?.size,
+                "depth_sell_levels" to quote.depth?.sell?.size
             ))
         }
         val historical = withForecastHistoricalDataSlot {
@@ -8200,8 +8205,8 @@ class TradingRepository @Inject constructor(
         private const val DISCOVERY_CONSECUTIVE_FAILURE_ABORT = 3
         private const val MIN_DISCOVERY_COVERAGE_RATIO = 0.85
         private const val RESEARCH_CAPTURE_TOP_N = 48
-        private const val RESEARCH_BACKFILL_SYMBOL_PACING_MS = 1_100L
-        private const val RESEARCH_BACKFILL_SYMBOL_BATCH = 24
+        private const val RESEARCH_BACKFILL_SYMBOL_PACING_MS = 2_500L
+        private const val RESEARCH_BACKFILL_SYMBOL_BATCH = 12
         private const val RESEARCH_BACKFILL_MAX_BATCHES_PER_RUN = 3
         private const val RESEARCH_BACKFILL_BUDGET_MS = 150_000L
         private const val BETA_FORECAST_FIXED_GUARD_MS = 10_000L
