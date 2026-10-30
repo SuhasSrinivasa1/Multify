@@ -10,6 +10,7 @@ import kotlinx.coroutines.delay
 import okhttp3.Request
 import java.io.IOException
 import com.multify.traderpro.engine.GrowwApiBudgetPolicy
+import com.multify.traderpro.engine.AlphaLtpPacingPolicy
 import okhttp3.Interceptor
 import okhttp3.Response
 import java.util.ArrayDeque
@@ -31,6 +32,11 @@ internal class GrowwRateLimitInterceptor(
     internal class PreAdmitted
 
     private val lock = Any()
+    // Local per-endpoint Alpha /ltp pacing: shared generic LIVE_DATA budget alone
+    // did not prevent HTTP 429 at 2 requests/second and 18/minute in the broker logs.
+    // This never changes Fixed scoring, SELL stop triggers or order dispatch.
+    private val alphaLtpMinute = ArrayDeque<Long>()
+    private var lastAlphaLtpGrantedAtMs = 0L
     private val lastBlockedAuditMs = EnumMap<GrowwApiUsageLedger.Category, Long>(GrowwApiUsageLedger.Category::class.java)
     private val states = EnumMap<GrowwApiUsageLedger.Category, State>(GrowwApiUsageLedger.Category::class.java).apply {
         GrowwApiUsageLedger.Category.values().forEach { put(it, State()) }
@@ -142,16 +148,27 @@ internal class GrowwRateLimitInterceptor(
                     (state.second.peekFirst() + 1_000L - now).coerceAtLeast(1L) else 0L
                 val minuteWait = if (state.minute.size >= limits.perMinute)
                     (state.minute.peekFirst() + 60_000L - now).coerceAtLeast(1L) else 0L
-                val wait = maxOf(cooldownWait, secondWait, minuteWait)
-                reason = when (wait) {
-                    cooldownWait -> if (cooldownWait > 0L) "429_COOLDOWN" else "NONE"
-                    minuteWait -> if (minuteWait > 0L) "APP_PER_MINUTE" else "NONE"
-                    secondWait -> if (secondWait > 0L) "APP_PER_SECOND" else "NONE"
+                val isAlphaLtp = path == "/v1/live-data/ltp"
+                if (isAlphaLtp) prune(alphaLtpMinute, now - 60_000L)
+                val ltpWait = if (isAlphaLtp) AlphaLtpPacingPolicy.waitMs(
+                    now, lastAlphaLtpGrantedAtMs,
+                    alphaLtpMinute.peekFirst(), alphaLtpMinute.size
+                ) else 0L
+                val wait = maxOf(cooldownWait, secondWait, minuteWait, ltpWait)
+                reason = when {
+                    cooldownWait > 0L && wait == cooldownWait -> "429_COOLDOWN"
+                    ltpWait > 0L && wait == ltpWait -> "ALPHA_LTP_ENDPOINT_PACING"
+                    minuteWait > 0L && wait == minuteWait -> "APP_PER_MINUTE"
+                    secondWait > 0L && wait == secondWait -> "APP_PER_SECOND"
                     else -> "NONE"
                 }
                 if (wait <= 0L) {
                     state.second.addLast(now)
                     state.minute.addLast(now)
+                    if (isAlphaLtp) {
+                        alphaLtpMinute.addLast(now)
+                        lastAlphaLtpGrantedAtMs = now
+                    }
                     0L
                 } else wait
             }

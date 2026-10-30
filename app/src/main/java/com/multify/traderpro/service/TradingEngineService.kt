@@ -412,9 +412,13 @@ class TradingEngineService : Service() {
                         // 22-second verified cache remains unchanged; the old prewarm calls
                         // regularly expired before Fixed used them and consumed broker quota.
                         val gateState = recoveryGate.status()
-                        val cooldownUntilMs = gateState.categoryCooldownUntilMs[
+                        val historicalCooldownUntilMs = gateState.categoryCooldownUntilMs[
                             GrowwApiUsageLedger.Category.HISTORICAL
                         ] ?: 0L
+                        val liveCooldownUntilMs = gateState.categoryCooldownUntilMs[
+                            GrowwApiUsageLedger.Category.LIVE_DATA
+                        ] ?: 0L
+                        val cooldownUntilMs = maxOf(historicalCooldownUntilMs, liveCooldownUntilMs)
                         val nowMs = System.currentTimeMillis()
                         val readiness = FixedDataPipelinePolicy.readiness(
                             gateState.reconnectRequired, cooldownUntilMs, nowMs
@@ -425,7 +429,8 @@ class TradingEngineService : Service() {
                             )) {
                                 auditLogger.log("FIXED_DATA_PIPELINE", "FIXED_SCAN_DEFERRED_BROKER_UNAVAILABLE", mapOf(
                                     "reason" to readiness.name,
-                                    "historical_cooldown_until_ms" to cooldownUntilMs,
+                                    "historical_cooldown_until_ms" to historicalCooldownUntilMs,
+                                    "live_ltp_cooldown_until_ms" to liveCooldownUntilMs,
                                     "remaining_cooldown_ms" to (cooldownUntilMs - nowMs).coerceAtLeast(0L),
                                     "forecast_formula_unchanged" to true,
                                     "existing_fixed_recommendations_preserved" to true
@@ -433,7 +438,10 @@ class TradingEngineService : Service() {
                                 lastFixedPauseAuditMs = nowMs
                             }
                             previousFixedPause = readiness
-                            delay(SCAN_WORKER_POLL_MS)
+                            // Wait out the known LIVE/HISTORICAL broker block rather than
+                            // retrying the Fixed scan every second. No complete scan is lost.
+                            val remaining = (cooldownUntilMs - nowMs).coerceAtLeast(0L)
+                            delay(if (remaining > 0L) remaining.coerceAtMost(30_000L) else SCAN_WORKER_POLL_MS)
                             continue
                         }
                         if (previousFixedPause != null) {
