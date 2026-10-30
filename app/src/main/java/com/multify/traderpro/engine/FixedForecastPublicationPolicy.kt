@@ -1,8 +1,8 @@
 package com.multify.traderpro.engine
 
-/** Market-wide PRIMARY calls can publish on the first fully-qualified scan; fallback names need repeat proof. */
+/** Prevents one-scan noise from consuming the five daily production slots. */
 object FixedForecastPublicationPolicy {
-    const val DISCOVERED_PRIOR_PRIMARY_HITS = 0
+    const val DISCOVERED_PRIOR_PRIMARY_HITS = 1
     const val FALLBACK_PRIOR_PRIMARY_HITS = 2
 
     fun isReady(

@@ -4,8 +4,9 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class FixedForecastPublicationPolicyTest {
-    @Test fun fullyQualifiedDiscoveredPrimaryCanPublishOnFirstScan() {
-        assertTrue(FixedForecastPublicationPolicy.isReady(true, true, true, 0))
+    @Test fun discoveredPrimaryRequiresIndependentRepeatConfirmation() {
+        assertFalse(FixedForecastPublicationPolicy.isReady(true, true, true, 0))
+        assertTrue(FixedForecastPublicationPolicy.isReady(true, true, true, 1))
     }
     @Test fun fallbackStillNeedsTwoIndependentPrimaryConfirmations() {
         assertFalse(FixedForecastPublicationPolicy.isReady(true, true, false, 0))
