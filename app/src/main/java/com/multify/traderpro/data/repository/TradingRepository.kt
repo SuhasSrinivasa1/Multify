@@ -949,7 +949,28 @@ class TradingRepository @Inject constructor(
     private suspend fun <T> betaMarketRead(token: String, type: BetaResearchGate.Type,
                                            alphaCall: suspend () -> T, betaCall: suspend () -> T): T {
         if (!forecastUsesBeta(token)) return alphaCall()
-        return try { betaResearchGate.read(type, betaCall) } catch (t: Throwable) {
+        val started = SystemClock.elapsedRealtime()
+        return try {
+            val result = betaResearchGate.read(type, betaCall)
+            val usage = betaResearchGate.snapshot()
+            auditLogger.logAsync("BETA_API", "REQUEST_PROFILE", mapOf(
+                "account" to "BETA", "category" to type.name, "outcome" to "SUCCESS",
+                "elapsed_ms" to (SystemClock.elapsedRealtime() - started).coerceAtLeast(0L),
+                "live_requests" to usage.liveRequests, "historical_requests" to usage.historicalRequests,
+                "live_429" to usage.liveRateLimits, "historical_429" to usage.historicalRateLimits,
+                "live_failures" to usage.liveFailures, "historical_failures" to usage.historicalFailures
+            ))
+            result
+        } catch (t: Throwable) {
+            val code = (t as? HttpException)?.code()
+            val usage = betaResearchGate.snapshot()
+            auditLogger.logAsync("BETA_API", "REQUEST_PROFILE", mapOf(
+                "account" to "BETA", "category" to type.name, "outcome" to "FAILURE",
+                "http_code" to (code ?: 0),
+                "elapsed_ms" to (SystemClock.elapsedRealtime() - started).coerceAtLeast(0L),
+                "live_requests" to usage.liveRequests, "historical_requests" to usage.historicalRequests,
+                "live_429" to usage.liveRateLimits, "historical_429" to usage.historicalRateLimits
+            ))
             if (t is HttpException && t.code() == 401) {
                 betaSessionInvalid = true
                 cachedBetaResearchToken = null
@@ -1900,11 +1921,15 @@ class TradingRepository @Inject constructor(
         recoveryGate.checkRequestAllowed(GrowwApiUsageLedger.Category.NON_TRADING)
     }.isSuccess
 
+    private fun forecastFixedGuardMs(): Long =
+        if (secretStore.hasBetaCredentials()) BETA_FORECAST_FIXED_GUARD_MS else 35_000L
+
     private fun forecastMarketCapacityAvailable(): Boolean {
         if (fixedApiPriorityRequested || marketCriticalTradeInFlight) return false
         if (secretStore.hasBetaCredentials()) {
-            // When Beta is configured, never silently fall back to Alpha research quota.
-            return betaResearchAuthenticated() && millisUntilNextFixedScan() > 35_000L
+            // Beta uses an independent read-only governor. Keep a short Fixed guard while
+            // allowing research through more of the otherwise idle inter-scan window.
+            return betaResearchAuthenticated() && millisUntilNextFixedScan() > forecastFixedGuardMs()
         }
         // A cooldown is an immediate no-go. Do not repeatedly request a blocked endpoint.
         // Trading and Fixed categories are never reserved for this research engine.
@@ -3009,9 +3034,25 @@ class TradingRepository @Inject constructor(
         }
         fixedHistoricalWindowStore.remember(historyKey, start, historical, SystemClock.elapsedRealtime())
         require(historical.candles.size >= 5) { "Insufficient fixed forecast candles" }
-        val features = FixedLocalStrategyEngine.buildFeatures(quote, historical, 5)
+        val features = FixedLocalStrategyEngine.buildFeatures(quote, historical, 5, now.toLocalDate())
         val signal = ParsedSignal(SignalType.TRADE_RELEASE, symbol = symbol, rawText = "fixed-forecast", confidence = 1.0)
         val evaluation = FixedLocalStrategyEngine.evaluateLong(signal, features, includeEventPrior = false)
+        val entrySafety = FixedEntrySafetyOverlay.assess(features)
+        auditLogger.logAsync("FIXED_ENTRY_SAFETY", "ASSESSMENT", mapOf(
+            "version" to FixedEntrySafetyOverlay.VERSION, "symbol" to symbol,
+            "eligible" to entrySafety.eligible, "reasons" to entrySafety.reasons,
+            "session_candle_count" to features.sessionCandleCount,
+            "spread_bps" to features.spreadBps,
+            "vwap_extension_atr" to entrySafety.vwapExtensionAtr,
+            "ema20_extension_atr" to entrySafety.ema20ExtensionAtr,
+            "recent_impulse_atr" to entrySafety.recentImpulseAtr
+        ))
+        if (quote.bidPrice == null || quote.offerPrice == null) {
+            auditLogger.logAsync("FIXED_RESEARCH", "QUOTE_SPREAD_UNAVAILABLE", mapOf(
+                "symbol" to symbol, "bid_present" to (quote.bidPrice != null),
+                "offer_present" to (quote.offerPrice != null)
+            ))
+        }
         // Diagnostic-only, O(1) non-blocking queue offer. All 40 factor calculations and disk
         // writes execute later on a low-priority worker; never delay Fixed recommendations.
         fixedFactorTelemetry.tryRecord(symbol, evaluation, lastFixedScanAtMs)
@@ -4107,7 +4148,7 @@ class TradingRepository @Inject constructor(
     private suspend fun <T> withForecastLiveDataSlot(block: suspend () -> T): T {
         // A quote and its 1m history must fit before the next scheduled Fixed scan.
         // Never reserve the shared scanner or broker capacity across Fixed's guard window.
-        if (!forecastMarketCapacityAvailable() || millisUntilNextFixedScan() <= 35_000L) {
+        if (!forecastMarketCapacityAvailable() || millisUntilNextFixedScan() <= forecastFixedGuardMs()) {
             throw ForecastPriorityYieldException()
         }
         return if (secretStore.hasBetaCredentials()) block() else withFixedLiveDataSlot(block)
@@ -4119,7 +4160,7 @@ class TradingRepository @Inject constructor(
         // candle request. Only check Fixed, SELL priority and the approaching guard;
         // actual network requests still pass the unmodified Groww rate governor.
         if (fixedApiPriorityRequested || marketCriticalTradeInFlight ||
-            millisUntilNextFixedScan() <= 35_000L) {
+            millisUntilNextFixedScan() <= forecastFixedGuardMs()) {
             throw ForecastPriorityYieldException()
         }
         return if (secretStore.hasBetaCredentials()) block() else withFixedHistoricalDataSlot(block)
@@ -4134,6 +4175,13 @@ class TradingRepository @Inject constructor(
                 alphaCall = { apiFactory.groww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Quote $symbol") },
                 betaCall = { apiFactory.betaGroww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Beta quote $symbol") })
         }
+        if (quote.bidPrice == null || quote.offerPrice == null || quote.bidPrice <= 0.0 ||
+            quote.offerPrice < (quote.bidPrice ?: Double.POSITIVE_INFINITY)) {
+            auditLogger.logAsync("FORECAST_RESEARCH", "QUOTE_SPREAD_UNAVAILABLE", mapOf(
+                "symbol" to symbol, "account" to (if (forecastUsesBeta(token)) "BETA" else "ALPHA"),
+                "bid_present" to (quote.bidPrice != null), "offer_present" to (quote.offerPrice != null)
+            ))
+        }
         val historical = withForecastHistoricalDataSlot {
             betaMarketRead(token, BetaResearchGate.Type.HISTORICAL,
                 alphaCall = { apiFactory.groww.historicalCandles(bearer(token), growwSymbol = "NSE-$symbol",
@@ -4142,7 +4190,7 @@ class TradingRepository @Inject constructor(
                     startTime = start, endTime = end, candleInterval = "1minute").requirePayload("Beta 1m candles $symbol") })
         }
         require(historical.candles.size >= 10) { "Insufficient forecast 1-minute candles" }
-        val aggregated5m = com.multify.traderpro.engine.ForecastCandleShadow.aggregateFiveMinute(historical)
+        val aggregated5m = com.multify.traderpro.engine.ForecastCandleShadow.aggregateFiveMinute(historical, System.currentTimeMillis())
         if (aggregated5m.completeBars > 0) auditLogger.logAsync("FORECAST_RESEARCH", "SHADOW_1M_5M", mapOf(
             "symbol" to symbol, "account" to (if (forecastUsesBeta(token)) "BETA" else "ALPHA"),
             "one_minute_bars" to historical.candles.size, "complete_five_minute_bars" to aggregated5m.completeBars,
@@ -5642,14 +5690,33 @@ class TradingRepository @Inject constructor(
         if (alphaToken != null) {
             runCatching { backfillRecentMultifyMfe(alphaToken, MFE_AFTER_HOURS_BACKFILL_BATCH_SIZE, force = true) }
         }
-        val researchUpdated = if (token != null) {
-            val incompleteDate = learningDao.forecastResearchDates()
-                .filter { it >= V7_RESEARCH_COHORT_START_DATE }
-                .firstOrNull { learningDao.pendingForecastResearchOutcomes(it).isNotEmpty() }
-            if (incompleteDate != null) {
-                runCatching { backfillForecastResearchOutcomes(incompleteDate, token) }.getOrDefault(0)
-            } else 0
-        } else 0
+        var researchUpdated = 0
+        var researchBatches = 0
+        val replayStartedAt = SystemClock.elapsedRealtime()
+        if (token != null) {
+            while (researchBatches < RESEARCH_BACKFILL_MAX_BATCHES_PER_RUN &&
+                SystemClock.elapsedRealtime() - replayStartedAt < RESEARCH_BACKFILL_BUDGET_MS) {
+                val incompleteDate = learningDao.forecastResearchDates()
+                    .filter { it >= V7_RESEARCH_COHORT_START_DATE }
+                    .firstOrNull { learningDao.pendingForecastResearchOutcomes(it).isNotEmpty() }
+                    ?: break
+                val pendingBefore = learningDao.pendingForecastResearchOutcomes(incompleteDate).size
+                val updated = runCatching { backfillForecastResearchOutcomes(incompleteDate, token) }.getOrDefault(0)
+                researchUpdated += updated
+                researchBatches++
+                val pendingAfter = learningDao.pendingForecastResearchOutcomes(incompleteDate).size
+                if (updated <= 0 || pendingAfter >= pendingBefore) break
+            }
+        }
+        val betaUsage = betaResearchGate.snapshot()
+        auditLogger.logAsync("FORECAST_RESEARCH", "BACKFILL_RUN_PROFILE", mapOf(
+            "batches" to researchBatches, "updated_rows" to researchUpdated,
+            "elapsed_ms" to (SystemClock.elapsedRealtime() - replayStartedAt).coerceAtLeast(0L),
+            "beta_live_requests" to betaUsage.liveRequests,
+            "beta_historical_requests" to betaUsage.historicalRequests,
+            "beta_live_429" to betaUsage.liveRateLimits,
+            "beta_historical_429" to betaUsage.historicalRateLimits
+        ))
         val todayCalibrationUpdated = if (token != null && learningDao.forecastResearchForDate(today).isNotEmpty()) {
             runCatching { backfillForecastResearchOutcomes(today, token) }.getOrDefault(0)
         } else 0
@@ -8142,6 +8209,9 @@ class TradingRepository @Inject constructor(
         private const val RESEARCH_CAPTURE_TOP_N = 48
         private const val RESEARCH_BACKFILL_SYMBOL_PACING_MS = 1_100L
         private const val RESEARCH_BACKFILL_SYMBOL_BATCH = 24
+        private const val RESEARCH_BACKFILL_MAX_BATCHES_PER_RUN = 3
+        private const val RESEARCH_BACKFILL_BUDGET_MS = 150_000L
+        private const val BETA_FORECAST_FIXED_GUARD_MS = 10_000L
         private const val RESEARCH_BACKFILL_NETWORK_ABORT_AFTER = 3
         private const val UNIVERSAL_EVIDENCE_NEAREST_SNAPSHOT_MS = 30L * 60L * 1000L
         private const val UNIVERSAL_EVIDENCE_REPLAY_SYMBOL_PACING_MS = 400L
