@@ -52,8 +52,24 @@ jobs:
           p='app/src/main/java/com/multify/traderpro/engine/FixedLocalStrategyEngine.kt'
           assert older(p)==current(p),'Fixed 40-factor scoring/target engine changed'
           p='app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt'
+          # Multify's order submission path is byte-for-byte protected. The only allowed
+          # differences inside handleMultifyBuy are trailing-state metadata/message fields.
+          old_buy=region(older(p),'private suspend fun handleMultifyBuy(', '    private suspend fun handleMultifyExit(')
+          new_buy=region(current(p),'private suspend fun handleMultifyBuy(', '    private suspend fun handleMultifyExit(')
+          allowed=[
+              ('val trailArmPct = SteppedTrailingPolicy.ARM_TRIGGER_PCT',
+               'val trailArmPct = NetProfitProtectionPolicy.MIN_NET_RETURN_PCT'),
+              ('Multify ARM holding · hard -2% floor · v7 fixed stepped trail 0.55→0.50 then +0.10%',
+               'Multify ARM holding · hard -2% floor · cost-aware net +0.50% trail +25bps slippage reserve, +0.10% steps'),
+              ('Fixed trailing arms when gain reaches +0.55%, protecting +0.50%, then ratchets by +0.10% steps.',
+               'Net trailing arms after estimated +0.50% net plus 25bps execution reserve; it ratchets in +0.10% net steps. The common -2% hard stop remains active until then.'),
+              ('"initial_protected_gain_pct" to SteppedTrailingPolicy.INITIAL_STOP_GAIN_PCT,',
+               '"initial_protected_net_pct" to NetProfitProtectionPolicy.MIN_NET_RETURN_PCT,\n            "slippage_allowance_bps" to NetProfitProtectionPolicy.SLIPPAGE_ALLOWANCE_BPS,'),
+          ]
+          for old_text,new_text in allowed:
+              new_buy=new_buy.replace(new_text,old_text)
+          assert old_buy==new_buy,'Multify BUY execution path changed beyond approved trailing metadata'
           checks=[
-              ('private suspend fun handleMultifyBuy(', '    private suspend fun handleMultifyExit(', 'Multify BUY handler'),
               ('suspend fun executeForecast(', '    suspend fun autoBuyForecastRecommendations():', 'Forecast BUY entry path'),
               ('private suspend fun autoBuyForecastRecommendationsLocked():', '    suspend fun reconcileForecastAutoBuyOrders(', 'Forecast Auto BUY scheduler'),
               ('suspend fun executeFixed(', '    suspend fun autoBuyFixedRecommendations():', 'Fixed BUY entry path'),
