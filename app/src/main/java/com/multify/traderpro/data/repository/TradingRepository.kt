@@ -3061,6 +3061,7 @@ class TradingRepository @Inject constructor(
             }
             val discovered = item.symbol in discoveryPass.symbols
             !FixedForecastPublicationPolicy.isReady(
+                currentPrimary = true,
                 discoveryBaselineReady = discoveryPass.baselineReady,
                 discoveredMarketWide = discovered,
                 priorPrimaryHits = hits
