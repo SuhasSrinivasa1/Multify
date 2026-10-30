@@ -100,9 +100,9 @@ jobs:
           python -m pip install -r backend/requirements.txt
           PYTHONPATH="$GITHUB_WORKSPACE" PHONE_HMAC_SECRET=test-secret-test-secret-test-secret GROWW_API_KEY=test-api-key GROWW_TOTP_SECRET=JBSWY3DPEHPK3PXP python -m pytest -q backend/tests
       - name: Android unit tests
-        run: gradle --no-daemon testDebugUnitTest
+        run: gradle --no-daemon --stacktrace --info testDebugUnitTest
       - name: Assemble debug APK
-        run: gradle --no-daemon assembleDebug
+        run: gradle --no-daemon --stacktrace assembleDebug
       - name: Verify package, version and signing; export exact source
         shell: bash
         run: |
