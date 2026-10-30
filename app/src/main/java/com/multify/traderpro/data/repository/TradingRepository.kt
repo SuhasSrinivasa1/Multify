@@ -6222,8 +6222,24 @@ class TradingRepository @Inject constructor(
         token: String,
         position: ManagedPositionEntity
     ): OrderPayload? {
-        val orders = growwOrderList(token, force = false)
         val reference = position.smartOrderReferenceId
+        if (!reference.isNullOrBlank()) {
+            val byReference = runCatching {
+                apiFactory.groww.orderStatusByReference(
+                    bearer(token), referenceId = reference, segment = "CASH"
+                ).requirePayload("GTT child order lookup by reference")
+            }.getOrNull()
+            val byReferenceId = byReference?.growwOrderId?.takeIf { it.isNotBlank() }
+            if (byReferenceId != null) {
+                val detail = runCatching {
+                    apiFactory.groww.orderStatus(
+                        bearer(token), orderId = byReferenceId, segment = "CASH"
+                    ).requirePayload("GTT child order detail by reference")
+                }.getOrNull()
+                if (detail != null && isMatchingGttChildOrder(detail, position)) return detail
+            }
+        }
+        val orders = growwOrderList(token, force = false)
         val exact = if (!reference.isNullOrBlank()) {
             orders.filter { isMatchingGttChildOrder(it, position) && it.orderReferenceId == reference }
         } else emptyList()
@@ -6238,7 +6254,8 @@ class TradingRepository @Inject constructor(
         val triggerAt = position.smartOrderTriggeredAtMs ?: position.smartOrderUpdatedAtMs ?: position.openedAtMs
         val fallback = orders.filter { order ->
             if (!isMatchingGttChildOrder(order, position)) return@filter false
-            val createdAt = parseGrowwTimestampMs(order.createdAt) ?: return@filter false
+            val createdAt = parseGrowwTimestampMs(order.createdAt ?: order.orderDateTime)
+                ?: return@filter false
             createdAt >= triggerAt - 60_000L && createdAt <= System.currentTimeMillis() + 10_000L &&
                 createdAt >= position.openedAtMs
         }

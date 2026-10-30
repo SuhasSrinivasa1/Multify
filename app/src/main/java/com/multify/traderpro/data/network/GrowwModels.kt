@@ -149,7 +149,8 @@ data class OrderPayload(
     val product: String = "",
     val quantity: Int? = null,
     @SerializedName("order_type") val orderType: String? = null,
-    @SerializedName("created_at") val createdAt: String? = null
+    @SerializedName("created_at") val createdAt: String? = null,
+    @SerializedName("order_date_time") val orderDateTime: String? = null
 )
 
 data class OrderListPayload(
