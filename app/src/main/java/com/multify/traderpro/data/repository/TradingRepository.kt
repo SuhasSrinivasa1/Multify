@@ -7206,6 +7206,9 @@ class TradingRepository @Inject constructor(
             "product" to "CNC",
             "post_trigger_order_type" to postTriggerOrder.orderType,
             "post_trigger_limit_price" to postTriggerOrder.price,
+            "net_profit_floor_price" to updated.netProfitFloorPrice,
+            "net_profit_target_pct" to updated.netProfitTargetPct,
+            "execution_slippage_allowance_bps" to NetProfitProtectionPolicy.SLIPPAGE_ALLOWANCE_BPS,
             "mode" to mode,
             "status" to updated.smartOrderStatus
         ))
