@@ -73,6 +73,7 @@ data class ForecastShadowFilterReview(
  * factor-family reweighting remain shadow-only until explicitly promoted after out-of-sample validation.
  */
 object ForecastAdaptiveSelectionPolicy {
+    const val MIN_NET_RETURN_PCT = 0.50
     const val ASSUMED_BASE_SLIPPAGE_BPS = 2.0
     const val MAX_ASSUMED_HALF_SPREAD_BPS = 20.0
     const val MIN_DOWNSIDE_PROXY_PCT = 0.25
@@ -146,8 +147,31 @@ object ForecastAdaptiveSelectionPolicy {
             netReturnPct = netReturn,
             downsideProxyPct = downside,
             riskAdjustedScore = riskAdjusted,
-            profitableAfterCosts = net > 0.0 && netReturn > 0.0
+            profitableAfterCosts = netReturn + 1e-9 >= MIN_NET_RETURN_PCT
         )
+    }
+
+    /** Minimum gross target needed for the configured budget to retain at least 0.50% net. */
+    fun minimumTargetPctForNetReturn(
+        entryPrice: Double,
+        budgetRupees: Long,
+        spreadBps: Double?,
+        targetNetReturnPct: Double = MIN_NET_RETURN_PCT
+    ): Double {
+        if (!entryPrice.isFinite() || entryPrice <= 0.0 || budgetRupees <= 0L ||
+            !targetNetReturnPct.isFinite() || targetNetReturnPct <= 0.0) return 0.0
+        val conservativeSpread = spreadBps ?: (MAX_ASSUMED_HALF_SPREAD_BPS * 2.0)
+        var low = 0.0
+        var high = 20.0
+        if (economics(entryPrice, high, budgetRupees, conservativeSpread, null).netReturnPct + 1e-9 < targetNetReturnPct) {
+            return high
+        }
+        repeat(48) {
+            val mid = (low + high) / 2.0
+            val net = economics(entryPrice, mid, budgetRupees, conservativeSpread, null).netReturnPct
+            if (net + 1e-9 >= targetNetReturnPct) high = mid else low = mid
+        }
+        return high
     }
 
     fun diagnostics(
