@@ -5,16 +5,18 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sqrt
 
-data class ForecastHistoricalOutcome(
-    val date: String,
-    val symbol: String,
-    val strategy: String,
-    val regime: String,
-    val marketRegime: String,
-    val maxFavourablePct: Double,
-    val maxAdversePct: Double,
-    val closePct: Double,
-    val targetHit: Boolean
+data class ForecastEconomicsDecision(
+    val quantity: Int,
+    val assumedEntryPrice: Double,
+    val assumedExitPrice: Double,
+    val estimatedChargesRupees: Double,
+    val estimatedSlippageRupees: Double,
+    val grossProfitRupees: Double,
+    val netProfitRupees: Double,
+    val netReturnPct: Double,
+    val downsideProxyPct: Double,
+    val riskAdjustedScore: Double,
+    val profitableAfterCosts: Boolean
 )
 
 data class ForecastEvidenceDiagnostics(
@@ -36,69 +38,39 @@ data class ForecastEvidenceDiagnostics(
     val shadowPenalty: Double = 0.0
 )
 
-data class ForecastEconomicsDecision(
-    val quantity: Int,
-    val assumedEntryPrice: Double,
-    val assumedExitPrice: Double,
-    val estimatedChargesRupees: Double,
-    val estimatedSlippageRupees: Double,
-    val grossProfitRupees: Double,
-    val netProfitRupees: Double,
-    val netReturnPct: Double,
-    val downsideProxyPct: Double,
-    val riskAdjustedScore: Double,
-    val profitableAfterCosts: Boolean
+data class ForecastHistoricalOutcome(
+    val date: String,
+    val symbol: String,
+    val strategy: String,
+    val regime: String,
+    val marketRegime: String,
+    val maxFavourablePct: Double,
+    val maxAdversePct: Double,
+    val closePct: Double,
+    val targetHit: Boolean
 )
 
 data class ForecastFamilyOutcome(
     val date: String,
     val symbol: String,
     val marketRegime: String,
+    val positive: Boolean,
     val momentumScore: Double,
     val participationScore: Double,
-    val structureScore: Double,
-    val positive: Boolean
+    val structureScore: Double
 )
 
-data class ForecastShadowFilterReview(
-    val passes: Boolean,
-    val failedRules: List<String>
-)
-
-/**
- * Adaptive-only Forecast policy. Fixed does not call this class.
- *
- * Live publication may use current-snapshot economics as a contemporaneous profitability gate.
- * Historical confidence bonuses, negative/flat penalties, stricter filters, contextual targets and
- * factor-family reweighting remain shadow-only until explicitly promoted after out-of-sample validation.
- */
 object ForecastAdaptiveSelectionPolicy {
+    const val MIN_NET_RETURN_PCT = 0.50
     const val ASSUMED_BASE_SLIPPAGE_BPS = 2.0
     const val MAX_ASSUMED_HALF_SPREAD_BPS = 20.0
-    const val MIN_DOWNSIDE_PROXY_PCT = 0.25
-    const val MIN_MATURE_SAMPLES = 5
-    const val MIN_MATURE_DAYS = 3
-    const val MIN_MATURE_SYMBOLS = 3
-    const val MAX_POSITIVE_CONFIDENCE_BONUS = 0.04
-    const val MAX_ECONOMICS_BONUS = 0.04
-    const val MAX_RISK_BONUS = 0.04
-
-    /** Stricter candidate filter experiment. This is telemetry/research only. */
-    fun shadowFilterReview(evaluation: StrategyEvaluation, targetPct: Double): ForecastShadowFilterReview {
-        val f = evaluation.features
-        val fails = mutableListOf<String>()
-        val atrPct = f.atr14?.takeIf { f.ltp > 0.0 && it > 0.0 }?.let { it / f.ltp * 100.0 }
-        if (f.spreadBps == null) fails += "missing spread"
-        else if (f.spreadBps > 35.0) fails += "spread >35bps"
-        if (f.rvol == null) fails += "missing RVOL"
-        else if (f.rvol < 1.0) fails += "RVOL <1.0"
-        if (f.atr14 == null || atrPct == null) fails += "missing ATR"
-        else if (atrPct * 4.0 + 1e-9 < targetPct) fails += "ATR capacity < target"
-        if (f.vwap == null) fails += "missing VWAP"
-        if (f.ema9 == null || f.ema20 == null) fails += "missing EMA9/20"
-        if (f.candles.size < 20) fails += "insufficient candles"
-        return ForecastShadowFilterReview(fails.isEmpty(), fails)
-    }
+    const val MIN_DOWNSIDE_PROXY_PCT = 0.35
+    const val MIN_MATURE_SAMPLES = 12
+    const val MIN_MATURE_DAYS = 5
+    const val MIN_MATURE_SYMBOLS = 5
+    const val MAX_POSITIVE_CONFIDENCE_BONUS = 0.08
+    const val MAX_ECONOMICS_BONUS = 0.10
+    const val MAX_RISK_BONUS = 0.06
 
     fun economics(
         entryPrice: Double,
@@ -146,8 +118,31 @@ object ForecastAdaptiveSelectionPolicy {
             netReturnPct = netReturn,
             downsideProxyPct = downside,
             riskAdjustedScore = riskAdjusted,
-            profitableAfterCosts = net > 0.0 && netReturn > 0.0
+            profitableAfterCosts = netReturn + 1e-9 >= MIN_NET_RETURN_PCT
         )
+    }
+
+    /** Minimum gross target needed for the configured budget to retain at least 0.50% net. */
+    fun minimumTargetPctForNetReturn(
+        entryPrice: Double,
+        budgetRupees: Long,
+        spreadBps: Double?,
+        targetNetReturnPct: Double = MIN_NET_RETURN_PCT
+    ): Double {
+        if (!entryPrice.isFinite() || entryPrice <= 0.0 || budgetRupees <= 0L ||
+            !targetNetReturnPct.isFinite() || targetNetReturnPct <= 0.0) return 0.0
+        val conservativeSpread = spreadBps ?: (MAX_ASSUMED_HALF_SPREAD_BPS * 2.0)
+        var low = 0.0
+        var high = 20.0
+        if (economics(entryPrice, high, budgetRupees, conservativeSpread, null).netReturnPct + 1e-9 < targetNetReturnPct) {
+            return high
+        }
+        repeat(48) {
+            val mid = (low + high) / 2.0
+            val net = economics(entryPrice, mid, budgetRupees, conservativeSpread, null).netReturnPct
+            if (net + 1e-9 >= targetNetReturnPct) high = mid else low = mid
+        }
+        return high
     }
 
     fun diagnostics(
@@ -179,7 +174,6 @@ object ForecastAdaptiveSelectionPolicy {
         val dayCount = clean.map { it.date }.distinct().size
         val symbolCount = clean.map { it.symbol.uppercase() }.distinct().size
 
-        // Agreement between target-hit and positive-close evidence; 1.0 = very consistent.
         val dispersion = clean.map { if (it.targetHit || it.closePct > 0.05) 1.0 else 0.0 }
         val mean = dispersion.average()
         val variance = dispersion.map { (it - mean) * (it - mean) }.average()
@@ -189,7 +183,6 @@ object ForecastAdaptiveSelectionPolicy {
             min(1.0, symbolCount / 5.0)
         val confidence = (breadthConfidence * (0.55 + 0.45 * consistency)).coerceIn(0.0, 1.0)
 
-        // Chronological holdout: the newest 25% of distinct dates are validation only.
         val dates = clean.map { it.date }.distinct().sorted()
         val validationDateCount = if (dates.size >= 4) max(1, dates.size / 4) else 0
         val validationDates = if (validationDateCount > 0) dates.takeLast(validationDateCount).toSet() else emptySet()
@@ -197,7 +190,6 @@ object ForecastAdaptiveSelectionPolicy {
         val validationHitRate = if (validation.isEmpty()) 0.0
             else validation.count { it.targetHit }.toDouble() / validation.size * 100.0
 
-        // Shadow-only negative learning proposal. Never add this value to live ranking.
         val adversePressure = (adverse.toDouble() / clean.size * 0.06) +
             ((medianMae - medianMfe).coerceAtLeast(0.0) * 0.015) +
             ((-medianClose).coerceAtLeast(0.0) * 0.01)
@@ -243,7 +235,6 @@ object ForecastAdaptiveSelectionPolicy {
         return (economics.riskAdjustedScore / 20.0).coerceIn(0.0, MAX_RISK_BONUS)
     }
 
-    /** Diagnostic-only target suggestion; current live expansion safeguards remain authoritative. */
     fun shadowTargetPct(currentTargetPct: Double, diagnostics: ForecastEvidenceDiagnostics): Double {
         if (diagnostics.sampleCount < MIN_MATURE_SAMPLES || diagnostics.medianMfePct <= 0.0) return currentTargetPct
         val reliability = diagnostics.confidence.coerceIn(0.0, 1.0)
@@ -256,10 +247,6 @@ object ForecastAdaptiveSelectionPolicy {
         )
     }
 
-    /**
-     * Diagnostic-only family reweighting proposal. Uses winners and non-winners together and is
-     * intentionally not wired into MultifyFactorFamilies live weights.
-     */
     fun shadowFamilyWeights(
         marketRegime: String,
         outcomes: List<ForecastFamilyOutcome>
