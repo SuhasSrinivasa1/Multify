@@ -1452,20 +1452,23 @@ class TradingRepository @Inject constructor(
             }.toList()
     }
 
-    /** Fixed PRIMARY candidates vetoed by the approved separate price-safety overlay. */
+    /** Recent Fixed PRIMARY candidates vetoed by the approved separate price-safety overlay. */
     private fun fixedSafetyWatchlist(date: String): List<ForecastDto> {
-        val observations = fixedRecommendationStore.observations(date)
-        val latest = observations.maxOfOrNull { it.scanAtMs } ?: return emptyList()
-        if (System.currentTimeMillis() - latest > 5L * 60_000L) return emptyList()
-        return observations.asSequence()
-            .filter { it.scanAtMs == latest && it.qualityTier == "PRIMARY" && !it.publishEligible }
-            .sortedBy { it.symbol }.take(12)
+        val cutoffMs = System.currentTimeMillis() - 20L * 60_000L
+        return fixedRecommendationStore.observations(date).asSequence()
+            .filter {
+                it.scanAtMs >= cutoffMs && it.qualityTier == "PRIMARY" && !it.publishEligible
+            }
+            .groupBy { it.symbol.uppercase(Locale.US) }
+            .values.mapNotNull { rows -> rows.maxByOrNull { it.scanAtMs } }
+            .sortedByDescending { it.scanAtMs }
+            .take(12)
             .mapIndexed { i, row ->
                 ForecastDto(rank = i + 1, symbol = row.symbol,
                     qualityTier = "PRIMARY SAFETY HOLD", executionEligible = false,
                     status = "ENTRY_SAFETY_HOLD",
-                    reason = "Fixed PRIMARY ranking, but approved entry-safety overlay vetoed this price. " +
-                        "No BUY until a fresh independently qualifying entry.",
+                    reason = "Fixed PRIMARY ranking, but the approved entry-safety overlay vetoed this scan. " +
+                        "Observation only; BUY remains disabled until a fresh independently qualifying entry.",
                     generatedAtMs = row.scanAtMs)
             }.toList()
     }
@@ -2026,18 +2029,20 @@ class TradingRepository @Inject constructor(
         if (secretStore.hasBetaCredentials()) BETA_FORECAST_FIXED_GUARD_MS else 35_000L
 
     private fun forecastMarketCapacityAvailable(): Boolean {
-        if (fixedApiPriorityRequested || marketCriticalTradeInFlight) return false
+        if (marketCriticalTradeInFlight) return false
         if (secretStore.hasBetaCredentials()) {
-            // An overdue Fixed scan during Alpha broker cooldown must not starve independent
-            // Beta research indefinitely. Never preempt an active Fixed cycle or protective trade.
+            // Beta uses a separate credential, quota, and mutex. Permit a bounded research
+            // tranche during an Alpha Fixed scan instead of starving Forecast for the whole cycle.
             return betaResearchAuthenticated() && ForecastBetaPriorityPolicy.canResearch(
                 fixedPriorityRequested = fixedApiPriorityRequested,
                 criticalTradeInFlight = marketCriticalTradeInFlight,
                 fixedDeferredForBroker = fixedScanDeferredBroker,
                 millisUntilNextFixed = millisUntilNextFixedScan(),
-                fixedGuardMs = forecastFixedGuardMs()
+                fixedGuardMs = forecastFixedGuardMs(),
+                allowIndependentBetaDuringFixed = true
             )
         }
+        if (fixedApiPriorityRequested) return false
         // A cooldown is an immediate no-go. Do not repeatedly request a blocked endpoint.
         // Trading and Fixed categories are never reserved for this research engine.
         if (!forecastBrokerHealthyForResearch()) return false
@@ -2329,13 +2334,21 @@ class TradingRepository @Inject constructor(
         // v7.9.4: partial Forecast work must not be thrown away whenever Fixed starts.
         // Evaluate fresh quotes/candles, one bounded tranche per opportunistic cycle.
         // Any qualified/watching candidates are captured this cycle for after-market research.
-        val tranche = forecastNextEvaluationTranche(today, universe)
-            .take(ForecastResearchWindowPolicy.trancheSize(forecastBoostActive(), forecastPostFixedOpportunity, FORECAST_EVALUATION_TRANCHE_SIZE))
+        val betaConcurrentWithFixed = secretStore.hasBetaCredentials() && fixedApiPriorityRequested
+        val normalTrancheSize = ForecastResearchWindowPolicy.trancheSize(
+            forecastBoostActive(), forecastPostFixedOpportunity, FORECAST_EVALUATION_TRANCHE_SIZE
+        )
+        // Keep concurrent Beta work small so Fixed retains CPU and Alpha API priority.
+        val trancheSize = if (betaConcurrentWithFixed) normalTrancheSize.coerceAtMost(2) else normalTrancheSize
+        val tranche = forecastNextEvaluationTranche(today, universe).take(trancheSize)
         val evaluated = mutableListOf<Pair<String, StrategyEvaluation>>()
         val detailedEvaluationStartedElapsedMs = SystemClock.elapsedRealtime()
         var processed = 0
         for (symbol in tranche) {
-            if (fixedApiPriorityRequested || marketCriticalTradeInFlight || !forecastMarketCapacityAvailable()) {
+            if (marketCriticalTradeInFlight ||
+                (fixedApiPriorityRequested && !secretStore.hasBetaCredentials()) ||
+                !forecastMarketCapacityAvailable()
+            ) {
                 auditLogger.log("FORECAST", "EVALUATION_PAUSED_FOR_FIXED", mapOf(
                     "processed" to processed,
                     "remaining" to forecastDetailQueue.size - forecastDetailCursor,
@@ -4293,13 +4306,16 @@ class TradingRepository @Inject constructor(
         // Forecast utilization thresholds after that quote starved the matching 1m
         // candle request. Only check Fixed, SELL priority and the approaching guard;
         // actual network requests still pass the unmodified Groww rate governor.
-        if (fixedApiPriorityRequested || marketCriticalTradeInFlight ||
+        val independentBeta = secretStore.hasBetaCredentials() && betaResearchAuthenticated()
+        if (marketCriticalTradeInFlight ||
+            (fixedApiPriorityRequested && !independentBeta) ||
             !ForecastBetaPriorityPolicy.canResearch(
                 fixedPriorityRequested = fixedApiPriorityRequested,
                 criticalTradeInFlight = marketCriticalTradeInFlight,
-                fixedDeferredForBroker = secretStore.hasBetaCredentials() && fixedScanDeferredBroker,
+                fixedDeferredForBroker = independentBeta && fixedScanDeferredBroker,
                 millisUntilNextFixed = millisUntilNextFixedScan(),
-                fixedGuardMs = forecastFixedGuardMs()
+                fixedGuardMs = forecastFixedGuardMs(),
+                allowIndependentBetaDuringFixed = independentBeta
             )) {
             throw ForecastPriorityYieldException()
         }

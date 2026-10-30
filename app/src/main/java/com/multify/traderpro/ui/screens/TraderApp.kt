@@ -574,7 +574,24 @@ private fun ForecastScreen(
     onBuy: (String) -> Unit
 ) {
     val dashboard = state.dashboard
-    val rows = dashboard?.forecasts.orEmpty().sortedBy { it.rank }
+    val productionRows = dashboard?.forecasts.orEmpty().sortedBy { it.rank }
+    val provisional = if (productionRows.isEmpty()) {
+        dashboard?.forecastWatchlist.orEmpty()
+            .filter {
+                it.qualityTier == "SECONDARY" && it.status == "WATCH_ONLY" &&
+                    it.entryPrice > 0.0 && it.targetPct >= 1.0 && it.score > 0.0
+            }
+            .maxByOrNull { it.confidence.coerceIn(0.0, 1.0) * it.score.coerceAtLeast(0.0) }
+    } else null
+    val rows = if (productionRows.isNotEmpty()) productionRows else provisional?.let {
+        listOf(it.copy(
+            rank = 1,
+            qualityTier = "PROVISIONAL · SECONDARY",
+            status = "WATCH_ONLY",
+            executionEligible = false,
+            reason = "OBSERVATION ONLY · no PRIMARY has passed every production gate. BUY is disabled. " + it.reason
+        ))
+    }.orEmpty()
     val learning = dashboard?.learning ?: com.multify.traderpro.data.network.LearningStatsDto()
     val forecastLearning = dashboard?.forecastLearning ?: com.multify.traderpro.data.network.ForecastLearningStatsDto()
     val report = dashboard?.research ?: com.multify.traderpro.data.network.ResearchDto()
@@ -665,6 +682,19 @@ private fun ForecastScreen(
                     modifier = Modifier.weight(1f)
                 ) { Text("Refresh scanner") }
                 OutlinedButton(onClick = onResearch, modifier = Modifier.weight(1f)) { Text("Run research") }
+            }
+        }
+        if (productionRows.isEmpty() && provisional != null) {
+            item {
+                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = .22f)),
+                    shape = RoundedCornerShape(18.dp)) {
+                    Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("Provisional Forecast · observation only", fontWeight = FontWeight.SemiBold)
+                        Text("No candidate has passed all PRIMARY production gates. The table shows the strongest recent SECONDARY setup for monitoring; it is not a live BUY recommendation and its BUY control is disabled.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
             }
         }
         item { ForecastTable(rows, onBuy, state.settings.brokerAuthenticated && state.settings.staticIpMatched && state.settings.brokerDdpiEnabled && !state.settings.safetyHalt, fixedClockMsForTable = forecastClockMs) }
@@ -877,9 +907,9 @@ private fun FixedScreen(
             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                 shape = RoundedCornerShape(20.dp)) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Fixed · Entry-safety holds", fontWeight = FontWeight.SemiBold)
-                    Text("These are genuine Fixed PRIMARY evaluations blocked by the existing " +
-                        "anti-chase guard. They are NOT trading recommendations; BUY is disabled.",
+                    Text("Fixed · Recent entry-safety holds", fontWeight = FontWeight.SemiBold)
+                    Text("Recent Fixed PRIMARY candidates from the last 20 minutes that were blocked by the existing " +
+                        "anti-chase guard. They remain observation-only; BUY is disabled.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                     if (held.isEmpty()) {
@@ -977,6 +1007,8 @@ private fun ForecastTable(
                                 fixed && f.status == "TARGET_HIT" -> "TARGET HIT · BUY disabled"
                                 fixed && f.status != "ACTIVE" -> "Session ended · BUY disabled"
                                 !fixed && f.status == "TARGET_HIT" -> "TARGET HIT · BUY disabled"
+                                !fixed && f.status == "WATCH_ONLY" -> "PROVISIONAL WATCH · BUY disabled"
+                                !fixed && f.status == "AWAITING_CONFIRMATION" -> "PRIMARY pending · BUY disabled"
                                 !fixed && f.status != "ACTIVE" -> "Finished · BUY disabled"
                                 !fixed && !com.multify.traderpro.engine.FixedBuyAvailabilityPolicy.nseRegularSession(fixedClockMsForTable) -> "Market closed · BUY disabled"
                                 fixed && !fixedMarketOpen -> "Market closed · BUY disabled"
