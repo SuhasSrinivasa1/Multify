@@ -1,7 +1,7 @@
-name: Multify v7.9.19 Beta Research Reliability and Multi-Peak Safety
+name: Multify v7.9.20 Beta Research Reliability and Multi-Peak Safety
 on:
   push:
-    branches: [ v7919-beta-research-multipeak-fixed-protected ]
+    branches: [ v7920-gtt-fill-reconciliation-net-trail-fixed-forecast-diagnostics ]
   workflow_dispatch:
 permissions:
   contents: read
@@ -32,7 +32,7 @@ jobs:
           python - <<'PY'
           from pathlib import Path
           import subprocess
-          base='b08714efc8bcf9548567a07ed3504f2db89f1db3'
+          base='8377e2b1fc419587c7c23dc4f53f34a7162099a6'
           root=Path('app/src/main/java/com/multify/traderpro')
           def older(p): return subprocess.check_output(['git','show',f'{base}:{p}']).decode()
           def current(p): return Path(p).read_text()
@@ -57,18 +57,20 @@ jobs:
           assert region(older(p),'private suspend fun handleMultifyBuy(', '    private suspend fun handleMultifyExit(')==region(current(p),'private suspend fun handleMultifyBuy(', '    private suspend fun handleMultifyExit('),'Multify BUY changed'
           for start,end in [
               ('    private suspend fun safeAppSellScope(', '    private suspend fun portfolioMonitorCount('),
-              ('    suspend fun monitorManagedPositions(', '    private suspend fun batchManagedLtps('),
               ('    private suspend fun ensureHardStopProtection(', '    private suspend fun monitorLongHolding('),
-              ('    private suspend fun monitorLongHolding(', '    private suspend fun createPositionGtt('),
           ]:
               assert region(older(p),start,end)==region(current(p),start,end),start
+          assert region(older(p),'    private suspend fun placeCncBuy(', '    private fun LongForecastEntity.toForecastDto')==region(current(p),'    private suspend fun placeCncBuy(', '    private fun LongForecastEntity.toForecastDto'),'Fast BUY code changed'
           assert 'FIXED_V741_FORECAST_SCAN_INTERVAL_MS = 150_000L' in current(p)
           assert 'FixedLocalStrategyEngine.buildFeatures(quote, historical, 5)' in current(p)
-          assert 'versionCode = 7919' in Path('app/build.gradle.kts').read_text()
+          assert 'versionCode = 7920' in Path('app/build.gradle.kts').read_text()
           assert 'forecastMarketToken() ?: return rows.count' in current(p)
           assert 'BETA_FIXED_COOLDOWN_RESEARCH_ALLOWED' in current(p)
           assert 'forecastWatchlist = secondaryForecastWatchlist(today)' in current(p)
-          print('PASS: Frozen Fixed, Multify BUY, common SELL and quality policies unchanged.')
+          assert 'GTT_BROKER_SELL_RECONCILED' in current(p)
+          assert 'PUBLICATION_GUARD_PROFILE' in current(p)
+          assert 'PRODUCTION_REJECTION_PROFILE' in current(p)
+          print('PASS: Frozen Fixed and Multify BUY unchanged; protected GTT reconciliation added.')
           PY
       - name: Backend tests
         run: |
@@ -83,17 +85,17 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v7.9.19-beta-research-multipeak-fixed-protected-debug.apk
+          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v7.9.20-gtt-net-trail-fixed-forecast-diagnostics-debug.apk
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/*.apk > dist/APK-SIGNATURE.txt
           "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/*.apk | head -n 2 > dist/PACKAGE.txt
           grep -q "name='com.multify.traderpro.vivoy73final'" dist/PACKAGE.txt
-          grep -q "versionCode='7919'" dist/PACKAGE.txt
+          grep -q "versionCode='7920'" dist/PACKAGE.txt
           sha256sum dist/*.apk > dist/SHA256SUMS.txt
           python - <<'PY'
           from pathlib import Path
           import subprocess,zipfile
           names=subprocess.check_output(['git','ls-files','-z']).decode().split('\0')
-          with zipfile.ZipFile('dist/Multify-TraderPro-v7.9.19-exact-source.zip','w',zipfile.ZIP_DEFLATED,compresslevel=6) as z:
+          with zipfile.ZipFile('dist/Multify-TraderPro-v7.9.20-exact-source.zip','w',zipfile.ZIP_DEFLATED,compresslevel=6) as z:
               for name in names:
                   if name and Path(name).is_file() and not any(p in {'.git','.gradle','build','dist'} for p in Path(name).parts):
                       z.write(name,name)
@@ -101,6 +103,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: multify-v7919-beta-research-multipeak-fixed-protected
+          name: multify-v7920-gtt-net-trail-fixed-forecast-diagnostics
           path: dist/
           if-no-files-found: error
