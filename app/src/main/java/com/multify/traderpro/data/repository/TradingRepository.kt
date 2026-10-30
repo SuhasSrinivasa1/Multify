@@ -6452,6 +6452,8 @@ class TradingRepository @Inject constructor(
             brokerInventorySnapshot = null
             activeGttSnapshot = null
             orderListSnapshot = null
+            lastGttChildPollAtMs.remove(pollKey)
+            lastGttChildReconcileAuditAtMs.remove(pollKey)
             auditLogger.log("HOLDING", "GTT_PARTIAL_FILL_RECONCILED", mapOf(
                 "symbol" to position.symbol, "child_order_id" to childId,
                 "filled_quantity" to filled, "remaining_quantity" to remaining,
@@ -6470,6 +6472,8 @@ class TradingRepository @Inject constructor(
         brokerInventorySnapshot = null
         activeGttSnapshot = null
         orderListSnapshot = null
+        lastGttChildPollAtMs.remove(pollKey)
+        lastGttChildReconcileAuditAtMs.remove(pollKey)
         auditLogger.log("GTT", "GTT_CHILD_ORDER_TERMINAL_NO_FILL_REPROTECT", mapOf(
             "symbol" to position.symbol, "child_order_id" to childId,
             "status" to stats.status, "action" to "rearm_or_local_emergency_fallback",
@@ -7324,7 +7328,8 @@ class TradingRepository @Inject constructor(
         val triggered = nextStatus.uppercase(Locale.US) in setOf("TRIGGERED", "COMPLETED")
         val triggeredAtMs = if (triggered) {
             orderListSnapshot = null
-            position.smartOrderTriggeredAtMs ?: parseGrowwTimestampMs(payload.triggeredAt) ?: now
+            position.smartOrderTriggeredAtMs ?: parseGrowwTimestampMs(payload.triggeredAt)
+                ?: position.smartOrderUpdatedAtMs ?: now
         } else position.smartOrderTriggeredAtMs
         val updated = position.copy(
             status = if (triggered) "EXIT_PENDING_RECONCILIATION" else position.status,
