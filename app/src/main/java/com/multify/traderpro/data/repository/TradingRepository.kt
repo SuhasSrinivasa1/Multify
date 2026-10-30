@@ -1834,6 +1834,31 @@ class TradingRepository @Inject constructor(
                 generateFixedForecasts(false)
                 val recommendationCompletedAtMs = System.currentTimeMillis()
                 val scanned = lastFixedScanAtMs != previousScanAtMs && !fixedScanDeferredBroker
+                if (scanned) {
+                    // Outside FIXED_FINAL_LOCK: read-only publication diagnostics.
+                    // Observations include the original tier and the separate safety verdict.
+                    val currentDate = LocalDate.now(INDIA).toString()
+                    val observations = fixedRecommendationStore.observations(currentDate)
+                    val latestScanTime = observations.maxOfOrNull { it.scanAtMs }
+                    val latest = observations.filter { it.scanAtMs == latestScanTime }
+                    val tierPrimary = latest.filter { it.qualityTier == "PRIMARY" }
+                    val prior = observations.filter { it.scanAtMs != latestScanTime }
+                    auditLogger.log("FIXED_ENGINE", "PUBLICATION_GUARD_PROFILE", mapOf(
+                        "date" to currentDate,
+                        "primary_before_overlay" to tierPrimary.size,
+                        "primary_entry_safety_held" to tierPrimary.count { !it.publishEligible },
+                        "primary_entry_safe" to tierPrimary.count { it.publishEligible },
+                        "primary_needing_repeat_confirmation" to tierPrimary.count { item ->
+                            item.publishEligible && prior.none { old ->
+                                old.symbol.equals(item.symbol, true) &&
+                                    old.qualityTier == "PRIMARY" && old.publishEligible
+                            }
+                        },
+                        "published_count" to fixedRecommendationStore.recommendations(currentDate).size,
+                        "explanatory_detail" to "read-only counts from frozen Fixed scan observations",
+                        "scoring_or_publication_changed" to false
+                    ))
+                }
                 var autoBuySubmitted = 0
                 var autoBuyElapsedMs = 0L
                 if (scanned) {
@@ -2941,29 +2966,6 @@ class TradingRepository @Inject constructor(
             }.thenByDescending { it.score }
         )
 
-        // Visibility only: explain why initially PRIMARY Fixed candidates are withheld.
-        val fixedPrimary = ranked.filter { it.quality.tier == "PRIMARY" }
-        auditLogger.log("FIXED_ENGINE", "PUBLICATION_GUARD_PROFILE", mapOf(
-            "date" to today,
-            "primary_before_overlay" to fixedPrimary.size,
-            "primary_entry_safety_held" to fixedPrimary.count { !it.quality.publishEligible },
-            "primary_entry_safe" to fixedPrimary.count { it.quality.publishEligible },
-            "entry_hold_reasons" to fixedPrimary.filter { !it.quality.publishEligible }
-                .flatMap { it.quality.failedRules }.groupingBy { it }.eachCount(),
-            "baseline_ready" to discoveryPass.baselineReady,
-            "primary_needing_repeat_confirmation" to fixedPrimary.count { item ->
-                item.quality.publishEligible &&
-                    priorTodayResearch.none { prev ->
-                        prev.symbol.equals(item.symbol, true) && prev.qualityTier == "PRIMARY" &&
-                            prev.publishEligible && prev.executionEligible
-                    }
-            },
-            "primary_safe_symbols_observation_only" to fixedPrimary.filter {
-                it.quality.publishEligible
-            }.take(12).map { it.symbol },
-            "fixed_40_factor_model_changed" to false,
-            "publication_rules_relaxed" to false
-        ))
         fixedRecommendationStore.appendObservations(
             ranked.take(FIXED_V741_RESEARCH_CAPTURE_TOP_N).map { item ->
                 FixedScanObservation(
