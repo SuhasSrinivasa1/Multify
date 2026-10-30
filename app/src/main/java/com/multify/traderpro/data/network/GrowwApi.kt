@@ -69,6 +69,14 @@ interface GrowwApi {
         @Body request: OrderCreateRequest
     ): ApiEnvelope<OrderPayload>
 
+    @GET("v1/order/list")
+    suspend fun orderList(
+        @Header("Authorization") authorization: String,
+        @Query("segment") segment: String = "CASH",
+        @Query("page") page: Int = 0,
+        @Query("page_size") pageSize: Int = 100
+    ): ApiEnvelope<GrowwOrderListPayload>
+
     @GET("v1/order/detail/{orderId}")
     suspend fun orderStatus(
         @Header("Authorization") authorization: String,

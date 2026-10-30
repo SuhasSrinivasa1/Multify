@@ -146,6 +146,24 @@ data class OrderPayload(
     @SerializedName("average_fill_price") val averageFillPrice: Double? = null
 )
 
+/** Same-day broker child order details, not the smart-order trigger. */
+data class GrowwOrderBookRow(
+    @SerializedName("groww_order_id") val growwOrderId: String = "",
+    @SerializedName("trading_symbol") val tradingSymbol: String = "",
+    @SerializedName("transaction_type") val transactionType: String = "",
+    val product: String = "",
+    val quantity: Int = 0,
+    @SerializedName("order_status") val orderStatus: String = "",
+    @SerializedName("filled_quantity") val filledQuantity: Int = 0,
+    @SerializedName("remaining_quantity") val remainingQuantity: Int = 0,
+    @SerializedName("average_fill_price") val averageFillPrice: Double? = null,
+    @SerializedName("order_reference_id") val orderReferenceId: String = "",
+    @SerializedName("created_at") val createdAt: String = ""
+)
+data class GrowwOrderListPayload(
+    @SerializedName("order_list") val orderList: List<GrowwOrderBookRow> = emptyList()
+)
+
 data class OrderCancelRequest(
     val segment: String = "CASH",
     @SerializedName("groww_order_id") val growwOrderId: String
