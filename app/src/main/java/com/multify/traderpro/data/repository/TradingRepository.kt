@@ -1856,6 +1856,7 @@ class TradingRepository @Inject constructor(
                         },
                         "published_count" to fixedRecommendationStore.recommendations(currentDate).size,
                         "explanatory_detail" to "read-only counts from frozen Fixed scan observations",
+                        "pre_spike_discovery_slots" to FixedMarketDiscoveryPolicy.DEFAULT_PRE_SPIKE_SLOTS,
                         "scoring_or_publication_changed" to false
                     ))
                 }
@@ -2385,7 +2386,11 @@ class TradingRepository @Inject constructor(
         }
         val priorMfe = priorForecasts.map { it.maxFavourablePct }
             .filter { it.isFinite() && it >= 0.0 && it < 25.0 }
-        val targetPct = ForecastQualityPolicy.adaptiveTargetPct(learned.longAveragePct, priorMfe)
+        val priorForecastDistinctDays = priorForecasts.map { it.forecastDate }.distinct().size
+        val priorForecastDistinctSymbols = priorForecasts.map { it.symbol.uppercase(Locale.US) }.distinct().size
+        val targetPct = ForecastQualityPolicy.adaptiveTargetPct(
+            learned.longAveragePct, priorMfe, priorForecastDistinctDays, priorForecastDistinctSymbols
+        )
 
         val latestBySymbol = existing.groupBy { it.symbol.uppercase(Locale.US) }
             .mapValues { (_, rows) -> rows.maxByOrNull { it.generatedAtMs }!! }
@@ -2568,6 +2573,24 @@ class TradingRepository @Inject constructor(
             "research" to ranked.count { it.quality.tier == "RESEARCH" },
             "spread_unavailable" to ranked.count { it.evaluation.features.spreadBps == null },
             "net_economics_unprofitable" to ranked.count { !it.economics.profitableAfterCosts },
+            "adaptive_target_pct" to targetPct,
+            "multify_baseline_mfe_pct" to learned.longAveragePct,
+            "prior_forecast_mfe_samples" to priorMfe.size,
+            "prior_forecast_distinct_days" to priorForecastDistinctDays,
+            "prior_forecast_distinct_symbols" to priorForecastDistinctSymbols,
+            "forecast_mfe_calibration_enabled" to (
+                priorMfe.size >= ForecastQualityPolicy.TARGET_CALIBRATION_MIN_ROWS &&
+                    priorForecastDistinctDays >= ForecastQualityPolicy.TARGET_CALIBRATION_MIN_DISTINCT_DAYS &&
+                    priorForecastDistinctSymbols >= ForecastQualityPolicy.TARGET_CALIBRATION_MIN_DISTINCT_SYMBOLS
+            ),
+            "five_minute_capacity_rejections" to ranked.count {
+                it.quality.failedRules.any { rule -> rule.contains("volatility capacity") || rule.contains("five-minute ATR") }
+            },
+            "five_minute_context_rejections" to ranked.count {
+                it.quality.failedRules.any { rule -> rule.contains("completed 5-minute context") }
+            },
+            "multi_peak_retest_candidates" to ranked.count { it.quality.reason.contains("multi-peak retest", true) },
+            "quality_rejection_counts" to ranked.flatMap { it.quality.failedRules }.groupingBy { it }.eachCount(),
             "top_quality_reasons" to ranked.asSequence()
                 .filter { it.quality.tier != "PRIMARY" }.map { it.quality.reason.take(150) }
                 .take(6).toList(),
@@ -6249,6 +6272,25 @@ class TradingRepository @Inject constructor(
         val marketOpen = marketSession() == "OPEN"
         val now = System.currentTimeMillis()
         val managedOpen = managedDao.openPositions().any(::appOwned)
+        val nonTradingCooldownUntil = recoveryGate.status().categoryCooldownUntilMs["NON_TRADING"] ?: 0L
+        if (nonTradingCooldownUntil > now) {
+            val cooldownAuditKey = "__NON_TRADING_COOLDOWN__"
+            val lastCooldownAudit = lastPortfolioConflictAuditAtMs[cooldownAuditKey] ?: 0L
+            if (now - lastCooldownAudit >= 60_000L) {
+                lastPortfolioConflictAuditAtMs[cooldownAuditKey] = now
+                auditLogger.logAsync("PORTFOLIO_MONITOR", "NON_TRADING_COOLDOWN_DEFERRED", mapOf(
+                    "retry_after_ms" to (nonTradingCooldownUntil - now).coerceAtLeast(0L),
+                    "tracked_positions" to managedDao.openPositions().count(::appOwned),
+                    "broker_requests_suppressed" to true,
+                    "existing_server_gtt_left_untouched" to true,
+                    "no_direct_sell_submitted" to true,
+                    "fixed_priority_preserved" to true
+                ))
+            }
+            // brokerInventory() would be locally rejected until this cooldown expires.
+            // The broker-side GTT remains the active protection; do not spam retries or logs.
+            return portfolioMonitorCount()
+        }
         val confirmedEmpty = brokerInventorySnapshot?.takeIf { now - it.atMs < 5L * 60_000L }
             ?.let { it.holdings.isEmpty() && it.positions.isEmpty() } == true &&
             activeGttSnapshot?.takeIf { now - it.atMs < 5L * 60_000L }
@@ -6342,9 +6384,15 @@ class TradingRepository @Inject constructor(
                         if (gtt != null && AppPositionOwnershipPolicy.isAppProtectionReference(gtt.referenceId)) {
                             runCatching { cancelKnownPositionGtt(token, position, "OWNERSHIP_CONFLICT_STOP_PROTECTION", clearIfTerminal = false) }
                         } else {
-                            auditLogger.log("SAFETY", "GTT_OWNERSHIP_CONFLICT_MANUAL_REVIEW", mapOf(
-                                "symbol" to symbol, "gtt_id" to knownId
-                            ))
+                            val manualAuditKey = "GTT_MANUAL_REVIEW:$symbol"
+                            val lastManualAudit = lastPortfolioConflictAuditAtMs[manualAuditKey] ?: 0L
+                            if (now - lastManualAudit >= 60_000L) {
+                                lastPortfolioConflictAuditAtMs[manualAuditKey] = now
+                                auditLogger.logAsync("SAFETY", "GTT_OWNERSHIP_CONFLICT_MANUAL_REVIEW", mapOf(
+                                    "symbol" to symbol, "gtt_id" to knownId,
+                                    "audit_throttled_to_once_per_minute" to true
+                                ))
+                            }
                         }
                     }
                 }
@@ -6993,13 +7041,40 @@ class TradingRepository @Inject constructor(
                 return@withLock false
             gttExitReconcileLastAttemptAtMs[position.id] = now
 
-            val confirmed = refreshKnownSmartOrderStatus(token, position, force = true)
-            val parentStatus = confirmed.smartOrderStatus.orEmpty().uppercase(Locale.US)
+            val parent = apiFactory.groww.smartOrderStatus(
+                bearer(token),
+                segment = "CASH",
+                smartOrderType = "GTT",
+                smartOrderId = position.smartOrderId
+            ).requirePayload("Groww triggered GTT parent status ${position.symbol}")
+            val parentStatus = parent.status.uppercase(Locale.US)
+            val confirmed = position.copy(
+                smartOrderStatus = parent.status.ifBlank { position.smartOrderStatus },
+                smartOrderUpdatedAtMs = now,
+                smartOrderTriggerPrice = parent.triggerPrice?.takeIf { it.isFinite() && it > 0.0 }
+                    ?: position.smartOrderTriggerPrice
+            )
+            managedDao.updatePosition(confirmed)
             if (parentStatus !in setOf("TRIGGERED", "COMPLETED")) {
                 auditLogger.log("GTT", "EXIT_WAITING_PARENT_TRIGGER", mapOf(
                     "symbol" to position.symbol,
                     "parent_status" to parentStatus,
                     "broker_quantity" to brokerQuantity,
+                    "duplicate_sell_allowed" to false
+                ))
+                return@withLock false
+            }
+            // Do not guess from symbol + quantity alone: an unrelated manual SELL must not
+            // close an app-owned position. Groww's child order must carry this exact GTT reference.
+            val expectedReference = parent.referenceId
+                ?.takeIf { AppPositionOwnershipPolicy.isAppProtectionReference(it) }
+            if (expectedReference.isNullOrBlank()) {
+                auditLogger.log("GTT", "PARENT_REFERENCE_UNVERIFIED_MANUAL_REVIEW", mapOf(
+                    "symbol" to confirmed.symbol,
+                    "gtt_id" to confirmed.smartOrderId,
+                    "parent_status" to parentStatus,
+                    "reference_available" to !parent.referenceId.isNullOrBlank(),
+                    "no_close_booked" to true,
                     "duplicate_sell_allowed" to false
                 ))
                 return@withLock false
@@ -7012,16 +7087,17 @@ class TradingRepository @Inject constructor(
                 if (pageRows.size < 100) break
             }
             val full = GttExitReconciliationPolicy.uniqueConfirmedFullSell(
-                brokerOrders, confirmed.symbol, confirmed.quantity, confirmed.openOrderId
+                brokerOrders, confirmed.symbol, confirmed.quantity, confirmed.openOrderId, expectedReference
             )
             val partial = GttExitReconciliationPolicy.identifiedPartialFills(
-                brokerOrders, confirmed.symbol, confirmed.quantity, confirmed.openOrderId
+                brokerOrders, confirmed.symbol, confirmed.quantity, confirmed.openOrderId, expectedReference
             )
             if (full == null || brokerQuantity != 0) {
                 auditLogger.log("GTT", "BROKER_FILL_PENDING_OR_PARTIAL_QUARANTINE", mapOf(
                     "symbol" to confirmed.symbol,
                     "parent_status" to parentStatus,
                     "gtt_id" to confirmed.smartOrderId,
+                    "gtt_reference_id" to expectedReference,
                     "broker_quantity" to brokerQuantity,
                     "tracked_quantity" to confirmed.quantity,
                     "partial_fill_qty_observed" to partial.sumOf { it.filledQuantity },
@@ -7050,6 +7126,7 @@ class TradingRepository @Inject constructor(
             auditLogger.log("HOLDING", "GTT_BROKER_SELL_RECONCILED", mapOf(
                 "symbol" to confirmed.symbol,
                 "parent_gtt_id" to confirmed.smartOrderId,
+                "gtt_reference_id" to expectedReference,
                 "sell_order_id" to full.growwOrderId,
                 "broker_average_fill" to price,
                 "quantity" to confirmed.quantity,
@@ -7059,7 +7136,7 @@ class TradingRepository @Inject constructor(
                 "estimated_net_pnl" to GrowwDeliveryCostPolicy.estimatedNetProfit(
                     confirmed.entryPrice, price, confirmed.quantity
                 ),
-                "broker_order_match_note" to "unique same-day full SELL; child-parent ID not supplied by broker API",
+                "broker_order_match_note" to "exact order_reference_id match to app GTT parent reference",
                 "duplicate_sell_sent" to false
             ))
             true
