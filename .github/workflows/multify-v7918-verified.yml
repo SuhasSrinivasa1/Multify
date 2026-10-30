@@ -709,7 +709,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git fetch --no-tags --depth=1 origin 07278226b851262d3b10762de73dbcf1443d8887
+          git fetch --no-tags --depth=1 origin 877068dbc860384c6bd12414759f466cc831faa9
           python - <<'PY'
           from pathlib import Path
           import subprocess
@@ -734,7 +734,7 @@ jobs:
           ui=(repo/'ui/screens/TraderApp.kt').read_text()
           assert 'ALPHA · AUTH OK · IP OK' in ui and 'BETA · READ-ONLY OK' in ui
           assert 'MAX_LOSS_PCT = 2.0' in (repo/'engine/HardStopLossPolicy.kt').read_text()
-          base='07278226b851262d3b10762de73dbcf1443d8887'
+          base='877068dbc860384c6bd12414759f466cc831faa9'
           def git_file(ref,path): return subprocess.check_output(['git','show',f'{ref}:{path}'],text=True)
           def section(text,start,end): return text.split(start,1)[1].split(end,1)[0]
           p='app/src/main/java/com/multify/traderpro/engine/FixedLocalStrategyEngine.kt'
