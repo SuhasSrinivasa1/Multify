@@ -7476,14 +7476,22 @@ class TradingRepository @Inject constructor(
         return cleared
     }
 
+    private fun requiredRecoveryNetProfitRupees(position: ManagedPositionEntity): Double =
+        max(
+            RECOVERY_NET_PROFIT_RUPEES,
+            position.entryPrice * position.quantity * NetProfitProtectionPolicy.MIN_NET_RETURN_PCT / 100.0
+        )
+
     private suspend fun ensureOvernightRecoveryGtt(token: String, position: ManagedPositionEntity): ManagedPositionEntity {
         if (position.smartOrderMode == HoldingSmartOrderPolicy.MODE_RECOVERY_GTT) {
             return maintainRecoveryGtt(token, position)
         }
-        val target = GrowwDeliveryCostPolicy.recoverySellPrice(
-            position.entryPrice,
-            position.quantity,
-            RECOVERY_NET_PROFIT_RUPEES
+        val minimumNetProfit = requiredRecoveryNetProfitRupees(position)
+        val target = max(
+            position.targetPrice ?: 0.0,
+            GrowwDeliveryCostPolicy.recoverySellPrice(
+                position.entryPrice, position.quantity, minimumNetProfit
+            )
         )
         val direction = HoldingSmartOrderPolicy.recoveryDirection(position.lastPrice, target)
         val estimate = GrowwDeliveryCostPolicy.estimateCharges(position.entryPrice, target, position.quantity)
@@ -7511,7 +7519,8 @@ class TradingRepository @Inject constructor(
             "entry" to working.entryPrice,
             "last_price" to working.lastPrice,
             "quantity" to working.quantity,
-            "net_profit_target_rupees" to RECOVERY_NET_PROFIT_RUPEES,
+            "net_profit_target_rupees" to minimumNetProfit,
+            "minimum_net_return_pct" to NetProfitProtectionPolicy.MIN_NET_RETURN_PCT,
             "trigger_price" to target,
             "trigger_direction" to direction,
             "estimated_gross_profit" to ((target - working.entryPrice) * working.quantity),
@@ -7541,10 +7550,12 @@ class TradingRepository @Inject constructor(
     }
 
     private suspend fun maintainRecoveryGtt(token: String, position: ManagedPositionEntity): ManagedPositionEntity {
-        val target = position.targetPrice ?: GrowwDeliveryCostPolicy.recoverySellPrice(
-            position.entryPrice,
-            position.quantity,
-            RECOVERY_NET_PROFIT_RUPEES
+        val minimumNetProfit = requiredRecoveryNetProfitRupees(position)
+        val target = max(
+            position.targetPrice ?: 0.0,
+            GrowwDeliveryCostPolicy.recoverySellPrice(
+                position.entryPrice, position.quantity, minimumNetProfit
+            )
         )
         if (position.smartOrderId.isNullOrBlank()) {
             val livePrice = if (marketSession() == "OPEN") runCatching {
