@@ -35,8 +35,11 @@ object ForecastEarlyEntryPolicy {
             )
         }
 
+        // Keep the original 30-minute resistance reference (six completed 5m bars).
+        // The wider eight-bar window is used only to recognise a controlled multi-peak retest.
+        val contextBars = bars.takeLast(6)
         val window = bars.takeLast(8)
-        val referenceHigh = window.maxOf { it.high }
+        val referenceHigh = contextBars.maxOf { it.high }
         val lastThree = bars.takeLast(3)
         val previousFiveClose = bars[bars.lastIndex - 1].close
         val latestFiveClose = bars.last().close
