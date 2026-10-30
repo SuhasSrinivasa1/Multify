@@ -7,6 +7,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.time.LocalDate
+import java.time.ZoneId
 class FixedSessionFeatureTest {
  private fun bar(d:LocalDate,t:String,o:Double,h:Double,l:Double,c:Double,v:Double):List<JsonElement> =
   listOf(JsonPrimitive(d.toString()+"T"+t),JsonPrimitive(o),JsonPrimitive(h),JsonPrimitive(l),JsonPrimitive(c),JsonPrimitive(v))
@@ -22,7 +23,7 @@ class FixedSessionFeatureTest {
   history+=bar(today,"09:25:00",101.0,103.0,100.0,102.0,100.0)
   history+=bar(today,"09:30:00",102.0,104.0,101.0,103.0,100.0)
   val x=FixedLocalStrategyEngine.buildFeatures(QuotePayload(lastPrice=103.0,bidPrice=102.9,offerPrice=103.1),
-   HistoricalPayload(candles=history,intervalInMinutes=5),5,today)
+   HistoricalPayload(candles=history,intervalInMinutes=5),5,today,today.atTime(9,35).atZone(ZoneId.of("Asia/Kolkata")).toInstant().toEpochMilli())
   assertEquals(4,x.sessionCandleCount);assertTrue(x.vwap!!>99.0);assertTrue(x.vwap!!<103.0)
   assertEquals(101.0,x.orb5High!!,.0001);assertEquals(103.0,x.orb15High!!,.0001)
   assertTrue(x.sessionHighDistancePct!!>0.0);assertTrue(x.sessionHighDistancePct!!<2.0)

@@ -719,8 +719,8 @@ jobs:
           assert 'MarketCandleTimestampParser.toEpochMillis(x[0])' in fixed
           assert 'val sessionCandles = candles.filter' in fixed
           assert 'vwap(sessionCandles)' in fixed
-          assert 'openingRange(sessionCandles, 15, intervalMinutes)' in fixed
-          assert 'sessionCandleCount = sessionCandles.size' in fixed
+          assert 'openingRange(completedSessionCandles, 15, intervalMinutes)' in fixed
+          assert 'sessionCandleCount = completedSessionCandles.size' in fixed
           overlay=(repo/'engine/FixedEntrySafetyOverlay.kt').read_text()
           assert 'FIXED_ENTRY_SAFETY_V1' in overlay
           assert 'FixedEntrySafetyOverlay.assess(f)' in (repo/'engine/FixedForecastQualityPolicy.kt').read_text()
@@ -731,6 +731,7 @@ jobs:
           assert 'BETA_FORECAST_FIXED_GUARD_MS = 10_000L' in code
           assert 'RESEARCH_BACKFILL_MAX_BATCHES_PER_RUN = 3' in code
           assert 'BETA_API' in code and 'BACKFILL_RUN_PROFILE' in code
+          assert 'REQUEST_SKIPPED_SESSION_INVALID' in code and 'Alpha fallback is disabled' in code
           ui=(repo/'ui/screens/TraderApp.kt').read_text()
           assert 'ALPHA · AUTH OK · IP OK' in ui and 'BETA · READ-ONLY OK' in ui
           assert 'MAX_LOSS_PCT = 2.0' in (repo/'engine/HardStopLossPolicy.kt').read_text()
