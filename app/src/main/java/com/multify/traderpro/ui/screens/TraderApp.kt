@@ -134,23 +134,54 @@ fun TraderApp(viewModel: TraderViewModel = hiltViewModel()) {
         containerColor = MaterialTheme.colorScheme.background,
         snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
-            CenterAlignedTopAppBar(
-                title = {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(Destination.entries[selected].label, fontWeight = FontWeight.SemiBold)
-                        Text(
-                            Destination.entries[selected].subtitle,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+            Column {
+                CenterAlignedTopAppBar(
+                    title = {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(Destination.entries[selected].label, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                Destination.entries[selected].subtitle,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    },
+                    actions = {
+                        IconButton(onClick = { viewModel.refresh() }) {
+                            Icon(Icons.Default.Refresh, contentDescription = "Refresh")
+                        }
                     }
-                },
-                actions = {
-                    IconButton(onClick = { viewModel.refresh() }) {
-                        Icon(Icons.Default.Refresh, contentDescription = "Refresh")
-                    }
+                )
+                val alphaLabel = when {
+                    state.settings.brokerAuthenticated && state.settings.staticIpMatched -> "ALPHA · AUTH OK · IP OK"
+                    state.settings.brokerAuthenticated -> "ALPHA · AUTH OK · IP CHECK"
+                    state.credentialsConfigured -> "ALPHA · AUTH REQUIRED"
+                    else -> "ALPHA · NOT CONFIGURED"
                 }
-            )
+                val alphaTone = when {
+                    state.settings.brokerAuthenticated && state.settings.staticIpMatched -> StatusTone.Positive
+                    state.settings.brokerAuthenticated || state.credentialsConfigured -> StatusTone.Warning
+                    else -> StatusTone.Negative
+                }
+                val betaLabel = when {
+                    state.betaAuthenticated -> "BETA · AUTH OK · READ-ONLY"
+                    state.betaConfigured -> "BETA · AUTH REQUIRED"
+                    else -> "BETA · NOT CONFIGURED"
+                }
+                val betaTone = when {
+                    state.betaAuthenticated -> StatusTone.Positive
+                    state.betaConfigured -> StatusTone.Warning
+                    else -> StatusTone.Neutral
+                }
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    StatusPill(alphaLabel, alphaTone, Modifier.weight(1f))
+                    StatusPill(betaLabel, betaTone, Modifier.weight(1f))
+                }
+            }
         },
         bottomBar = {
             NavigationBar(windowInsets = WindowInsets.navigationBars) {
