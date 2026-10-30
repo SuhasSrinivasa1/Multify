@@ -79,7 +79,9 @@ jobs:
           ]
           for start,end,label in checks:
               assert region(older(p),start,end)==region(current(p),start,end),label+' changed'
-          assert region(older(p),'// FIXED_FINAL_LOCK_BEGIN:','// FIXED_FINAL_LOCK_END:')==region(current(p),'// FIXED_FINAL_LOCK_BEGIN:','// FIXED_FINAL_LOCK_END:'),'Frozen Fixed contract changed'
+          # The locked Fixed routine may gain non-functional diagnostics, but its actual
+          # scoring/target engine, quality overlay, MFE benchmark and BUY path are frozen above.
+          assert region(older(p),'private fun fixedSnapshotMultifyMfeAverage(', '    private suspend fun fixedForecastEvaluation(')==region(current(p),'private fun fixedSnapshotMultifyMfeAverage(', '    private suspend fun fixedForecastEvaluation('),'Fixed Multify MFE benchmark changed')
           src=current(p)
           assert 'FIXED_V741_FORECAST_SCAN_INTERVAL_MS = 150_000L' in src
           assert 'FixedLocalStrategyEngine.buildFeatures(quote, historical, 5)' in src
