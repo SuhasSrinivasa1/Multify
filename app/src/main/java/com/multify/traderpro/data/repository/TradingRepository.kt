@@ -6219,23 +6219,21 @@ class TradingRepository @Inject constructor(
         position: ManagedPositionEntity
     ): OrderPayload? {
         val reference = position.smartOrderReferenceId
-        if (!reference.isNullOrBlank()) {
-            val byReference = runCatching {
+        val byReferenceId = if (!reference.isNullOrBlank()) {
+            runCatching {
                 apiFactory.groww.orderStatusByReference(
                     bearer(token), referenceId = reference, segment = "CASH"
                 ).requirePayload("GTT child order lookup by reference")
-            }.getOrNull()
-            val byReferenceId = byReference?.growwOrderId?.takeIf { it.isNotBlank() }
-            if (byReferenceId != null) {
-                val detail = runCatching {
-                    apiFactory.groww.orderStatus(
-                        bearer(token), orderId = byReferenceId, segment = "CASH"
-                    ).requirePayload("GTT child order detail by reference")
-                }.getOrNull()
-                if (detail != null && isMatchingGttChildOrder(detail, position)) return detail
-            }
-        }
+            }.getOrNull()?.takeIf { it.orderReferenceId == reference }
+                ?.growwOrderId?.takeIf { it.isNotBlank() }
+        } else null
         val orders = growwOrderList(token, force = false)
+        if (byReferenceId != null) {
+            orders.firstOrNull {
+                it.growwOrderId == byReferenceId && it.orderReferenceId == reference &&
+                    isMatchingGttChildOrder(it, position)
+            }?.let { return it }
+        }
         val exact = if (!reference.isNullOrBlank()) {
             orders.filter { isMatchingGttChildOrder(it, position) && it.orderReferenceId == reference }
         } else emptyList()
