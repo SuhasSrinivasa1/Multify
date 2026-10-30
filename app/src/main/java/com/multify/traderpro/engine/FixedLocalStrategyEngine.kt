@@ -92,7 +92,7 @@ object FixedLocalStrategyEngine {
         val parsedCandles = historical.candles.mapNotNull { x ->
             if (x.size < 6) null else runCatching {
                 FixedCandle(
-                    ts = MarketCandleTimestampParser.toEpochMillis(x[0]) ?: 0L,
+                    ts = (MarketCandleTimestampParser.toEpochMillis(x[0]) ?: 0L) / 1000L,
                     open = x[1].asDouble, high = x[2].asDouble, low = x[3].asDouble,
                     close = x[4].asDouble, volume = x[5].asDouble
                 )
@@ -101,13 +101,13 @@ object FixedLocalStrategyEngine {
         val candles = if (parsedCandles.all { it.ts > 0L }) parsedCandles.sortedBy { it.ts } else parsedCandles
         val sessionCandles = candles.filter { candle ->
             if (candle.ts <= 0L) false else {
-                val local = Instant.ofEpochMilli(candle.ts).atZone(NSE_ZONE)
+                val local = Instant.ofEpochSecond(candle.ts).atZone(NSE_ZONE)
                 local.toLocalDate() == sessionDate &&
                     local.toLocalTime() >= LocalTime.of(9, 15) && local.toLocalTime() < LocalTime.of(15, 30)
             }
         }
         val completedSessionCandles = sessionCandles.filter {
-            it.ts + intervalMinutes.coerceAtLeast(1) * 60_000L <= asOfMs
+            it.ts * 1000L + intervalMinutes.coerceAtLeast(1) * 60_000L <= asOfMs
         }
         val ltp = quote.lastPrice ?: candles.lastOrNull()?.close ?: error("Groww quote does not contain LTP")
         val closes = candles.map { it.close }

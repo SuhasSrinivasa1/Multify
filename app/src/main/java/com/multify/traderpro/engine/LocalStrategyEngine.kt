@@ -80,7 +80,7 @@ object LocalStrategyEngine {
         val parsedCandles = historical.candles.mapNotNull { x ->
             if (x.size < 6) null else runCatching {
                 Candle(
-                    ts = MarketCandleTimestampParser.toEpochMillis(x[0]) ?: 0L,
+                    ts = (MarketCandleTimestampParser.toEpochMillis(x[0]) ?: 0L) / 1000L,
                     open = x[1].asDouble, high = x[2].asDouble, low = x[3].asDouble,
                     close = x[4].asDouble, volume = x[5].asDouble
                 )

@@ -4,7 +4,7 @@ data class EarlyEntryAssessment(val qualifies:Boolean,val watch:Boolean,val scor
 object ForecastEarlyEntryPolicy {
     fun assess(evaluation:StrategyEvaluation,asOfMs:Long=System.currentTimeMillis()):EarlyEntryAssessment{
         val f=evaluation.features
-        val bars=FiveMinuteCandleAggregator.aggregate(f.candles.map{MarketCandleBar(it.ts,it.open,it.high,it.low,it.close,it.volume)},asOfMs)
+        val bars=FiveMinuteCandleAggregator.aggregate(f.candles.map{MarketCandleBar(it.ts*1000L,it.open,it.high,it.low,it.close,it.volume)},asOfMs)
         if(bars.size<6||f.ltp<=0.0||!f.ltp.isFinite())
             return EarlyEntryAssessment(false,false,0.0,"Insufficient complete 5-minute bars for 30-minute context",0.0,0.0)
         val referenceHigh=bars.takeLast(6).maxOf{it.high}
@@ -17,7 +17,7 @@ object ForecastEarlyEntryPolicy {
         // Actual completed 5m close-to-close return; not LTP versus the last completed bar.
         val fiveChangePct=(latestFiveClose/previousFiveClose-1.0)*100.0
         val currentExtensionFromFiveClosePct=(f.ltp/latestFiveClose-1.0)*100.0
-        val completedOneMinuteBars=f.candles.filter{it.ts>0L&&it.ts+60_000L<=asOfMs}.sortedBy{it.ts}
+        val completedOneMinuteBars=f.candles.filter{it.ts>0L&&it.ts*1000L+60_000L<=asOfMs}.sortedBy{it.ts}
         val lastOneMinute=completedOneMinuteBars.lastOrNull()
         val previousOneMinute=completedOneMinuteBars.getOrNull(completedOneMinuteBars.lastIndex-1)
         val recentBarChangePct=if(lastOneMinute!=null&&previousOneMinute!=null&&previousOneMinute.close>0.0)
