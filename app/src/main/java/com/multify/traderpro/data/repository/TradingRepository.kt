@@ -6218,7 +6218,7 @@ class TradingRepository @Inject constructor(
             order.transactionType.equals("SELL", true) &&
             order.product.equals("CNC", true) &&
             (order.quantity == null || order.quantity in 1..position.quantity) &&
-            (order.orderType.isBlank() || order.orderType.equals(expectedOrderType, true))
+            (order.orderType.isNullOrBlank() || order.orderType.equals(expectedOrderType, true))
     }
 
     private suspend fun findTriggeredGttChildOrder(
