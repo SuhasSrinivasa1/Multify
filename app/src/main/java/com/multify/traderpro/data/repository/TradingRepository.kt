@@ -6154,21 +6154,259 @@ class TradingRepository @Inject constructor(
             else parser.parse(event.title, event.text, event.bigText).exitPrice
         }
 
-    private suspend fun recordExternalClose(position: ManagedPositionEntity, quantity: Int, exit: Double, reason: String) {
+    private fun buildExternalCloseTrade(
+        position: ManagedPositionEntity,
+        quantity: Int,
+        exit: Double,
+        reason: String,
+        closeOrderId: String
+    ): ManagedTradeEntity {
         val gross = (exit - position.entryPrice) * quantity
         val costs = estimatedCashCosts(position.entryPrice, exit, quantity)
-        managedDao.insertTrade(
-            ManagedTradeEntity(
-                engine = position.engine, symbol = position.symbol, product = "CNC", side = "LONG",
-                quantity = quantity, entryPrice = position.entryPrice, exitPrice = exit,
-                grossPnl = gross, estimatedCosts = costs, netPnl = gross - costs, exitReason = reason,
-                strategy = position.strategy, regime = position.regime, confidence = position.confidence,
-                mfeRupees = max(0.0, position.maxFavourablePrice - position.entryPrice) * quantity,
-                maeRupees = max(0.0, position.entryPrice - position.maxAdversePrice) * quantity,
-                sourceEventId = position.sourceEventId, openOrderId = position.openOrderId, closeOrderId = position.smartOrderId ?: "EXTERNAL",
-                openedAtMs = position.openedAtMs, closedAtMs = System.currentTimeMillis()
-            )
+        return ManagedTradeEntity(
+            engine = position.engine, symbol = position.symbol, product = "CNC", side = "LONG",
+            quantity = quantity, entryPrice = position.entryPrice, exitPrice = exit,
+            grossPnl = gross, estimatedCosts = costs, netPnl = gross - costs, exitReason = reason,
+            strategy = position.strategy, regime = position.regime, confidence = position.confidence,
+            mfeRupees = max(0.0, position.maxFavourablePrice - position.entryPrice) * quantity,
+            maeRupees = max(0.0, position.entryPrice - position.maxAdversePrice) * quantity,
+            sourceEventId = position.sourceEventId, openOrderId = position.openOrderId,
+            closeOrderId = closeOrderId,
+            openedAtMs = position.openedAtMs, closedAtMs = System.currentTimeMillis()
         )
+    }
+
+    private fun parseGrowwTimestampMs(value: String?): Long? {
+        val text = value?.trim().orEmpty()
+        if (text.isBlank()) return null
+        return runCatching { Instant.parse(text).toEpochMilli() }.getOrNull()
+            ?: runCatching { ZonedDateTime.parse(text).toInstant().toEpochMilli() }.getOrNull()
+            ?: runCatching { LocalDateTime.parse(text, DateTimeFormatter.ISO_LOCAL_DATE_TIME)
+                .atZone(INDIA).toInstant().toEpochMilli() }.getOrNull()
+            ?: runCatching { LocalDateTime.parse(text, HIST_FORMAT).atZone(INDIA).toInstant().toEpochMilli() }.getOrNull()
+    }
+
+    private suspend fun growwOrderList(token: String, force: Boolean = false): List<OrderPayload> {
+        val now = System.currentTimeMillis()
+        orderListSnapshot?.takeIf { !force && now - it.atMs < 2_000L }?.let { return it.orders }
+        val all = mutableListOf<OrderPayload>()
+        for (page in 0 until 5) {
+            val rows = apiFactory.groww.orderList(
+                bearer(token), segment = "CASH", page = page, pageSize = 100
+            ).requirePayload("Groww order list for GTT reconciliation").orderList
+            all += rows
+            if (rows.size < 100) break
+        }
+        orderListSnapshot = OrderListSnapshot(all, now)
+        return all
+    }
+
+    private fun isMatchingGttChildOrder(order: OrderPayload, position: ManagedPositionEntity): Boolean =
+        order.growwOrderId.isNotBlank() &&
+            order.tradingSymbol.equals(position.symbol, true) &&
+            order.transactionType.equals("SELL", true) &&
+            order.product.equals("CNC", true) &&
+            (order.quantity == null || order.quantity in 1..position.quantity)
+
+    private suspend fun findTriggeredGttChildOrder(
+        token: String,
+        position: ManagedPositionEntity
+    ): OrderPayload? {
+        val orders = growwOrderList(token, force = true)
+        val reference = position.smartOrderReferenceId
+        val exact = if (!reference.isNullOrBlank()) {
+            orders.filter { isMatchingGttChildOrder(it, position) && it.orderReferenceId == reference }
+        } else emptyList()
+        if (exact.size == 1) return exact.single()
+        if (exact.size > 1) {
+            auditLogger.log("GTT", "GTT_CHILD_ORDER_REFERENCE_AMBIGUOUS", mapOf(
+                "symbol" to position.symbol, "gtt_id" to position.smartOrderId,
+                "reference_id" to reference, "candidate_order_ids" to exact.map { it.growwOrderId }
+            ))
+            return null
+        }
+        val triggerAt = position.smartOrderTriggeredAtMs ?: position.smartOrderUpdatedAtMs ?: position.openedAtMs
+        val fallback = orders.filter { order ->
+            if (!isMatchingGttChildOrder(order, position)) return@filter false
+            val createdAt = parseGrowwTimestampMs(order.createdAt) ?: return@filter false
+            createdAt >= triggerAt - 60_000L && createdAt <= System.currentTimeMillis() + 10_000L &&
+                createdAt >= position.openedAtMs
+        }
+        if (fallback.size == 1) return fallback.single()
+        auditLogger.log("GTT", if (fallback.isEmpty()) "GTT_CHILD_ORDER_NOT_YET_VISIBLE"
+            else "GTT_CHILD_ORDER_MATCH_AMBIGUOUS", mapOf(
+            "symbol" to position.symbol, "gtt_id" to position.smartOrderId,
+            "reference_id" to reference, "triggered_at_ms" to triggerAt,
+            "candidate_order_ids" to fallback.map { it.growwOrderId },
+            "candidate_count" to fallback.size,
+            "note" to "No SELL or new GTT is submitted while the broker-triggered child order is unresolved."
+        ))
+        return null
+    }
+
+    private suspend fun fetchGttChildFillStats(
+        token: String,
+        orderId: String,
+        symbol: String
+    ): GttChildFillStats {
+        val order = apiFactory.groww.orderStatus(
+            bearer(token), orderId = orderId, segment = "CASH"
+        ).requirePayload("GTT child order status $symbol")
+        val trades = mutableListOf<OrderTradeRecord>()
+        for (page in 0 until 5) {
+            val rows = apiFactory.groww.orderTrades(
+                bearer(token), orderId = orderId, segment = "CASH", page = page, pageSize = 50
+            ).requirePayload("GTT child order trades $symbol").tradeList
+            trades += rows
+            if (rows.size < 50) break
+        }
+        val validTrades = trades.filter {
+            it.quantity > 0 && it.price.isFinite() && it.price > 0.0 &&
+                (it.tradeStatus.isBlank() || it.tradeStatus.equals("COMPLETED", true)) &&
+                (it.tradingSymbol.isBlank() || it.tradingSymbol.equals(symbol, true)) &&
+                (it.transactionType.isBlank() || it.transactionType.equals("SELL", true)) &&
+                (it.product.isBlank() || it.product.equals("CNC", true))
+        }
+        val tradeQuantity = validTrades.sumOf { it.quantity }
+        val tradeAverage = if (tradeQuantity > 0) {
+            validTrades.sumOf { it.price * it.quantity } / tradeQuantity.toDouble()
+        } else null
+        val filledQuantity = max(tradeQuantity, order.filledQuantity ?: 0)
+        val averageFillPrice = tradeAverage ?: order.averageFillPrice?.takeIf { it.isFinite() && it > 0.0 }
+        val status = order.orderStatus.uppercase(Locale.US)
+        val terminal = status in setOf("EXECUTED", "COMPLETED", "CANCELLED", "REJECTED", "FAILED", "EXPIRED") ||
+            (order.remainingQuantity == 0 && filledQuantity > 0)
+        return GttChildFillStats(filledQuantity, averageFillPrice, terminal, status, order)
+    }
+
+    private suspend fun reconcileTriggeredGttChildOrder(
+        token: String,
+        position: ManagedPositionEntity
+    ): ManagedPositionEntity? {
+        val child = position.smartOrderChildOrderId?.let { id ->
+            OrderPayload(growwOrderId = id)
+        } ?: findTriggeredGttChildOrder(token, position)
+        val childId = child?.growwOrderId?.takeIf { it.isNotBlank() }
+        if (childId == null) {
+            val pending = position.copy(
+                status = "EXIT_PENDING_RECONCILIATION",
+                smartOrderChildStatus = position.smartOrderChildStatus ?: "AWAITING_CHILD_ORDER"
+            )
+            managedDao.updatePosition(pending)
+            return null
+        }
+        val stats = fetchGttChildFillStats(token, childId, position.symbol)
+        val working = position.copy(
+            status = "EXIT_PENDING_RECONCILIATION",
+            smartOrderChildOrderId = childId,
+            smartOrderChildStatus = stats.status
+        )
+        managedDao.updatePosition(working)
+        if (!stats.terminal) {
+            auditLogger.log("GTT", "GTT_CHILD_ORDER_PENDING", mapOf(
+                "symbol" to position.symbol, "gtt_id" to position.smartOrderId,
+                "child_order_id" to childId, "status" to stats.status,
+                "filled_quantity" to stats.filledQuantity,
+                "requested_quantity" to position.quantity
+            ))
+            return null
+        }
+        val filled = stats.filledQuantity
+        if (filled > position.quantity) {
+            auditLogger.log("SAFETY", "GTT_CHILD_FILL_EXCEEDS_APP_POSITION", mapOf(
+                "symbol" to position.symbol, "child_order_id" to childId,
+                "filled_quantity" to filled, "app_quantity" to position.quantity,
+                "action" to "manual_review_no_additional_sell"
+            ))
+            return null
+        }
+        if (filled > 0 && (stats.averageFillPrice == null || !stats.averageFillPrice.isFinite() ||
+                stats.averageFillPrice <= 0.0)) {
+            auditLogger.log("GTT", "GTT_CHILD_FILL_PRICE_PENDING", mapOf(
+                "symbol" to position.symbol, "child_order_id" to childId,
+                "filled_quantity" to filled, "status" to stats.status
+            ))
+            return null
+        }
+        val reason = when (position.smartOrderMode) {
+            HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT -> "COMMON_HARD_STOP_MINUS_2_GTT_EXIT"
+            HoldingSmartOrderPolicy.MODE_TRAILING_GTT -> "NET_050_TRAILING_GTT_EXIT"
+            HoldingSmartOrderPolicy.MODE_RECOVERY_GTT -> "RECOVERY_GTT_EXIT"
+            else -> "GTT_EXIT"
+        }
+        if (filled >= position.quantity && filled > 0) {
+            val exit = stats.averageFillPrice!!
+            val trade = buildExternalCloseTrade(position, position.quantity, exit, reason, childId)
+            managedDao.recordFullExit(position.id, trade)
+            val gross = trade.grossPnl
+            val netReturnPct = if (position.entryPrice * position.quantity > 0.0)
+                trade.netPnl / (position.entryPrice * position.quantity) * 100.0 else 0.0
+            val trigger = position.smartOrderTriggerPrice
+            val slippageBps = if (trigger != null && trigger > 0.0)
+                ((trigger - exit) / trigger * 10_000.0).coerceAtLeast(0.0) else 0.0
+            recentlyClosedSymbolsAtMs[position.symbol.uppercase(Locale.US)] = System.currentTimeMillis()
+            brokerInventorySnapshot = null
+            activeGttSnapshot = null
+            orderListSnapshot = null
+            lastTrailStateAuditAtMs.remove(position.id)
+            lastSmartOrderStatusAtMs.remove(position.id)
+            auditLogger.log("HOLDING", "GTT_LONG_CLOSED", mapOf(
+                "symbol" to position.symbol, "qty" to position.quantity,
+                "exit" to exit, "gross_pnl" to gross, "estimated_costs" to trade.estimatedCosts,
+                "net_pnl" to trade.netPnl, "net_return_pct" to netReturnPct,
+                "trigger" to trigger, "execution_slippage_bps" to slippageBps,
+                "slippage_allowance_bps" to NetProfitProtectionPolicy.SLIPPAGE_ALLOWANCE_BPS,
+                "close_order_id" to childId, "gtt_id" to position.smartOrderId,
+                "exit_reason" to reason, "gtt_status" to position.smartOrderStatus
+            ))
+            if (position.smartOrderMode == HoldingSmartOrderPolicy.MODE_TRAILING_GTT &&
+                netReturnPct + 1e-9 < NetProfitProtectionPolicy.MIN_NET_RETURN_PCT) {
+                auditLogger.log("TRAILING_STOP", "NET_PROFIT_SLIPPAGE_BREACH", mapOf(
+                    "symbol" to position.symbol, "close_order_id" to childId,
+                    "net_return_pct" to netReturnPct, "minimum_net_return_pct" to NetProfitProtectionPolicy.MIN_NET_RETURN_PCT,
+                    "trigger" to trigger, "actual_average_fill" to exit, "slippage_bps" to slippageBps
+                ))
+            }
+            return null
+        }
+        if (filled > 0) {
+            val exit = stats.averageFillPrice!!
+            val trade = buildExternalCloseTrade(position, filled, exit, reason + "_PARTIAL", childId)
+            val remaining = position.quantity - filled
+            val reopened = clearManagedGttState(working).copy(
+                status = "OPEN", quantity = remaining,
+                stopPrice = position.smartOrderTriggerPrice ?: position.stopPrice
+                    ?: HardStopLossPolicy.stopPrice(position.entryPrice),
+                lastPrice = position.lastPrice
+            )
+            managedDao.recordPartialExitAndReopen(reopened, trade)
+            brokerInventorySnapshot = null
+            activeGttSnapshot = null
+            orderListSnapshot = null
+            auditLogger.log("HOLDING", "GTT_PARTIAL_FILL_RECONCILED", mapOf(
+                "symbol" to position.symbol, "child_order_id" to childId,
+                "filled_quantity" to filled, "remaining_quantity" to remaining,
+                "actual_average_fill" to exit, "gross_pnl" to trade.grossPnl,
+                "estimated_costs" to trade.estimatedCosts, "net_pnl" to trade.netPnl,
+                "next_action" to "rearm_remaining_quantity_after_broker_inventory_verification"
+            ))
+            return reopened
+        }
+        val reopened = clearManagedGttState(working).copy(
+            status = "OPEN",
+            stopPrice = position.smartOrderTriggerPrice ?: position.stopPrice
+                ?: HardStopLossPolicy.stopPrice(position.entryPrice)
+        )
+        managedDao.updatePosition(reopened)
+        brokerInventorySnapshot = null
+        activeGttSnapshot = null
+        orderListSnapshot = null
+        auditLogger.log("GTT", "GTT_CHILD_ORDER_TERMINAL_NO_FILL_REPROTECT", mapOf(
+            "symbol" to position.symbol, "child_order_id" to childId,
+            "status" to stats.status, "action" to "rearm_or_local_emergency_fallback",
+            "stop_price" to reopened.stopPrice
+        ))
+        return reopened
     }
     private suspend fun activeGttsBySymbol(token: String, force: Boolean = false): Map<String, List<SmartOrderPayload>> {
         val now = System.currentTimeMillis()
