@@ -17,12 +17,18 @@ object ForecastEarlyEntryPolicy {
         // Actual completed 5m close-to-close return; not LTP versus the last completed bar.
         val fiveChangePct=(latestFiveClose/previousFiveClose-1.0)*100.0
         val currentExtensionFromFiveClosePct=(f.ltp/latestFiveClose-1.0)*100.0
-        val lastOneMinute=f.candles.asSequence().filter{it.ts>0L&&it.ts+60_000L<=asOfMs}.maxByOrNull{it.ts}
-        val recentBarChangePct=if(lastOneMinute!=null&&lastOneMinute.close>0.0)(f.ltp/lastOneMinute.close-1.0)*100.0 else fiveChangePct
+        val completedOneMinuteBars=f.candles.filter{it.ts>0L&&it.ts+60_000L<=asOfMs}.sortedBy{it.ts}
+        val lastOneMinute=completedOneMinuteBars.lastOrNull()
+        val previousOneMinute=completedOneMinuteBars.getOrNull(completedOneMinuteBars.lastIndex-1)
+        val recentBarChangePct=if(lastOneMinute!=null&&previousOneMinute!=null&&previousOneMinute.close>0.0)
+            (lastOneMinute.close/previousOneMinute.close-1.0)*100.0 else 100.0
+        val currentExtensionFromOneMinuteClosePct=if(lastOneMinute!=null&&lastOneMinute.close>0.0)
+            (f.ltp/lastOneMinute.close-1.0)*100.0 else 100.0
         val low=lastThree.minOf{it.low}
         val fiveLowRisePct=if(low>0.0)(f.ltp/low-1.0)*100.0 else 100.0
         val nearBreakout=breakoutDistancePct in -0.55..0.20
-        val notChasing=fiveChangePct in -0.55..0.90&&currentExtensionFromFiveClosePct in -0.55..0.65&&recentBarChangePct<=0.65&&fiveLowRisePct<=1.25
+        val notChasing=fiveChangePct in -0.55..0.90&&currentExtensionFromFiveClosePct in -0.55..0.65&&
+            recentBarChangePct in -0.45..0.65&&currentExtensionFromOneMinuteClosePct in -0.55..0.65&&fiveLowRisePct<=1.25
         val spreadSafe=f.spreadBps?.let{it.isFinite()&&it in 0.0..40.0}?:false
         val participation=(f.rvol?:0.0)>=0.75&&(f.greenVolumeShare?:0.0)>=0.43
         val direction=((f.ema9Slope?:0.0)>-0.08||(f.rsiSlope?:0.0)>0.0)&&evaluation.directionalScore>=0.08&&evaluation.confidence>=0.53
