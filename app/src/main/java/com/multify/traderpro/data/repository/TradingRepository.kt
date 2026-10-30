@@ -6523,6 +6523,7 @@ class TradingRepository @Inject constructor(
         val marketOpen = marketSession() == "OPEN"
         val now = System.currentTimeMillis()
         val managedOpen = managedDao.openPositions().any(::appOwned)
+        val pendingExitAtStart = managedDao.pendingExitReconciliations()
         val confirmedEmpty = brokerInventorySnapshot?.takeIf { now - it.atMs < 5L * 60_000L }
             ?.let { it.holdings.isEmpty() && it.positions.isEmpty() } == true &&
             activeGttSnapshot?.takeIf { now - it.atMs < 5L * 60_000L }
@@ -6530,7 +6531,7 @@ class TradingRepository @Inject constructor(
         // A verified empty portfolio needs a slow inventory heartbeat, not fresh holdings,
         // positions and GTT calls every five seconds. Never apply this to any tracked
         // position, pending BUY/GTT, unknown broker state or order in flight.
-        val noTrackedPositions = !managedOpen && managedDao.openPositions().isEmpty()
+        val noTrackedPositions = !managedOpen && pendingExitAtStart.isEmpty() && managedDao.openPositions().isEmpty()
         val pendingEntry = fixedAutoBuyOrderStore.all().any { !ForecastAutoBuyPolicy.isTerminal(it.status) } ||
             forecastAutoBuyOrderStore.all().any { !ForecastAutoBuyPolicy.isTerminal(it.status) }
         if (marketOpen && noTrackedPositions && !pendingEntry && !marketCriticalTradeInFlight &&
@@ -6550,7 +6551,7 @@ class TradingRepository @Inject constructor(
             }
             return portfolioMonitorCount()
         }
-        val reconcileGap = if (!marketOpen && !managedOpen && confirmedEmpty) 5L * 60_000L
+        val reconcileGap = if (!marketOpen && !managedOpen && pendingExitAtStart.isEmpty() && confirmedEmpty) 5L * 60_000L
             else CLOSED_SESSION_RECONCILE_MS
         if (!marketOpen && now - lastClosedSessionReconcileAtMs < reconcileGap) {
             return portfolioMonitorCount()
@@ -6569,6 +6570,27 @@ class TradingRepository @Inject constructor(
             .getOrElse { return portfolioMonitorCount() }
 
         val blockedSymbols = mutableSetOf<String>()
+        val gttReconciliationCandidates = (
+            managedDao.openPositions().filter { appOwned(it) && !it.smartOrderId.isNullOrBlank() } +
+                managedDao.pendingExitReconciliations()
+            ).distinctBy { it.id }
+        for (position in gttReconciliationCandidates) {
+            try {
+                val after = finalizeCompletedGttIfNeeded(token, position)
+                if (after == null || after.status == "EXIT_PENDING_RECONCILIATION" ||
+                    after.quantity != position.quantity || after.smartOrderId != position.smartOrderId) {
+                    blockedSymbols += position.symbol.uppercase(Locale.US)
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (t: Throwable) {
+                blockedSymbols += position.symbol.uppercase(Locale.US)
+                auditLogger.log("GTT", "GTT_CHILD_RECONCILIATION_ERROR", mapOf(
+                    "symbol" to position.symbol, "gtt_id" to position.smartOrderId,
+                    "message" to (t.message ?: t.javaClass.simpleName)
+                ))
+            }
+        }
         val activeGttsResult = runCatching { activeGttsBySymbol(token) }
         if (activeGttsResult.isSuccess) {
             val activeGtts = activeGttsResult.getOrThrow()
