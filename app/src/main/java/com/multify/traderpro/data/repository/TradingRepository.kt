@@ -249,7 +249,6 @@ class TradingRepository @Inject constructor(
     private var brokerInventorySnapshot: BrokerInventorySnapshot? = null
     @Volatile private var activeGttSnapshot: ActiveGttSnapshot? = null
     @Volatile private var orderListSnapshot: OrderListSnapshot? = null
-    @Volatile private var orderListSnapshot: OrderListSnapshot? = null
     private var lastClosedSessionReconcileAtMs = 0L
     private var lastIdlePortfolioAuditAtMs = 0L
     private val lastPortfolioConflictAuditAtMs = ConcurrentHashMap<String, Long>()
@@ -334,19 +333,6 @@ class TradingRepository @Inject constructor(
     private data class ActiveGttSnapshot(
         val bySymbol: Map<String, List<SmartOrderPayload>>,
         val atMs: Long
-    )
-
-    private data class OrderListSnapshot(
-        val orders: List<OrderPayload>,
-        val atMs: Long
-    )
-
-    private data class GttChildFillStats(
-        val filledQuantity: Int,
-        val averageFillPrice: Double?,
-        val terminal: Boolean,
-        val status: String,
-        val order: OrderPayload
     )
 
     private data class OrderListSnapshot(
