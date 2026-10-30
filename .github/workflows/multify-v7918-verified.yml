@@ -709,6 +709,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          git fetch --no-tags --depth=1 origin 07278226b851262d3b10762de73dbcf1443d8887
           python - <<'PY'
           from pathlib import Path
           import subprocess
