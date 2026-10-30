@@ -2392,14 +2392,16 @@ class TradingRepository @Inject constructor(
                     targetHit = it.status == "TARGET_HIT"
                 )
         }
-        val priorMfe = priorForecasts.map { it.maxFavourablePct }
-            .filter { it.isFinite() && it >= 0.0 && it < 25.0 }
-        val priorForecastTargetDays = priorForecasts.map { it.forecastDate }.distinct().size
-        val priorForecastTargetSymbols = priorForecasts.map { it.symbol.uppercase(Locale.US) }.distinct().size
+        val priorForecastMfeRows = priorForecasts.filter {
+            it.maxFavourablePct.isFinite() && it.maxFavourablePct >= 0.0 && it.maxFavourablePct < 25.0
+        }
+        val priorMfe = priorForecastMfeRows.map { it.maxFavourablePct }
+        val priorForecastTargetDays = priorForecastMfeRows.map { it.forecastDate }.distinct().size
+        val priorForecastTargetSymbols = priorForecastMfeRows.map { it.symbol.uppercase(Locale.US) }.distinct().size
         // Two early Forecast outcomes had been allowed to dominate the target at 2.60%.
         // Require breadth before Forecast MFE can override the rolling Multify MFE benchmark.
         val maturePriorMfe = if (ForecastTargetMaturityPolicy.isMature(
-                priorForecasts.size, priorForecastTargetDays, priorForecastTargetSymbols
+                priorMfe.size, priorForecastTargetDays, priorForecastTargetSymbols
             )) priorMfe else emptyList()
         val targetPct = ForecastQualityPolicy.adaptiveTargetPct(learned.longAveragePct, maturePriorMfe)
 
@@ -2681,11 +2683,11 @@ class TradingRepository @Inject constructor(
             "daily_recommendation_cap" to "NONE",
             "newly_publishable_count" to publishable.size,
             "base_target_pct" to targetPct,
-            "prior_forecast_target_samples" to priorForecasts.size,
+            "prior_forecast_target_samples" to priorMfe.size,
             "prior_forecast_target_days" to priorForecastTargetDays,
             "prior_forecast_target_symbols" to priorForecastTargetSymbols,
             "prior_forecast_target_mature" to ForecastTargetMaturityPolicy.isMature(
-                priorForecasts.size, priorForecastTargetDays, priorForecastTargetSymbols
+                priorMfe.size, priorForecastTargetDays, priorForecastTargetSymbols
             ),
             "net_return_floor_pct" to ForecastAdaptiveSelectionPolicy.MIN_NET_RETURN_PCT,
             "max_published_target_pct" to (publishable.maxOfOrNull { it.targetPct } ?: targetPct),
@@ -3069,6 +3071,8 @@ class TradingRepository @Inject constructor(
             )
         }
         val primarySafetyBlocked = primaryTier.filterNot { it.quality.publishEligible && it.quality.executionEligible }
+        val spreadAvailable = ranked.filter { it.evaluation.features.spreadBps != null }
+        val spreadMissing = ranked.filter { it.evaluation.features.spreadBps == null }
         auditLogger.log("FIXED_ENGINE", "LONG_SCAN_TIERED", mapOf(
             "snapshot_id" to snapshot.payload.snapshotId,
             "snapshot_sha256" to snapshot.sha256,
@@ -3099,6 +3103,9 @@ class TradingRepository @Inject constructor(
                 mapOf("symbol" to it.symbol, "reason" to it.quality.reason)
             },
             "primary_confirmation_pending_symbols" to primaryConfirmationPending.take(8).map { it.symbol },
+            "spread_available_count" to spreadAvailable.size,
+            "spread_missing_count" to spreadMissing.size,
+            "spread_missing_symbols" to spreadMissing.take(12).map { it.symbol },
             "available_processors" to availableProcessors,
             "evaluation_concurrency" to fixedEvaluationConcurrency
         ))
