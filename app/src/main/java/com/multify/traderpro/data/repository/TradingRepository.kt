@@ -67,6 +67,7 @@ import com.multify.traderpro.engine.AdaptiveLearningMath
 import com.multify.traderpro.engine.CashAwareCncSizing
 import com.multify.traderpro.engine.BrokerInventorySymbolPolicy
 import com.multify.traderpro.engine.AutoBuyEntrySafetyPolicy
+import com.multify.traderpro.engine.AutoBuyEntryPricePolicy
 import com.multify.traderpro.engine.ExecutionTelemetryMath
 import com.multify.traderpro.engine.ForecastAutoBuyPolicy
 import com.multify.traderpro.engine.ForecastAdaptiveSelectionPolicy
@@ -4341,6 +4342,26 @@ class TradingRepository @Inject constructor(
         return LocalStrategyEngine.evaluateLong(signal, features, includeEventPrior = false)
     }
 
+    private fun autoBuyEntryPriceAllowed(
+        engine: String,
+        symbol: String,
+        recommendedEntry: Double,
+        livePrice: Double
+    ): Boolean {
+        val decision = AutoBuyEntryPricePolicy.evaluate(recommendedEntry, livePrice)
+        if (!decision.allowed) {
+            auditLogger.logAsync(engine, "ENTRY_SKIPPED_PRICE_SLIPPAGE", mapOf(
+                "symbol" to symbol,
+                "recommended_entry" to recommendedEntry,
+                "live_ltp" to livePrice,
+                "positive_deviation_pct" to decision.deviationPct,
+                "max_positive_slippage_pct" to AutoBuyEntryPricePolicy.MAX_POSITIVE_SLIPPAGE_PCT,
+                "extra_market_data_requests" to 0
+            ))
+        }
+        return decision.allowed
+    }
+
     suspend fun executeForecast(symbol: String): String {
         val now = ZonedDateTime.now(INDIA)
         require(now.dayOfWeek.value < 6 && marketSession() == "OPEN") { "Forecast BUY is available only during the NSE regular session" }
@@ -4366,6 +4387,9 @@ class TradingRepository @Inject constructor(
         }
         val ltp = quote.lastPrice ?: error("Groww quote has no LTP")
         require(ltp < row.targetPrice) { "Forecast target already reached; BUY disabled" }
+        require(autoBuyEntryPriceAllowed("FORECAST_AUTO_BUY", row.symbol, row.entryPrice, ltp)) {
+            "Forecast BUY blocked: live price exceeds the recommended entry by more than 0.35%"
+        }
         val margin = apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin")
         val available = (margin.equity?.cncBalanceAvailable ?: margin.clearCash).coerceAtLeast(0.0)
         val sizing = CashAwareCncSizing.sizeStrictBudget(settings.holdingBudgetRupees.toDouble(), available, ltp)
@@ -4887,6 +4911,9 @@ class TradingRepository @Inject constructor(
             fixedOutcomePerformanceStore.record(fixedRecommendationStore.recommendations(today))
             error("Fixed target already reached for $symbol; BUY disabled")
         }
+        require(autoBuyEntryPriceAllowed("FIXED_AUTO_BUY", row.symbol, row.entryPrice, ltp)) {
+            "Fixed BUY blocked: live price exceeds the recommended entry by more than 0.35%"
+        }
         val margin = apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin")
         val available = (margin.equity?.cncBalanceAvailable ?: margin.clearCash).coerceAtLeast(0.0)
         val sizing = CashAwareCncSizing.sizeFixedAvailable(settings.holdingBudgetRupees.toDouble(), available, ltp)
@@ -5041,6 +5068,7 @@ class TradingRepository @Inject constructor(
                 auditLogger.log("FIXED_OUTCOME", "BUY_PREVENTED_TARGET_ALREADY_HIT", mapOf("symbol" to row.symbol))
                 continue
             }
+            if (!autoBuyEntryPriceAllowed("FIXED_AUTO_BUY", row.symbol, row.entryPrice, ltp)) continue
 
             val marginCooldown = buyApiCooldownOrNull()
             if (marginCooldown != null) {
