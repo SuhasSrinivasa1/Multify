@@ -1,28 +1,32 @@
 package com.multify.traderpro.engine
-import org.junit.Assert.assertFalse
-import org.junit.Assert.assertTrue
+
+import org.junit.Assert.*
 import org.junit.Test
+
 class FixedEntrySafetyOverlayTest {
- private fun f(ltp:Double=100.0,vwap:Double?=99.5,ema20:Double?=99.0,atr:Double?=1.0,rsi:Double?=60.0,
-  spread:Double?=10.0,sessionCount:Int=6,lastHigh:Double?=100.2,prevHigh:Double?=100.0,
-  lastClose:Double?=100.0,prevClose:Double?=99.8,highDistance:Double?=0.8)=FixedFeatureSnapshot(
-  ltp=ltp,bid=99.9,ask=100.0,spreadBps=spread,orderBookImbalance=.1,dayChangePct=1.0,marketCap=null,range52Position=null,
-  vwap=vwap,ema9=99.8,ema20=ema20,atr14=atr,rsi14=rsi,bollWidth=.02,macdHistogram=.1,trendSlopeAtr=.1,rvol=1.2,
-  donchianHigh=100.0,donchianLow=98.0,orb5High=99.5,orb5Low=98.5,orb15High=99.8,orb15Low=98.0,
-  lastOpen=99.8,lastHigh=lastHigh,lastLow=99.5,lastClose=lastClose,prevOpen=99.5,prevHigh=prevHigh,
-  prevLow=99.0,prevClose=prevClose,candles=emptyList(),sessionCandleCount=sessionCount,sessionHighDistancePct=highDistance
- )
- @Test fun allowsHealthyNonExtendedEntry(){assertTrue(FixedEntrySafetyOverlay.assess(f()).eligible)}
- @Test fun rejectsPeakExtensionAndOverboughtMomentum(){
-  val x=FixedEntrySafetyOverlay.assess(f(ltp=110.0,vwap=100.0,ema20=101.0,rsi=90.0))
-  assertFalse(x.eligible);assertTrue(x.reasons.any{it.contains("above session VWAP")});assertTrue(x.reasons.any{it.contains("overbought")})
- }
- @Test fun rejectsConfirmedFailedBreakout(){
-  val x=FixedEntrySafetyOverlay.assess(f(lastHigh=105.0,prevHigh=104.0,lastClose=103.5))
-  assertFalse(x.eligible);assertTrue(x.reasons.any{it.contains("failed breakout")})
- }
- @Test fun missingSpreadOrSessionFailsClosed(){
-  assertFalse(FixedEntrySafetyOverlay.assess(f(spread=null)).eligible)
-  assertFalse(FixedEntrySafetyOverlay.assess(f(sessionCount=0)).eligible)
- }
+    private fun features(lastClose: Double = 102.10, rsi: Double = 78.0) = FixedFeatureSnapshot(
+        ltp = 102.60, bid = 102.59, ask = 102.61, spreadBps = 2.0,
+        orderBookImbalance = 0.2, dayChangePct = 1.5, marketCap = null, range52Position = 0.7,
+        vwap = 100.0, ema9 = 102.0, ema20 = 101.0, ema9Slope = 0.2, vwapSlope = 0.1,
+        structureScore = 0.5, sessionHighDistancePct = 0.05, atr14 = 1.0, rsi14 = rsi,
+        bollWidth = 0.02, macdHistogram = 0.1, trendSlopeAtr = 0.2, rvol = 1.5,
+        donchianHigh = 103.0, donchianLow = 99.0, orb5High = 102.0, orb5Low = 100.0,
+        orb15High = 102.0, orb15Low = 99.0, lastOpen = 101.8, lastHigh = 103.0,
+        lastLow = 101.50, lastClose = lastClose, prevOpen = 101.4, prevHigh = 102.0,
+        prevLow = 101.4, prevClose = 101.5, candles = emptyList(), sessionCandleCount = 12
+    )
+    @Test fun confirmedHigherLowRebreakoutMayPassModestExtension() {
+        val result = FixedEntrySafetyOverlay.assess(features())
+        assertTrue(result.confirmedMultiPeakRebreakout)
+        assertTrue(result.eligible)
+    }
+    @Test fun failedBreakoutRemainsRejected() {
+        val result = FixedEntrySafetyOverlay.assess(features(lastClose = 101.8))
+        assertFalse(result.eligible)
+        assertTrue(result.reasons.any { it.contains("failed breakout") })
+    }
+    @Test fun extremeRsiStillRejectsEvenARebreakout() {
+        val result = FixedEntrySafetyOverlay.assess(features(rsi = 82.0))
+        assertFalse(result.eligible)
+    }
 }

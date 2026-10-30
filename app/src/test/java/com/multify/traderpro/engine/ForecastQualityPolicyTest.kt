@@ -162,4 +162,19 @@ class ForecastQualityPolicyTest {
         val secondary = ForecastQualityPolicy.rankingBonus(e, 1.6, 1.0, "SECONDARY")
         assertTrue(primary > secondary)
     }
+
+    @Test fun aFewLargeForecastWinnersCannotInflateTarget() {
+        assertEquals(1.14, ForecastQualityPolicy.adaptiveTargetPct(
+            1.14, listOf(4.4, 5.8, 2.6, 1.5),
+            priorForecastDistinctDays = 2, priorForecastDistinctSymbols = 4
+        ), 0.0001)
+    }
+
+    @Test fun historicalForecastTargetNeedsThirtyIndependentOutcomes() {
+        val samples = List(30) { 2.4 + (it % 4) * 0.1 }
+        val target = ForecastQualityPolicy.adaptiveTargetPct(
+            1.14, samples, priorForecastDistinctDays = 5, priorForecastDistinctSymbols = 10
+        )
+        assertTrue(target > 1.14)
+    }
 }

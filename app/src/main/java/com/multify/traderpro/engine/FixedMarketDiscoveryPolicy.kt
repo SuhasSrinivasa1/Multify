@@ -27,7 +27,7 @@ object FixedMarketDiscoveryPolicy {
         previousLtps: Map<String, Double>,
         sessionOpenLtps: Map<String, Double>,
         limit: Int,
-        preSpikeSlots: Int = 0
+        preSpikeSlots: Int = DEFAULT_PRE_SPIKE_SLOTS
     ): List<FixedMarketDiscoveryCandidate> {
         if (limit <= 0) return emptyList()
         val candidates = currentLtps.mapNotNull { (symbol, ltp) ->
