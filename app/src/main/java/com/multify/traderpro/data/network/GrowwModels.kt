@@ -143,7 +143,33 @@ data class OrderPayload(
     val price: Double? = null,
     @SerializedName("filled_quantity") val filledQuantity: Int? = null,
     @SerializedName("remaining_quantity") val remainingQuantity: Int? = null,
-    @SerializedName("average_fill_price") val averageFillPrice: Double? = null
+    @SerializedName("average_fill_price") val averageFillPrice: Double? = null,
+    @SerializedName("trading_symbol") val tradingSymbol: String = "",
+    @SerializedName("transaction_type") val transactionType: String = "",
+    val product: String = "",
+    val quantity: Int? = null,
+    @SerializedName("order_type") val orderType: String? = null,
+    @SerializedName("created_at") val createdAt: String? = null
+)
+
+data class OrderListPayload(
+    @SerializedName("order_list") val orderList: List<OrderPayload> = emptyList()
+)
+
+data class OrderTradeRecord(
+    val price: Double = 0.0,
+    val quantity: Int = 0,
+    @SerializedName("groww_order_id") val growwOrderId: String = "",
+    @SerializedName("groww_trade_id") val growwTradeId: String = "",
+    @SerializedName("trade_status") val tradeStatus: String = "",
+    @SerializedName("trading_symbol") val tradingSymbol: String = "",
+    @SerializedName("transaction_type") val transactionType: String = "",
+    val product: String = "",
+    @SerializedName("trade_date_time") val tradeDateTime: String? = null
+)
+
+data class OrderTradesPayload(
+    @SerializedName("trade_list") val tradeList: List<OrderTradeRecord> = emptyList()
 )
 
 data class OrderCancelRequest(

@@ -4,6 +4,7 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
 import androidx.room.Update
 
 @Dao
@@ -16,6 +17,9 @@ interface ManagedTradeDao {
 
     @Query("SELECT * FROM managed_positions WHERE status='OPEN' ORDER BY openedAtMs ASC")
     suspend fun openPositions(): List<ManagedPositionEntity>
+
+    @Query("SELECT * FROM managed_positions WHERE status='EXIT_PENDING_RECONCILIATION' ORDER BY openedAtMs ASC")
+    suspend fun pendingExitReconciliations(): List<ManagedPositionEntity>
 
     @Query("SELECT * FROM managed_positions ORDER BY openedAtMs ASC")
     suspend fun allPositions(): List<ManagedPositionEntity>
@@ -37,6 +41,18 @@ interface ManagedTradeDao {
 
     @Query("DELETE FROM managed_positions WHERE id=:id")
     suspend fun deletePosition(id: Long)
+
+    @Transaction
+    suspend fun recordFullExit(positionId: Long, trade: ManagedTradeEntity) {
+        insertTrade(trade)
+        deletePosition(positionId)
+    }
+
+    @Transaction
+    suspend fun recordPartialExitAndReopen(position: ManagedPositionEntity, trade: ManagedTradeEntity) {
+        insertTrade(trade)
+        updatePosition(position)
+    }
 
     @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insertTrade(trade: ManagedTradeEntity): Long

@@ -19,7 +19,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         ForecastChampionEntity::class,
         ResearchReportEntity::class
     ],
-    version = 16,
+    version = 17,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -32,6 +32,17 @@ abstract class AppDatabase : RoomDatabase() {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("DROP INDEX IF EXISTS index_long_forecasts_forecastDate_symbol")
                 db.execSQL("CREATE INDEX index_long_forecasts_forecastDate_symbol ON long_forecasts(forecastDate,symbol)")
+            }
+        }
+
+        val MIGRATION_16_17 = object : Migration(16, 17) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE managed_positions ADD COLUMN smartOrderReferenceId TEXT")
+                db.execSQL("ALTER TABLE managed_positions ADD COLUMN smartOrderTriggeredAtMs INTEGER")
+                db.execSQL("ALTER TABLE managed_positions ADD COLUMN smartOrderChildOrderId TEXT")
+                db.execSQL("ALTER TABLE managed_positions ADD COLUMN smartOrderChildStatus TEXT")
+                db.execSQL("ALTER TABLE managed_positions ADD COLUMN netProfitFloorPrice REAL")
+                db.execSQL("ALTER TABLE managed_positions ADD COLUMN netProfitTargetPct REAL")
             }
         }
 

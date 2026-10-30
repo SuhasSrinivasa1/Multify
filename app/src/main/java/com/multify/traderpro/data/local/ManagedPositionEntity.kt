@@ -41,5 +41,11 @@ data class ManagedPositionEntity(
     val smartOrderTriggerPrice: Double? = null,
     val smartOrderDirection: String? = null,
     val smartOrderStatus: String? = null,
-    val smartOrderUpdatedAtMs: Long? = null
+    val smartOrderUpdatedAtMs: Long? = null,
+    val smartOrderReferenceId: String? = null,
+    val smartOrderTriggeredAtMs: Long? = null,
+    val smartOrderChildOrderId: String? = null,
+    val smartOrderChildStatus: String? = null,
+    val netProfitFloorPrice: Double? = null,
+    val netProfitTargetPct: Double? = null
 )
