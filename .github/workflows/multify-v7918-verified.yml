@@ -728,6 +728,7 @@ jobs:
           forecast=(root/'engine/ForecastEarlyEntryPolicy.kt').read_text()
           assert 'FiveMinuteCandleAggregator.aggregate' in forecast and 'bars.size<6' in forecast
           assert 'latestFiveClose/previousFiveClose' in forecast and 'currentExtensionFromFiveClosePct' in forecast
+          assert 'completedOneMinuteBars' in forecast and 'currentExtensionFromOneMinuteClosePct' in forecast
           assert 'MarketCandleTimestampParser.toEpochMillis' in (root/'engine/ForecastCandleShadow.kt').read_text()
           code=(root/'data/repository/TradingRepository.kt').read_text()
           assert 'BETA_FORECAST_FIXED_GUARD_MS = 10_000L' in code
