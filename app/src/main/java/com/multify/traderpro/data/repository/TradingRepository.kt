@@ -288,6 +288,7 @@ class TradingRepository @Inject constructor(
     private val lastTrailStateAuditSignature = ConcurrentHashMap<Long, String>()
     private val lastSmartOrderStatusAtMs = ConcurrentHashMap<Long, Long>()
     private val lastGttChildReconcileAuditAtMs = ConcurrentHashMap<String, Long>()
+    private val lastGttChildPollAtMs = ConcurrentHashMap<String, Long>()
 
     private data class MarketDiscoveryPass(
         val symbols: List<String>,
@@ -6277,7 +6278,7 @@ class TradingRepository @Inject constructor(
         }
         val validTrades = trades.filter {
             it.quantity > 0 && it.price.isFinite() && it.price > 0.0 &&
-                (it.tradeStatus.isBlank() || it.tradeStatus.equals("COMPLETED", true)) &&
+                (it.tradeStatus.isBlank() || it.tradeStatus.uppercase(Locale.US) in setOf("COMPLETED", "EXECUTED", "TRADED")) &&
                 (it.tradingSymbol.isBlank() || it.tradingSymbol.equals(symbol, true)) &&
                 (it.transactionType.isBlank() || it.transactionType.equals("SELL", true)) &&
                 (it.product.isBlank() || it.product.equals("CNC", true))
@@ -6291,6 +6292,9 @@ class TradingRepository @Inject constructor(
         val status = order.orderStatus.uppercase(Locale.US)
         val terminal = status in setOf("EXECUTED", "COMPLETED", "CANCELLED", "REJECTED", "FAILED", "EXPIRED") ||
             (order.remainingQuantity == 0 && filledQuantity > 0)
+        if ((order.filledQuantity ?: 0) <= 0 && tradeQuantity == 0 && !terminal) {
+            return GttChildFillStats(0, null, false, status, order)
+        }
         return GttChildFillStats(filledQuantity, averageFillPrice, terminal, status, order)
     }
 
@@ -6298,6 +6302,11 @@ class TradingRepository @Inject constructor(
         token: String,
         position: ManagedPositionEntity
     ): ManagedPositionEntity? {
+        val pollKey = position.symbol.uppercase(Locale.US)
+        val pollNow = System.currentTimeMillis()
+        val lastPoll = lastGttChildPollAtMs[pollKey] ?: 0L
+        if (pollNow - lastPoll < 5_000L) return null
+        lastGttChildPollAtMs[pollKey] = pollNow
         val child = position.smartOrderChildOrderId?.let { id ->
             OrderPayload(growwOrderId = id)
         } ?: findTriggeredGttChildOrder(token, position)
@@ -6371,6 +6380,8 @@ class TradingRepository @Inject constructor(
             orderListSnapshot = null
             lastTrailStateAuditAtMs.remove(position.id)
             lastSmartOrderStatusAtMs.remove(position.id)
+            lastGttChildPollAtMs.remove(pollKey)
+            lastGttChildReconcileAuditAtMs.remove(pollKey)
             auditLogger.log("HOLDING", "GTT_LONG_CLOSED", mapOf(
                 "symbol" to position.symbol, "qty" to position.quantity,
                 "exit" to exit, "gross_pnl" to gross, "estimated_costs" to trade.estimatedCosts,
@@ -7272,6 +7283,7 @@ class TradingRepository @Inject constructor(
         val nextStatus = payload.status.ifBlank { position.smartOrderStatus ?: "" }
         val triggered = nextStatus.uppercase(Locale.US) in setOf("TRIGGERED", "COMPLETED")
         val triggeredAtMs = if (triggered) {
+            orderListSnapshot = null
             position.smartOrderTriggeredAtMs ?: parseGrowwTimestampMs(payload.triggeredAt) ?: now
         } else position.smartOrderTriggeredAtMs
         val updated = position.copy(
@@ -7351,6 +7363,7 @@ class TradingRepository @Inject constructor(
     ): ManagedPositionEntity {
         val id = position.smartOrderId ?: return position
         activeGttSnapshot = null
+        orderListSnapshot = null
         val statusPayload = runCatching {
             apiFactory.groww.smartOrderStatus(
                 bearer(token), segment = "CASH", smartOrderType = "GTT", smartOrderId = id
