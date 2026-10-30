@@ -6113,7 +6113,10 @@ class TradingRepository @Inject constructor(
             else parser.parse(event.title, event.text, event.bigText).exitPrice
         }
 
-    private suspend fun recordExternalClose(position: ManagedPositionEntity, quantity: Int, exit: Double, reason: String) {
+    private suspend fun recordExternalClose(
+        position: ManagedPositionEntity, quantity: Int, exit: Double, reason: String,
+        confirmedChildOrderId: String? = null
+    ) {
         val gross = (exit - position.entryPrice) * quantity
         val costs = estimatedCashCosts(position.entryPrice, exit, quantity)
         managedDao.insertTrade(
@@ -6124,7 +6127,7 @@ class TradingRepository @Inject constructor(
                 strategy = position.strategy, regime = position.regime, confidence = position.confidence,
                 mfeRupees = max(0.0, position.maxFavourablePrice - position.entryPrice) * quantity,
                 maeRupees = max(0.0, position.entryPrice - position.maxAdversePrice) * quantity,
-                sourceEventId = position.sourceEventId, openOrderId = position.openOrderId, closeOrderId = position.smartOrderId ?: "EXTERNAL",
+                sourceEventId = position.sourceEventId, openOrderId = position.openOrderId, closeOrderId = confirmedChildOrderId ?: position.smartOrderId ?: "EXTERNAL",
                 openedAtMs = position.openedAtMs, closedAtMs = System.currentTimeMillis()
             )
         )
@@ -6296,6 +6299,29 @@ class TradingRepository @Inject constructor(
             val open = managedDao.openPositions()
             for (position in open) {
                 val symbol = position.symbol.uppercase(Locale.US)
+                val brokerQty = max(
+                    inventory.holdings[symbol]?.quantity ?: 0,
+                    inventory.positions[symbol]?.quantity ?: 0
+                )
+                val gttStatus = position.smartOrderStatus.orEmpty().uppercase(Locale.US)
+                // Broker child fills must be reconciled before ordinary ownership checks:
+                // a successful GTT SELL legitimately reduces the broker's share count to zero.
+                // No direct SELL may fire while a GTT child could still be pending.
+                if (GttExitReconciliationPolicy.shouldQuarantinePendingChild(
+                    position.smartOrderMode, position.smartOrderId,
+                    gttStatus, brokerQty, position.quantity
+                )) {
+                    blockedSymbols += symbol
+                    runCatching { reconcileTriggeredGttExit(token, position, brokerQty) }
+                        .onFailure { error ->
+                            auditLogger.log("GTT", "BROKER_CHILD_RECONCILIATION_ERROR", mapOf(
+                                "symbol" to symbol,
+                                "message" to (error.message ?: error.javaClass.simpleName),
+                                "duplicate_sell_allowed" to false
+                            ))
+                        }
+                    continue
+                }
                 val conflict = activeGtts[symbol].orEmpty().any { it.smartOrderId != position.smartOrderId }
                 val exclusive = safeAppSellScope(token, position, inventory)
                 if (conflict || !exclusive) {
@@ -6948,6 +6974,96 @@ class TradingRepository @Inject constructor(
         return updated
     }
 
+    /**
+     * Read-only broker order confirmation. A GTT TRIGGERED event is not a fill.
+     * Never submits/cancels SELL, and never guesses that the trigger equals the fill.
+     * Partial or ambiguous evidence is quarantined until broker status resolves.
+     */
+    private suspend fun reconcileTriggeredGttExit(
+        token: String, position: ManagedPositionEntity, brokerQuantity: Int
+    ): Boolean {
+        if (!appOwned(position) || position.smartOrderId.isNullOrBlank()) return false
+        val closeLock = closePositionMutexes.computeIfAbsent(position.id) { Mutex() }
+        return closeLock.withLock {
+            if (managedDao.openPositionById(position.id) == null) return@withLock false
+            val now = System.currentTimeMillis()
+            if (now - (gttExitReconcileLastAttemptAtMs[position.id] ?: 0L) < 8_000L)
+                return@withLock false
+            gttExitReconcileLastAttemptAtMs[position.id] = now
+
+            val confirmed = refreshKnownSmartOrderStatus(token, position, force = true)
+            val parentStatus = confirmed.smartOrderStatus.orEmpty().uppercase(Locale.US)
+            if (parentStatus !in setOf("TRIGGERED", "COMPLETED")) {
+                auditLogger.log("GTT", "EXIT_WAITING_PARENT_TRIGGER", mapOf(
+                    "symbol" to position.symbol,
+                    "parent_status" to parentStatus,
+                    "broker_quantity" to brokerQuantity,
+                    "duplicate_sell_allowed" to false
+                ))
+                return@withLock false
+            }
+            val brokerOrders = mutableListOf<GrowwOrderBookRow>()
+            for (page in 0..2) {
+                val pageRows = apiFactory.groww.orderList(bearer(token), page = page)
+                    .requirePayload("Groww same-day SELL order book").orderList
+                brokerOrders.addAll(pageRows)
+                if (pageRows.size < 100) break
+            }
+            val full = GttExitReconciliationPolicy.uniqueConfirmedFullSell(
+                brokerOrders, confirmed.symbol, confirmed.quantity, confirmed.openOrderId
+            )
+            val partial = GttExitReconciliationPolicy.identifiedPartialFills(
+                brokerOrders, confirmed.symbol, confirmed.quantity, confirmed.openOrderId
+            )
+            if (full == null || brokerQuantity != 0) {
+                auditLogger.log("GTT", "BROKER_FILL_PENDING_OR_PARTIAL_QUARANTINE", mapOf(
+                    "symbol" to confirmed.symbol,
+                    "parent_status" to parentStatus,
+                    "gtt_id" to confirmed.smartOrderId,
+                    "broker_quantity" to brokerQuantity,
+                    "tracked_quantity" to confirmed.quantity,
+                    "partial_fill_qty_observed" to partial.sumOf { it.filledQuantity },
+                    "unique_full_order_match" to (full != null),
+                    "manual_review_if_persistent" to true,
+                    "duplicate_sell_allowed" to false
+                ))
+                return@withLock false
+            }
+            val price = full.averageFillPrice ?: return@withLock false
+            val exitReason = when (confirmed.smartOrderMode) {
+                HoldingSmartOrderPolicy.MODE_TRAILING_GTT -> "TRAILING_GTT_CONFIRMED_BROKER_FILL"
+                HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT -> "HARD_STOP_GTT_CONFIRMED_BROKER_FILL"
+                else -> "GTT_CONFIRMED_BROKER_FILL"
+            }
+            recordExternalClose(
+                confirmed, confirmed.quantity, price, exitReason,
+                confirmedChildOrderId = full.growwOrderId
+            )
+            recentlyClosedSymbolsAtMs[confirmed.symbol.uppercase(Locale.US)] = now
+            managedDao.deletePosition(confirmed.id)
+            brokerInventorySnapshot = null
+            gttExitReconcileLastAttemptAtMs.remove(confirmed.id)
+            lastTrailStateAuditAtMs.remove(confirmed.id)
+            lastSmartOrderStatusAtMs.remove(confirmed.id)
+            auditLogger.log("HOLDING", "GTT_BROKER_SELL_RECONCILED", mapOf(
+                "symbol" to confirmed.symbol,
+                "parent_gtt_id" to confirmed.smartOrderId,
+                "sell_order_id" to full.growwOrderId,
+                "broker_average_fill" to price,
+                "quantity" to confirmed.quantity,
+                "trigger_price" to confirmed.smartOrderTriggerPrice,
+                "trigger_to_fill_slippage_bps" to confirmed.smartOrderTriggerPrice
+                    ?.takeIf { it > 0.0 }?.let { (it - price) / it * 10_000.0 },
+                "estimated_net_pnl" to GrowwDeliveryCostPolicy.estimatedNetProfit(
+                    confirmed.entryPrice, price, confirmed.quantity
+                ),
+                "broker_order_match_note" to "unique same-day full SELL; child-parent ID not supplied by broker API",
+                "duplicate_sell_sent" to false
+            ))
+            true
+        }
+    }
+
     private suspend fun finalizeCompletedGttIfNeeded(
         token: String,
         position: ManagedPositionEntity
@@ -6971,36 +7087,11 @@ class TradingRepository @Inject constructor(
             ))
             return cleared
         }
-        if (!refreshed.smartOrderStatus.equals("COMPLETED", true)) return refreshed
-
-        val inventory = runCatching { brokerInventory(token, force = true) }.getOrNull()
-        val brokerExit = inventory?.positions?.get(refreshed.symbol.uppercase(Locale.US))?.debitPrice
-            ?.takeIf { it.isFinite() && it > 0.0 }
-        val exit = brokerExit ?: refreshed.smartOrderTriggerPrice ?: refreshed.lastPrice
-        val reason = when (refreshed.smartOrderMode) {
-            HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT -> "COMMON_HARD_STOP_MINUS_2_GTT_EXIT"
-            HoldingSmartOrderPolicy.MODE_TRAILING_GTT -> "TRAILING_GTT_EXIT"
-            HoldingSmartOrderPolicy.MODE_RECOVERY_GTT -> "RECOVERY_GTT_100_NET_EXIT"
-            else -> "GTT_EXIT"
-        }
-        recordExternalClose(refreshed, refreshed.quantity, exit, reason)
-        runCatching { cancelKnownPositionGtt(token, refreshed, "GTT_COMPLETED_CLEANUP", clearIfTerminal = true) }
-        recentlyClosedSymbolsAtMs[refreshed.symbol.uppercase(Locale.US)] = System.currentTimeMillis()
-        managedDao.deletePosition(refreshed.id)
-        brokerInventorySnapshot = null
-        lastTrailStateAuditAtMs.remove(refreshed.id)
-        lastSmartOrderStatusAtMs.remove(refreshed.id)
-        auditLogger.log("HOLDING", "GTT_LONG_CLOSED", mapOf(
-            "symbol" to refreshed.symbol,
-            "qty" to refreshed.quantity,
-            "exit" to exit,
-            "exit_reason" to reason,
-            "gtt_id" to refreshed.smartOrderId,
-            "gtt_mode" to refreshed.smartOrderMode,
-            "gtt_status" to refreshed.smartOrderStatus,
-            "active_gtt_cleanup_requested" to true
-        ))
-        return null
+        // NEVER book a GTT trigger price as an actual broker fill.
+        // The parent can be COMPLETED before its child fill is visible in the order book.
+        // First-loop quarantine will reconcile when unique full broker SELL evidence exists.
+        if (refreshed.smartOrderStatus.equals("COMPLETED", true)) return null
+        return refreshed
     }
 
     private suspend fun cancelKnownPositionGtt(
