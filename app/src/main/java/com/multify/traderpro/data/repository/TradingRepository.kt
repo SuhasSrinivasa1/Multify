@@ -6841,6 +6841,7 @@ class TradingRepository @Inject constructor(
         brokerRetryGuard.clearGtt(position.symbol)
         require(payload.smartOrderId.isNotBlank()) { "Groww did not return a GTT id for ${position.symbol}" }
         activeGttSnapshot = null
+        orderListSnapshot = null
         val now = System.currentTimeMillis()
         val updated = position.copy(
             smartOrderId = payload.smartOrderId,
@@ -6849,6 +6850,12 @@ class TradingRepository @Inject constructor(
             smartOrderDirection = direction,
             smartOrderStatus = payload.status.ifBlank { "ACTIVE" },
             smartOrderUpdatedAtMs = now,
+            smartOrderReferenceId = reference,
+            smartOrderTriggeredAtMs = null,
+            smartOrderChildOrderId = null,
+            smartOrderChildStatus = null,
+            netProfitFloorPrice = position.netProfitFloorPrice.takeIf { mode == HoldingSmartOrderPolicy.MODE_TRAILING_GTT },
+            netProfitTargetPct = position.netProfitTargetPct.takeIf { mode == HoldingSmartOrderPolicy.MODE_TRAILING_GTT },
             stopPrice = if (mode in setOf(HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT, HoldingSmartOrderPolicy.MODE_TRAILING_GTT)) roundedTrigger else null,
             targetPrice = if (mode == HoldingSmartOrderPolicy.MODE_RECOVERY_GTT) roundedTrigger else position.targetPrice,
             lastEvaluatedAtMs = now
@@ -6920,13 +6927,25 @@ class TradingRepository @Inject constructor(
         }
         brokerRetryGuard.clearGtt(position.symbol)
         activeGttSnapshot = null
+        orderListSnapshot = null
         val now = System.currentTimeMillis()
+        val referencePrefix = when (mode) {
+            HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT -> "MHS"
+            HoldingSmartOrderPolicy.MODE_TRAILING_GTT -> "MTG"
+            else -> "MTR"
+        }
         val updated = position.copy(
             smartOrderMode = mode,
             smartOrderTriggerPrice = roundedTrigger,
             smartOrderDirection = direction,
             smartOrderStatus = payload.status.ifBlank { position.smartOrderStatus ?: "ACTIVE" },
             smartOrderUpdatedAtMs = now,
+            smartOrderReferenceId = position.smartOrderReferenceId ?: stableRef(referencePrefix, "${position.id}-${position.symbol}-${position.openedAtMs}"),
+            smartOrderTriggeredAtMs = null,
+            smartOrderChildOrderId = null,
+            smartOrderChildStatus = null,
+            netProfitFloorPrice = position.netProfitFloorPrice.takeIf { mode == HoldingSmartOrderPolicy.MODE_TRAILING_GTT },
+            netProfitTargetPct = position.netProfitTargetPct.takeIf { mode == HoldingSmartOrderPolicy.MODE_TRAILING_GTT },
             stopPrice = if (mode in setOf(HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT, HoldingSmartOrderPolicy.MODE_TRAILING_GTT)) roundedTrigger else null,
             targetPrice = if (mode == HoldingSmartOrderPolicy.MODE_RECOVERY_GTT) roundedTrigger else position.targetPrice,
             lastEvaluatedAtMs = now
@@ -6968,9 +6987,17 @@ class TradingRepository @Inject constructor(
             smartOrderType = "GTT",
             smartOrderId = id
         ).requirePayload("GTT status ${position.symbol}")
+        val nextStatus = payload.status.ifBlank { position.smartOrderStatus ?: "" }
+        val triggered = nextStatus.uppercase(Locale.US) in setOf("TRIGGERED", "COMPLETED")
+        val triggeredAtMs = if (triggered) {
+            position.smartOrderTriggeredAtMs ?: parseGrowwTimestampMs(payload.triggeredAt) ?: now
+        } else position.smartOrderTriggeredAtMs
         val updated = position.copy(
-            smartOrderStatus = payload.status.ifBlank { position.smartOrderStatus },
-            smartOrderUpdatedAtMs = now
+            status = if (triggered) "EXIT_PENDING_RECONCILIATION" else position.status,
+            smartOrderStatus = nextStatus,
+            smartOrderUpdatedAtMs = now,
+            smartOrderReferenceId = payload.referenceId ?: position.smartOrderReferenceId,
+            smartOrderTriggeredAtMs = triggeredAtMs
         )
         managedDao.updatePosition(updated)
         auditLogger.log("GTT", "GTT_STATUS", mapOf(
@@ -6988,56 +7015,51 @@ class TradingRepository @Inject constructor(
         token: String,
         position: ManagedPositionEntity
     ): ManagedPositionEntity? {
-        if (position.smartOrderId.isNullOrBlank()) return position
-        val refreshed = runCatching { refreshKnownSmartOrderStatus(token, position, force = false) }
-            .getOrDefault(position)
-        if (refreshed.smartOrderStatus?.uppercase(Locale.US) in setOf("FAILED", "CANCELLED", "EXPIRED")) {
-            val cleared = refreshed.copy(
-                smartOrderId = null,
-                smartOrderMode = HoldingSmartOrderPolicy.MODE_NONE,
-                smartOrderTriggerPrice = null,
-                smartOrderDirection = null,
-                smartOrderStatus = null,
-                smartOrderUpdatedAtMs = System.currentTimeMillis()
+        if (position.smartOrderId.isNullOrBlank() && position.status != "EXIT_PENDING_RECONCILIATION") return position
+        val refreshed = if (!position.smartOrderId.isNullOrBlank()) {
+            runCatching { refreshKnownSmartOrderStatus(token, position, force = false) }.getOrDefault(position)
+        } else position
+        val status = refreshed.smartOrderStatus?.uppercase(Locale.US).orEmpty()
+        if (status in setOf("TRIGGERED", "COMPLETED") ||
+            refreshed.status == "EXIT_PENDING_RECONCILIATION") {
+            val pending = refreshed.copy(
+                status = "EXIT_PENDING_RECONCILIATION",
+                smartOrderTriggeredAtMs = refreshed.smartOrderTriggeredAtMs
+                    ?: refreshed.smartOrderUpdatedAtMs ?: System.currentTimeMillis()
+            )
+            managedDao.updatePosition(pending)
+            return reconcileTriggeredGttChildOrder(token, pending)
+        }
+        if (status in setOf("FAILED", "CANCELLED", "EXPIRED")) {
+            val cleared = clearManagedGttState(refreshed).copy(
+                status = "OPEN",
+                stopPrice = refreshed.stopPrice ?: HardStopLossPolicy.stopPrice(refreshed.entryPrice)
             )
             managedDao.updatePosition(cleared)
             auditLogger.log("GTT", "TERMINAL_GTT_RECONCILED_FOR_REPROTECTION", mapOf(
                 "symbol" to cleared.symbol, "old_gtt_id" to refreshed.smartOrderId,
-                "old_status" to refreshed.smartOrderStatus
+                "old_status" to status
             ))
             return cleared
         }
-        if (!refreshed.smartOrderStatus.equals("COMPLETED", true)) return refreshed
-
-        val inventory = runCatching { brokerInventory(token, force = true) }.getOrNull()
-        val brokerExit = inventory?.positions?.get(refreshed.symbol.uppercase(Locale.US))?.debitPrice
-            ?.takeIf { it.isFinite() && it > 0.0 }
-        val exit = brokerExit ?: refreshed.smartOrderTriggerPrice ?: refreshed.lastPrice
-        val reason = when (refreshed.smartOrderMode) {
-            HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT -> "COMMON_HARD_STOP_MINUS_2_GTT_EXIT"
-            HoldingSmartOrderPolicy.MODE_TRAILING_GTT -> "TRAILING_GTT_EXIT"
-            HoldingSmartOrderPolicy.MODE_RECOVERY_GTT -> "RECOVERY_GTT_100_NET_EXIT"
-            else -> "GTT_EXIT"
-        }
-        recordExternalClose(refreshed, refreshed.quantity, exit, reason)
-        runCatching { cancelKnownPositionGtt(token, refreshed, "GTT_COMPLETED_CLEANUP", clearIfTerminal = true) }
-        recentlyClosedSymbolsAtMs[refreshed.symbol.uppercase(Locale.US)] = System.currentTimeMillis()
-        managedDao.deletePosition(refreshed.id)
-        brokerInventorySnapshot = null
-        lastTrailStateAuditAtMs.remove(refreshed.id)
-        lastSmartOrderStatusAtMs.remove(refreshed.id)
-        auditLogger.log("HOLDING", "GTT_LONG_CLOSED", mapOf(
-            "symbol" to refreshed.symbol,
-            "qty" to refreshed.quantity,
-            "exit" to exit,
-            "exit_reason" to reason,
-            "gtt_id" to refreshed.smartOrderId,
-            "gtt_mode" to refreshed.smartOrderMode,
-            "gtt_status" to refreshed.smartOrderStatus,
-            "active_gtt_cleanup_requested" to true
-        ))
-        return null
+        return refreshed
     }
+
+    private fun clearManagedGttState(position: ManagedPositionEntity): ManagedPositionEntity =
+        position.copy(
+            smartOrderId = null,
+            smartOrderMode = HoldingSmartOrderPolicy.MODE_NONE,
+            smartOrderTriggerPrice = null,
+            smartOrderDirection = null,
+            smartOrderStatus = null,
+            smartOrderUpdatedAtMs = null,
+            smartOrderReferenceId = null,
+            smartOrderTriggeredAtMs = null,
+            smartOrderChildOrderId = null,
+            smartOrderChildStatus = null,
+            netProfitFloorPrice = null,
+            netProfitTargetPct = null
+        )
 
     private suspend fun cancelKnownPositionGtt(
         token: String,
