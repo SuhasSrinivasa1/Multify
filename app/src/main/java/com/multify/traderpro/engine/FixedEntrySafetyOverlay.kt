@@ -7,7 +7,7 @@ object FixedEntrySafetyOverlay {
     const val MAX_EMA20_EXTENSION_ATR=2.0
     const val MAX_RECENT_IMPULSE_ATR=1.2
     const val MAX_SPREAD_BPS=40.0
-    const val RSI_EXHAUSTION=82.0
+    const val RSI_EXHAUSTION=75.0
     fun assess(f:FixedFeatureSnapshot):FixedEntrySafetyAssessment {
         val r=mutableListOf<String>()
         if(f.sessionCandleCount<1) r+="current-session candles unavailable"
