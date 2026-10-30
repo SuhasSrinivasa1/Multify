@@ -575,6 +575,9 @@ private fun ForecastScreen(
 ) {
     val dashboard = state.dashboard
     val productionRows = dashboard?.forecasts.orEmpty().sortedBy { it.rank }
+    val researchPrimary = productionRows.asSequence()
+        .filter { it.qualityTier == "PRIMARY" && !it.executionEligible }
+        .maxByOrNull { it.confidence.coerceIn(0.0, 1.0) * it.score.coerceAtLeast(0.0) }
     val provisional = if (productionRows.isEmpty()) {
         dashboard?.forecastWatchlist.orEmpty()
             .filter {
@@ -682,6 +685,24 @@ private fun ForecastScreen(
                     modifier = Modifier.weight(1f)
                 ) { Text("Refresh scanner") }
                 OutlinedButton(onClick = onResearch, modifier = Modifier.weight(1f)) { Text("Run research") }
+            }
+        }
+        if (researchPrimary != null) {
+            item {
+                Card(colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = .22f)),
+                    shape = RoundedCornerShape(18.dp)) {
+                    Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("Strongest PRIMARY research · BUY locked", fontWeight = FontWeight.SemiBold)
+                        Text(researchPrimary.symbol + " · " +
+                            String.format(Locale.US, "%.0f%% confidence", researchPrimary.confidence * 100.0) +
+                            " · target " + String.format(Locale.US, "%.2f%%", researchPrimary.targetPct),
+                            fontWeight = FontWeight.Medium)
+                        Text("Quality-qualified research, NOT a live BUY. Five completed, outcome-validated sessions are required before trading. The historical replay runs outside market hours.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
             }
         }
         if (productionRows.isEmpty() && provisional != null) {
@@ -907,17 +928,21 @@ private fun FixedScreen(
             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                 shape = RoundedCornerShape(20.dp)) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Fixed · Recent entry-safety holds", fontWeight = FontWeight.SemiBold)
-                    Text("Recent Fixed PRIMARY candidates from the last 20 minutes that were blocked by the existing " +
-                        "anti-chase guard. They remain observation-only; BUY is disabled.",
+                    Text("Fixed · Safety holds and confirmation queue", fontWeight = FontWeight.SemiBold)
+                    Text("Last 20 minutes of PRIMARY evaluations: safety-held or " +
+                        "entry-safe but awaiting the frozen repeat-confirmation rule. " +
+                        "Neither category permits BUY until published independently.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                     if (held.isEmpty()) {
-                        Text("No fresh safety-held PRIMARY candidates in the latest scan.",
+                        Text("No recent Fixed PRIMARY candidates awaiting confirmation or held by safety.",
                             style = MaterialTheme.typography.bodySmall)
                     } else held.forEach { candidate ->
                         HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = .12f))
-                        Text(candidate.symbol + " · SAFETY HOLD · BUY disabled", fontWeight = FontWeight.Medium)
+                        Text(candidate.symbol + if (candidate.status == "AWAITING_CONFIRMATION")
+                            " · ENTRY SAFE · AWAITING SECOND SCAN · BUY disabled"
+                            else " · SAFETY HOLD · BUY disabled",
+                            fontWeight = FontWeight.Medium)
                     }
                 }
             }

@@ -272,8 +272,14 @@ class TradingEngineService : Service() {
                         ))
                     }
 
-                    if (now.dayOfWeek.value < 6 &&
-                        now.toLocalTime() >= LocalTime.of(15, 35) &&
+                    // Mature completed-date research can catch up before market open and
+                    // on closed days, not only while the app happens to run after 15:35.
+                    // No replay during trading; Alpha orders/Fixed retain all priority.
+                    val replayWindow = !regularSession &&
+                        (now.dayOfWeek.value >= 6 ||
+                            now.toLocalTime() < LocalTime.of(9, 10) ||
+                            now.toLocalTime() >= LocalTime.of(15, 35))
+                    if (replayWindow &&
                         nowMs - lastAfterHoursResearchAtMs >= AFTER_HOURS_RESEARCH_INTERVAL_MS
                     ) {
                         lastAfterHoursResearchAtMs = nowMs

@@ -227,6 +227,7 @@ class TradingRepository @Inject constructor(
     // replay symbols forever; this does not influence production trading decisions.
     private val forecastReplayRetryAfterMs = ConcurrentHashMap<String, Long>()
     private val forecastReplayFailureCount = ConcurrentHashMap<String, Int>()
+    private var forecastBackfillDateCursor = 0
     private var forecastDetailCursor = 0
 
     // The scheduling timestamp remains frozen; this flag only prevents auto-BUY on incomplete scans.
@@ -1452,24 +1453,36 @@ class TradingRepository @Inject constructor(
             }.toList()
     }
 
-    /** Recent Fixed PRIMARY candidates vetoed by the approved separate price-safety overlay. */
+    /**
+     * Read-only Fixed diagnostics; pending FIRST confirmations are never trade recommendations.
+     * A later non-PRIMARY scan must not erase a held candidate within the 20-minute window.
+     */
     private fun fixedSafetyWatchlist(date: String): List<ForecastDto> {
-        val cutoffMs = System.currentTimeMillis() - 20L * 60_000L
+        val cutoff = System.currentTimeMillis() - 20L * 60_000L
+        val published = fixedRecommendationStore.recommendations(date)
+            .map { it.symbol.uppercase(Locale.US) }.toSet()
         return fixedRecommendationStore.observations(date).asSequence()
-            .filter {
-                it.scanAtMs >= cutoffMs && it.qualityTier == "PRIMARY" && !it.publishEligible
-            }
+            .filter { it.scanAtMs >= cutoff && it.qualityTier == "PRIMARY" }
+            .filterNot { it.symbol.uppercase(Locale.US) in published }
             .groupBy { it.symbol.uppercase(Locale.US) }
             .values.mapNotNull { rows -> rows.maxByOrNull { it.scanAtMs } }
-            .sortedByDescending { it.scanAtMs }
+            .sortedWith(compareByDescending<FixedScanObservation> {
+                it.publishEligible && it.executionEligible
+            }.thenByDescending { it.scanAtMs })
             .take(12)
             .mapIndexed { i, row ->
-                ForecastDto(rank = i + 1, symbol = row.symbol,
-                    qualityTier = "PRIMARY SAFETY HOLD", executionEligible = false,
-                    status = "ENTRY_SAFETY_HOLD",
-                    reason = "Fixed PRIMARY ranking, but the approved entry-safety overlay vetoed this scan. " +
-                        "Observation only; BUY remains disabled until a fresh independently qualifying entry.",
-                    generatedAtMs = row.scanAtMs)
+                val pending = row.publishEligible && row.executionEligible
+                ForecastDto(
+                    rank = i + 1, symbol = row.symbol,
+                    qualityTier = if (pending) "PRIMARY · AWAITING CONFIRMATION" else "PRIMARY · SAFETY HOLD",
+                    executionEligible = false,
+                    status = if (pending) "AWAITING_CONFIRMATION" else "ENTRY_SAFETY_HOLD",
+                    reason = if (pending)
+                        "Entry safety passed, but the frozen Fixed repeat-confirmation rule has not published this setup. Observation only; BUY disabled."
+                    else
+                        "Original Fixed PRIMARY ranking vetoed by the unchanged entry-safety overlay. Observation only; BUY disabled.",
+                    generatedAtMs = row.scanAtMs
+                )
             }.toList()
     }
 
@@ -5798,6 +5811,14 @@ class TradingRepository @Inject constructor(
                 val volume = x.getOrNull(5)?.let { runCatching { it.asDouble }.getOrNull() } ?: 0.0
                 ResearchCandle(atMs, high, low, close, open, volume)
             }.sortedBy { it.atMs }
+            if (candles.isEmpty()) {
+                auditLogger.log("FORECAST_RESEARCH", "OUTCOME_REPLAY_NO_CANDLES", mapOf(
+                    "date" to date, "symbol" to symbol,
+                    "historical_payload_rows" to historical.candles.size,
+                    "outcome_written" to false,
+                    "five_session_unlock_affected" to true
+                ))
+            }
             rows.forEach { row ->
                 // Never count the partly observed one-minute bar at notification time.
                 val xs = candles.filter { it.atMs > row.scanAtMs && it.atMs < sessionEndMs }
@@ -5854,7 +5875,8 @@ class TradingRepository @Inject constructor(
     suspend fun runAfterHoursResearch(force: Boolean = false): ResearchDto {
         ensureHistoricalSeed()
         val today = LocalDate.now(INDIA).toString()
-        val alphaToken = ensureToken()
+        // Alpha availability must not block independent, read-only Beta replay.
+        val alphaToken = runCatching { ensureToken() }.getOrNull()
         val token = forecastMarketToken()
         if (alphaToken != null) {
             runCatching { backfillRecentMultifyMfe(alphaToken, MFE_AFTER_HOURS_BACKFILL_BATCH_SIZE, force = true) }
@@ -5865,16 +5887,29 @@ class TradingRepository @Inject constructor(
         if (token != null) {
             while (researchBatches < RESEARCH_BACKFILL_MAX_BATCHES_PER_RUN &&
                 SystemClock.elapsedRealtime() - replayStartedAt < RESEARCH_BACKFILL_BUDGET_MS) {
-                val incompleteDate = learningDao.forecastResearchDates()
+                // The DAO sorts dates newest first; always choosing first starved older
+                // sessions and prevented the five-distinct-day calibration cohort.
+                // Rotate eligible completed market dates, at most one batch per date.
+                val incompleteDates = learningDao.forecastResearchDates()
                     .filter { it >= V7_RESEARCH_COHORT_START_DATE }
-                    .firstOrNull { learningDao.pendingForecastResearchOutcomes(it).isNotEmpty() }
-                    ?: break
+                    .filter { it < today || java.time.LocalTime.now(INDIA) >= LocalTime.of(15, 35) }
+                    .filter { learningDao.pendingForecastResearchOutcomes(it).isNotEmpty() }
+                    .sorted()
+                if (incompleteDates.isEmpty()) break
+                val incompleteDate = incompleteDates[forecastBackfillDateCursor % incompleteDates.size]
+                forecastBackfillDateCursor = (forecastBackfillDateCursor + 1) % incompleteDates.size
                 val pendingBefore = learningDao.pendingForecastResearchOutcomes(incompleteDate).size
                 val updated = runCatching { backfillForecastResearchOutcomes(incompleteDate, token) }.getOrDefault(0)
                 researchUpdated += updated
                 researchBatches++
                 val pendingAfter = learningDao.pendingForecastResearchOutcomes(incompleteDate).size
-                if (updated <= 0 || pendingAfter >= pendingBefore) break
+                if (updated <= 0 || pendingAfter >= pendingBefore) {
+                    auditLogger.logAsync("FORECAST_RESEARCH", "OUTCOME_REPLAY_DATE_NO_PROGRESS", mapOf(
+                        "date" to incompleteDate, "pending" to pendingAfter,
+                        "next_date_rotates" to true, "no_fabricated_outcomes" to true
+                    ))
+                    // Continue to another date: an unavailable symbol/date cannot starve all research.
+                }
             }
         }
         val betaUsage = betaResearchGate.snapshot()
