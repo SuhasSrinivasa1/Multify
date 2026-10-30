@@ -60,6 +60,11 @@ data class ForecastFamilyOutcome(
     val structureScore: Double
 )
 
+data class ForecastShadowFilterReview(
+    val passes: Boolean,
+    val failedRules: List<String>
+)
+
 object ForecastAdaptiveSelectionPolicy {
     const val MIN_NET_RETURN_PCT = 0.50
     const val ASSUMED_BASE_SLIPPAGE_BPS = 2.0
@@ -71,6 +76,23 @@ object ForecastAdaptiveSelectionPolicy {
     const val MAX_POSITIVE_CONFIDENCE_BONUS = 0.08
     const val MAX_ECONOMICS_BONUS = 0.10
     const val MAX_RISK_BONUS = 0.06
+
+    /** Stricter candidate filter experiment. This is telemetry/research only. */
+    fun shadowFilterReview(evaluation: StrategyEvaluation, targetPct: Double): ForecastShadowFilterReview {
+        val f = evaluation.features
+        val fails = mutableListOf<String>()
+        val atrPct = f.atr14?.takeIf { f.ltp > 0.0 && it > 0.0 }?.let { it / f.ltp * 100.0 }
+        if (f.spreadBps == null) fails += "missing spread"
+        else if (f.spreadBps > 35.0) fails += "spread >35bps"
+        if (f.rvol == null) fails += "missing RVOL"
+        else if (f.rvol < 1.0) fails += "RVOL <1.0"
+        if (f.atr14 == null || atrPct == null) fails += "missing ATR"
+        else if (atrPct * 4.0 + 1e-9 < targetPct) fails += "ATR capacity < target"
+        if (f.vwap == null) fails += "missing VWAP"
+        if (f.ema9 == null || f.ema20 == null) fails += "missing EMA9/20"
+        if (f.candles.size < 20) fails += "insufficient candles"
+        return ForecastShadowFilterReview(fails.isEmpty(), fails)
+    }
 
     fun economics(
         entryPrice: Double,
