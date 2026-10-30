@@ -673,8 +673,8 @@ private fun ForecastScreen(
             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                 shape = RoundedCornerShape(20.dp)) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("SECONDARY · Pre-spike research watchlist", fontWeight = FontWeight.SemiBold)
-                    Text("Observation only. Not a recommendation; BUY and auto-BUY are disabled. " +
+                    Text("Early-entry research · PRIMARY pending / SECONDARY", fontWeight = FontWeight.SemiBold)
+                    Text("These watchlist rows cannot place an order. " +
                         "A stock can form several peaks: after a completed target and pullback, " +
                         "a new independently qualified PRIMARY setup may trigger another opportunity.",
                         style = MaterialTheme.typography.bodySmall,
@@ -685,7 +685,8 @@ private fun ForecastScreen(
                     } else {
                         watchlist.forEach { candidate ->
                             HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = .12f))
-                            Text(candidate.symbol + " · Watch only · " +
+                            Text(candidate.symbol + " · " +
+                                (if (candidate.qualityTier == "PRIMARY") "PRIMARY awaiting confirmation" else "SECONDARY watch") + " · " +
                                 String.format(Locale.US, "%.0f%% confidence", candidate.confidence * 100.0),
                                 fontWeight = FontWeight.Medium)
                             Text(candidate.reason.ifBlank { "Awaiting a fresh qualifying setup" },
@@ -871,6 +872,26 @@ private fun FixedScreen(
             state.settings.brokerAuthenticated && state.settings.staticIpMatched && state.settings.brokerDdpiEnabled && !state.settings.safetyHalt,
             fixed = true, fixedMarketOpen = fixedMarketOpen, fixedClockMsForTable = fixedClockMs
         ) }
+        item {
+            val held = dashboard?.fixedWatchlist.orEmpty()
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                shape = RoundedCornerShape(20.dp)) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Fixed · Entry-safety holds", fontWeight = FontWeight.SemiBold)
+                    Text("These are genuine Fixed PRIMARY evaluations blocked by the existing " +
+                        "anti-chase guard. They are NOT trading recommendations; BUY is disabled.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (held.isEmpty()) {
+                        Text("No fresh safety-held PRIMARY candidates in the latest scan.",
+                            style = MaterialTheme.typography.bodySmall)
+                    } else held.forEach { candidate ->
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = .12f))
+                        Text(candidate.symbol + " · SAFETY HOLD · BUY disabled", fontWeight = FontWeight.Medium)
+                    }
+                }
+            }
+        }
         item {
             Card(
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),

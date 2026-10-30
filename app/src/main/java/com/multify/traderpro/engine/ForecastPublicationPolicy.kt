@@ -9,10 +9,14 @@ object ForecastPublicationPolicy {
         discoveryBaselineReady: Boolean,
         currentPrimary: Boolean,
         discoveredMarketWide: Boolean,
-        priorPrimaryHits: Int
+        priorPrimaryHits: Int,
+        researchOnly: Boolean = false
     ): Boolean {
         if (!discoveryBaselineReady || !currentPrimary) return false
-        val required = if (discoveredMarketWide) DISCOVERED_PRIOR_PRIMARY_HITS else FALLBACK_PRIOR_PRIMARY_HITS
+        // A validated PRIMARY may be observed without repeat confirmation while trading
+        // is calibration-locked. Trading mode retains the original required confirmations.
+        val required = if (researchOnly) 0 else
+            if (discoveredMarketWide) DISCOVERED_PRIOR_PRIMARY_HITS else FALLBACK_PRIOR_PRIMARY_HITS
         return priorPrimaryHits >= required
     }
 }

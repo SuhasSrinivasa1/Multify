@@ -1384,6 +1384,7 @@ class TradingRepository @Inject constructor(
             forecasts = forecasts,
             fixedForecasts = fixedForecasts,
             forecastWatchlist = secondaryForecastWatchlist(today),
+            fixedWatchlist = fixedSafetyWatchlist(today),
             research = research,
             health = EngineHealthDto(
                 listener = if (listenerAge <= 60_000L) "HEALTHY" else "UNHEALTHY",
@@ -1422,13 +1423,19 @@ class TradingRepository @Inject constructor(
         )
     }
 
-    /** Read-only research watchlist. Never writes LongForecastEntity or enables a BUY. */
-    private suspend fun secondaryForecastWatchlist(date: String): List<ForecastDto> =
-        learningDao.forecastResearchForDate(date).asSequence()
+    /** Read-only near-term candidates. Never writes orders or alters either scoring engine. */
+    private suspend fun secondaryForecastWatchlist(date: String): List<ForecastDto> {
+        val published = learningDao.longForecastsForDate(date)
+            .map { it.symbol.uppercase(Locale.US) }.toSet()
+        val freshAfter = System.currentTimeMillis() - 20L * 60_000L
+        return learningDao.forecastResearchForDate(date).asSequence()
             .groupBy { it.symbol.uppercase(Locale.US) }
-            .values.mapNotNull { rows -> rows.maxByOrNull { it.scanAtMs } }
-            .filter { it.qualityTier == "SECONDARY" }
-            .sortedByDescending { it.scanAtMs }
+            .values.mapNotNull { it.maxByOrNull { row -> row.scanAtMs } }
+            .filter { it.scanAtMs >= freshAfter && it.qualityTier in setOf("PRIMARY", "SECONDARY") }
+            .filterNot { it.qualityTier == "PRIMARY" && it.symbol.uppercase(Locale.US) in published }
+            .sortedWith(compareByDescending<com.multify.traderpro.data.local.ForecastResearchEntity> {
+                it.qualityTier == "PRIMARY"
+            }.thenByDescending { it.scanAtMs })
             .take(12)
             .mapIndexed { i, row ->
                 ForecastDto(
@@ -1437,11 +1444,31 @@ class TradingRepository @Inject constructor(
                     entryPrice = row.entryPrice,
                     targetPct = row.targetPct,
                     targetPrice = row.entryPrice * (1.0 + row.targetPct / 100.0),
-                    status = "WATCH_ONLY", strategy = row.strategy, regime = row.regime,
+                    status = if (row.qualityTier == "PRIMARY") "AWAITING_CONFIRMATION" else "WATCH_ONLY",
+                    strategy = row.strategy, regime = row.regime,
                     marketRegime = row.marketRegime, generatedAtMs = row.scanAtMs,
-                    qualityTier = "SECONDARY", executionEligible = false
+                    qualityTier = row.qualityTier, executionEligible = false
                 )
             }.toList()
+    }
+
+    /** Fixed PRIMARY candidates vetoed by the approved separate price-safety overlay. */
+    private fun fixedSafetyWatchlist(date: String): List<ForecastDto> {
+        val observations = fixedRecommendationStore.observations(date)
+        val latest = observations.maxOfOrNull { it.scanAtMs } ?: return emptyList()
+        if (System.currentTimeMillis() - latest > 5L * 60_000L) return emptyList()
+        return observations.asSequence()
+            .filter { it.scanAtMs == latest && it.qualityTier == "PRIMARY" && !it.publishEligible }
+            .sortedBy { it.symbol }.take(12)
+            .mapIndexed { i, row ->
+                ForecastDto(rank = i + 1, symbol = row.symbol,
+                    qualityTier = "PRIMARY SAFETY HOLD", executionEligible = false,
+                    status = "ENTRY_SAFETY_HOLD",
+                    reason = "Fixed PRIMARY ranking, but approved entry-safety overlay vetoed this price. " +
+                        "No BUY until a fresh independently qualifying entry.",
+                    generatedAtMs = row.scanAtMs)
+            }.toList()
+    }
 
     suspend fun refreshDashboard(): DashboardDto {
         val settings = preferences.settings.first()
@@ -1514,7 +1541,8 @@ class TradingRepository @Inject constructor(
                 summary = snapshot.summary, execution = execution, learning = learning, forecastLearning = forecastLearning,
                 forecastReferences = forecastReferences,
                 forecasts = forecasts, fixedForecasts = fixedForecasts,
-                forecastWatchlist = secondaryForecastWatchlist(today), forecastChampions = champions,
+                forecastWatchlist = secondaryForecastWatchlist(today),
+            fixedWatchlist = fixedSafetyWatchlist(today), forecastChampions = champions,
                 research = research,
                 health = EngineHealthDto(
                     listener = if (listenerAge <= 60_000L) "HEALTHY" else "UNHEALTHY",
@@ -2638,7 +2666,8 @@ class TradingRepository @Inject constructor(
                 discoveryBaselineReady = discoveryPass.baselineReady,
                 currentPrimary = currentPrimary,
                 discoveredMarketWide = item.symbol in discoveredSymbols,
-                priorPrimaryHits = priorPrimaryHits(item.symbol)
+                priorPrimaryHits = priorPrimaryHits(item.symbol),
+                researchOnly = !liveForecastReady
             )
         }
 
@@ -2659,7 +2688,9 @@ class TradingRepository @Inject constructor(
                     regime = item.evaluation.regime,
                     marketRegime = marketRegime,
                     championKey = item.championKey,
-                    reason = quality.reason + " · " + item.evaluation.reason +
+                    reason = (if (!liveForecastReady)
+                        "RESEARCH ONLY · wait for five completed outcome-validated sessions before BUY · "
+                        else "") + quality.reason + " · " + item.evaluation.reason +
                         " · Entry intelligence " + run {
                             val context = ForecastPreSpikeContextPolicy.evaluate(item.evaluation.features.candles)
                             val advice = timingAdvice(marketRegime, nowMs, item.evaluation.features.rvol,
@@ -2679,7 +2710,7 @@ class TradingRepository @Inject constructor(
                     lastPrice = price,
                     lastObservedAtMs = nowMs,
                     qualityTier = quality.tier,
-                    executionEligible = quality.executionEligible
+                    executionEligible = quality.executionEligible && liveForecastReady
                 )
             )
         }
@@ -4331,6 +4362,7 @@ class TradingRepository @Inject constructor(
             return "Legacy Forecast entry order is still being migrated for ${row.symbol}; duplicate BUY blocked"
         }
         require(row.status == "ACTIVE") { "$symbol forecast is no longer active" }
+        require(forecastLiveUnlocked()) { "Forecast BUY requires five completed outcome-validated research sessions" }
         require(row.executionEligible) { "$symbol is ${row.qualityTier}; only PRIMARY forecast setups can place a real forecast BUY" }
         require(row.targetPct + 1e-9 >= ForecastQualityPolicy.MIN_TARGET_PCT) { "Forecast target is below the 1% quality floor" }
         if (managedDao.openPosition(ENGINE_FORECAST_HOLDING, row.symbol) != null) {
@@ -8418,7 +8450,8 @@ class TradingRepository @Inject constructor(
         risk = RiskStatusDto(maxExposure = settings.holdingBudgetRupees.toDouble(), riskMode = if (settings.safetyHalt) "HALTED" else "DISARMED"),
         fixedSnapshot = fixedSnapshotDto(fixedSnapshot),
         forecastReferences = runCatching { forecastReferenceStats() }.getOrDefault(ForecastReferenceStatsDto()),
-        forecastWatchlist = secondaryForecastWatchlist(LocalDate.now(INDIA).toString())
+        forecastWatchlist = secondaryForecastWatchlist(LocalDate.now(INDIA).toString()),
+        fixedWatchlist = fixedSafetyWatchlist(LocalDate.now(INDIA).toString())
     )
 
     private fun marketSession(): String {
