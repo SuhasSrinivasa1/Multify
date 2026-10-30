@@ -19,7 +19,7 @@ object FixedMarketDiscoveryPolicy {
     const val EARLY_PULSE_MIN_PCT = -0.15
     const val EARLY_PULSE_MAX_PCT = 0.40
     const val EARLY_SESSION_MIN_PCT = -0.50
-    const val EARLY_SESSION_MAX_PCT = 6.00
+    const val EARLY_SESSION_MAX_PCT = 12.00
     const val MOMENTUM_SHARE = 0.65
 
     fun rank(
