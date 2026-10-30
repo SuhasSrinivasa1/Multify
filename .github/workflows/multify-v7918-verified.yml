@@ -746,7 +746,7 @@ jobs:
           assert section(git_file(base_repo,p),'// FIXED_FINAL_LOCK_BEGIN:', '// FIXED_FINAL_LOCK_END:')==section(Path(p).read_text(),'// FIXED_FINAL_LOCK_BEGIN:', '// FIXED_FINAL_LOCK_END:')
           assert section(git_file(base_repo,p),'private suspend fun handleMultify', 'private suspend fun')==section(Path(p).read_text(),'private suspend fun handleMultify', 'private suspend fun')
           for p in ['app/src/main/java/com/multify/traderpro/engine/HardStopLossPolicy.kt','app/src/main/java/com/multify/traderpro/engine/SteppedTrailingPolicy.kt']:
-            assert git_file(base_fixed,p)==Path(p).read_text(),p
+            assert git_file(base_repo,p)==Path(p).read_text(),p
           print('v7.9.18 safeguards verified; Fixed score, locked recommendation body, Multify BUY and SELL policies unchanged.')
           PY
       - name: Backend tests
