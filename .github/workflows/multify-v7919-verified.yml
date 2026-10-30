@@ -1,0 +1,106 @@
+name: Multify v7.9.19 Beta Research Reliability and Multi-Peak Safety
+on:
+  push:
+    branches: [ v7919-beta-research-multipeak-fixed-protected ]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verified-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Android SDK 35
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
+      - name: Verify frozen Fixed scoring and trading safety against v7.9.18
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+          base='b08714efc8bcf9548567a07ed3504f2db89f1db3'
+          root=Path('app/src/main/java/com/multify/traderpro')
+          def older(p): return subprocess.check_output(['git','show',f'{base}:{p}']).decode()
+          def current(p): return Path(p).read_text()
+          def region(s,start,end):
+              i=s.index(start); j=s.index(end,i+len(start))
+              return s[i:j]
+          for path in [
+              'app/src/main/java/com/multify/traderpro/engine/FixedMultifyFactorFamilies.kt',
+              'app/src/main/java/com/multify/traderpro/engine/FixedFinalContract.kt',
+              'app/src/main/java/com/multify/traderpro/engine/FixedForecastQualityPolicy.kt',
+              'app/src/main/java/com/multify/traderpro/engine/FixedEntrySafetyOverlay.kt',
+              'app/src/main/java/com/multify/traderpro/engine/HardStopLossPolicy.kt',
+              'app/src/main/java/com/multify/traderpro/engine/SteppedTrailingPolicy.kt',
+              'app/src/main/java/com/multify/traderpro/engine/ForecastEarlyEntryPolicy.kt',
+              'app/src/main/java/com/multify/traderpro/engine/ForecastRepeatEntryPolicy.kt',
+          ]:
+              assert older(path)==current(path),path
+          p='app/src/main/java/com/multify/traderpro/engine/FixedLocalStrategyEngine.kt'
+          assert older(p)==current(p),'Fixed engine source changed'
+          p='app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt'
+          assert region(older(p),'// FIXED_FINAL_LOCK_BEGIN:','// FIXED_FINAL_LOCK_END:')==region(current(p),'// FIXED_FINAL_LOCK_BEGIN:','// FIXED_FINAL_LOCK_END:'),'Frozen Fixed block changed'
+          assert region(older(p),'private suspend fun handleMultifyBuy(', '    private suspend fun handleMultifyExit(')==region(current(p),'private suspend fun handleMultifyBuy(', '    private suspend fun handleMultifyExit('),'Multify BUY changed'
+          for start,end in [
+              ('    private suspend fun safeAppSellScope(', '    private suspend fun portfolioMonitorCount('),
+              ('    suspend fun monitorManagedPositions(', '    private suspend fun batchManagedLtps('),
+              ('    private suspend fun ensureHardStopProtection(', '    private suspend fun monitorLongHolding('),
+              ('    private suspend fun monitorLongHolding(', '    private suspend fun createPositionGtt('),
+          ]:
+              assert region(older(p),start,end)==region(current(p),start,end),start
+          assert 'FIXED_V741_FORECAST_SCAN_INTERVAL_MS = 150_000L' in current(p)
+          assert 'FixedLocalStrategyEngine.buildFeatures(quote, historical, 5)' in current(p)
+          assert 'versionCode = 7919' in Path('app/build.gradle.kts').read_text()
+          assert 'forecastMarketToken() ?: return rows.count' in current(p)
+          assert 'BETA_FIXED_COOLDOWN_RESEARCH_ALLOWED' in current(p)
+          assert 'forecastWatchlist = secondaryForecastWatchlist(today)' in current(p)
+          print('PASS: Frozen Fixed, Multify BUY, common SELL and quality policies unchanged.')
+          PY
+      - name: Backend tests
+        run: |
+          python -m pip install -r backend/requirements.txt
+          PYTHONPATH="$GITHUB_WORKSPACE" PHONE_HMAC_SECRET=test-secret-test-secret-test-secret GROWW_API_KEY=test-api-key GROWW_TOTP_SECRET=JBSWY3DPEHPK3PXP python -m pytest -q backend/tests
+      - name: Android unit tests
+        run: gradle --no-daemon testDebugUnitTest
+      - name: Assemble debug APK
+        run: gradle --no-daemon assembleDebug
+      - name: Verify package signing and export exact source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v7.9.19-beta-research-multipeak-fixed-protected-debug.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/*.apk > dist/APK-SIGNATURE.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/*.apk | head -n 2 > dist/PACKAGE.txt
+          grep -q "name='com.multify.traderpro.vivoy73final'" dist/PACKAGE.txt
+          grep -q "versionCode='7919'" dist/PACKAGE.txt
+          sha256sum dist/*.apk > dist/SHA256SUMS.txt
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess,zipfile
+          names=subprocess.check_output(['git','ls-files','-z']).decode().split('\0')
+          with zipfile.ZipFile('dist/Multify-TraderPro-v7.9.19-exact-source.zip','w',zipfile.ZIP_DEFLATED,compresslevel=6) as z:
+              for name in names:
+                  if name and Path(name).is_file() and not any(p in {'.git','.gradle','build','dist'} for p in Path(name).parts):
+                      z.write(name,name)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: multify-v7919-beta-research-multipeak-fixed-protected
+          path: dist/
+          if-no-files-found: error

@@ -110,6 +110,7 @@ import com.multify.traderpro.engine.HoldingSmartOrderPolicy
 import com.multify.traderpro.engine.BrokerExecutionSafetyPolicy
 import com.multify.traderpro.engine.MarketPriorityPolicy
 import com.multify.traderpro.engine.ForecastResearchWindowPolicy
+import com.multify.traderpro.engine.ForecastBetaPriorityPolicy
 import com.multify.traderpro.engine.LocalStrategyEngine
 import com.multify.traderpro.engine.MarketDiscoveryPolicy
 import com.multify.traderpro.engine.MultifyFactorFamilies
@@ -1378,6 +1379,7 @@ class TradingRepository @Inject constructor(
             fixedOutcomes = fixedOutcomes,
             forecasts = forecasts,
             fixedForecasts = fixedForecasts,
+            forecastWatchlist = secondaryForecastWatchlist(today),
             research = research,
             health = EngineHealthDto(
                 listener = if (listenerAge <= 60_000L) "HEALTHY" else "UNHEALTHY",
@@ -1415,6 +1417,27 @@ class TradingRepository @Inject constructor(
             recentDecisions = (snapshot.recentDecisions + events).take(10)
         )
     }
+
+    /** Read-only research watchlist. Never writes LongForecastEntity or enables a BUY. */
+    private suspend fun secondaryForecastWatchlist(date: String): List<ForecastDto> =
+        learningDao.forecastResearchForDate(date).asSequence()
+            .groupBy { it.symbol.uppercase(Locale.US) }
+            .values.mapNotNull { rows -> rows.maxByOrNull { it.scanAtMs } }
+            .filter { it.qualityTier == "SECONDARY" }
+            .sortedByDescending { it.scanAtMs }
+            .take(12)
+            .mapIndexed { i, row ->
+                ForecastDto(
+                    rank = i + 1, symbol = row.symbol, confidence = row.confidence,
+                    score = row.directionalScore, reason = row.rejectionReason,
+                    entryPrice = row.entryPrice,
+                    targetPct = row.targetPct,
+                    targetPrice = row.entryPrice * (1.0 + row.targetPct / 100.0),
+                    status = "WATCH_ONLY", strategy = row.strategy, regime = row.regime,
+                    marketRegime = row.marketRegime, generatedAtMs = row.scanAtMs,
+                    qualityTier = "SECONDARY", executionEligible = false
+                )
+            }.toList()
 
     suspend fun refreshDashboard(): DashboardDto {
         val settings = preferences.settings.first()
@@ -1486,7 +1509,8 @@ class TradingRepository @Inject constructor(
                 ),
                 summary = snapshot.summary, execution = execution, learning = learning, forecastLearning = forecastLearning,
                 forecastReferences = forecastReferences,
-                forecasts = forecasts, fixedForecasts = fixedForecasts, forecastChampions = champions,
+                forecasts = forecasts, fixedForecasts = fixedForecasts,
+                forecastWatchlist = secondaryForecastWatchlist(today), forecastChampions = champions,
                 research = research,
                 health = EngineHealthDto(
                     listener = if (listenerAge <= 60_000L) "HEALTHY" else "UNHEALTHY",
@@ -1847,6 +1871,15 @@ class TradingRepository @Inject constructor(
 
     suspend fun runForecastOpportunisticCycle(postFixedOpportunity: Boolean = false): Boolean {
         if (postFixedOpportunity) forecastPostFixedOpportunity = true
+        if (secretStore.hasBetaCredentials() && fixedScanDeferredBroker &&
+            !fixedApiPriorityRequested && !marketCriticalTradeInFlight &&
+            millisUntilNextFixedScan() <= forecastFixedGuardMs()) {
+            auditLogger.logAsync("FORECAST_RESEARCH", "BETA_FIXED_COOLDOWN_RESEARCH_ALLOWED", mapOf(
+                "account" to "BETA", "fixed_due_in_ms" to millisUntilNextFixedScan(),
+                "fixed_deferred_for_broker" to true, "fixed_priority" to false,
+                "critical_trade_in_flight" to false, "alpha_fallback" to false
+            ))
+        }
         if (!forecastMarketCapacityAvailable()) {
             logForecastCapacitySkip("BROKER_CAPACITY_OR_FIXED_GUARD")
             forecastPostFixedOpportunity = false
@@ -1937,8 +1970,15 @@ class TradingRepository @Inject constructor(
     private fun forecastMarketCapacityAvailable(): Boolean {
         if (fixedApiPriorityRequested || marketCriticalTradeInFlight) return false
         if (secretStore.hasBetaCredentials()) {
-            // When Beta is configured, never silently fall back to Alpha research quota.
-            return betaResearchAuthenticated() && millisUntilNextFixedScan() > forecastFixedGuardMs()
+            // An overdue Fixed scan during Alpha broker cooldown must not starve independent
+            // Beta research indefinitely. Never preempt an active Fixed cycle or protective trade.
+            return betaResearchAuthenticated() && ForecastBetaPriorityPolicy.canResearch(
+                fixedPriorityRequested = fixedApiPriorityRequested,
+                criticalTradeInFlight = marketCriticalTradeInFlight,
+                fixedDeferredForBroker = fixedScanDeferredBroker,
+                millisUntilNextFixed = millisUntilNextFixedScan(),
+                fixedGuardMs = forecastFixedGuardMs()
+            )
         }
         // A cooldown is an immediate no-go. Do not repeatedly request a blocked endpoint.
         // Trading and Fixed categories are never reserved for this research engine.
@@ -4141,7 +4181,7 @@ class TradingRepository @Inject constructor(
     private suspend fun <T> withForecastLiveDataSlot(block: suspend () -> T): T {
         // A quote and its 1m history must fit before the next scheduled Fixed scan.
         // Never reserve the shared scanner or broker capacity across Fixed's guard window.
-        if (!forecastMarketCapacityAvailable() || millisUntilNextFixedScan() <= forecastFixedGuardMs()) {
+        if (!forecastMarketCapacityAvailable()) {
             throw ForecastPriorityYieldException()
         }
         return if (secretStore.hasBetaCredentials()) block() else withFixedLiveDataSlot(block)
@@ -4153,7 +4193,13 @@ class TradingRepository @Inject constructor(
         // candle request. Only check Fixed, SELL priority and the approaching guard;
         // actual network requests still pass the unmodified Groww rate governor.
         if (fixedApiPriorityRequested || marketCriticalTradeInFlight ||
-            millisUntilNextFixedScan() <= forecastFixedGuardMs()) {
+            !ForecastBetaPriorityPolicy.canResearch(
+                fixedPriorityRequested = fixedApiPriorityRequested,
+                criticalTradeInFlight = marketCriticalTradeInFlight,
+                fixedDeferredForBroker = secretStore.hasBetaCredentials() && fixedScanDeferredBroker,
+                millisUntilNextFixed = millisUntilNextFixedScan(),
+                fixedGuardMs = forecastFixedGuardMs()
+            )) {
             throw ForecastPriorityYieldException()
         }
         return if (secretStore.hasBetaCredentials()) block() else withFixedHistoricalDataSlot(block)
@@ -5274,7 +5320,9 @@ class TradingRepository @Inject constructor(
         val today = now.toLocalDate().toString()
         val rows = learningDao.longForecastsForDate(today)
         if (rows.isEmpty()) return 0
-        val token = ensureToken() ?: return rows.count { it.status == "ACTIVE" }
+        // Outcomes are Forecast research, not order execution. Use Beta if configured;
+        // an unauthenticated Beta must never silently borrow Alpha's request budget.
+        val token = forecastMarketToken() ?: return rows.count { it.status == "ACTIVE" }
 
         val ltps = fetchForecastOutcomeLtps(token, rows.map { it.symbol })
         if (ltps.isEmpty()) return rows.count { it.status == "ACTIVE" }
@@ -5428,11 +5476,14 @@ class TradingRepository @Inject constructor(
             var lastFailure: Throwable? = null
             for (attempt in 0 until FORECAST_OUTCOME_BATCH_ATTEMPTS) {
                 try {
-                    payload = withFixedLiveDataSlot {
-                        apiFactory.groww.ltp(
-                            bearer(token),
-                            exchangeSymbols = chunk.joinToString(",") { "NSE_$it" }
-                        ).requirePayload("Forecast outcome batch LTP")
+                    payload = withForecastLiveDataSlot {
+                        val symbols = chunk.joinToString(",") { "NSE_$it" }
+                        betaMarketRead(token, BetaResearchGate.Type.LIVE,
+                            alphaCall = { apiFactory.groww.ltp(bearer(token), exchangeSymbols = symbols)
+                                .requirePayload("Forecast outcome batch LTP") },
+                            betaCall = { apiFactory.betaGroww.ltp(bearer(token), exchangeSymbols = symbols)
+                                .requirePayload("Beta Forecast outcome batch LTP") }
+                        )
                     }
                     break
                 } catch (t: Throwable) {
@@ -5443,6 +5494,8 @@ class TradingRepository @Inject constructor(
             }
             if (payload == null) {
                 auditLogger.log("FORECAST", "OUTCOME_BATCH_ERROR", mapOf(
+                    "account" to (if (secretStore.hasBetaCredentials()) "BETA" else "ALPHA"),
+                    "alpha_fallback" to false,
                     "batch_index" to index,
                     "symbols" to chunk,
                     "message" to (lastFailure?.message ?: lastFailure?.javaClass?.simpleName ?: "unknown")
@@ -8124,7 +8177,8 @@ class TradingRepository @Inject constructor(
         broker = BrokerStatusDto(configured = hasBrokerCredentials(), connected = false, detail = "Refresh & Authenticate required"),
         risk = RiskStatusDto(maxExposure = settings.holdingBudgetRupees.toDouble(), riskMode = if (settings.safetyHalt) "HALTED" else "DISARMED"),
         fixedSnapshot = fixedSnapshotDto(fixedSnapshot),
-        forecastReferences = runCatching { forecastReferenceStats() }.getOrDefault(ForecastReferenceStatsDto())
+        forecastReferences = runCatching { forecastReferenceStats() }.getOrDefault(ForecastReferenceStatsDto()),
+        forecastWatchlist = secondaryForecastWatchlist(LocalDate.now(INDIA).toString())
     )
 
     private fun marketSession(): String {

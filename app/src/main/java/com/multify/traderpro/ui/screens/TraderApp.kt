@@ -669,6 +669,35 @@ private fun ForecastScreen(
         }
         item { ForecastTable(rows, onBuy, state.settings.brokerAuthenticated && state.settings.staticIpMatched && state.settings.brokerDdpiEnabled && !state.settings.safetyHalt, fixedClockMsForTable = forecastClockMs) }
         item {
+            val watchlist = dashboard?.forecastWatchlist.orEmpty()
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                shape = RoundedCornerShape(20.dp)) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("SECONDARY · Pre-spike research watchlist", fontWeight = FontWeight.SemiBold)
+                    Text("Observation only. Not a recommendation; BUY and auto-BUY are disabled. " +
+                        "A stock can form several peaks: after a completed target and pullback, " +
+                        "a new independently qualified PRIMARY setup may trigger another opportunity.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (watchlist.isEmpty()) {
+                        Text("No current SECONDARY candidates; research continues.",
+                            style = MaterialTheme.typography.bodySmall)
+                    } else {
+                        watchlist.forEach { candidate ->
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = .12f))
+                            Text(candidate.symbol + " · Watch only · " +
+                                String.format(Locale.US, "%.0f%% confidence", candidate.confidence * 100.0),
+                                fontWeight = FontWeight.Medium)
+                            Text(candidate.reason.ifBlank { "Awaiting a fresh qualifying setup" },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 3)
+                        }
+                    }
+                }
+            }
+        }
+        item {
             Card(
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                 shape = RoundedCornerShape(20.dp)

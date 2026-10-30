@@ -78,6 +78,7 @@ data class DashboardDto(
     val fixedOutcomes: FixedOutcomeStatsDto = FixedOutcomeStatsDto(),
     val forecasts: List<ForecastDto> = emptyList(),
     val fixedForecasts: List<ForecastDto> = emptyList(),
+    val forecastWatchlist: List<ForecastDto> = emptyList(),
     val forecastChampions: List<ForecastChampionDto> = emptyList(),
     val research: ResearchDto = ResearchDto(),
     val health: EngineHealthDto = EngineHealthDto(),
