@@ -6309,7 +6309,16 @@ class TradingRepository @Inject constructor(
         val tradeAverage = if (tradeQuantity > 0) {
             validTrades.sumOf { it.price * it.quantity } / tradeQuantity.toDouble()
         } else null
-        val filledQuantity = max(tradeQuantity, order.filledQuantity ?: 0)
+        val brokerReportedFilled = order.filledQuantity ?: 0
+        // Do not book a fill from the GTT trigger or an order-status quantity alone. Wait
+        // until the broker trade ledger has caught up and supplies an actual weighted price.
+        if (brokerReportedFilled > tradeQuantity) {
+            return GttChildFillStats(brokerReportedFilled, null, false, status, order)
+        }
+        if (status in setOf("EXECUTED", "COMPLETED") && tradeQuantity == 0) {
+            return GttChildFillStats(0, null, false, status, order)
+        }
+        val filledQuantity = if (tradeQuantity > 0) tradeQuantity else brokerReportedFilled
         val averageFillPrice = tradeAverage ?: order.averageFillPrice?.takeIf { it.isFinite() && it > 0.0 }
         val terminal = terminalStatus || (order.remainingQuantity == 0 && filledQuantity > 0)
         return GttChildFillStats(filledQuantity, averageFillPrice, terminal, status, order)
