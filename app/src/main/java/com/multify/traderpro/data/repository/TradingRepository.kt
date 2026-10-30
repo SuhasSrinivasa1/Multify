@@ -948,7 +948,17 @@ class TradingRepository @Inject constructor(
 
     private suspend fun <T> betaMarketRead(token: String, type: BetaResearchGate.Type,
                                            alphaCall: suspend () -> T, betaCall: suspend () -> T): T {
-        if (!forecastUsesBeta(token)) return alphaCall()
+        val tokenIsBeta = cachedBetaResearchToken == token || secretStore.getBetaAccessToken() == token
+        if (tokenIsBeta || secretStore.hasBetaCredentials()) {
+            if (!forecastUsesBeta(token)) {
+                auditLogger.logAsync("BETA_RESEARCH", "REQUEST_SKIPPED_SESSION_INVALID", mapOf(
+                    "category" to type.name, "alpha_fallback" to false
+                ))
+                error("Beta research session is unavailable; Alpha fallback is disabled while Beta is configured")
+            }
+        } else {
+            return alphaCall()
+        }
         val started = SystemClock.elapsedRealtime()
         return try {
             val result = betaResearchGate.read(type, betaCall)
@@ -3034,7 +3044,7 @@ class TradingRepository @Inject constructor(
         }
         fixedHistoricalWindowStore.remember(historyKey, start, historical, SystemClock.elapsedRealtime())
         require(historical.candles.size >= 5) { "Insufficient fixed forecast candles" }
-        val features = FixedLocalStrategyEngine.buildFeatures(quote, historical, 5, now.toLocalDate())
+        val features = FixedLocalStrategyEngine.buildFeatures(quote, historical, 5, now.toLocalDate(), now.toInstant().toEpochMilli())
         val signal = ParsedSignal(SignalType.TRADE_RELEASE, symbol = symbol, rawText = "fixed-forecast", confidence = 1.0)
         val evaluation = FixedLocalStrategyEngine.evaluateLong(signal, features, includeEventPrior = false)
         val entrySafety = FixedEntrySafetyOverlay.assess(features)

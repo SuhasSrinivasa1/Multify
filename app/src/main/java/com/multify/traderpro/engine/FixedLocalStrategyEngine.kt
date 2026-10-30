@@ -86,7 +86,8 @@ object FixedLocalStrategyEngine {
         quote: QuotePayload,
         historical: HistoricalPayload,
         intervalMinutes: Int = historical.intervalInMinutes ?: 5,
-        sessionDate: LocalDate = LocalDate.now(NSE_ZONE)
+        sessionDate: LocalDate = LocalDate.now(NSE_ZONE),
+        asOfMs: Long = System.currentTimeMillis()
     ): FixedFeatureSnapshot {
         val parsedCandles = historical.candles.mapNotNull { x ->
             if (x.size < 6) null else runCatching {
@@ -105,6 +106,9 @@ object FixedLocalStrategyEngine {
                     local.toLocalTime() >= LocalTime.of(9, 15) && local.toLocalTime() < LocalTime.of(15, 30)
             }
         }
+        val completedSessionCandles = sessionCandles.filter {
+            it.ts + intervalMinutes.coerceAtLeast(1) * 60_000L <= asOfMs
+        }
         val ltp = quote.lastPrice ?: candles.lastOrNull()?.close ?: error("Groww quote does not contain LTP")
         val closes = candles.map { it.close }
         val vols = candles.map { it.volume }
@@ -115,8 +119,8 @@ object FixedLocalStrategyEngine {
             val base = vols.dropLast(1).takeLast(20).average().takeIf { it > 0.0 }
             base?.let { vols.last() / it }
         } else null
-        val (o5h, o5l) = openingRange(sessionCandles, 5, intervalMinutes)
-        val (o15h, o15l) = openingRange(sessionCandles, 15, intervalMinutes)
+        val (o5h, o5l) = openingRange(completedSessionCandles, 5, intervalMinutes)
+        val (o15h, o15l) = openingRange(completedSessionCandles, 15, intervalMinutes)
         val bid = quote.bidPrice
         val ask = quote.offerPrice
         val atrNow = atr(candles, 14)
@@ -191,7 +195,7 @@ object FixedLocalStrategyEngine {
             lastOpen = last?.open, lastHigh = last?.high, lastLow = last?.low, lastClose = last?.close,
             prevOpen = prev?.open, prevHigh = prev?.high, prevLow = prev?.low, prevClose = prev?.close,
             candles = candles,
-            sessionCandleCount = sessionCandles.size
+            sessionCandleCount = completedSessionCandles.size
         )
     }
 
