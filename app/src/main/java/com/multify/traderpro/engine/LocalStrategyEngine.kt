@@ -77,20 +77,16 @@ data class StrategyEvaluation(
 
 object LocalStrategyEngine {
     fun buildFeatures(quote: QuotePayload, historical: HistoricalPayload, intervalMinutes: Int = historical.intervalInMinutes ?: 5): FeatureSnapshot {
-        val candles = historical.candles.mapIndexedNotNull { index, x ->
+        val parsedCandles = historical.candles.mapNotNull { x ->
             if (x.size < 6) null else runCatching {
                 Candle(
-                    // Groww has returned both epoch-like and textual timestamps across historical APIs.
-                    // Timestamp is not used for signal math, so keep a stable fallback when it is textual.
-                    ts = x[0].takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isNumber }?.asLong ?: index.toLong(),
-                    open = x[1].asDouble,
-                    high = x[2].asDouble,
-                    low = x[3].asDouble,
-                    close = x[4].asDouble,
-                    volume = x[5].asDouble
+                    ts = MarketCandleTimestampParser.toEpochMillis(x[0]) ?: 0L,
+                    open = x[1].asDouble, high = x[2].asDouble, low = x[3].asDouble,
+                    close = x[4].asDouble, volume = x[5].asDouble
                 )
             }.getOrNull()
         }
+        val candles = if (parsedCandles.all { it.ts > 0L }) parsedCandles.sortedBy { it.ts } else parsedCandles
         val ltp = quote.lastPrice ?: candles.lastOrNull()?.close ?: error("Groww quote does not contain LTP")
         val closes = candles.map { it.close }
         val vols = candles.map { it.volume }
@@ -138,7 +134,7 @@ object LocalStrategyEngine {
             ltp = ltp,
             bid = bid,
             ask = ask,
-            spreadBps = if (bid != null && ask != null && ltp > 0) max(0.0, ask - bid) / ltp * 10_000.0 else null,
+            spreadBps = if (bid != null && ask != null && bid > 0.0 && ask >= bid && ltp > 0.0) (ask - bid) / ltp * 10_000.0 else null,
             orderBookImbalance = run {
                 val b = quote.totalBuyQuantity ?: quote.bidQuantity
                 val a = quote.totalSellQuantity ?: quote.offerQuantity
@@ -367,8 +363,8 @@ object LocalStrategyEngine {
     }
 
     private fun openingRange(c: List<Candle>, minutes: Int, intervalMinutes: Int): Pair<Double?, Double?> {
-        if (c.isEmpty()) return null to null
         val count = max(1, kotlin.math.ceil(minutes.toDouble() / max(1, intervalMinutes)).toInt())
+        if (c.size < count) return null to null
         val selected = c.take(count)
         return selected.maxOfOrNull { it.high } to selected.minOfOrNull { it.low }
     }
