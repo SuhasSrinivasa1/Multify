@@ -27,8 +27,8 @@ class FixedMarketDiscoveryPolicyTest {
 
     @Test fun secondPeakPullbackRemainsInPreSpikeLaneAfterLargeSessionMove() {
         val rows = FixedMarketDiscoveryPolicy.rank(
-            currentLtps = mapOf("SECOND_PEAK" to 106.10, "SPIKE" to 110.0),
-            previousLtps = mapOf("SECOND_PEAK" to 106.00, "SPIKE" to 109.0),
+            currentLtps = mapOf("SECOND_PEAK" to 115.10, "SPIKE" to 120.0),
+            previousLtps = mapOf("SECOND_PEAK" to 115.00, "SPIKE" to 119.0),
             sessionOpenLtps = mapOf("SECOND_PEAK" to 100.0, "SPIKE" to 100.0),
             limit = 10
         )
