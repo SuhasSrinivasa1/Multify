@@ -48,6 +48,8 @@ import com.multify.traderpro.data.network.LearningStatsDto
 import com.multify.traderpro.data.network.OrderCancelRequest
 import com.multify.traderpro.data.network.OrderCreateRequest
 import com.multify.traderpro.data.network.OrderPayload
+import com.multify.traderpro.data.network.OrderListPayload
+import com.multify.traderpro.data.network.OrderTradeRecord
 import com.multify.traderpro.data.network.PositionDto
 import com.multify.traderpro.data.network.QuotePayload
 import com.multify.traderpro.data.network.RecentDecisionDto
@@ -83,6 +85,8 @@ import com.multify.traderpro.engine.FixedPositiveTransferCase
 import com.multify.traderpro.engine.ForecastQualityDecision
 import com.multify.traderpro.engine.ForecastQualityPolicy
 import com.multify.traderpro.engine.ForecastTargetExpansionPolicy
+import com.multify.traderpro.engine.ForecastTargetMaturityPolicy
+import com.multify.traderpro.engine.NetProfitProtectionPolicy
 import com.multify.traderpro.engine.ForecastUniversalPositiveEvidencePolicy
 import com.multify.traderpro.engine.ForecastPositiveEvidenceCase
 import com.multify.traderpro.engine.ForecastPublicationPolicy
@@ -245,6 +249,7 @@ class TradingRepository @Inject constructor(
     private var lastFixedHotPrewarmForDueAtMs = 0L
     private var brokerInventorySnapshot: BrokerInventorySnapshot? = null
     @Volatile private var activeGttSnapshot: ActiveGttSnapshot? = null
+    @Volatile private var orderListSnapshot: OrderListSnapshot? = null
     private var lastClosedSessionReconcileAtMs = 0L
     private var lastIdlePortfolioAuditAtMs = 0L
     private val lastPortfolioConflictAuditAtMs = ConcurrentHashMap<String, Long>()
@@ -327,6 +332,19 @@ class TradingRepository @Inject constructor(
     private data class ActiveGttSnapshot(
         val bySymbol: Map<String, List<SmartOrderPayload>>,
         val atMs: Long
+    )
+
+    private data class OrderListSnapshot(
+        val orders: List<OrderPayload>,
+        val atMs: Long
+    )
+
+    private data class GttChildFillStats(
+        val filledQuantity: Int,
+        val averageFillPrice: Double?,
+        val terminal: Boolean,
+        val status: String,
+        val order: OrderPayload
     )
 
     private data class ArmHotState(
@@ -2356,7 +2374,14 @@ class TradingRepository @Inject constructor(
         }
         val priorMfe = priorForecasts.map { it.maxFavourablePct }
             .filter { it.isFinite() && it >= 0.0 && it < 25.0 }
-        val targetPct = ForecastQualityPolicy.adaptiveTargetPct(learned.longAveragePct, priorMfe)
+        val priorForecastTargetDays = priorForecasts.map { it.forecastDate }.distinct().size
+        val priorForecastTargetSymbols = priorForecasts.map { it.symbol.uppercase(Locale.US) }.distinct().size
+        // Two early Forecast outcomes had been allowed to dominate the target at 2.60%.
+        // Require breadth before Forecast MFE can override the rolling Multify MFE benchmark.
+        val maturePriorMfe = if (ForecastTargetMaturityPolicy.isMature(
+                priorForecasts.size, priorForecastTargetDays, priorForecastTargetSymbols
+            )) priorMfe else emptyList()
+        val targetPct = ForecastQualityPolicy.adaptiveTargetPct(learned.longAveragePct, maturePriorMfe)
 
         val latestBySymbol = existing.groupBy { it.symbol.uppercase(Locale.US) }
             .mapValues { (_, rows) -> rows.maxByOrNull { it.generatedAtMs }!! }
@@ -2437,9 +2462,16 @@ class TradingRepository @Inject constructor(
         val universalPositiveEvidence = universalPositiveEvidenceCases(today)
 
         val ranked = evaluated.map { row ->
-            val baseQuality = com.multify.traderpro.engine.ForecastEarlyEntryPolicy.quality(row.second, targetPct)
+            val minimumNetTargetPct = ForecastAdaptiveSelectionPolicy.minimumTargetPctForNetReturn(
+                entryPrice = row.second.features.ltp,
+                budgetRupees = forecastSettings.holdingBudgetRupees,
+                spreadBps = row.second.features.spreadBps,
+                targetNetReturnPct = ForecastAdaptiveSelectionPolicy.MIN_NET_RETURN_PCT
+            )
+            val candidateBaseTargetPct = max(targetPct, minimumNetTargetPct)
+            val baseQuality = com.multify.traderpro.engine.ForecastEarlyEntryPolicy.quality(row.second, candidateBaseTargetPct)
             val expandedTargetPct = ForecastTargetExpansionPolicy.targetPct(
-                baseTargetPct = targetPct,
+                baseTargetPct = candidateBaseTargetPct,
                 symbol = row.first,
                 strategy = row.second.strategy,
                 regime = row.second.regime,
@@ -2448,11 +2480,11 @@ class TradingRepository @Inject constructor(
                 positives = fixedPositiveTransfer
             )
             val expandedQuality = com.multify.traderpro.engine.ForecastEarlyEntryPolicy.quality(row.second, expandedTargetPct)
-            val useExpandedTarget = expandedTargetPct > targetPct &&
+            val useExpandedTarget = expandedTargetPct > candidateBaseTargetPct &&
                 expandedQuality.tier == baseQuality.tier &&
                 expandedQuality.publishEligible == baseQuality.publishEligible &&
                 expandedQuality.executionEligible == baseQuality.executionEligible
-            val candidateTargetPct = if (useExpandedTarget) expandedTargetPct else targetPct
+            val candidateTargetPct = if (useExpandedTarget) expandedTargetPct else candidateBaseTargetPct
             val quality = if (useExpandedTarget) expandedQuality else baseQuality
             val factorModel = MultifyFactorFamilies.evaluate(row.second, marketRegime)
             val key = championKey(marketRegime, row.second.regime, row.second.strategy)
@@ -2629,6 +2661,13 @@ class TradingRepository @Inject constructor(
             "daily_recommendation_cap" to "NONE",
             "newly_publishable_count" to publishable.size,
             "base_target_pct" to targetPct,
+            "prior_forecast_target_samples" to priorForecasts.size,
+            "prior_forecast_target_days" to priorForecastTargetDays,
+            "prior_forecast_target_symbols" to priorForecastTargetSymbols,
+            "prior_forecast_target_mature" to ForecastTargetMaturityPolicy.isMature(
+                priorForecasts.size, priorForecastTargetDays, priorForecastTargetSymbols
+            ),
+            "net_return_floor_pct" to ForecastAdaptiveSelectionPolicy.MIN_NET_RETURN_PCT,
             "max_published_target_pct" to (publishable.maxOfOrNull { it.targetPct } ?: targetPct),
             "positive_target_expansion_enabled" to true,
             "target_floor_pct" to ForecastQualityPolicy.MIN_TARGET_PCT,
@@ -2667,6 +2706,7 @@ class TradingRepository @Inject constructor(
             "publication_suppressed_until_discovery_ready" to !discoveryPass.baselineReady,
             "top_candidates" to ranked.take(5).map {
                 mapOf("symbol" to it.symbol, "tier" to it.quality.tier, "score" to it.score,
+                    "target_pct" to it.targetPct,
                     "confidence" to it.evaluation.confidence, "directional_score" to it.evaluation.directionalScore,
                     "dominant_family" to it.factorModel.dominantFamily,
                     "family_consensus" to it.factorModel.consensusScore,
@@ -2994,6 +3034,21 @@ class TradingRepository @Inject constructor(
         val all = fixedRecommendationStore.recommendations(today)
             .filter { it.entryPrice > FIXED_MIN_STOCK_PRICE_RUPEES }
         val tierCounts = ranked.groupingBy { it.quality.tier }.eachCount()
+        val primaryTier = ranked.filter { it.quality.tier == "PRIMARY" }
+        val primaryEntryEligible = primaryTier.filter { it.quality.publishEligible && it.quality.executionEligible }
+        val primaryConfirmationPending = primaryEntryEligible.filter { item ->
+            val hits = priorTodayResearch.count {
+                it.symbol.equals(item.symbol, true) && it.qualityTier == "PRIMARY" &&
+                    it.publishEligible && it.executionEligible
+            }
+            val discovered = item.symbol in discoveryPass.symbols
+            !FixedForecastPublicationPolicy.isReady(
+                discoveryBaselineReady = discoveryPass.baselineReady,
+                discoveredMarketWide = discovered,
+                priorPrimaryHits = hits
+            )
+        }
+        val primarySafetyBlocked = primaryTier.filterNot { it.quality.publishEligible && it.quality.executionEligible }
         auditLogger.log("FIXED_ENGINE", "LONG_SCAN_TIERED", mapOf(
             "snapshot_id" to snapshot.payload.snapshotId,
             "snapshot_sha256" to snapshot.sha256,
@@ -3017,6 +3072,13 @@ class TradingRepository @Inject constructor(
             "arm_effective" to preferences.settings.first().armEffective,
             "learning_enabled" to false,
             "publishable_after_confirmation" to publishable.size,
+            "primary_entry_eligible" to primaryEntryEligible.size,
+            "primary_entry_safety_blocked" to primarySafetyBlocked.size,
+            "primary_confirmation_pending" to primaryConfirmationPending.size,
+            "primary_safety_block_reasons" to primarySafetyBlocked.take(8).map {
+                mapOf("symbol" to it.symbol, "reason" to it.quality.reason)
+            },
+            "primary_confirmation_pending_symbols" to primaryConfirmationPending.take(8).map { it.symbol },
             "available_processors" to availableProcessors,
             "evaluation_concurrency" to fixedEvaluationConcurrency
         ))
@@ -3109,9 +3171,9 @@ class TradingRepository @Inject constructor(
         var abortedForNetwork = false
         val chunks = distinctMaster.chunked(50)
 
-        // Fixed v7.4.1's universe, inputs and ranking are unchanged. Only independent
-        // LTP batches are fetched two at a time; all responses are consumed in original
-        // index order, preserving the original network-failure abort and coverage rules.
+        // Fixed's frozen 40-factor score, feature inputs and target calculations are unchanged.
+        // The lightweight prefilter adds a reserved pre-spike lane; full scoring and entry safety
+        // still decide every publication. LTP batches remain ordered and non-blocking.
         for (windowStart in chunks.indices step FixedDiscoveryWindowScheduler.WINDOW_SIZE) {
             val results = FixedDiscoveryWindowScheduler.fetchOrdered(
                 chunks, windowStart
@@ -3168,7 +3230,10 @@ class TradingRepository @Inject constructor(
             "aborted_for_network" to abortedForNetwork,
             "baseline_ready" to baselineReady,
             "state_restored" to restored,
-            "selected" to ranked.size
+            "selected" to ranked.size,
+            "momentum_lane_selected" to ranked.count { it.lane == "MOMENTUM" },
+            "early_pre_spike_lane_selected" to ranked.count { it.lane == "EARLY_PRE_SPIKE" },
+            "early_pre_spike_symbols" to ranked.filter { it.lane == "EARLY_PRE_SPIKE" }.map { it.symbol }.take(12)
         ))
         return MarketDiscoveryPass(ranked.map { it.symbol }, baselineReady, coverageRatio, restored, batchErrors)
     }
