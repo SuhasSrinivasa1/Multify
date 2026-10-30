@@ -7034,12 +7034,8 @@ class TradingRepository @Inject constructor(
                 val refreshed = refreshKnownSmartOrderStatus(token, working, force = true)
                 when (refreshed.smartOrderStatus?.uppercase(Locale.US)) {
                     "FAILED", "CANCELLED", "EXPIRED" -> {
-                        val cleared = refreshed.copy(
-                            smartOrderId = null,
-                            smartOrderMode = HoldingSmartOrderPolicy.MODE_NONE,
-                            smartOrderTriggerPrice = null,
-                            smartOrderDirection = null,
-                            smartOrderStatus = null,
+                        val cleared = clearManagedGttState(refreshed).copy(
+                            status = "OPEN",
                             smartOrderUpdatedAtMs = System.currentTimeMillis(),
                             stopPrice = activeStop
                         )
@@ -7493,11 +7489,11 @@ class TradingRepository @Inject constructor(
             working = cancelKnownPositionGtt(token, working, "END_OF_DAY_SWITCH_TO_RECOVERY", clearIfTerminal = false)
             if (!working.smartOrderId.isNullOrBlank()) return working
         }
-        working = working.copy(
+        working = clearManagedGttState(working).copy(
+            status = "OPEN",
             stopPrice = null,
             targetPrice = target,
             smartOrderMode = HoldingSmartOrderPolicy.MODE_RECOVERY_GTT,
-            smartOrderId = null,
             smartOrderTriggerPrice = target,
             smartOrderDirection = direction,
             smartOrderStatus = "PENDING_CREATE",
@@ -7567,8 +7563,8 @@ class TradingRepository @Inject constructor(
         val refreshed = refreshKnownSmartOrderStatus(token, position, force = false)
         return when (refreshed.smartOrderStatus?.uppercase(Locale.US)) {
             "FAILED", "CANCELLED", "EXPIRED" -> {
-                val cleared = refreshed.copy(
-                    smartOrderId = null,
+                val cleared = clearManagedGttState(refreshed).copy(
+                    status = "OPEN",
                     smartOrderTriggerPrice = target,
                     smartOrderDirection = HoldingSmartOrderPolicy.recoveryDirection(refreshed.lastPrice, target),
                     smartOrderStatus = "PENDING_RECREATE",
