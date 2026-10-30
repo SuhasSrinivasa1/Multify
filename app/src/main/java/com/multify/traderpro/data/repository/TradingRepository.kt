@@ -3126,6 +3126,23 @@ class TradingRepository @Inject constructor(
         val quote = withFixedLiveDataSlot {
             apiFactory.groww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Fixed quote $symbol")
         }
+        val fixedBestBid = quote.bidPrice?.takeIf { it.isFinite() && it > 0.0 }
+            ?: quote.depth?.buy?.mapNotNull { it.price?.takeIf { p -> p.isFinite() && p > 0.0 } }?.maxOrNull()
+        val fixedBestAsk = quote.offerPrice?.takeIf { it.isFinite() && it > 0.0 }
+            ?: quote.depth?.sell?.mapNotNull { it.price?.takeIf { p -> p.isFinite() && p > 0.0 } }?.minOrNull()
+        if (fixedBestBid == null || fixedBestAsk == null || fixedBestAsk < fixedBestBid) {
+            auditLogger.logAsync("FIXED_RESEARCH", "FIXED_QUOTE_SPREAD_UNAVAILABLE", mapOf(
+                "symbol" to symbol, "account" to "ALPHA",
+                "bid_price_present" to (quote.bidPrice != null),
+                "offer_price_present" to (quote.offerPrice != null),
+                "depth_buy_levels" to quote.depth?.buy?.size,
+                "depth_sell_levels" to quote.depth?.sell?.size,
+                "bid_quantity_present" to (quote.bidQuantity != null),
+                "offer_quantity_present" to (quote.offerQuantity != null),
+                "quote_ltp_present" to (quote.lastPrice != null),
+                "note" to "Fixed entry safety remains fail-closed; no spread relaxation."
+            ))
+        }
         // Token-scope the RAM snapshot so a reconnect or account change cannot reuse candles.
         val historyKey = sha256(token).take(12) + ":" + symbol
         val incremental = fixedHistoricalWindowStore.request(historyKey, start, SystemClock.elapsedRealtime())
