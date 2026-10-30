@@ -54,10 +54,10 @@ data class ForecastFamilyOutcome(
     val date: String,
     val symbol: String,
     val marketRegime: String,
-    val positive: Boolean,
     val momentumScore: Double,
     val participationScore: Double,
-    val structureScore: Double
+    val structureScore: Double,
+    val positive: Boolean
 )
 
 data class ForecastShadowFilterReview(
