@@ -35,7 +35,7 @@ class ForecastUnivestLearningPolicyTest {
     @Test fun trainingRequiresMatureSameDayDenominatorAnd75Percent() {
         val point = (1..48).associate { "p$it" to (it.toDouble() / 48) }
         val cases = (1..30).map { i ->
-            ForecastUnivestLearningPolicy.ClosedCase("STK${i%5}", "2026-10-${(i%10+10)}", if (i <= 24) 1.2 else -0.8, point)
+            ForecastUnivestLearningPolicy.ClosedCase("STK${i}", "2026-10-${(i%10+10)}", if (i <= 24) 1.2 else -0.8, point)
         }
         val good = p.evaluate(cases, point, "2026-11-01")
         assertTrue(good.eligible)
