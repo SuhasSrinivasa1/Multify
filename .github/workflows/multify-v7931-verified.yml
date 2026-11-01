@@ -78,9 +78,9 @@ jobs:
           # Exact v7.9.1 (Oct 26 successful build) engine: the one extra
           # diagnostic field exists only to retain Kotlin source compatibility.
           engine=(root/"engine/FixedLocalStrategyEngine.kt").read_text()
-          diagnostic="    val candles: List<FixedCandle>,\\n    val sessionCandleCount: Int = 0 // binary compatibility for unused diagnostic overlay\\n)"
+          diagnostic="    val candles: List<FixedCandle>,\n    val sessionCandleCount: Int = 0 // binary compatibility for unused diagnostic overlay\n)"
           assert diagnostic in engine, "Unexpected Fixed engine diagnostic field"
-          legacy=engine.replace(diagnostic,"    val candles: List<FixedCandle>\\n)")
+          legacy=engine.replace(diagnostic,"    val candles: List<FixedCandle>\n)")
           import hashlib
           assert hashlib.sha256(legacy.encode()).hexdigest()=="40eb2a6ff6f9c595cfa4d5c114bfef5f4a07bc7ffcadeb9b0fb4b16e7ed75b52", "Fixed v7.9.1 core source mismatch"
           section=src.split("// FIXED_FINAL_LOCK_BEGIN:",1)[1].split("// FIXED_FINAL_LOCK_END:",1)[0]
