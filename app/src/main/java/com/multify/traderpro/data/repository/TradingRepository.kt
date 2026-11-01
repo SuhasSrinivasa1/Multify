@@ -4392,108 +4392,174 @@ class TradingRepository @Inject constructor(
         return LocalStrategyEngine.evaluateLong(signal, features, includeEventPrior = false)
     }
 
-    /** Forecast-only source: public NSE announcements, with Beta read-only quote/candle confirmation. */
+    /** NSE-only: capture announcements even outside session; publish immediately if a
+     * previously validated catalyst pattern remains unpriced at the open or on arrival.
+     * Beta provides read-only quotes. No minimum upward move or breakout confirmation.
+     */
     suspend fun monitorForecastNews(): Int {
-        if (!forecastBackgroundScanningEnabled()) return 0
         val newlyCaptured = forecastNewsMonitor.poll()
+        val enabled = forecastBackgroundScanningEnabled()
+        if (!enabled) {
+            auditLogger.logAsync("FORECAST_NEWS", "CAPTURE_ONLY_SCANNER_DISABLED", mapOf(
+                "captured" to newlyCaptured, "exchange" to "NSE", "orders_enabled" to false))
+            return newlyCaptured
+        }
         val now = ZonedDateTime.now(INDIA)
         val today = now.toLocalDate().toString()
         if (marketSession() != "OPEN" || now.dayOfWeek.value >= 6) return newlyCaptured
         val token = forecastMarketToken() ?: run {
-            auditLogger.logAsync("FORECAST_NEWS", "NO_FORECAST_MARKET_TOKEN")
+            auditLogger.logAsync("FORECAST_NEWS", "NO_BETA_MARKET_TOKEN_OR_FORECAST_TOKEN")
             return newlyCaptured
         }
-        val healthy = marketDiscoveryStateStore.loadHealth(today)
-        val baselineReady = healthy?.baselineReady == true &&
-            System.currentTimeMillis() - healthy.updatedAtMs < 20L * 60_000L
         val guard = if (secretStore.hasBetaCredentials()) betaForecastCycleMutex else scanApiCycleMutex
         if (!guard.tryLock()) return newlyCaptured
         try {
-            val news = forecastNewsJournal.dueForEvaluation(System.currentTimeMillis())
-            for (item in news) {
+            val cutoff = now.toLocalDate().atStartOfDay(INDIA).toInstant().toEpochMilli()
+            val stats = forecastNewsJournal.completedPatternStats(cutoff).associateBy { it.key }
+            val pending = forecastNewsJournal.dueForEvaluation(System.currentTimeMillis(), limit = 5)
+            for (item in pending) {
                 if (fixedApiPriorityRequested || marketCriticalTradeInFlight) break
-                val eval = runCatching { forecastEvaluation(item.symbol, token) }
-                    .onFailure { auditLogger.logAsync("FORECAST_NEWS", "CANDIDATE_EVALUATION_ERROR", mapOf(
-                        "news_id" to item.id, "symbol" to item.symbol,
-                        "exception" to it.javaClass.simpleName)) }.getOrNull() ?: continue
-                val quality = com.multify.traderpro.engine.ForecastEarlyEntryPolicy.quality(eval, 1.0)
+                // An after-hours report may be actionable at the next open, but stale
+                // intraday reports must NOT become retroactive recommendations.
+                val evaluatedAt = System.currentTimeMillis()
+                val ageMs = evaluatedAt - item.publishedAtMs
+                val carry = com.multify.traderpro.engine.ForecastNewsOpportunityPolicy.isCarryForward(
+                    item.publishedAtMs, evaluatedAt)
+                val marketOpenAgeMinutes = java.time.Duration.between(
+                    java.time.LocalTime.of(9, 15), now.toLocalTime()).toMinutes()
+                if ((ageMs > 20L * 60_000L && !carry) || (carry && marketOpenAgeMinutes > 90L)) {
+                    forecastNewsJournal.update(item.copy(status = "EXPIRED", rationale = "STALE_OR_PREOPEN_WINDOW_EXPIRED"))
+                    auditLogger.logAsync("FORECAST_NEWS", "NEWS_RECOMMENDATION_EXPIRED", mapOf(
+                        "symbol" to item.symbol, "category" to item.category,
+                        "age_ms" to ageMs, "carry_forward" to carry, "exchange" to "NSE"))
+                    continue
+                }
+                // The latest independent NSE events, not repeated publications of the
+                // same filing, form the joint-catalyst context of this announcement.
+                val related = forecastNewsJournal.recent(1000).filter { other ->
+                    other.symbol.equals(item.symbol, true) &&
+                        other.direction == "POSITIVE_POSSIBLE" &&
+                        kotlin.math.abs(other.publishedAtMs - item.publishedAtMs) <= 30L * 60_000L
+                }.distinctBy { it.headline.uppercase(java.util.Locale.ROOT)
+                    .replace(Regex("[^A-Z0-9]"), "").take(180) }
+                val categories = (related.map { it.category } + item.category).distinct().sorted()
+                val conflicting = forecastNewsJournal.recent(1000).any { other ->
+                    other.symbol.equals(item.symbol, true) &&
+                        other.direction == "NEGATIVE_OR_AMBIGUOUS" &&
+                        kotlin.math.abs(other.publishedAtMs - item.publishedAtMs) <= 30L * 60_000L
+                }
+                val catalystKey = categories.joinToString("+")
+                // One fresh Beta quote is enough for the trained fast path. We do not
+                // wait for a 1-minute/5-minute breakout or a +1% price reaction.
+                val quote = runCatching {
+                    withForecastLiveDataSlot {
+                        betaMarketRead(token, BetaResearchGate.Type.LIVE,
+                            alphaCall = { apiFactory.groww.quote(bearer(token), tradingSymbol = item.symbol)
+                                .requirePayload("NSE news quote ${item.symbol}") },
+                            betaCall = { apiFactory.betaGroww.quote(bearer(token), tradingSymbol = item.symbol)
+                                .requirePayload("Beta NSE news quote ${item.symbol}") })
+                    }
+                }.onFailure { auditLogger.logAsync("FORECAST_NEWS", "BETA_NEWS_QUOTE_RETRY", mapOf(
+                    "id" to item.id, "symbol" to item.symbol, "exception" to it.javaClass.simpleName))
+                }.getOrNull() ?: continue
+                val ltp = quote.lastPrice?.takeIf { it.isFinite() && it > 0.0 } ?: continue
+                val bid = quote.bidPrice?.takeIf { it.isFinite() && it > 0.0 }
+                    ?: quote.depth?.buy?.mapNotNull { it.price?.takeIf { p -> p.isFinite() && p > 0.0 } }?.maxOrNull()
+                val ask = quote.offerPrice?.takeIf { it.isFinite() && it > 0.0 }
+                    ?: quote.depth?.sell?.mapNotNull { it.price?.takeIf { p -> p.isFinite() && p > 0.0 } }?.minOrNull()
+                val spreadBps = if (bid != null && ask != null && ask >= bid && bid > 0.0)
+                    (ask - bid) / ((ask + bid) / 2.0) * 10_000.0 else null
+                val rawFeatures = runCatching {
+                    com.google.gson.JsonParser.parseString(item.featureJson).asJsonObject
+                }.getOrNull()
+                val amountCrore = runCatching {
+                    rawFeatures?.get("reported_amount_crore")?.takeUnless { it.isJsonNull }?.asDouble
+                }.getOrNull()
+                val cap = quote.marketCap?.takeIf { it.isFinite() && it >= 100_000_000.0 }
+                val policy = com.multify.traderpro.engine.ForecastNewsOpportunityPolicy
+                val materiality = policy.materialityPct(amountCrore, cap)
+                val patternKey = policy.patternKey(catalystKey, policy.capBucket(cap), categories.size, materiality)
+                val history = stats[patternKey]
+                val evidence = policy.Evidence(history?.observations ?: 0,
+                    history?.distinctDays ?: 0, history?.hitRate ?: 0.0)
+                val decision = policy.decide(policy.Context(quote.dayChangePct, spreadBps, ltp,
+                    amountCrore, cap, categories.size, catalystKey, ageMs / 60_000L, evidence))
                 val settings = preferences.settings.first()
                 val economics = ForecastAdaptiveSelectionPolicy.economics(
-                    entryPrice = eval.features.ltp, targetPct = 1.0,
-                    budgetRupees = settings.holdingBudgetRupees,
-                    spreadBps = eval.features.spreadBps,
-                    atrPct = eval.features.atr14?.takeIf { eval.features.ltp > 0.0 }
-                        ?.let { it / eval.features.ltp * 100.0 })
-                val ageMs = System.currentTimeMillis() - item.publishedAtMs
-                // Learn only from completed prior-session news, never from future bars.
-                val priorDayEnd = today.let { LocalDate.parse(it).atStartOfDay(INDIA).toInstant().toEpochMilli() }
-                val historical = forecastNewsJournal.completedCategoryStats(priorDayEnd)
-                    .firstOrNull { it.category == item.category }
-                val validatedCategory = historical != null && historical.observations >= 15 &&
-                    historical.distinctDays >= 3
-                val learnedConfidence = if (validatedCategory) {
-                    item.classificationConfidence + if (historical!!.hitRate >= 0.60) 0.07
-                    else if (historical.hitRate < 0.30) -0.10 else 0.0
-                } else item.classificationConfidence
+                    entryPrice = ltp, targetPct = 1.0, budgetRupees = settings.holdingBudgetRupees,
+                    spreadBps = spreadBps, atrPct = null)
                 val qualifies = item.direction == "POSITIVE_POSSIBLE" &&
-                    learnedConfidence >= 0.70 &&
-                    ageMs in 0L..(5L * 60_000L) &&
-                    baselineReady && quality.publishEligible && quality.executionEligible &&
-                    economics.profitableAfterCosts
-                val reason = "NEWS ${item.category} · " + item.rationale +
-                    " · quality=" + quality.tier +
-                    " · baseline=" + baselineReady + " · net ₹" + fmt(economics.netProfitRupees)
-                val factorModel = MultifyFactorFamilies.evaluate(eval, "BREADTH_NEUTRAL")
-                learningDao.insertForecastResearch(ForecastResearchEntity(
-                    researchDate = today, scanAtMs = System.currentTimeMillis(), symbol = item.symbol,
-                    rank = 0, qualityTier = if (qualifies) "NEWS_PRIMARY" else "NEWS_RESEARCH",
-                    publishEligible = qualifies, executionEligible = qualifies,
-                    targetPct = 1.0, entryPrice = eval.features.ltp, regime = eval.regime,
-                    marketRegime = "BREADTH_NEUTRAL", strategy = "NEWS_" + item.category,
-                    directionalScore = eval.directionalScore, confidence = eval.confidence,
-                    rejectionReason = reason,
-                    featureJson = researchGson.toJson(researchFeatureMap(eval, factorModel) +
-                        mapOf("news_event_id" to item.id, "news_category" to item.category,
-                            "news_feature_json" to item.featureJson)),
-                    voteJson = researchGson.toJson(eval.votes)))
+                    decision.eligible && !conflicting && economics.profitableAfterCosts
                 val existing = learningDao.longForecastsForDate(today)
                 val alreadyRecommended = existing.any { it.symbol.equals(item.symbol, true) }
-                // An official source event is an independent discovery candidate, but the
-                // complete market baseline, 1m+5m quality, spread and net economics are mandatory.
-                val publish = qualifies && !alreadyRecommended &&
-                    ForecastPublicationPolicy.isReady(baselineReady, true, true, 0)
+                val publish = qualifies && !alreadyRecommended
+                val state = when {
+                    conflicting -> "CONFLICTING_NEWS"
+                    !economics.profitableAfterCosts -> "NET_PROFIT_NOT_POSITIVE"
+                    alreadyRecommended -> "DUPLICATE_SAME_DAY"
+                    else -> decision.reason
+                }
+                // Keep the canonical 40 headline features, and append verified contextual
+                // fields for historical outcome learning. UNKNOWN remains null.
+                val enriched = linkedMapOf<String, Any?>(
+                    "news_pattern_key" to patternKey, "exchange" to "NSE",
+                    "news_category_combo" to catalystKey, "distinct_catalysts" to categories.size,
+                    "market_cap_rupees" to cap, "reported_amount_crore" to amountCrore,
+                    "news_amount_to_market_cap_pct" to materiality, "cap_bucket" to decision.capBucket,
+                    "news_age_minutes" to (ageMs / 60_000L), "carry_forward" to carry,
+                    "day_change_pct_at_evaluation" to quote.dayChangePct,
+                    "spread_bps_at_evaluation" to spreadBps,
+                    "evidence_samples" to evidence.observations,
+                    "evidence_distinct_days" to evidence.distinctDays,
+                    "evidence_one_pct_hit_rate" to evidence.hitRate,
+                    "evidence_proven" to evidence.proven, "entry_decision" to state,
+                    "no_price_spike_required" to true, "news_features_40" to item.featureJson)
+                forecastNewsJournal.update(item.copy(
+                    featureJson = researchGson.toJson(enriched),
+                    status = if (publish) "PUBLISHED" else "RESEARCH_ONLY",
+                    rationale = state, baselinePrice = ltp, baselineAtMs = evaluatedAt,
+                    lastObservedPrice = ltp, lastObservedAtMs = evaluatedAt))
+                // All signals, including unsuccessful ones, enter the learning denominator.
+                learningDao.insertForecastResearch(ForecastResearchEntity(
+                    researchDate = today, scanAtMs = evaluatedAt, symbol = item.symbol,
+                    rank = 0, qualityTier = if (publish) "NEWS_PRIMARY" else "NEWS_RESEARCH",
+                    publishEligible = publish, executionEligible = publish,
+                    targetPct = 1.0, entryPrice = ltp, regime = "NEWS_PRE_SPIKE",
+                    marketRegime = "NSE_ONLY", strategy = "NEWS_" + item.category,
+                    directionalScore = evidence.hitRate, confidence = item.classificationConfidence,
+                    rejectionReason = state, featureJson = researchGson.toJson(enriched), voteJson = "[]"))
                 if (publish) {
-                    val at = System.currentTimeMillis()
                     learningDao.upsertLongForecast(LongForecastEntity(
                         forecastDate = today, rank = (existing.maxOfOrNull { it.rank } ?: 0) + 1,
-                        symbol = item.symbol, entryPrice = eval.features.ltp, targetPct = 1.0,
-                        targetPrice = eval.features.ltp * 1.01,
-                        confidence = eval.confidence, score = eval.confidence,
-                        strategy = "NEWS_" + item.category, regime = eval.regime,
-                        marketRegime = "BREADTH_NEUTRAL", reason = reason,
-                        generatedAtMs = at, lastPrice = eval.features.ltp,
-                        lastObservedAtMs = at, qualityTier = "PRIMARY", executionEligible = true))
+                        symbol = item.symbol, entryPrice = ltp, targetPct = 1.0,
+                        targetPrice = ltp * 1.01,
+                        confidence = evidence.hitRate.coerceIn(0.0, 0.95),
+                        score = evidence.hitRate.coerceIn(0.0, 0.95),
+                        strategy = "NEWS_" + item.category, regime = "NEWS_PRE_SPIKE",
+                        marketRegime = "NSE_ONLY", reason = "Validated pre-spike NSE catalyst: " +
+                            catalystKey + " · $state · learned " + evidence.observations +
+                            " samples on " + evidence.distinctDays + " days · no price move required",
+                        generatedAtMs = evaluatedAt, lastPrice = ltp,
+                        lastObservedAtMs = evaluatedAt, qualityTier = "PRIMARY", executionEligible = true))
                 }
-                forecastNewsJournal.update(item.copy(status = if (publish) "PUBLISHED" else "RESEARCH_ONLY",
-                    rationale = reason, baselinePrice = eval.features.ltp,
-                    baselineAtMs = System.currentTimeMillis(), lastObservedPrice = eval.features.ltp,
-                    lastObservedAtMs = System.currentTimeMillis()))
-                auditLogger.logAsync("FORECAST_NEWS", "EVENT_EVALUATED", mapOf(
-                    "id" to item.id, "symbol" to item.symbol, "category" to item.category,
-                    "published" to publish, "baseline_ready" to baselineReady,
-                    "quality_tier" to quality.tier, "economics_profitable" to economics.profitableAfterCosts,
-                    "net_profit_rupees" to economics.netProfitRupees,
-                    "feature_count" to 40,
-                    "historical_category_samples" to (historical?.observations ?: 0),
-                    "historical_category_hit_rate" to historical?.hitRate,
-                    "news_age_ms" to ageMs, "reason" to reason))
+                auditLogger.logAsync("FORECAST_NEWS", "EARLY_CATALYST_DECISION", mapOf(
+                    "id" to item.id, "symbol" to item.symbol, "source" to item.source,
+                    "exchange" to "NSE", "category" to item.category, "catalyst_combo" to catalystKey,
+                    "pattern_key" to patternKey, "distinct_catalysts" to categories.size,
+                    "age_ms" to ageMs, "carry_forward" to carry,
+                    "quote_research_account" to (if (forecastUsesBeta(token)) "BETA" else "ALPHA_FALLBACK"),
+                    "quote_ltp" to ltp, "market_cap_rupees" to cap, "amount_crore" to amountCrore,
+                    "materiality_pct" to materiality, "day_change_pct" to quote.dayChangePct,
+                    "spread_bps" to spreadBps, "conflicting_news" to conflicting,
+                    "samples" to evidence.observations, "distinct_days" to evidence.distinctDays,
+                    "hit_rate" to evidence.hitRate, "validated" to evidence.proven,
+                    "economics_net_rupees" to economics.netProfitRupees,
+                    "result" to state, "published" to publish,
+                    "frozen_fixed_untouched" to true, "no_spike_confirmation" to true))
             }
-        } finally {
-            guard.unlock()
-        }
+        } finally { guard.unlock() }
         return newlyCaptured
     }
-
     /** Completed outcome study: can run outside market hours without broker requests. */
     fun auditForecastNewsLearning() {
         val cutoff = LocalDate.now(INDIA).atStartOfDay(INDIA).toInstant().toEpochMilli()
@@ -4507,6 +4573,20 @@ class TradingRepository @Inject constructor(
                 "average_mfe_pct" to row.averageMfe) },
             "needs_out_of_sample_validation" to true,
             "fixed_engine_changed" to false))
+        val patterns = forecastNewsJournal.completedPatternStats(cutoff)
+        auditLogger.logAsync("FORECAST_NEWS", "CONTEXTUAL_PATTERN_LEARNING", mapOf(
+            "exchange" to "NSE", "observed_patterns" to patterns.size,
+            "minimum_samples" to com.multify.traderpro.engine.ForecastNewsOpportunityPolicy.MIN_PATTERN_SAMPLES,
+            "minimum_distinct_days" to com.multify.traderpro.engine.ForecastNewsOpportunityPolicy.MIN_PATTERN_DAYS,
+            "minimum_one_pct_hit_rate" to com.multify.traderpro.engine.ForecastNewsOpportunityPolicy.MIN_PATTERN_HIT_RATE,
+            "patterns" to patterns.take(100).map { pattern -> mapOf(
+                "key" to pattern.key, "observations" to pattern.observations,
+                "distinct_days" to pattern.distinctDays, "wins" to pattern.wins,
+                "hit_rate" to pattern.hitRate, "average_mfe_pct" to pattern.averageMfe,
+                "validated" to (pattern.observations >= com.multify.traderpro.engine.ForecastNewsOpportunityPolicy.MIN_PATTERN_SAMPLES &&
+                    pattern.distinctDays >= com.multify.traderpro.engine.ForecastNewsOpportunityPolicy.MIN_PATTERN_DAYS &&
+                    pattern.hitRate >= com.multify.traderpro.engine.ForecastNewsOpportunityPolicy.MIN_PATTERN_HIT_RATE)) },
+            "current_day_leakage" to false, "fixed_engine_changed" to false))
     }
 
     /** One-minute outcome snapshots, bounded to avoid stealing API calls from Fixed or SELL. */
