@@ -1,0 +1,135 @@
+name: Multify v7.9.30 Forecast 1m Replay Candle Decoder
+on:
+  push:
+    branches: [v7930-forecast-replay-candle-parser]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verified-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Android SDK 35
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
+      - name: Verify Fixed baseline, independent Alpha-Beta and execution safety
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin v7929-multify-positive-beta-capture
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+          root = Path("app/src/main/java/com/multify/traderpro")
+          def previous(path):
+              return subprocess.check_output(["git","show",f"origin/v7929-multify-positive-beta-capture:{path}"]).decode()
+          unchanged=[
+              "engine/FixedLocalStrategyEngine.kt",
+              "engine/FixedForecastQualityPolicy.kt",
+              "engine/FixedMarketDiscoveryPolicy.kt",
+              "engine/FixedForecastPublicationPolicy.kt",
+              "engine/FixedMultifyFactorFamilies.kt",
+              "engine/FixedFinalContract.kt",
+              "engine/HardStopLossPolicy.kt",
+              "engine/SteppedTrailingPolicy.kt",
+              "data/network/GrowwApiFactory.kt",
+              "data/network/BetaReadOnlyInterceptor.kt",
+              "data/network/BetaResearchGate.kt",
+              "data/network/GrowwRateLimitInterceptor.kt",
+              "data/network/GrowwModels.kt",
+              "engine/ForecastEarlyEntryPolicy.kt",
+              "engine/ForecastEntryTimingPolicy.kt",
+              "engine/ForecastPublicationPolicy.kt",
+              "engine/LocalStrategyEngine.kt"
+          ]
+          for name in unchanged:
+              path="app/src/main/java/com/multify/traderpro/"+name
+              assert Path(path).read_text()==previous(path),name+" changed unexpectedly"
+          src=(root/"data/repository/TradingRepository.kt").read_text()
+          prior=previous("app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt")
+          def region(s,a,b):
+              x=s.index(a);y=s.index(b,x+len(a))
+              return s[x:y+len(b)]
+          assert region(src,"// FIXED_FINAL_LOCK_BEGIN","// FIXED_FINAL_LOCK_END")==region(prior,"// FIXED_FINAL_LOCK_BEGIN","// FIXED_FINAL_LOCK_END")
+          for expected in ("forecastNewsJournal.archive()", "forecastNewsJournal.restore(",
+                           "auditLogger.restoreArchived(", "finalizeMultifyPositivePattern(",
+                           "monitorForecastNewsOutcomes()", "forecastLiveUnlocked(): Boolean = true",
+                           'candleInterval = "5minute"'):
+              assert expected in src, expected
+          # The entire repository differs from v7.9.29 only in Forecast replay paths,
+          # new decoder + tests, version and this workflow. Fixed, execution and news stay frozen.
+          changed=set(subprocess.check_output(
+              ["git","diff","--name-only","origin/v7929-multify-positive-beta-capture...HEAD"]).decode().splitlines())
+          allowed={
+              "app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt",
+              "app/build.gradle.kts",
+              ".github/workflows/multify-v7930-verified.yml",
+              "app/src/main/java/com/multify/traderpro/engine/ForecastReplayCandleDecoder.kt",
+              "app/src/test/java/com/multify/traderpro/engine/ForecastReplayCandleDecoderTest.kt"
+          }
+          assert changed <= allowed, "Unexpected changed files: " + str(changed - allowed)
+          # Ensure repository behavior changed only in Forecast replay parsing;
+          # preserve Multify Beta research snapshots, Fixed selection and execution.
+          a="    private fun researchCandleTimestampMs(value: com.google.gson.JsonElement): Long?"
+          b="    /** Serialized inside the existing, backup/exported Forecast snapshot JSON."
+          c="            preferences.recordMarketData()"
+          d="            rows.forEach { row ->"
+          assert src.split(a)[0]==prior.split(a)[0], "Other TradingRepository code changed before replay timestamp parser"
+          assert src.split(b)[1].split(c)[0]==prior.split(b)[1].split(c)[0], "Non-replay research code changed"
+          assert src.split(d)[1]==prior.split(d)[1], "TradingRepository changed after replay mapping"
+          assert "MarketCandleTimestampParser.toEpochMillis(value)" in src
+          assert "ForecastReplayCandleDecoder.decode(historical.candles)" in src
+          assert "OUTCOME_REPLAY_DECODE_PROFILE" in src
+          assert "OUTCOME_REPLAY_NO_CANDLES" in src
+          assert "BetaReadOnlyInterceptor.kt" in str(unchanged)
+          assert 'versionCode = 7930' in Path("app/build.gradle.kts").read_text()
+          print("Fixed immutable selection, Beta isolation, broker SELL and v7930 Forecast-only replay decoder verified")
+          PY
+      - name: Backend tests
+        shell: bash
+        run: |
+          python -m pip install -r backend/requirements.txt
+          PYTHONPATH="$GITHUB_WORKSPACE" PHONE_HMAC_SECRET=test-secret-test-secret-test-secret GROWW_API_KEY=test-api-key GROWW_TOTP_SECRET=JBSWY3DPEHPK3PXP python -m pytest -q backend/tests
+      - name: Android unit tests
+        run: gradle --no-daemon testDebugUnitTest
+      - name: Build APK
+        run: gradle --no-daemon assembleDebug
+      - name: Verify signature, APK identity, source checksum
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v7.9.30-forecast-replay-candle-fix-debug.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/*.apk > dist/APK-SIGNATURE.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/*.apk | head -n 2 > dist/PACKAGE.txt
+          sha256sum dist/*.apk > dist/SHA256SUMS.txt
+          git rev-parse HEAD > dist/SOURCE-COMMIT.txt
+          python - <<'PY'
+          from pathlib import Path
+          import zipfile
+          with zipfile.ZipFile('dist/Multify-TraderPro-v7.9.30-source.zip','w',zipfile.ZIP_DEFLATED,compresslevel=6) as z:
+              for p in Path('.').rglob('*'):
+                  if not p.is_file():continue
+                  if any(part in {'.git','.gradle','build','dist','__pycache__','.pytest_cache'} for part in p.parts):continue
+                  if p.suffix.lower() in {'.jks','.keystore'} or p.name.startswith('.env'):continue
+                  z.write(p,p.as_posix())
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: multify-v7930-forecast-replay-fix
+          path: dist/
+          if-no-files-found: warn
