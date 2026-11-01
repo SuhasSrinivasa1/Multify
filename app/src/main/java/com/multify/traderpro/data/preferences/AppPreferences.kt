@@ -61,6 +61,7 @@ class AppPreferences @Inject constructor(
         val forecastEarlyEntryMigration = booleanPreferencesKey("forecast_early_entry_v788_enabled")
         val forecastAutoBuyEnabled = booleanPreferencesKey("forecast_auto_buy_enabled")
         val fixedAutoBuyEnabled = booleanPreferencesKey("fixed_auto_buy_enabled")
+        val v7931EntryToggleReset = booleanPreferencesKey("v7931_entry_toggles_off_once")
         val onboardingComplete = booleanPreferencesKey("onboarding_complete")
         val brokerAuthenticated = booleanPreferencesKey("broker_authenticated")
         val authenticatedAtMs = longPreferencesKey("authenticated_at_ms")
@@ -144,6 +145,21 @@ class AppPreferences @Inject constructor(
 
     suspend fun setForecastAutoBuy(value: Boolean) {
         context.dataStore.edit { it[Keys.forecastAutoBuyEnabled] = value }
+    }
+
+    /** A one-time upgrade migration: previous saved ON states must not arm new purchases.
+     * This never changes protective monitoring for already-held, app-owned positions.
+     * It also leaves the research scanner enabled so Forecast can continue learning.
+     */
+    suspend fun disableAutomaticEntriesOnceForV7931() {
+        context.dataStore.edit {
+            if (it[Keys.v7931EntryToggleReset] == true) return@edit
+            it[Keys.armEnabled] = false
+            it[Keys.armedDate] = ""
+            it[Keys.fixedAutoBuyEnabled] = false
+            it[Keys.forecastAutoBuyEnabled] = false
+            it[Keys.v7931EntryToggleReset] = true
+        }
     }
 
     suspend fun setFixedAutoBuy(value: Boolean) {

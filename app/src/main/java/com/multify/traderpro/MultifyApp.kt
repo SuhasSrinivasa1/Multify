@@ -17,6 +17,8 @@ import com.multify.traderpro.data.network.GrowwRecoveryGate
 import com.multify.traderpro.data.preferences.AppPreferences
 import dagger.hilt.android.HiltAndroidApp
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
 import javax.inject.Inject
 
 @HiltAndroidApp
@@ -33,6 +35,9 @@ class MultifyApp : Application(), Configuration.Provider {
 
     override fun onCreate() {
         super.onCreate()
+        // Before any background trade scanner/service can run, require explicit opt-in again.
+        // Does not disable monitoring/sells for existing app-owned positions.
+        runBlocking(Dispatchers.IO) { preferences.disableAutomaticEntriesOnceForV7931() }
         GrowwRateLimitInterceptor.installRecovery(recoveryGate, preferences)
         val network = Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()
         val wm = WorkManager.getInstance(this)

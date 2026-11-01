@@ -30,8 +30,8 @@ android {
         applicationId = "com.multify.traderpro.vivoy73final"
         minSdk = 26
         targetSdk = 35
-        versionCode = 7930
-        versionName = "7.9.30-forecast-replay-candle-fix"
+        versionCode = 7931
+        versionName = "7.9.31-fixed-v791-input-restored"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
     }

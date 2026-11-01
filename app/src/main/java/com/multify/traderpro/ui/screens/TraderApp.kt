@@ -928,30 +928,6 @@ private fun FixedScreen(
             fixed = true, fixedMarketOpen = fixedMarketOpen, fixedClockMsForTable = fixedClockMs
         ) }
         item {
-            val held = dashboard?.fixedWatchlist.orEmpty()
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                shape = RoundedCornerShape(20.dp)) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Fixed · Safety holds and confirmation queue", fontWeight = FontWeight.SemiBold)
-                    Text("Last 20 minutes of PRIMARY evaluations: safety-held or " +
-                        "entry-safe but awaiting the frozen repeat-confirmation rule. " +
-                        "Neither category permits BUY until published independently.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    if (held.isEmpty()) {
-                        Text("No recent Fixed PRIMARY candidates awaiting confirmation or held by safety.",
-                            style = MaterialTheme.typography.bodySmall)
-                    } else held.forEach { candidate ->
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = .12f))
-                        Text(candidate.symbol + if (candidate.status == "AWAITING_CONFIRMATION")
-                            " · ENTRY SAFE · AWAITING SECOND SCAN · BUY disabled"
-                            else " · SAFETY HOLD · BUY disabled",
-                            fontWeight = FontWeight.Medium)
-                    }
-                }
-            }
-        }
-        item {
             Card(
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                 shape = RoundedCornerShape(20.dp)
