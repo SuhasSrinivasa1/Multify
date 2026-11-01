@@ -46,7 +46,6 @@ object FixedForecastQualityPolicy {
         marketRegime: String = "BREADTH_NEUTRAL"
     ): FixedForecastQualityDecision {
         val f = evaluation.features
-        val entrySafety = FixedEntrySafetyOverlay.assess(f)
         val atrPct = if (f.ltp > 0.0 && f.atr14 != null && f.atr14 > 0.0) f.atr14 / f.ltp * 100.0 else 0.0
         val capacityPct = atrPct * 4.0
         val aboveVwap = f.vwap?.let { f.ltp > it } == true
@@ -82,15 +81,13 @@ object FixedForecastQualityPolicy {
         if (primaryFails.isEmpty()) {
             return FixedForecastQualityDecision(
                 tier = "PRIMARY",
-                publishEligible = entrySafety.eligible,
-                executionEligible = entrySafety.eligible,
+                publishEligible = true,
+                executionEligible = true,
                 volatilityCapacityPct = capacityPct,
-                reason = if (!entrySafety.eligible) "ENTRY SAFETY HOLD · " + entrySafety.reasons.joinToString("; ")
-                else if (marketRegime == "BREADTH_WEAK")
+                reason = if (marketRegime == "BREADTH_WEAK")
                     "Production TREND setup: counter-breadth relative strength, liquidity and volatility capacity confirmed"
                 else
-                    "Production TREND setup: momentum alignment, liquidity and volatility capacity confirmed",
-                failedRules = entrySafety.reasons
+                    "Production TREND setup: momentum alignment, liquidity and volatility capacity confirmed"
             )
         }
 
@@ -107,12 +104,11 @@ object FixedForecastQualityPolicy {
         if (secondaryFails.isEmpty()) {
             return FixedForecastQualityDecision(
                 tier = "SECONDARY",
-                publishEligible = entrySafety.eligible,
+                publishEligible = true,
                 executionEligible = false,
                 volatilityCapacityPct = capacityPct,
-                reason = if (!entrySafety.eligible) "ENTRY SAFETY HOLD · " + entrySafety.reasons.joinToString("; ")
-                    else "Analyst watchlist: positive structure but not strong enough for production forecast execution",
-                failedRules = primaryFails + entrySafety.reasons
+                reason = "Analyst watchlist: positive structure but not strong enough for production forecast execution",
+                failedRules = primaryFails
             )
         }
 
@@ -122,7 +118,7 @@ object FixedForecastQualityPolicy {
             executionEligible = false,
             volatilityCapacityPct = capacityPct,
             reason = secondaryFails.joinToString("; "),
-            failedRules = primaryFails + secondaryFails + entrySafety.reasons
+            failedRules = primaryFails + secondaryFails
         )
     }
 
