@@ -8,20 +8,33 @@ object ForecastNewsPatternPolicy {
     data class Assessment(val category: String, val direction: String, val confidence: Double,
         val features: Map<String, Any?>, val reason: String)
 
+    // 22 broad catalyst families; preserves original ten category IDs for historical learning.
     private val categories = linkedMapOf(
         "EARNINGS" to listOf("quarterly results", "financial results", "quarter ended", "annual results"),
         "PROFIT_MARGIN" to listOf("net profit", "ebitda", "operating margin", "profit after tax"),
         "ORDER_CONTRACT" to listOf("order received", "work order", "contract awarded", "order win", "letter of award"),
-        "INSTITUTIONAL_DEAL" to listOf("bulk deal", "block deal", "institutional investment", "stake acquisition", "fund raising"),
+        "INSTITUTIONAL_DEAL" to listOf("bulk deal", "block deal", "institutional investment", "stake acquisition"),
         "CUSTOMER_GROWTH" to listOf("subscribers", "customer base", "user growth", "new customers"),
         "EXPANSION" to listOf("capacity expansion", "new plant", "new facility", "expansion", "commercial production"),
         "ACQUISITION" to listOf("acquisition", "merger", "strategic partnership", "joint venture"),
         "REGULATORY" to listOf("regulatory approval", "usfda approval", "drug approval", "license granted", "clearance"),
         "GUIDANCE" to listOf("guidance raised", "outlook revised", "forecast raised", "management guidance"),
-        "DIVIDEND" to listOf("interim dividend", "final dividend", "special dividend", "buyback")
+        "DIVIDEND" to listOf("interim dividend", "final dividend", "special dividend"),
+        "FUNDING" to listOf("funding secured", "fund raise", "fundraising", "capital infusion", "equity financing", "raised funding"),
+        "IPO_LISTING" to listOf("ipo listing", "listed on nse", "initial public offering", "listing approval"),
+        "PRODUCT_LAUNCH" to listOf("product launch", "new product", "commercial launch", "product approval"),
+        "EXPORT_DEAL" to listOf("export order", "export contract", "overseas order", "international contract"),
+        "GOVERNMENT_POLICY" to listOf("government subsidy", "production linked incentive", "pli scheme", "government incentive"),
+        "CAPACITY_UTILIZATION" to listOf("capacity utilization", "capacity utilisation", "production ramp", "utilisation increased"),
+        "DEBT_REDUCTION" to listOf("debt repayment", "debt reduction", "debt free", "loan repayment", "prepaid debt"),
+        "BUYBACK" to listOf("share buyback", "buyback approved", "buyback offer"),
+        "PROMOTER_PURCHASE" to listOf("promoter acquired", "promoter purchase", "promoter increased stake"),
+        "PATENT_IP" to listOf("patent granted", "patent approval", "intellectual property granted"),
+        "STRATEGIC_ALLIANCE" to listOf("strategic alliance", "strategic collaboration", "memorandum of understanding", "signed mou"),
+        "RATING_UPGRADE" to listOf("credit rating upgraded", "rating upgrade", "outlook upgraded")
     )
-    private val negative = listOf("loss widened", "profit declined", "revenue declined", "guidance cut", "penalty", "fraud", "default", "downgrade", "resigned", "termination", "order cancelled")
-    private val positive = listOf("rose", "grew", "increased", "improved", "surge", "record", "awarded", "approved", "secured", "wins", "expands", "raises")
+    private val negative = listOf("loss widened", "profit declined", "revenue declined", "guidance cut", "penalty", "fraud", "default", "downgrade", "resigned", "termination", "order cancelled", "guidance lowered", "regulatory warning", "dilution", "pledge", "lawsuit", "insolvency", "fraud investigation")
+    private val positive = listOf("rose", "grew", "increased", "improved", "surge", "record", "awarded", "approved", "secured", "wins", "expands", "raises", "secured", "granted", "launched", "upgraded", "inflow", "reduced debt", "awarded contract")
     private val percent = Regex("([+-]?\\d+(?:\\.\\d+)?)\\s*%")
     private val money = Regex("(?:₹|rs\\.?|inr)\\s*([\\d,]+(?:\\.\\d+)?)\\s*(crore|cr|lakh|million|billion)?", RegexOption.IGNORE_CASE)
 
@@ -47,6 +60,8 @@ object ForecastNewsPatternPolicy {
             "billion" -> amount?.times(100.0)
             else -> null
         }
+        // Amounts are parsed only for explicit INR figures; foreign currencies and
+        // missing units remain UNKNOWN, not implicitly converted into rupees.
         val confidence = ((if (sourceVerified) .18 else 0.0) +
             (if (category != "OTHER") .22 else 0.0) +
             (if (direction == "POSITIVE_POSSIBLE") .20 else 0.0) +
