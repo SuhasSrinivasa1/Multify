@@ -626,9 +626,9 @@ private fun ForecastScreen(
                     Text("Forecast engine · AUTOMATIC DISCOVERY", fontWeight = FontWeight.SemiBold)
                     Text(
                         if (state.settings.forecastAutoBuyEnabled)
-                            "Forecast screens the entire NSE universe but uses only spare API capacity after SELL, Multify and Fixed. Automatic CNC BUY remains gated behind five completed calibration sessions."
+                            "Forecast screens the entire NSE universe but uses only spare API capacity after SELL, Multify and Fixed. Automatic CNC BUY remains subject to broker readiness, fresh PRIMARY quality and existing safety rules. Research sessions are tracked for learning, not an activation mandate."
                         else
-                            "EARLY ENTRY alerts publish during calibration. Forecast automatic buying is OFF; optional manual BUY still needs broker readiness. Multiple separate setups in the same stock may appear after a completed target and new pullback.",
+                            "Forecast can publish early-entry and news-confirmed PRIMARY calls without a five-session gate. Auto Buy is OFF until you enable it; research-only candidates never BUY. Broker and safety checks still apply.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -1212,7 +1212,7 @@ private fun SettingsScreen(
                         Column(Modifier.weight(1f)) {
                             Text("Auto-buy forecast recommendations", fontWeight = FontWeight.SemiBold)
                             Text(
-                                "After five completed calibration sessions, this toggle independently allows new confirmed PRIMARY Forecast calls to use direct Groww CNC MARKET BUY. Multify ARM is separate; common broker readiness, safety halt and sell protection still apply.",
+                                "When enabled, confirmed PRIMARY Forecast calls may use direct Groww CNC MARKET BUY; all broker readiness, entry freshness, safety halt and common SELL protections still apply. Research-only rows cannot BUY.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -1224,7 +1224,7 @@ private fun SettingsScreen(
                     }
                     KeyValueRow(
                         "Forecast auto-buy",
-                        if (state.settings.forecastAutoBuyEnabled) "ON · execution subject to broker and calibration guards" else "OFF · five completed sessions required before activation"
+                        if (state.settings.forecastAutoBuyEnabled) "ON · execution subject to broker and quality guards" else "OFF · only verified PRIMARY calls are buy-eligible"
                     )
                     Text(
                         "Entry control: no Fixed entry GTT. Auto-buy uses a fresh quote for sizing and sends a direct CNC MARKET BUY immediately. The actual broker fill becomes the holding average and trailing anchor; the live execution target keeps the frozen recommendation target percentage but is anchored to that actual fill.",

@@ -6,6 +6,7 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import org.json.JSONObject
 import java.io.File
 import java.time.Instant
+import java.security.MessageDigest
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
@@ -61,12 +62,23 @@ class AuditLogger @Inject constructor(
             executor.submit {}.get(EXPORT_FLUSH_TIMEOUT_MS, TimeUnit.MILLISECONDS)
         }
         return synchronized(lock) {
-            buildString {
-                val old = File(directory, "system_audit.1.jsonl")
-                if (old.exists()) append(old.readText())
-                if (file.exists()) append(file.readText())
-            }
+            directory.listFiles()?.filter { it.name.endsWith(".jsonl") }
+                ?.sortedBy { it.name }?.joinToString("") { it.readText() }.orEmpty()
         }
+    }
+
+    /** Exact archival import; idempotent by digest. Does not restore secrets or broker state. */
+    fun restoreArchived(jsonl: String): Int = synchronized(lock) {
+        val valid = jsonl.lineSequence().filter { line ->
+            runCatching { val x = JSONObject(line); x.has("timestamp_ms") && x.has("category") && x.has("event") }.getOrDefault(false)
+        }.joinToString("\n", postfix = "\n")
+        if (valid.isBlank()) return@synchronized 0
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest(valid.toByteArray()).joinToString("") { "%02x".format(it) }
+        val archived = File(directory, "restored_audit_$digest.jsonl")
+        if (archived.exists()) return@synchronized 0
+        archived.writeText(valid)
+        valid.lineSequence().count { it.isNotBlank() }
     }
 
     private fun write(
@@ -96,9 +108,10 @@ class AuditLogger @Inject constructor(
 
     private fun rotateIfNeeded() {
         if (!file.exists() || file.length() < MAX_BYTES) return
-        val old = File(directory, "system_audit.1.jsonl")
-        if (old.exists()) old.delete()
-        file.renameTo(old)
+        // Never delete an older audit segment. Old data is included in ZIP exports.
+        var index = 1
+        while (File(directory, "system_audit.${index.toString().padStart(7, '0')}.jsonl").exists()) index++
+        check(file.renameTo(File(directory, "system_audit.${index.toString().padStart(7, '0')}.jsonl")))
     }
 
     private fun isSensitiveKey(key: String): Boolean {

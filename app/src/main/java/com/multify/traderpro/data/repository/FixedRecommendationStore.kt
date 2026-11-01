@@ -78,6 +78,9 @@ class FixedRecommendationStore @Inject constructor(
     private val gson = GsonBuilder().disableHtmlEscaping().create()
 
     @Synchronized
+    internal fun archivedRecommendations(): List<FixedRecommendationRecord> = load().recommendations
+
+    @Synchronized
     internal fun recommendations(date: String): List<FixedRecommendationRecord> =
         load().recommendations.filter { it.recommendationDate == date }.sortedBy { it.rank }
 

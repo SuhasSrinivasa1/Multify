@@ -82,6 +82,7 @@ import com.multify.traderpro.engine.ForecastEntryTimingPolicy
 import com.multify.traderpro.engine.MultifyPositiveTransferCase
 import com.multify.traderpro.engine.FixedPositiveTransferCase
 import com.multify.traderpro.engine.ForecastQualityDecision
+import com.multify.traderpro.engine.ForecastNewsPatternPolicy
 import com.multify.traderpro.engine.ForecastQualityPolicy
 import com.multify.traderpro.engine.ForecastTargetExpansionPolicy
 import com.multify.traderpro.engine.ForecastUniversalPositiveEvidencePolicy
@@ -188,6 +189,8 @@ class TradingRepository @Inject constructor(
     private val nseSymbols: NseSymbolRepository,
     private val auditLogger: AuditLogger,
     private val fixedFactorTelemetry: FixedFactorTelemetry,
+    private val forecastNewsMonitor: ForecastNewsMonitor,
+    private val forecastNewsJournal: ForecastNewsJournal,
     private val marketDiscoveryStateStore: MarketDiscoveryStateStore,
     private val forecastAutoBuyOrderStore: ForecastAutoBuyOrderStore,
     private val fixedEngineSnapshotStore: FixedEngineSnapshotStore,
@@ -1118,14 +1121,7 @@ class TradingRepository @Inject constructor(
     }
 
     suspend fun setForecastAutoBuy(enabled: Boolean) {
-        if (enabled && !forecastLiveUnlocked()) {
-            val completed = forecastCalibrationDates().size
-            auditLogger.log("FORECAST_AUTO_BUY", "ENABLE_REJECTED_CALIBRATION", mapOf(
-                "completed_sessions" to completed,
-                "required_sessions" to MarketPriorityPolicy.LIVE_FORECAST_UNLOCK_SESSIONS
-            ))
-            error("Forecast Auto Buy locked: $completed/${MarketPriorityPolicy.LIVE_FORECAST_UNLOCK_SESSIONS} completed calibration sessions. Research and manual observation stay available.")
-        }
+        // Training-session count is diagnostic only; existing execution and risk guards remain.
         if (enabled) preferences.setForecastScannerEnabled(true) // migrate old paused-scanner installs
         preferences.setForecastAutoBuy(enabled)
         auditLogger.log(
@@ -2279,8 +2275,9 @@ class TradingRepository @Inject constructor(
         }
     }
 
-    suspend fun forecastLiveUnlocked(): Boolean =
-        MarketPriorityPolicy.liveForecastUnlocked(forecastCalibrationDates().size)
+    // Forecast signals and optional Auto Buy are no longer locked behind five sessions.
+    // Broker readiness, qualifying PRIMARY entry, spread, economics and common SELL remain mandatory.
+    suspend fun forecastLiveUnlocked(): Boolean = true
 
     suspend fun generateDailyForecasts(force: Boolean = false): List<ForecastDto> {
         runCatching { ensureFixedEngineSnapshot() }
@@ -2699,7 +2696,7 @@ class TradingRepository @Inject constructor(
             .count()
 
         val completedCalibrationSessions = forecastCalibrationDates().size
-        val liveForecastReady = MarketPriorityPolicy.liveForecastUnlocked(completedCalibrationSessions)
+        val liveForecastReady = true // Forecast-only: no five-session recommendation gate
         val publishable = unseen.filter { item ->
             val currentPrimary =
                 item.quality.tier == "PRIMARY" && item.quality.publishEligible && item.quality.executionEligible &&
@@ -2731,7 +2728,7 @@ class TradingRepository @Inject constructor(
                     marketRegime = marketRegime,
                     championKey = item.championKey,
                     reason = (if (!liveForecastReady)
-                        "RESEARCH ONLY · wait for five completed outcome-validated sessions before BUY · "
+                        "RESEARCH ONLY · no auto BUY unless fresh PRIMARY with broker checks · "
                         else "") + quality.reason + " · " + item.evaluation.reason +
                         " · Entry intelligence " + run {
                             val context = ForecastPreSpikeContextPolicy.evaluate(item.evaluation.features.candles)
@@ -2787,7 +2784,7 @@ class TradingRepository @Inject constructor(
             "universal_evidence_negative_penalties" to false,
             "live_forecast_unlocked" to liveForecastReady,
             "live_forecast_completed_sessions" to completedCalibrationSessions,
-            "live_forecast_session_goal" to MarketPriorityPolicy.LIVE_FORECAST_UNLOCK_SESSIONS,
+            "live_forecast_session_goal" to 0, // calibration sessions remain research diagnostics only
             "research_capture_allowed" to researchCaptureAllowed,
             "research_sessions_captured" to capturedResearchDates.size,
             "research_session_goal" to RESEARCH_SESSION_GOAL,
@@ -3507,6 +3504,22 @@ class TradingRepository @Inject constructor(
                     "event_id" to eventId, "symbol" to symbol, "message" to (it.message ?: it.javaClass.simpleName)
                 ))
             }.getOrNull() ?: return
+        val capturedAt = System.currentTimeMillis()
+        val model = MultifyFactorFamilies.evaluate(evaluation, "BREADTH_NEUTRAL")
+        val featureJson = researchGson.toJson(researchFeatureMap(evaluation, model))
+        learningDao.insertForecastResearch(ForecastResearchEntity(
+            researchDate = LocalDate.now(INDIA).toString(), scanAtMs = capturedAt,
+            symbol = symbol.uppercase(Locale.US), rank = 0, qualityTier = "MULTIFY_REFERENCE",
+            publishEligible = false, executionEligible = false, targetPct = 1.0,
+            entryPrice = evaluation.features.ltp, regime = evaluation.regime,
+            marketRegime = "BREADTH_NEUTRAL", strategy = evaluation.strategy,
+            directionalScore = evaluation.directionalScore, confidence = evaluation.confidence,
+            rejectionReason = "Evidence only: pending 15-minute post-call outcome",
+            featureJson = featureJson,
+            voteJson = researchGson.toJson(evaluation.votes.map { mapOf(
+                "name" to it.name, "score" to it.score, "note" to it.note) }),
+            multifyMatched = true, multifyEventId = eventId, multifyAtMs = capturedAt
+        ))
         auditLogger.log("MULTIFY_RESEARCH", "FEATURE_SNAPSHOT", mapOf(
             "event_id" to eventId,
             "symbol" to symbol,
@@ -4396,6 +4409,156 @@ class TradingRepository @Inject constructor(
         return LocalStrategyEngine.evaluateLong(signal, features, includeEventPrior = false)
     }
 
+    /** Forecast-only source: public NSE announcements, with Beta read-only quote/candle confirmation. */
+    suspend fun monitorForecastNews(): Int {
+        if (!forecastBackgroundScanningEnabled()) return 0
+        val newlyCaptured = forecastNewsMonitor.poll()
+        val now = ZonedDateTime.now(INDIA)
+        val today = now.toLocalDate().toString()
+        if (marketSession() != "OPEN" || now.dayOfWeek.value >= 6) return newlyCaptured
+        val token = forecastMarketToken() ?: run {
+            auditLogger.logAsync("FORECAST_NEWS", "NO_FORECAST_MARKET_TOKEN")
+            return newlyCaptured
+        }
+        val healthy = marketDiscoveryStateStore.loadHealth(today)
+        val baselineReady = healthy?.baselineReady == true &&
+            System.currentTimeMillis() - healthy.updatedAtMs < 20L * 60_000L
+        val guard = if (secretStore.hasBetaCredentials()) betaForecastCycleMutex else scanApiCycleMutex
+        if (!guard.tryLock()) return newlyCaptured
+        try {
+            val news = forecastNewsJournal.dueForEvaluation(System.currentTimeMillis())
+            for (item in news) {
+                if (fixedApiPriorityRequested || marketCriticalTradeInFlight) break
+                val eval = runCatching { forecastEvaluation(item.symbol, token) }
+                    .onFailure { auditLogger.logAsync("FORECAST_NEWS", "CANDIDATE_EVALUATION_ERROR", mapOf(
+                        "news_id" to item.id, "symbol" to item.symbol,
+                        "exception" to it.javaClass.simpleName)) }.getOrNull() ?: continue
+                val quality = com.multify.traderpro.engine.ForecastEarlyEntryPolicy.quality(eval, 1.0)
+                val settings = preferences.settings.first()
+                val economics = ForecastAdaptiveSelectionPolicy.economics(
+                    entryPrice = eval.features.ltp, targetPct = 1.0,
+                    budgetRupees = settings.holdingBudgetRupees,
+                    spreadBps = eval.features.spreadBps,
+                    atrPct = eval.features.atr14?.takeIf { eval.features.ltp > 0.0 }
+                        ?.let { it / eval.features.ltp * 100.0 })
+                val ageMs = System.currentTimeMillis() - item.publishedAtMs
+                // Learn only from completed prior-session news, never from future bars.
+                val priorDayEnd = today.let { LocalDate.parse(it).atStartOfDay(INDIA).toInstant().toEpochMilli() }
+                val historical = forecastNewsJournal.completedCategoryStats(priorDayEnd)
+                    .firstOrNull { it.category == item.category }
+                val validatedCategory = historical != null && historical.observations >= 15 &&
+                    historical.distinctDays >= 3
+                val learnedConfidence = if (validatedCategory) {
+                    item.classificationConfidence + if (historical!!.hitRate >= 0.60) 0.07
+                    else if (historical.hitRate < 0.30) -0.10 else 0.0
+                } else item.classificationConfidence
+                val qualifies = item.direction == "POSITIVE_POSSIBLE" &&
+                    learnedConfidence >= 0.70 &&
+                    ageMs in 0L..(5L * 60_000L) &&
+                    baselineReady && quality.publishEligible && quality.executionEligible &&
+                    economics.profitableAfterCosts
+                val reason = "NEWS ${item.category} · " + item.rationale +
+                    " · quality=" + quality.tier +
+                    " · baseline=" + baselineReady + " · net ₹" + fmt(economics.netProfitRupees)
+                val factorModel = MultifyFactorFamilies.evaluate(eval, "BREADTH_NEUTRAL")
+                learningDao.insertForecastResearch(ForecastResearchEntity(
+                    researchDate = today, scanAtMs = System.currentTimeMillis(), symbol = item.symbol,
+                    rank = 0, qualityTier = if (qualifies) "NEWS_PRIMARY" else "NEWS_RESEARCH",
+                    publishEligible = qualifies, executionEligible = qualifies,
+                    targetPct = 1.0, entryPrice = eval.features.ltp, regime = eval.regime,
+                    marketRegime = "BREADTH_NEUTRAL", strategy = "NEWS_" + item.category,
+                    directionalScore = eval.directionalScore, confidence = eval.confidence,
+                    rejectionReason = reason,
+                    featureJson = researchGson.toJson(researchFeatureMap(eval, factorModel) +
+                        mapOf("news_event_id" to item.id, "news_category" to item.category,
+                            "news_feature_json" to item.featureJson)),
+                    voteJson = researchGson.toJson(eval.votes)))
+                val existing = learningDao.longForecastsForDate(today)
+                val alreadyRecommended = existing.any { it.symbol.equals(item.symbol, true) }
+                // An official source event is an independent discovery candidate, but the
+                // complete market baseline, 1m+5m quality, spread and net economics are mandatory.
+                val publish = qualifies && !alreadyRecommended &&
+                    ForecastPublicationPolicy.isReady(baselineReady, true, true, 0)
+                if (publish) {
+                    val at = System.currentTimeMillis()
+                    learningDao.upsertLongForecast(LongForecastEntity(
+                        forecastDate = today, rank = (existing.maxOfOrNull { it.rank } ?: 0) + 1,
+                        symbol = item.symbol, entryPrice = eval.features.ltp, targetPct = 1.0,
+                        targetPrice = eval.features.ltp * 1.01,
+                        confidence = eval.confidence, score = eval.confidence,
+                        strategy = "NEWS_" + item.category, regime = eval.regime,
+                        marketRegime = "BREADTH_NEUTRAL", reason = reason,
+                        generatedAtMs = at, lastPrice = eval.features.ltp,
+                        lastObservedAtMs = at, qualityTier = "PRIMARY", executionEligible = true)))
+                }
+                forecastNewsJournal.update(item.copy(status = if (publish) "PUBLISHED" else "RESEARCH_ONLY",
+                    rationale = reason, baselinePrice = eval.features.ltp,
+                    baselineAtMs = System.currentTimeMillis(), lastObservedPrice = eval.features.ltp,
+                    lastObservedAtMs = System.currentTimeMillis()))
+                auditLogger.logAsync("FORECAST_NEWS", "EVENT_EVALUATED", mapOf(
+                    "id" to item.id, "symbol" to item.symbol, "category" to item.category,
+                    "published" to publish, "baseline_ready" to baselineReady,
+                    "quality_tier" to quality.tier, "economics_profitable" to economics.profitableAfterCosts,
+                    "net_profit_rupees" to economics.netProfitRupees,
+                    "feature_count" to 40,
+                    "historical_category_samples" to (historical?.observations ?: 0),
+                    "historical_category_hit_rate" to historical?.hitRate,
+                    "news_age_ms" to ageMs, "reason" to reason))
+            }
+        } finally {
+            guard.unlock()
+        }
+        return newlyCaptured
+    }
+
+    /** Completed outcome study: can run outside market hours without broker requests. */
+    fun auditForecastNewsLearning() {
+        val cutoff = LocalDate.now(INDIA).atStartOfDay(INDIA).toInstant().toEpochMilli()
+        val stats = forecastNewsJournal.completedCategoryStats(cutoff)
+        auditLogger.logAsync("FORECAST_NEWS", "CHRONOLOGICAL_CATEGORY_LEARNING", mapOf(
+            "as_of_before_ms" to cutoff,
+            "categories" to stats.map { row -> mapOf(
+                "category" to row.category, "observations" to row.observations,
+                "one_pct_hits" to row.hitsOnePct, "hit_rate" to row.hitRate,
+                "distinct_days" to row.distinctDays,
+                "average_mfe_pct" to row.averageMfe) },
+            "needs_out_of_sample_validation" to true,
+            "fixed_engine_changed" to false))
+    }
+
+    /** One-minute outcome snapshots, bounded to avoid stealing API calls from Fixed or SELL. */
+    suspend fun monitorForecastNewsOutcomes() {
+        if (marketSession() != "OPEN" || fixedApiPriorityRequested || marketCriticalTradeInFlight) return
+        val token = forecastMarketToken() ?: return
+        for (item in forecastNewsJournal.dueForOutcome(System.currentTimeMillis(), 2)) {
+            val initial = item.baselinePrice?.takeIf { it > 0.0 } ?: continue
+            val quote = runCatching {
+                withForecastLiveDataSlot {
+                    betaMarketRead(token, BetaResearchGate.Type.LIVE,
+                        alphaCall = { apiFactory.groww.quote(bearer(token), tradingSymbol = item.symbol)
+                            .requirePayload("News outcome ${item.symbol}") },
+                        betaCall = { apiFactory.betaGroww.quote(bearer(token), tradingSymbol = item.symbol)
+                            .requirePayload("Beta news outcome ${item.symbol}") })
+                }
+            }.getOrNull() ?: continue
+            val price = quote.lastPrice?.takeIf { it.isFinite() && it > 0.0 } ?: continue
+            val pct = (price / initial - 1.0) * 100.0
+            val now = System.currentTimeMillis()
+            val hitTime = item.firstOnePctAtMs ?: if (pct >= 1.0) now else null
+            val complete = now - (item.baselineAtMs ?: now) >= 60L * 60_000L
+            forecastNewsJournal.update(item.copy(maxFavourablePct = maxOf(item.maxFavourablePct, pct),
+                maxAdversePct = minOf(item.maxAdversePct, pct),
+                lastObservedPrice = price, lastObservedAtMs = now,
+                firstOnePctAtMs = hitTime, completedAtMs = if (complete) now else null))
+            auditLogger.logAsync("FORECAST_NEWS", "POST_NEWS_PRICE", mapOf(
+                "id" to item.id, "symbol" to item.symbol, "move_pct" to pct,
+                "max_favourable_pct" to maxOf(item.maxFavourablePct, pct),
+                "max_adverse_pct" to minOf(item.maxAdversePct, pct),
+                "hit_one_pct" to (hitTime != null), "completed" to complete,
+                "time_since_news_ms" to (now - item.publishedAtMs)))
+        }
+    }
+
     suspend fun executeForecast(symbol: String): String {
         val now = ZonedDateTime.now(INDIA)
         require(now.dayOfWeek.value < 6 && marketSession() == "OPEN") { "Forecast BUY is available only during the NSE regular session" }
@@ -4477,14 +4640,7 @@ class TradingRepository @Inject constructor(
         if (now.dayOfWeek.value >= 6 || marketSession() != "OPEN") return 0
         val settings = preferences.settings.first()
         if (!settings.forecastAutoBuyEnabled || settings.safetyHalt) return 0
-        // A restored or legacy ON setting must never bypass five completed research sessions.
-        if (!forecastLiveUnlocked()) {
-            auditLogger.logAsync("FORECAST_AUTO_BUY", "BUY_BLOCKED_CALIBRATION", mapOf(
-                "completed_sessions" to forecastCalibrationDates().size,
-                "required_sessions" to MarketPriorityPolicy.LIVE_FORECAST_UNLOCK_SESSIONS
-            ))
-            return 0
-        }
+        // No session-count BUY lock; production PRIMARY and broker safeguards below are unchanged.
         val preflightCooldown = buyApiCooldownOrNull()
         if (preflightCooldown != null) {
             auditAutoBuyBlocked("FORECAST_AUTO_BUY", preflightCooldown)
@@ -8015,6 +8171,49 @@ class TradingRepository @Inject constructor(
                 )
             )
         }
+        finalizeMultifyPositivePattern(eventId, symbol)
+    }
+
+    /** Only a verified >=1% rise within 15 minutes enters positive Forecast training. */
+    private suspend fun finalizeMultifyPositivePattern(eventId: Long, symbol: String) {
+        val call = learningDao.liveCallForBuyEvent(eventId) ?: return
+        val observations = learningDao.observationsForEventPhase(eventId, "POST_LONG_CALL")
+            .filter { it.offsetSeconds in 1..900 && it.price.isFinite() && it.price > 0.0 }
+        val peak = observations.maxOfOrNull { it.price } ?: return
+        val mfePct = if (call.entryPrice > 0.0) (peak / call.entryPrice - 1.0) * 100.0 else 0.0
+        val firstOnePct = observations.firstOrNull {
+            call.entryPrice > 0.0 && (it.price / call.entryPrice - 1.0) * 100.0 >= 1.0
+        }
+        auditLogger.logAsync("MULTIFY_RESEARCH", "FIFTEEN_MINUTE_OUTCOME", mapOf(
+            "event_id" to eventId, "symbol" to symbol, "mfe_pct" to mfePct,
+            "hit_one_pct" to (firstOnePct != null), "first_hit_seconds" to firstOnePct?.offsetSeconds,
+            "observations" to observations.size))
+        if (firstOnePct == null) return // unsuccessful examples remain in the research record.
+        val snapshot = learningDao.allForecastResearch().filter {
+            it.multifyEventId == eventId && it.qualityTier == "MULTIFY_REFERENCE"
+        }.minByOrNull { it.scanAtMs } ?: return
+        val summary = evidenceFeatureSummary(snapshot.featureJson)
+        learningDao.upsertForecastPositiveEvidence(ForecastPositiveEvidenceEntity(
+            evidenceKey = "MULTIFY_FAST_1PCT|$eventId", source = "MULTIFY_FAST_15M",
+            evidenceDate = snapshot.researchDate, eventAtMs = snapshot.scanAtMs,
+            symbol = symbol.uppercase(Locale.US), strategy = snapshot.strategy,
+            regime = snapshot.regime, marketRegime = snapshot.marketRegime,
+            dominantFamily = summary.dominantFamily, familyConsensus = summary.familyConsensus,
+            momentumFamilyScore = summary.momentum,
+            participationFamilyScore = summary.participation,
+            structureFamilyScore = summary.structure,
+            factorJson = snapshot.featureJson, voteJson = snapshot.voteJson,
+            entryPrice = call.entryPrice, targetPct = 1.0,
+            maxFavourablePct = mfePct,
+            maxAdversePct = observations.minOf { (it.price / call.entryPrice - 1.0) * 100.0 },
+            targetHit = true, positiveReason = "Multify +1% within ${firstOnePct.offsetSeconds}s",
+            reconstructionQuality = "LIVE_EVENT_PRE_SPIKE_SNAPSHOT",
+            updatedAtMs = System.currentTimeMillis()
+        ))
+        auditLogger.logAsync("FORECAST_LEARNING", "MULTIFY_FAST_POSITIVE_CAPTURED", mapOf(
+            "event_id" to eventId, "symbol" to symbol, "feature_json_retained" to true,
+            "time_to_one_pct_seconds" to firstOnePct.offsetSeconds,
+            "mfe_15m_pct" to mfePct))
     }
 
     data class LogExportResult(val entries: Int, val signalCount: Int, val tradeCount: Int)
@@ -8148,6 +8347,12 @@ class TradingRepository @Inject constructor(
             }
         }
 
+        restoreStage = "Forecast news event journal"
+        val restoredNews = entries["forecast_news_events.jsonl"]?.let { forecastNewsJournal.restore(it) } ?: 0
+        restoreStage = "Historical audit events"
+        val restoredAudit = entries["system_audit.jsonl"]?.let { auditLogger.restoreArchived(it) } ?: 0
+        auditLogger.log("MIGRATION", "FORECAST_NEWS_AND_AUDIT_RESTORED", mapOf(
+            "news_records" to restoredNews, "audit_rows" to restoredAudit))
         restoreStage = "Forecast research snapshots"
         entries["forecast_research_snapshots.json"]?.let { json ->
             val imported = gson.fromJson(json, Array<ForecastResearchEntity>::class.java).orEmpty()
@@ -8351,7 +8556,7 @@ class TradingRepository @Inject constructor(
         val today = LocalDate.now(INDIA).toString()
         val forecastAutoBuyOrders = forecastAutoBuyOrderStore.all(today)
         val fixedAutoBuyOrders = fixedAutoBuyOrderStore.all(today)
-        val fixedRecommendations = fixedRecommendationStore.recommendations(today)
+        val fixedRecommendations = fixedRecommendationStore.archivedRecommendations()
         val fixedSnapshot = fixedEngineSnapshotStore.loadOrNull()
         val safeSettings = mapOf(
             "holding_budget_rupees" to settings.holdingBudgetRupees,
@@ -8385,6 +8590,7 @@ class TradingRepository @Inject constructor(
                 add("signal_price_observations.json", priceObservations)
                 add("forecast_research_snapshots.json", forecastResearch)
                 add("forecast_positive_evidence.json", positiveEvidence)
+                addText("forecast_news_events.jsonl", forecastNewsJournal.archive())
                 add("long_learning.json", calls)
                 add("long_forecasts.json", forecasts)
                 add("long_champions.json", champions)
@@ -8410,6 +8616,8 @@ class TradingRepository @Inject constructor(
                     "client_governor_wait_event" to "CLIENT_GOVERNOR_WAIT",
                     "forecast_replay_event" to "UNIVERSAL_POSITIVE_EVIDENCE_REFRESH",
                     "positive_evidence_file" to "forecast_positive_evidence.json",
+                    "forecast_news_file" to "forecast_news_events.jsonl",
+                    "news_event_outcome_label" to ">=1% measured within 60m from first observed baseline",
                     "fixed_priority_phase_event" to "FIXED_PRIORITY_PHASE_PROFILE",
                     "fixed_entry_latency_event" to "ENTRY_LATENCY_PROFILE",
                     "fixed_notification_latency_event" to "FIXED_NOTIFICATION_POSTED"
@@ -8665,10 +8873,12 @@ class TradingRepository @Inject constructor(
             "forecast_positive_evidence.json",
             "fixed_recommendations.json",
             "fixed_engine_snapshot.json",
-            "fixed_factor_snapshots.jsonl"
+            "fixed_factor_snapshots.jsonl",
+            "forecast_news_events.jsonl",
+            "system_audit.jsonl"
         )
-        private const val MAX_RESTORE_ENTRY_BYTES = 48L * 1024L * 1024L
-        private const val MAX_RESTORE_TOTAL_BYTES = 64L * 1024L * 1024L
+        private const val MAX_RESTORE_ENTRY_BYTES = 128L * 1024L * 1024L
+        private const val MAX_RESTORE_TOTAL_BYTES = 256L * 1024L * 1024L
         private const val RESEARCH_SESSION_GOAL = 5
         private const val FORECAST_CALIBRATION_MIN_COMPLETED_ROWS = 5
         private const val FORECAST_CALIBRATION_PREFS = "forecast_v770_live_calibration"

@@ -11,6 +11,7 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import com.multify.traderpro.worker.NseSymbolSyncWorker
+import com.multify.traderpro.worker.ForecastNewsSyncWorker
 import com.multify.traderpro.data.network.GrowwRateLimitInterceptor
 import com.multify.traderpro.data.network.GrowwRecoveryGate
 import com.multify.traderpro.data.preferences.AppPreferences
@@ -39,6 +40,13 @@ class MultifyApp : Application(), Configuration.Provider {
             "nse-symbol-master-initial",
             ExistingWorkPolicy.KEEP,
             OneTimeWorkRequestBuilder<NseSymbolSyncWorker>().setConstraints(network).build()
+        )
+        // Android WorkManager cannot run 60-second jobs; this only recovers news
+        // monitoring if the foreground service was stopped by the OS.
+        wm.enqueueUniquePeriodicWork(
+            "forecast-news-fallback-15m", ExistingPeriodicWorkPolicy.UPDATE,
+            PeriodicWorkRequestBuilder<ForecastNewsSyncWorker>(15, TimeUnit.MINUTES)
+                .setConstraints(network).build()
         )
         wm.enqueueUniquePeriodicWork(
             "nse-symbol-master-monthly",

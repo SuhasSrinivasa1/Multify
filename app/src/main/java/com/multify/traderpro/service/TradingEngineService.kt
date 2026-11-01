@@ -46,6 +46,7 @@ class TradingEngineService : Service() {
     private var positionMonitorJob: Job? = null
     private var fixedScanJob: Job? = null
     private var forecastScanJob: Job? = null
+    private var forecastNewsJob: Job? = null
     private var positionMonitoringWakeLock: PowerManager.WakeLock? = null
     @Volatile private var lastKnownManagedCount = 0
     @Volatile private var lastManagedMonitorSucceeded = true
@@ -53,6 +54,7 @@ class TradingEngineService : Service() {
     private var lastAfterHoursMaintenanceAtMs = 0L
     private var lastFixedOutcomePollAtMs = 0L
     private var lastForecastOutcomePollAtMs = 0L
+    private var lastNewsDailyReportDate = ""
     private var lastApiUsageAuditAtMs = 0L
     private var positionProfileWindowStartedAtMs = 0L
     private var positionProfilePasses = 0
@@ -126,6 +128,7 @@ class TradingEngineService : Service() {
         positionMonitorJob?.cancel()
         fixedScanJob?.cancel()
         forecastScanJob?.cancel()
+        forecastNewsJob?.cancel()
         engineJob?.cancel()
         scope.cancel()
         auditLogger.log("RUNTIME", "FOREGROUND_ENGINE_DESTROYED")
@@ -134,10 +137,35 @@ class TradingEngineService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    /** Independent Forecast-only news I/O. SELL/Fixed keep priority; no new order path. */
+    private fun startForecastNewsWorker() {
+        if (forecastNewsJob?.isActive == true) return
+        forecastNewsJob = scope.launch(Dispatchers.IO.limitedParallelism(1)) {
+            auditLogger.logAsync("FORECAST_NEWS", "BACKGROUND_MONITOR_STARTED",
+                mapOf("requested_cadence_ms" to 60_000L))
+            while (isActive) {
+                runCatching {
+                    repository.monitorForecastNews()
+                    repository.monitorForecastNewsOutcomes()
+                    val studyDate = java.time.LocalDate.now(java.time.ZoneId.of("Asia/Kolkata")).toString()
+                    if (studyDate != lastNewsDailyReportDate) {
+                        repository.auditForecastNewsLearning()
+                        lastNewsDailyReportDate = studyDate
+                    }
+                }.onFailure { if (it !is CancellationException) {
+                    auditLogger.logAsync("FORECAST_NEWS", "BACKGROUND_CYCLE_ERROR", mapOf(
+                        "type" to it.javaClass.simpleName, "message" to (it.message ?: "").take(160)))
+                } }
+                delay(60_000L)
+            }
+        }
+    }
+
     private fun startEngineLoop() {
         startPositionMonitorWorker()
         startFixedScanWorker()
         startForecastScanWorker()
+        startForecastNewsWorker()
         if (engineJob?.isActive == true) return
         engineJob = scope.launch {
             auditLogger.log("RUNTIME", "FOREGROUND_ENGINE_STARTED", mapOf(
