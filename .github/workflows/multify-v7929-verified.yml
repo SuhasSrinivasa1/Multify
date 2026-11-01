@@ -1,0 +1,130 @@
+name: Multify v7.9.29 Beta Positive-Example Routing Hotfix
+on:
+  push:
+    branches: [v7929-multify-positive-beta-capture]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verified-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Android SDK 35
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
+      - name: Verify Fixed baseline, independent Alpha-Beta and execution safety
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin v7928-forecast-news-persistent-learning
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+          root = Path("app/src/main/java/com/multify/traderpro")
+          def previous(path):
+              return subprocess.check_output(["git","show",f"origin/v7928-forecast-news-persistent-learning:{path}"]).decode()
+          unchanged=[
+              "engine/FixedLocalStrategyEngine.kt",
+              "engine/FixedForecastQualityPolicy.kt",
+              "engine/FixedMarketDiscoveryPolicy.kt",
+              "engine/FixedForecastPublicationPolicy.kt",
+              "engine/FixedMultifyFactorFamilies.kt",
+              "engine/FixedFinalContract.kt",
+              "engine/HardStopLossPolicy.kt",
+              "engine/SteppedTrailingPolicy.kt",
+              "data/network/GrowwApiFactory.kt",
+              "data/network/BetaReadOnlyInterceptor.kt",
+              "data/network/BetaResearchGate.kt",
+              "data/network/GrowwRateLimitInterceptor.kt",
+              "data/network/GrowwModels.kt",
+              "engine/ForecastEarlyEntryPolicy.kt",
+              "engine/ForecastEntryTimingPolicy.kt",
+              "engine/ForecastPublicationPolicy.kt",
+              "engine/LocalStrategyEngine.kt"
+          ]
+          for name in unchanged:
+              path="app/src/main/java/com/multify/traderpro/"+name
+              assert Path(path).read_text()==previous(path),name+" changed unexpectedly"
+          src=(root/"data/repository/TradingRepository.kt").read_text()
+          prior=previous("app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt")
+          def region(s,a,b):
+              x=s.index(a);y=s.index(b,x+len(a))
+              return s[x:y+len(b)]
+          assert region(src,"// FIXED_FINAL_LOCK_BEGIN","// FIXED_FINAL_LOCK_END")==region(prior,"// FIXED_FINAL_LOCK_BEGIN","// FIXED_FINAL_LOCK_END")
+          for expected in ("forecastNewsJournal.archive()", "forecastNewsJournal.restore(",
+                           "auditLogger.restoreArchived(", "finalizeMultifyPositivePattern(",
+                           "monitorForecastNewsOutcomes()", "forecastLiveUnlocked(): Boolean = true",
+                           'candleInterval = "5minute"'):
+              assert expected in src, expected
+          # The entire repository differs from v7.9.28 only at the capture method,
+          # version number and this workflow. Fixed, execution and news source stay frozen.
+          changed=set(subprocess.check_output(
+              ["git","diff","--name-only","origin/v7928-forecast-news-persistent-learning...HEAD"]).decode().splitlines())
+          allowed={
+              "app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt",
+              "app/build.gradle.kts",
+              ".github/workflows/multify-v7929-verified.yml"
+          }
+          assert changed <= allowed, "Unexpected changed files: " + str(changed - allowed)
+          a="    suspend fun captureMultifyResearchSnapshot(eventId: Long, symbol: String) {"
+          b="    private data class EvidenceFeatureSummary("
+          assert src.split(a)[0]==prior.split(a)[0], "TradingRepository changed before capture"
+          assert src.split(b)[1]==prior.split(b)[1], "TradingRepository changed after capture"
+          capture=src.split(a)[1].split(b)[0]
+          assert "forecastMarketToken()" in capture
+          assert "ensureToken()" not in capture
+          assert "forecastUsesBeta(token)" in capture
+          assert 'FEATURE_CAPTURE_SKIPPED_NO_RESEARCH_ACCOUNT' in capture
+          assert '"research_account" to researchAccount' in capture
+          assert 'forecastEvaluation(symbol, token)' in capture
+          assert 'versionCode = 7929' in Path("app/build.gradle.kts").read_text()
+          print("Fixed immutable selection, Beta isolation, broker SELL and v7929 Beta routing verified")
+          PY
+      - name: Backend tests
+        shell: bash
+        run: |
+          python -m pip install -r backend/requirements.txt
+          PYTHONPATH="$GITHUB_WORKSPACE" PHONE_HMAC_SECRET=test-secret-test-secret-test-secret GROWW_API_KEY=test-api-key GROWW_TOTP_SECRET=JBSWY3DPEHPK3PXP python -m pytest -q backend/tests
+      - name: Android unit tests
+        run: gradle --no-daemon testDebugUnitTest
+      - name: Build APK
+        run: gradle --no-daemon assembleDebug
+      - name: Verify signature, APK identity, source checksum
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v7.9.29-beta-multify-positive-capture-debug.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/*.apk > dist/APK-SIGNATURE.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/*.apk | head -n 2 > dist/PACKAGE.txt
+          sha256sum dist/*.apk > dist/SHA256SUMS.txt
+          git rev-parse HEAD > dist/SOURCE-COMMIT.txt
+          python - <<'PY'
+          from pathlib import Path
+          import zipfile
+          with zipfile.ZipFile('dist/Multify-TraderPro-v7.9.29-source.zip','w',zipfile.ZIP_DEFLATED,compresslevel=6) as z:
+              for p in Path('.').rglob('*'):
+                  if not p.is_file():continue
+                  if any(part in {'.git','.gradle','build','dist','__pycache__','.pytest_cache'} for part in p.parts):continue
+                  if p.suffix.lower() in {'.jks','.keystore'} or p.name.startswith('.env'):continue
+                  z.write(p,p.as_posix())
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: multify-v7929-beta-positive-capture
+          path: dist/
+          if-no-files-found: warn
