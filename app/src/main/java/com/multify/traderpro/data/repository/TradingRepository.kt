@@ -1914,7 +1914,7 @@ class TradingRepository @Inject constructor(
                         },
                         "published_count" to fixedRecommendationStore.recommendations(currentDate).size,
                         "explanatory_detail" to "read-only counts from frozen Fixed scan observations",
-                        "pre_spike_discovery_slots" to 0 // original v7.9.17 momentum rank has no pre-spike bucket,
+                        "pre_spike_discovery_slots" to 0, // original v7.9.17 has no pre-spike bucket,
                         "scoring_or_publication_changed" to false
                     ))
                 }
