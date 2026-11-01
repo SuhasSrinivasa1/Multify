@@ -724,20 +724,24 @@ private fun ForecastScreen(
             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                 shape = RoundedCornerShape(20.dp)) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Early-entry research · PRIMARY pending / SECONDARY", fontWeight = FontWeight.SemiBold)
+                    Text("Early-entry research · PRIMARY pending / SECONDARY / RESEARCH", fontWeight = FontWeight.SemiBold)
                     Text("These watchlist rows cannot place an order. " +
                         "A stock can form several peaks: after a completed target and pullback, " +
                         "a new independently qualified PRIMARY setup may trigger another opportunity.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                     if (watchlist.isEmpty()) {
-                        Text("No current SECONDARY candidates; research continues.",
+                        Text("No recent research candidates; research continues.",
                             style = MaterialTheme.typography.bodySmall)
                     } else {
                         watchlist.forEach { candidate ->
                             HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = .12f))
                             Text(candidate.symbol + " · " +
-                                (if (candidate.qualityTier == "PRIMARY") "PRIMARY awaiting confirmation" else "SECONDARY watch") + " · " +
+                                (when (candidate.qualityTier) {
+                                    "PRIMARY" -> "PRIMARY awaiting confirmation"
+                                    "SECONDARY" -> "SECONDARY watch"
+                                    else -> "RESEARCH only · NOT A BUY"
+                                }) + " · " +
                                 String.format(Locale.US, "%.0f%% confidence", candidate.confidence * 100.0),
                                 fontWeight = FontWeight.Medium)
                             Text(candidate.reason.ifBlank { "Awaiting a fresh qualifying setup" },
