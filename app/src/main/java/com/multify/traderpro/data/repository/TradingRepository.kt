@@ -4480,9 +4480,9 @@ class TradingRepository @Inject constructor(
                 val materiality = policy.materialityPct(amountCrore, cap)
                 val patternKey = policy.patternKey(catalystKey, policy.capBucket(cap), categories.size, materiality)
                 val history = stats[patternKey]
-                val evidence = policy.Evidence(history?.observations ?: 0,
+                val evidence = com.multify.traderpro.engine.ForecastNewsOpportunityPolicy.Evidence(history?.observations ?: 0,
                     history?.distinctDays ?: 0, history?.hitRate ?: 0.0)
-                val decision = policy.decide(policy.Context(quote.dayChangePct, spreadBps, ltp,
+                val decision = policy.decide(com.multify.traderpro.engine.ForecastNewsOpportunityPolicy.Context(quote.dayChangePct, spreadBps, ltp,
                     amountCrore, cap, categories.size, catalystKey, ageMs / 60_000L, evidence))
                 val settings = preferences.settings.first()
                 val economics = ForecastAdaptiveSelectionPolicy.economics(
