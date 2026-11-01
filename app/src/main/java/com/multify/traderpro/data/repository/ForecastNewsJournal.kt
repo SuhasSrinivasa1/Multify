@@ -2,6 +2,9 @@ package com.multify.traderpro.data.repository
 
 import android.content.Context
 import com.google.gson.GsonBuilder
+import com.google.gson.JsonParser
+import java.time.Instant
+import java.time.ZoneId
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
 import javax.inject.Inject
@@ -66,15 +69,17 @@ class ForecastNewsJournal @Inject constructor(@ApplicationContext context: Conte
     }
 
     fun dueForEvaluation(nowMs: Long, limit: Int = 3): List<ForecastNewsEvent> = synchronized(lock) {
+        // Prioritize fresh intraday headlines, then replay after-hours/weekend items
+        // at the next NSE open. Never discard them merely because they exceed 20 min.
         latest.values.asSequence().filter { it.status == "NEW" && it.symbol.isNotBlank() &&
-            it.publishedAtMs in (nowMs - 20L * 60_000L)..nowMs
-        }.take(limit).toList()
+            it.publishedAtMs in (nowMs - 96L * 3_600_000L)..nowMs
+        }.sortedByDescending { it.publishedAtMs }.take(limit).toList()
     }
 
     fun dueForOutcome(nowMs: Long, limit: Int = 4): List<ForecastNewsEvent> = synchronized(lock) {
         latest.values.asSequence().filter { it.baselinePrice != null && it.completedAtMs == null &&
             (it.lastObservedAtMs == null || nowMs - it.lastObservedAtMs >= 60_000L)
-        }.take(limit).toList()
+        }.sortedBy { it.lastObservedAtMs ?: 0L }.take(limit).toList()
     }
 
     /** Purely prior completed outcomes: no future or same-day labels leak into prediction. */
@@ -91,6 +96,33 @@ class ForecastNewsJournal @Inject constructor(@ApplicationContext context: Conte
                 rows.map { it.publishedAtMs / (24 * 60 * 60_000L) }.distinct().size,
                 hits.toDouble() / rows.size, rows.map { it.maxFavourablePct }.average())
         }.sortedByDescending { it.observations }
+    }
+
+    /** Prior-session outcome cohorts, stratified by category, company size,
+     * independent catalyst count and measured financial materiality.
+     * One symbol per market day / key prevents multiple notifications from inflating the denominator.
+     */
+    data class PatternStats(val key: String, val observations: Int, val wins: Int,
+                            val distinctDays: Int, val hitRate: Double, val averageMfe: Double)
+
+    fun completedPatternStats(beforeMs: Long): List<PatternStats> = synchronized(lock) {
+        val india = ZoneId.of("Asia/Kolkata")
+        latest.values.asSequence().filter { row ->
+            row.completedAtMs != null && row.completedAtMs < beforeMs &&
+                row.baselinePrice != null && row.lastObservedAtMs != null
+        }.mapNotNull { row ->
+            val key = runCatching {
+                JsonParser.parseString(row.featureJson).asJsonObject
+                    .get("news_pattern_key")?.asString
+            }.getOrNull()?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            val day = Instant.ofEpochMilli(row.publishedAtMs).atZone(india).toLocalDate().toString()
+            Triple(row, key, day)
+        }.distinctBy { (row, key, day) -> "$day|$key|${row.symbol}" }
+            .groupBy { it.second }.map { (key, group) ->
+                val wins = group.count { it.first.firstOnePctAtMs != null }
+                PatternStats(key, group.size, wins, group.map { it.third }.distinct().size,
+                    wins.toDouble() / group.size, group.map { it.first.maxFavourablePct }.average())
+            }.sortedByDescending { it.observations }
     }
 
     /** Exports the full immutable event/update stream, not just newest rows. */
