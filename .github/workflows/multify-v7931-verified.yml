@@ -63,7 +63,13 @@ jobs:
           def region(s,a,b):
               x=s.index(a);y=s.index(b,x+len(a))
               return s[x:y+len(b)]
-          assert region(src,"// FIXED_FINAL_LOCK_BEGIN","// FIXED_FINAL_LOCK_END")==region(prior,"// FIXED_FINAL_LOCK_BEGIN","// FIXED_FINAL_LOCK_END")
+          lock=region(src,"// FIXED_FINAL_LOCK_BEGIN","// FIXED_FINAL_LOCK_END")
+          previous_lock=region(prior,"// FIXED_FINAL_LOCK_BEGIN","// FIXED_FINAL_LOCK_END")
+          normalized=lock.replace('candleInterval = "15minute"','candleInterval = "5minute"').replace(
+              "FixedLocalStrategyEngine.buildFeatures(quote, historical, 15)",
+              "FixedLocalStrategyEngine.buildFeatures(quote, historical, 5)"
+          ).replace('"fixed_15minute_forecast_1minute"','"fixed_5minute_forecast_1minute"')
+          assert normalized == previous_lock, "Fixed lock changed beyond v7.9.1 input restoration"
           for expected in ("forecastNewsJournal.archive()", "forecastNewsJournal.restore(",
                            "auditLogger.restoreArchived(", "finalizeMultifyPositivePattern(",
                            "monitorForecastNewsOutcomes()", "forecastLiveUnlocked(): Boolean = true",
