@@ -614,7 +614,7 @@ private fun ForecastScreen(
         item {
             SectionTitle(
                 "LONG holding forecast",
-                "EARLY ENTRY · entire NSE market screened by bulk prices, then candidates evaluated with 1-minute candles and 5/15/30-minute context. Qualified early setups publish immediately; five-session learning continues without blocking notifications."
+                "EARLY ENTRY · NSE market scanning, NSE news intelligence, Multify positive-pattern research, Fixed outcome transfer, and official Univest 1–3 month calls closed the same day. Univest is research-only, capturing 48 entry-time factors and learning only after verified entry/exit quotes; it never places Univest orders."
             )
         }
         item {

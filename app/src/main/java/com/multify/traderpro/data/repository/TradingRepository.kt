@@ -83,6 +83,7 @@ import com.multify.traderpro.engine.MultifyPositiveTransferCase
 import com.multify.traderpro.engine.FixedPositiveTransferCase
 import com.multify.traderpro.engine.ForecastQualityDecision
 import com.multify.traderpro.engine.ForecastNewsPatternPolicy
+import com.multify.traderpro.engine.ForecastUnivestLearningPolicy
 import com.multify.traderpro.engine.ForecastQualityPolicy
 import com.multify.traderpro.engine.ForecastTargetExpansionPolicy
 import com.multify.traderpro.engine.ForecastUniversalPositiveEvidencePolicy
@@ -191,6 +192,7 @@ class TradingRepository @Inject constructor(
     private val fixedFactorTelemetry: FixedFactorTelemetry,
     private val forecastNewsMonitor: ForecastNewsMonitor,
     private val forecastNewsJournal: ForecastNewsJournal,
+    private val forecastUnivestJournal: ForecastUnivestJournal,
     private val marketDiscoveryStateStore: MarketDiscoveryStateStore,
     private val forecastAutoBuyOrderStore: ForecastAutoBuyOrderStore,
     private val fixedEngineSnapshotStore: FixedEngineSnapshotStore,
@@ -2503,6 +2505,18 @@ class TradingRepository @Inject constructor(
         }
 
         val universalPositiveEvidence = universalPositiveEvidenceCases(today)
+        val univestCompleted = univestHistoricalCases(today)
+        val univestResults = univestCompleted.map { it.date }.distinct().size
+        auditLogger.logAsync("FORECAST_UNIVEST", "SAME_DAY_LEARNING_PROFILE", mapOf(
+            "completed_cases_previous_days" to univestCompleted.size,
+            "distinct_days" to univestResults,
+            "positive_cases" to univestCompleted.count { it.returnPct > 0.0 },
+            "positive_hit_rate" to (univestCompleted.count { it.returnPct > 0.0 }.toDouble() /
+                univestCompleted.size.coerceAtLeast(1)),
+            "minimum_closed" to ForecastUnivestLearningPolicy.MIN_CLOSED_COHORT,
+            "minimum_hit_rate" to ForecastUnivestLearningPolicy.MIN_WIN_RATE,
+            "training_source" to "OFFICIAL_1_TO_3_MONTH_ENTRY_SAME_DAY_EXIT_ONLY",
+            "feature_count" to 48, "fixed_engine_changed" to false))
 
         val ranked = evaluated.map { row ->
             val baseQuality = com.multify.traderpro.engine.ForecastEarlyEntryPolicy.quality(row.second, targetPct)
@@ -2549,6 +2563,10 @@ class TradingRepository @Inject constructor(
             // A historical winner, a coil or volume build cannot bypass eligibility.
             val preSpikeEvidence = ForecastPreSpikeContextPolicy.evaluate(row.second.features.candles)
             val preSpikeBonus = if (quality.publishEligible) preSpikeEvidence.rankingBonus else 0.0
+            val univestBonus = if (quality.publishEligible) ForecastUnivestLearningPolicy.evaluate(
+                univestCompleted,
+                ForecastUnivestLearningPolicy.fingerprint(factorModel, row.second, marketRegime), today
+            ).bonus else 0.0
             val universalEvidenceBonus = ForecastUniversalPositiveEvidencePolicy.rankingBonus(
                 symbol = row.first,
                 strategy = row.second.strategy,
@@ -2584,7 +2602,7 @@ class TradingRepository @Inject constructor(
                     row.second.confidence +
                     row.second.directionalScore.coerceAtLeast(0.0) * 0.10 +
                     championBonus + frequencyBonus + dnaBonus + qualityBonus + researchBonus + familyBonus +
-                    fixedPositiveBonus + multifyPositiveBonus + historicalReferenceBonus + preSpikeBonus + universalEvidenceBonus
+                    fixedPositiveBonus + multifyPositiveBonus + historicalReferenceBonus + preSpikeBonus + universalEvidenceBonus + univestBonus
                 ).coerceIn(0.01, .99),
                 championKey = key,
                 targetPct = candidateTargetPct,
@@ -3461,6 +3479,126 @@ class TradingRepository @Inject constructor(
             "prev_low" to f.prevLow,
             "prev_close" to f.prevClose
         )
+    }
+
+    /**
+     * Independent, official-package-only Univest RESEARCH input. No order is ever placed.
+     * Only 1–3 month ENTRY + official same-NSE-session EXIT with two observed quote
+     * prices and 48 entry-time features may join Forecast learning. Never feeds Fixed.
+     */
+    suspend fun captureUnivestNotification(title: String, body: String, postedAtMs: Long) {
+        val at = postedAtMs.takeIf { it > 0L } ?: System.currentTimeMillis()
+        val received = System.currentTimeMillis()
+        val combined = (title + "\n" + body).take(2500)
+        val signal = ForecastUnivestLearningPolicy.parse(ForecastUnivestLearningPolicy.OFFICIAL_PACKAGE, combined)
+        if (signal == null) {
+            auditLogger.logAsync("FORECAST_UNIVEST", "NOTIFICATION_IGNORED", mapOf(
+                "reason" to "NOT_1_TO_3_MONTH_ENTRY_OR_OFFICIAL_EXIT", "source_verified" to true))
+            return
+        }
+        // Don't infer ticker from a company name. The NSE master is the identity authority.
+        if (signal.symbol !in nseSymbols.symbols()) {
+            auditLogger.logAsync("FORECAST_UNIVEST", "SYMBOL_NOT_VERIFIED_NSE", mapOf(
+                "symbol" to signal.symbol, "type" to signal.type.name, "nse_only" to true))
+            return
+        }
+        val date = ForecastUnivestLearningPolicy.date(at)
+        val key = "$date|${signal.symbol}"
+        val candidate = if (signal.type == ForecastUnivestLearningPolicy.Type.ENTRY) {
+            forecastUnivestJournal.enter(signal.symbol, at, received, signal.durationMonths ?: 0.0)
+        } else {
+            forecastUnivestJournal.claimExit(signal.symbol, at, received)
+        }
+        if (candidate == null) {
+            auditLogger.logAsync("FORECAST_UNIVEST", "PAIRING_SKIPPED", mapOf(
+                "type" to signal.type.name, "symbol" to signal.symbol, "date" to date,
+                "reason" to "DUPLICATE_ENTRY_OR_NO_MATCHING_SAME_DAY_ENTRY", "no_order_path" to true))
+            return
+        }
+        auditLogger.logAsync("FORECAST_UNIVEST", "OFFICIAL_NOTIFICATION_CAPTURED", mapOf(
+            "symbol" to signal.symbol, "type" to signal.type.name,
+            "duration_months" to signal.durationMonths, "source_package" to ForecastUnivestLearningPolicy.OFFICIAL_PACKAGE,
+            "posted_ms" to at, "received_ms" to received,
+            "same_day_pair" to (signal.type == ForecastUnivestLearningPolicy.Type.EXIT),
+            "entry_price_recorded" to (candidate.entryPrice != null), "no_order_path" to true))
+        val token = runCatching { forecastMarketToken() }.getOrNull()
+        val betaConfigured = secretStore.hasBetaCredentials()
+        if (token.isNullOrBlank() || (betaConfigured && !forecastUsesBeta(token))) {
+            auditLogger.logAsync("FORECAST_UNIVEST", "RESEARCH_QUOTE_DEFERRED", mapOf(
+                "symbol" to signal.symbol, "type" to signal.type.name,
+                "reason" to "RESEARCH_ACCOUNT_UNAVAILABLE", "beta_configured" to betaConfigured,
+                "alpha_quota_borrowed" to false))
+            return
+        }
+        val quote = runCatching { withForecastLiveDataSlot {
+            betaMarketRead(token, BetaResearchGate.Type.LIVE,
+                alphaCall = { apiFactory.groww.quote(bearer(token), tradingSymbol = signal.symbol)
+                    .requirePayload("Univest entry/exit research quote") },
+                betaCall = { apiFactory.betaGroww.quote(bearer(token), tradingSymbol = signal.symbol)
+                    .requirePayload("Beta Univest research quote") })
+        } }.onFailure { auditLogger.logAsync("FORECAST_UNIVEST", "RESEARCH_QUOTE_FAILED", mapOf(
+            "symbol" to signal.symbol, "type" to signal.type.name,
+            "error" to it.javaClass.simpleName)) }.getOrNull() ?: return
+        val price = quote.lastPrice?.takeIf { it.isFinite() && it > 0.0 } ?: run {
+            auditLogger.logAsync("FORECAST_UNIVEST", "RESEARCH_QUOTE_MISSING_LTP", mapOf("symbol" to signal.symbol))
+            return
+        }
+        val quoteAt = System.currentTimeMillis()
+        if (signal.type == ForecastUnivestLearningPolicy.Type.EXIT) {
+            val closed = forecastUnivestJournal.quoteExit(key, price, quoteAt)
+            auditLogger.logAsync("FORECAST_UNIVEST", "SAME_DAY_EXIT_OUTCOME", mapOf(
+                "symbol" to signal.symbol, "entry_at_ms" to candidate.entryNotificationAtMs,
+                "exit_at_ms" to at, "entry_price" to closed?.entryPrice,
+                "exit_price" to closed?.exitPrice, "return_pct" to closed?.outcomePct,
+                "entry_price_source" to closed?.entryPriceSource,
+                "exit_price_source" to closed?.exitPriceSource,
+                "capture_latency_ms" to (quoteAt - at),
+                "training_eligible" to (closed?.status == "CLOSED_SAME_DAY_VERIFIED"),
+                "status" to (closed?.status ?: "EXIT_PRICE_NOT_VERIFIED"),
+                "outcome_is_broker_trade_pnl" to false))
+            return
+        }
+        val entry = forecastUnivestJournal.quoteEntry(key, price, quoteAt)
+        if (entry == null) {
+            auditLogger.logAsync("FORECAST_UNIVEST", "ENTRY_QUOTE_NOT_ELIGIBLE", mapOf(
+                "symbol" to signal.symbol, "price" to price,
+                "quote_latency_ms" to quoteAt - at, "max_latency_ms" to 180_000L))
+            return
+        }
+        // Feature I/O is research-only and can fail without affecting official Multify signals.
+        val eval = runCatching { forecastEvaluation(signal.symbol, token) }
+            .onFailure { auditLogger.logAsync("FORECAST_UNIVEST", "48_FACTOR_CAPTURE_FAILED", mapOf(
+                "symbol" to signal.symbol, "error" to it.javaClass.simpleName)) }
+            .getOrNull() ?: return
+        val model = MultifyFactorFamilies.evaluate(eval, "BREADTH_NEUTRAL")
+        val factors = ForecastUnivestLearningPolicy.fingerprint(model, eval, "BREADTH_NEUTRAL")
+        val captured = System.currentTimeMillis()
+        val snapshot = forecastUnivestJournal.snapshot(key, researchGson.toJson(factors), captured,
+            factors.values.count { it != null })
+        auditLogger.logAsync("FORECAST_UNIVEST", "ENTRY_48_FACTOR_SNAPSHOT", mapOf(
+            "symbol" to signal.symbol, "entry_at_ms" to at, "price" to entry.entryPrice,
+            "price_source" to entry.entryPriceSource,
+            "feature_count" to factors.size, "observed_factor_count" to factors.values.count { it != null },
+            "capture_at_ms" to captured, "capture_latency_ms" to captured - at,
+            "within_three_minutes" to (snapshot != null), "research_account" to
+                (if (forecastUsesBeta(token)) "BETA" else "ALPHA_FALLBACK"),
+            "entry_features_used_only_after_verified_same_day_exit" to true))
+    }
+
+    private fun univestHistoricalCases(beforeDate: String): List<ForecastUnivestLearningPolicy.ClosedCase> {
+        val completed = forecastUnivestJournal.training(beforeDate)
+        val days = completed.map { ForecastUnivestLearningPolicy.date(it.entryNotificationAtMs) }
+            .distinct().sortedDescending().take(30).toSet()
+        return completed.filter { ForecastUnivestLearningPolicy.date(it.entryNotificationAtMs) in days }
+            .mapNotNull { row ->
+                val features = runCatching {
+                    @Suppress("UNCHECKED_CAST")
+                    researchGson.fromJson(row.features48Json, Map::class.java) as Map<String, Any?>
+                }.getOrNull() ?: return@mapNotNull null
+                ForecastUnivestLearningPolicy.ClosedCase(row.symbol,
+                    ForecastUnivestLearningPolicy.date(row.entryNotificationAtMs),
+                    row.outcomePct ?: return@mapNotNull null, features)
+            }
     }
 
     suspend fun captureMultifyResearchSnapshot(eventId: Long, symbol: String) {
@@ -8409,6 +8547,9 @@ class TradingRepository @Inject constructor(
 
         restoreStage = "Forecast news event journal"
         val restoredNews = entries["forecast_news_events.jsonl"]?.let { forecastNewsJournal.restore(it) } ?: 0
+        restoreStage = "Univest same-day research journal"
+        val restoredUnivest = entries["forecast_univest_same_day.jsonl"]?.let { forecastUnivestJournal.restore(it) } ?: 0
+        auditLogger.log("MIGRATION", "FORECAST_UNIVEST_RESTORED", mapOf("records" to restoredUnivest))
         restoreStage = "Historical audit events"
         val restoredAudit = entries["system_audit.jsonl"]?.let { auditLogger.restoreArchived(it) } ?: 0
         auditLogger.log("MIGRATION", "FORECAST_NEWS_AND_AUDIT_RESTORED", mapOf(
@@ -8651,6 +8792,7 @@ class TradingRepository @Inject constructor(
                 add("forecast_research_snapshots.json", forecastResearch)
                 add("forecast_positive_evidence.json", positiveEvidence)
                 addText("forecast_news_events.jsonl", forecastNewsJournal.archive())
+                addText("forecast_univest_same_day.jsonl", forecastUnivestJournal.archive())
                 add("long_learning.json", calls)
                 add("long_forecasts.json", forecasts)
                 add("long_champions.json", champions)
@@ -8677,6 +8819,9 @@ class TradingRepository @Inject constructor(
                     "forecast_replay_event" to "UNIVERSAL_POSITIVE_EVIDENCE_REFRESH",
                     "positive_evidence_file" to "forecast_positive_evidence.json",
                     "forecast_news_file" to "forecast_news_events.jsonl",
+                    "forecast_univest_file" to "forecast_univest_same_day.jsonl",
+                    "univest_48_factor_cohort" to "official 1-3 month entry + same-day exit + both Groww quote prices; no broker trade assumed",
+                    "univest_cohort_stats" to forecastUnivestJournal.summary(),
                     "news_event_outcome_label" to ">=1% measured within 60m from first observed baseline",
                     "fixed_priority_phase_event" to "FIXED_PRIORITY_PHASE_PROFILE",
                     "fixed_entry_latency_event" to "ENTRY_LATENCY_PROFILE",
@@ -8935,6 +9080,7 @@ class TradingRepository @Inject constructor(
             "fixed_engine_snapshot.json",
             "fixed_factor_snapshots.jsonl",
             "forecast_news_events.jsonl",
+            "forecast_univest_same_day.jsonl",
             "system_audit.jsonl"
         )
         private const val MAX_RESTORE_ENTRY_BYTES = 128L * 1024L * 1024L
