@@ -3497,11 +3497,25 @@ class TradingRepository @Inject constructor(
     }
 
     suspend fun captureMultifyResearchSnapshot(eventId: Long, symbol: String) {
-        val token = ensureToken() ?: return
+        // This is Forecast research, not Multify order/execution tracking.
+        // Use the same Beta-first token routing as normal Forecast scans and news evaluation.
+        // If Beta is configured but unavailable, never borrow Alpha's market-data quota.
+        val researchAccount = if (secretStore.hasBetaCredentials()) "BETA" else "ALPHA_FALLBACK"
+        val token = forecastMarketToken()
+        if (token.isNullOrBlank() || (researchAccount == "BETA" && !forecastUsesBeta(token))) {
+            auditLogger.log("MULTIFY_RESEARCH", "FEATURE_CAPTURE_SKIPPED_NO_RESEARCH_ACCOUNT", mapOf(
+                "event_id" to eventId, "symbol" to symbol,
+                "research_account" to researchAccount, "beta_configured" to secretStore.hasBetaCredentials(),
+                "alpha_fallback_used" to false
+            ))
+            return
+        }
         val evaluation = runCatching { forecastEvaluation(symbol, token) }
             .onFailure {
                 auditLogger.log("MULTIFY_RESEARCH", "FEATURE_CAPTURE_ERROR", mapOf(
-                    "event_id" to eventId, "symbol" to symbol, "message" to (it.message ?: it.javaClass.simpleName)
+                    "event_id" to eventId, "symbol" to symbol,
+                    "research_account" to researchAccount,
+                    "message" to (it.message ?: it.javaClass.simpleName)
                 ))
             }.getOrNull() ?: return
         val capturedAt = System.currentTimeMillis()
@@ -3523,6 +3537,8 @@ class TradingRepository @Inject constructor(
         auditLogger.log("MULTIFY_RESEARCH", "FEATURE_SNAPSHOT", mapOf(
             "event_id" to eventId,
             "symbol" to symbol,
+            "research_account" to researchAccount,
+            "beta_configured" to secretStore.hasBetaCredentials(),
             "regime" to evaluation.regime,
             "directional_score" to evaluation.directionalScore,
             "confidence" to evaluation.confidence,
