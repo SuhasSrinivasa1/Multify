@@ -1388,7 +1388,7 @@ class TradingRepository @Inject constructor(
             forecasts = forecasts,
             fixedForecasts = fixedForecasts,
             forecastWatchlist = secondaryForecastWatchlist(today),
-            fixedWatchlist = fixedSafetyWatchlist(today),
+            fixedWatchlist = emptyList(),
             research = research,
             health = EngineHealthDto(
                 listener = if (listenerAge <= 60_000L) "HEALTHY" else "UNHEALTHY",
@@ -1459,39 +1459,6 @@ class TradingRepository @Inject constructor(
                     strategy = row.strategy, regime = row.regime,
                     marketRegime = row.marketRegime, generatedAtMs = row.scanAtMs,
                     qualityTier = row.qualityTier, executionEligible = false
-                )
-            }.toList()
-    }
-
-    /**
-     * Read-only Fixed diagnostics; pending FIRST confirmations are never trade recommendations.
-     * A later non-PRIMARY scan must not erase a held candidate within the 20-minute window.
-     */
-    private fun fixedSafetyWatchlist(date: String): List<ForecastDto> {
-        val cutoff = System.currentTimeMillis() - 20L * 60_000L
-        val published = fixedRecommendationStore.recommendations(date)
-            .map { it.symbol.uppercase(Locale.US) }.toSet()
-        return fixedRecommendationStore.observations(date).asSequence()
-            .filter { it.scanAtMs >= cutoff && it.qualityTier == "PRIMARY" }
-            .filterNot { it.symbol.uppercase(Locale.US) in published }
-            .groupBy { it.symbol.uppercase(Locale.US) }
-            .values.mapNotNull { rows -> rows.maxByOrNull { it.scanAtMs } }
-            .sortedWith(compareByDescending<FixedScanObservation> {
-                it.publishEligible && it.executionEligible
-            }.thenByDescending { it.scanAtMs })
-            .take(12)
-            .mapIndexed { i, row ->
-                val pending = row.publishEligible && row.executionEligible
-                ForecastDto(
-                    rank = i + 1, symbol = row.symbol,
-                    qualityTier = if (pending) "PRIMARY · AWAITING CONFIRMATION" else "PRIMARY · SAFETY HOLD",
-                    executionEligible = false,
-                    status = if (pending) "AWAITING_CONFIRMATION" else "ENTRY_SAFETY_HOLD",
-                    reason = if (pending)
-                        "Fixed repeat-confirmation rule has not published this setup. Observation only; BUY disabled."
-                    else
-                        "Fixed PRIMARY currently not publication-eligible. Observation only; BUY disabled.",
-                    generatedAtMs = row.scanAtMs
                 )
             }.toList()
     }
@@ -1568,7 +1535,7 @@ class TradingRepository @Inject constructor(
                 forecastReferences = forecastReferences,
                 forecasts = forecasts, fixedForecasts = fixedForecasts,
                 forecastWatchlist = secondaryForecastWatchlist(today),
-            fixedWatchlist = fixedSafetyWatchlist(today), forecastChampions = champions,
+            fixedWatchlist = emptyList(), forecastChampions = champions,
                 research = research,
                 health = EngineHealthDto(
                     listener = if (listenerAge <= 60_000L) "HEALTHY" else "UNHEALTHY",
@@ -2989,7 +2956,7 @@ class TradingRepository @Inject constructor(
             "fallback_full_requests" to (fixedHistoryStitchFallbacks.get() - priorFallback).coerceAtLeast(0L),
             "attempted" to universe.size,
             "evaluated" to evaluated.size,
-            "signal_intervals" to "fixed_5minute_forecast_1minute"
+            "signal_intervals" to "fixed_15minute_forecast_1minute"
         ))
 
         val breadth = evaluated.mapNotNull { it.second.features.dayChangePct }
@@ -3195,7 +3162,7 @@ class TradingRepository @Inject constructor(
         val raw = withFixedHistoricalDataSlot {
             apiFactory.groww.historicalCandles(
                 bearer(token), growwSymbol = "NSE-$symbol", startTime = incremental?.startTime ?: start,
-                endTime = end, candleInterval = "5minute"
+                endTime = end, candleInterval = "15minute"
             ).requirePayload("Fixed forecast candles $symbol")
         }
         val historical = if (incremental == null) {
@@ -3213,7 +3180,7 @@ class TradingRepository @Inject constructor(
                 withFixedHistoricalDataSlot {
                     apiFactory.groww.historicalCandles(
                         bearer(token), growwSymbol = "NSE-$symbol", startTime = start, endTime = end,
-                        candleInterval = "5minute"
+                        candleInterval = "15minute"
                     ).requirePayload("Fixed historical fallback $symbol")
                 }
             }
@@ -3223,7 +3190,7 @@ class TradingRepository @Inject constructor(
         // Broker I/O is completed before scheduling CPU-only feature/scoring work.
         // Identical inputs and scoring; only the execution dispatcher differs.
         val evaluation = withContext(fixedCpuDispatcher) {
-            val features = FixedLocalStrategyEngine.buildFeatures(quote, historical, 5)
+            val features = FixedLocalStrategyEngine.buildFeatures(quote, historical, 15)
             val signal = ParsedSignal(SignalType.TRADE_RELEASE, symbol = symbol, rawText = "fixed-forecast", confidence = 1.0)
             FixedLocalStrategyEngine.evaluateLong(signal, features, includeEventPrior = false)
         }
@@ -8786,7 +8753,7 @@ class TradingRepository @Inject constructor(
         fixedSnapshot = fixedSnapshotDto(fixedSnapshot),
         forecastReferences = runCatching { forecastReferenceStats() }.getOrDefault(ForecastReferenceStatsDto()),
         forecastWatchlist = secondaryForecastWatchlist(LocalDate.now(INDIA).toString()),
-        fixedWatchlist = fixedSafetyWatchlist(LocalDate.now(INDIA).toString())
+        fixedWatchlist = emptyList()
     )
 
     private fun marketSession(): String {
