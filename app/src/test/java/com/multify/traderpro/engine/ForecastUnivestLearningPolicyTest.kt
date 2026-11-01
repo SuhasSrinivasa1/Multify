@@ -12,7 +12,7 @@ class ForecastUnivestLearningPolicyTest {
 
     @Test fun capturesOnlyOfficialOneToThreeMonthEquityEntry() {
         val msg = "New Advisory Pick\nSTOCK: GRAPHITE\nDuration: 1-3 Months"
-        assertEquals(p.Type.ENTRY, p.parse("com.univest.capp", msg)?.type)
+        assertEquals(ForecastUnivestLearningPolicy.Type.ENTRY, p.parse("com.univest.capp", msg)?.type)
         assertEquals("GRAPHITE", p.parse("com.univest.capp", msg)?.symbol)
         assertNull(p.parse("com.random.app", msg))
         assertNull(p.parse("com.univest.capp", msg.replace("1-3", "3-6")))
@@ -23,7 +23,7 @@ class ForecastUnivestLearningPolicyTest {
 
     @Test fun officialProfitOfDayExitMatchesSameDayEntryOnly() {
         val exit = p.parse("com.univest.capp", "1st Equity Profit of the Day\nAdvisory Pick: GRAPHITE\nDuration: 2 Days")
-        assertEquals(p.Type.EXIT, exit?.type)
+        assertEquals(ForecastUnivestLearningPolicy.Type.EXIT, exit?.type)
         assertEquals("GRAPHITE", exit?.symbol)
         val morning = india(2026,10,30,9,30)
         val afternoon = india(2026,10,30,14,30)
@@ -35,7 +35,7 @@ class ForecastUnivestLearningPolicyTest {
     @Test fun trainingRequiresMatureSameDayDenominatorAnd75Percent() {
         val point = (1..48).associate { "p$it" to (it.toDouble() / 48) }
         val cases = (1..30).map { i ->
-            p.ClosedCase("STK${i%5}", "2026-10-${(i%10+10)}", if (i <= 24) 1.2 else -0.8, point)
+            ForecastUnivestLearningPolicy.ClosedCase("STK${i%5}", "2026-10-${(i%10+10)}", if (i <= 24) 1.2 else -0.8, point)
         }
         val good = p.evaluate(cases, point, "2026-11-01")
         assertTrue(good.eligible)
@@ -49,7 +49,7 @@ class ForecastUnivestLearningPolicyTest {
     }
 
     @Test fun incomplete48FingerprintDoesNotCreateFalseConfidence() {
-        val points=(1..30).map { i -> p.ClosedCase("T${i%5}","2026-10-${(i%10+10)}",1.0,
+        val points=(1..30).map { i -> ForecastUnivestLearningPolicy.ClosedCase("T${i%5}","2026-10-${(i%10+10)}",1.0,
             (1..8).associate { "f$it" to it.toDouble() }) }
         assertEquals(0.0,p.evaluate(points,(1..8).associate { "f$it" to it.toDouble() },"2026-11-01").bonus,0.0)
     }
