@@ -15,6 +15,9 @@ import java.io.StringReader
 import java.security.MessageDigest
 import java.time.Duration
 import java.time.Instant
+import java.time.LocalDateTime
+import java.time.ZoneId
+import java.time.format.DateTimeParseException
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
@@ -44,20 +47,37 @@ class ForecastNewsMonitor @Inject constructor(
         var examined = 0
         var newlyStored = 0
         var failures = 0
+        var missingDate = 0
+        var futureDates = 0
+        var staleDates = 0
+        var unresolvedSymbols = 0
+        var unclassified = 0
+        var duplicateTitles = 0
+        var duplicateIds = 0
+        var eligibleDatedItems = 0
+        var newestPublishedAtMs = 0L
+        var oldestPublishedAtMs = Long.MAX_VALUE
         for (feed in RSS_FEEDS) {
             try {
                 val xml = fetch(feed.second)
                 val entries = parseRss(xml)
                 examined += entries.size
                 for (entry in entries) {
-                    val published = parseDate(entry.published) ?: continue
-                    if (published > now + 60_000L || published < now - 3L * 24L * 60 * 60_000L) continue
+                    val published = parseDate(entry.published)
+                    if (published == null) { missingDate++; continue }
+                    newestPublishedAtMs = maxOf(newestPublishedAtMs, published)
+                    oldestPublishedAtMs = minOf(oldestPublishedAtMs, published)
+                    if (published > now + 60_000L) { futureDates++; continue }
+                    if (published < now - 3L * 24L * 60 * 60_000L) { staleDates++; continue }
+                    eligibleDatedItems++
                     val symbol = resolveSymbol(entry.title, entry.summary)
+                    if (symbol.isBlank()) unresolvedSymbols++
                     val id = sha256(feed.first + "|" + (entry.guid.ifBlank { entry.url.ifBlank { entry.title + published } }))
                     val near = journal.recent(500).filter { it.symbol == symbol && symbol.isNotBlank() &&
                         now - it.firstSeenAtMs in 0L..(24L * 60 * 60_000L) }
                     val canonicalTitle = normalize(entry.title).take(180)
                     if (near.any { normalize(it.headline).take(180) == canonicalTitle }) {
+                        duplicateTitles++
                         audit.logAsync("FORECAST_NEWS", "DUPLICATE_CATALYST_SKIPPED", mapOf(
                             "symbol" to symbol, "feed" to feed.first,
                             "reason" to "SAME_NSE_TITLE_IN_MULTIPLE_FEEDS"))
@@ -70,6 +90,7 @@ class ForecastNewsMonitor @Inject constructor(
                     val assess = ForecastNewsPatternPolicy.assess(entry.title, entry.summary,
                         ((now - published) / 60_000L).coerceAtLeast(0),
                         uniqueIn(5), uniqueIn(10), uniqueIn(15), sourceVerified = true)
+                    if (assess.category == "OTHER" || assess.direction != "POSITIVE_POSSIBLE") unclassified++
                     val event = ForecastNewsEvent(id, feed.first, symbol, entry.title.take(300),
                         entry.summary.take(1200), entry.url.take(500), assess.category, assess.direction,
                         published, now, gson.toJson(assess.features), assess.confidence,
@@ -90,7 +111,7 @@ class ForecastNewsMonitor @Inject constructor(
                                 normalize(it.headline).take(180) }.size + 1,
                             "off_market_collection" to (java.time.Instant.ofEpochMilli(now)
                                 .atZone(java.time.ZoneId.of("Asia/Kolkata")).hour !in 9..15)))
-                    }
+                    } else duplicateIds++
                 }
             } catch (err: Exception) {
                 failures++
@@ -101,7 +122,17 @@ class ForecastNewsMonitor @Inject constructor(
         }
         audit.logAsync("FORECAST_NEWS", "POLL_PROFILE", mapOf("items_examined" to examined,
             "new_events" to newlyStored, "source_failures" to failures,
-            "catalog_size" to companyByName.size, "poll_started_at_ms" to now))
+            "catalog_size" to companyByName.size, "poll_started_at_ms" to now,
+            "date_parse_failed" to missingDate, "future_dated" to futureDates,
+            "older_than_72h" to staleDates, "dated_in_window" to eligibleDatedItems,
+            "unresolved_nse_symbol" to unresolvedSymbols,
+            "other_or_nonpositive_category" to unclassified,
+            "duplicate_titles" to duplicateTitles, "duplicate_event_ids" to duplicateIds,
+            "newest_feed_age_minutes" to (if (newestPublishedAtMs > 0L)
+                ((now - newestPublishedAtMs) / 60_000L) else null),
+            "oldest_feed_age_minutes" to (if (oldestPublishedAtMs < Long.MAX_VALUE)
+                ((now - oldestPublishedAtMs) / 60_000L) else null),
+            "nse_only" to true))
         newlyStored
     }
 
@@ -142,11 +173,7 @@ class ForecastNewsMonitor @Inject constructor(
         }?.value ?: ""
     }
 
-    private fun parseDate(s: String): Long? = runCatching {
-        ZonedDateTime.parse(s.trim(), DateTimeFormatter.RFC_1123_DATE_TIME).toInstant().toEpochMilli()
-    }.getOrElse {
-        runCatching { Instant.parse(s.trim()).toEpochMilli() }.getOrNull()
-    }
+    internal fun parseDate(s: String): Long? = ForecastNewsDatePolicy.parse(s)
 
     internal data class RssItem(val title: String, val summary: String, val published: String, val url: String, val guid: String)
     internal fun parseRss(xml: String): List<RssItem> {

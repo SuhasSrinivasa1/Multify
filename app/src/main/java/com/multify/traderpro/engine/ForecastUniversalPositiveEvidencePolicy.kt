@@ -19,7 +19,8 @@ data class ForecastPositiveEvidenceCase(
     val realizedPct: Double?,
     val closePct: Double?,
     val maxFavourablePct: Double,
-    val protectedTrailPct: Double?
+    val protectedTrailPct: Double?,
+    val observedAtMs: Long = 0L
 )
 
 /**
@@ -93,6 +94,15 @@ object ForecastUniversalPositiveEvidencePolicy {
         }
     }
 
+    /** One independent outcome per (source, trading date, symbol). Earliest capture wins.
+     * Retain repeated intraday observations in raw logs for timing research, not ranking weight.
+     */
+    fun independentOutcomes(rows: List<ForecastPositiveEvidenceCase>): List<ForecastPositiveEvidenceCase> =
+        rows.groupBy { it.source.uppercase() + "|" + it.evidenceDate + "|" + it.symbol.uppercase() }
+            .values.map { group -> group.minWithOrNull(compareBy<ForecastPositiveEvidenceCase> {
+                it.observedAtMs.takeIf { at -> at > 0L } ?: Long.MAX_VALUE
+            }.thenBy { it.strategy })!! }
+
     fun rankingBonus(
         symbol: String,
         strategy: String,
@@ -105,23 +115,24 @@ object ForecastUniversalPositiveEvidencePolicy {
         evidence: List<ForecastPositiveEvidenceCase>
     ): Double {
         if (evidence.isEmpty()) return 0.0
+        val independent = independentOutcomes(evidence)
 
         fun mature(rows: List<ForecastPositiveEvidenceCase>, minSamples: Int): Boolean =
             rows.size >= minSamples &&
                 rows.map { it.evidenceDate }.distinct().size >= MIN_DISTINCT_DAYS &&
                 rows.map { it.symbol }.distinct().size >= MIN_DISTINCT_SYMBOLS
 
-        val exact = evidence.filter {
+        val exact = independent.filter {
             it.strategy == strategy && it.regime == regime && it.marketRegime == marketRegime &&
                 it.capBucket == capBucket && it.timeBucket == timeBucket &&
                 it.dominantFamily == dominantFamily &&
                 (sectorRegime == "UNAVAILABLE" || it.sectorRegime == sectorRegime)
         }
-        val contextual = evidence.filter {
+        val contextual = independent.filter {
             it.strategy == strategy && it.regime == regime && it.marketRegime == marketRegime &&
                 it.dominantFamily == dominantFamily
         }
-        val broad = evidence.filter {
+        val broad = independent.filter {
             it.regime == regime && it.marketRegime == marketRegime
         }
 

@@ -192,6 +192,7 @@ class TradingRepository @Inject constructor(
     private val fixedFactorTelemetry: FixedFactorTelemetry,
     private val forecastNewsMonitor: ForecastNewsMonitor,
     private val forecastNewsJournal: ForecastNewsJournal,
+    private val nseMarketCapResearch: NseMarketCapResearch,
     private val forecastUnivestJournal: ForecastUnivestJournal,
     private val marketDiscoveryStateStore: MarketDiscoveryStateStore,
     private val forecastAutoBuyOrderStore: ForecastAutoBuyOrderStore,
@@ -1988,6 +1989,20 @@ class TradingRepository @Inject constructor(
     suspend fun forecastBackgroundScanningEnabled(): Boolean =
         preferences.settings.first().forecastScannerEnabled
 
+    /** Research-only pacing; avoids waking Forecast every poll during active broker cooldown.
+     * Beta uses independent credentials and remains unaffected by Alpha cooldowns.
+     */
+    fun forecastBrokerCooldownRemainingMs(): Long {
+        if (secretStore.hasBetaCredentials()) return 0L
+        val status = recoveryGate.status()
+        if (status.reconnectRequired) return 30_000L
+        val now = System.currentTimeMillis()
+        val until = listOf(GrowwApiUsageLedger.Category.LIVE_DATA,
+            GrowwApiUsageLedger.Category.HISTORICAL, GrowwApiUsageLedger.Category.NON_TRADING)
+            .maxOf { status.categoryCooldownUntilMs[it] ?: 0L }
+        return (until - now).coerceAtLeast(0L)
+    }
+
     private fun logForecastCapacitySkip(reason: String) {
         val now = System.currentTimeMillis()
         if (now - lastForecastCapacitySkipLogAtMs < 60_000L) return
@@ -2205,7 +2220,16 @@ class TradingRepository @Inject constructor(
         val rows = learningDao.allForecastPositiveEvidence()
             .filter { it.evidenceDate < beforeDate }
         val dates = rows.map { it.evidenceDate }.distinct().sortedDescending().take(30).toSet()
-        return rows.filter { it.evidenceDate in dates }.map {
+        val eligible = rows.filter { it.evidenceDate in dates }
+        val independent = eligible.groupBy { it.source.uppercase(Locale.US) + "|" +
+            it.evidenceDate + "|" + it.symbol.uppercase(Locale.US) }
+            .values.mapNotNull { cases -> cases.minByOrNull { it.eventAtMs } }
+        if (eligible.size != independent.size) auditLogger.logAsync("FORECAST_LEARNING",
+            "POSITIVE_EVIDENCE_DEDUPED", mapOf(
+                "raw_rows" to eligible.size, "independent_rows" to independent.size,
+                "duplicate_rows_removed_from_ranking" to (eligible.size - independent.size),
+                "raw_evidence_preserved_in_export" to true))
+        return independent.map {
             ForecastPositiveEvidenceCase(
                 source = it.source,
                 evidenceDate = it.evidenceDate,
@@ -2220,7 +2244,8 @@ class TradingRepository @Inject constructor(
                 realizedPct = it.realizedPct,
                 closePct = it.closePct,
                 maxFavourablePct = it.maxFavourablePct,
-                protectedTrailPct = it.protectedTrailPct
+                protectedTrailPct = it.protectedTrailPct,
+                observedAtMs = it.eventAtMs
             )
         }
     }
@@ -4614,7 +4639,19 @@ class TradingRepository @Inject constructor(
                 val amountCrore = runCatching {
                     rawFeatures?.get("reported_amount_crore")?.takeUnless { it.isJsonNull }?.asDouble
                 }.getOrNull()
-                val cap = quote.marketCap?.takeIf { it.isFinite() && it >= 100_000_000.0 }
+                val growwCap = quote.marketCap?.takeIf { it.isFinite() && it >= 100_000_000.0 }
+                val fallbackCap = if (growwCap == null && amountCrore != null) {
+                    nseMarketCapResearch.marketCapRupees(item.symbol)
+                } else null
+                val cap = growwCap ?: fallbackCap
+                auditLogger.logAsync("FORECAST_NEWS", "MARKET_CAP_PROVENANCE", mapOf(
+                    "symbol" to item.symbol, "provider" to when {
+                        growwCap != null -> "GROWW_QUOTE"
+                        fallbackCap != null -> "NSE_TRADE_INFO"
+                        else -> "UNAVAILABLE"
+                    }, "market_cap_rupees" to cap,
+                    "required_for_materiality" to (amountCrore != null),
+                    "missing_not_estimated" to (cap == null)))
                 val policy = com.multify.traderpro.engine.ForecastNewsOpportunityPolicy
                 val materiality = policy.materialityPct(amountCrore, cap)
                 val patternKey = policy.patternKey(catalystKey, policy.capBucket(cap), distinctCatalysts, materiality)

@@ -595,6 +595,18 @@ class TradingEngineService : Service() {
                         delay(SCAN_WORKER_POLL_MS)
                         continue
                     }
+                    val cooldownRemainingMs = repository.forecastBrokerCooldownRemainingMs()
+                    if (cooldownRemainingMs > 0L) {
+                        // News polling and existing-position monitoring have their own workers.
+                        // This only defers the discretionary Forecast discovery loop.
+                        if (cooldownRemainingMs > 20_000L) auditLogger.logAsync(
+                            "FORECAST_SCHEDULER", "COOLDOWN_PACED", mapOf(
+                                "remaining_ms" to cooldownRemainingMs,
+                                "fixed_logic_changed" to false,
+                                "news_monitoring_paused" to false))
+                        delay(cooldownRemainingMs.coerceIn(5_000L,30_000L))
+                        continue
+                    }
                     val now = ZonedDateTime.now(INDIA)
                     if (now.dayOfWeek.value < 6 &&
                         now.toLocalTime() >= LocalTime.of(9, 15) &&
