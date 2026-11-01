@@ -5884,22 +5884,8 @@ class TradingRepository @Inject constructor(
         )
     }
 
-    private fun researchCandleTimestampMs(value: com.google.gson.JsonElement): Long? {
-        val primitive = value.takeIf { it.isJsonPrimitive }?.asJsonPrimitive ?: return null
-        if (primitive.isNumber) {
-            val raw = runCatching { primitive.asLong }.getOrNull() ?: return null
-            return if (raw in 1_000_000_000L..9_999_999_999L) raw * 1000L else raw
-        }
-        val text = runCatching { primitive.asString.trim() }.getOrNull().orEmpty()
-        text.toLongOrNull()?.let { raw ->
-            return if (raw in 1_000_000_000L..9_999_999_999L) raw * 1000L else raw
-        }
-        runCatching { LocalDateTime.parse(text, HIST_FORMAT).atZone(INDIA).toInstant().toEpochMilli() }
-            .getOrNull()?.let { return it }
-        runCatching { ZonedDateTime.parse(text).toInstant().toEpochMilli() }
-            .getOrNull()?.let { return it }
-        return runCatching { Instant.parse(text).toEpochMilli() }.getOrNull()
-    }
+    private fun researchCandleTimestampMs(value: com.google.gson.JsonElement): Long? =
+        com.multify.traderpro.engine.MarketCandleTimestampParser.toEpochMillis(value)
 
     /** Serialized inside the existing, backup/exported Forecast snapshot JSON. No Room migration. */
     private fun timingStudy(row: ForecastResearchEntity): ForecastEntryTimingPolicy.Study? = runCatching {
@@ -6014,20 +6000,30 @@ class TradingRepository @Inject constructor(
             forecastReplayFailureCount.remove("$date|$symbol")
             forecastReplayRetryAfterMs.remove("$date|$symbol")
             preferences.recordMarketData()
-            val candles = historical.candles.mapNotNull { x ->
-                if (x.size < 5) return@mapNotNull null
-                val atMs = researchCandleTimestampMs(x[0]) ?: return@mapNotNull null
-                val open = runCatching { x[1].asDouble }.getOrNull() ?: return@mapNotNull null
-                val high = runCatching { x[2].asDouble }.getOrNull() ?: return@mapNotNull null
-                val low = runCatching { x[3].asDouble }.getOrNull() ?: return@mapNotNull null
-                val close = runCatching { x[4].asDouble }.getOrNull() ?: return@mapNotNull null
-                val volume = x.getOrNull(5)?.let { runCatching { it.asDouble }.getOrNull() } ?: 0.0
-                ResearchCandle(atMs, high, low, close, open, volume)
-            }.sortedBy { it.atMs }
+            // Forecast-only research: decode Groww 1m OHLC using the same robust
+            // epoch/ISO timestamp rules already used by live Forecast candle aggregation.
+            val decoded = com.multify.traderpro.engine.ForecastReplayCandleDecoder.decode(historical.candles)
+            val candles = decoded.bars.map { bar ->
+                ResearchCandle(bar.atMs, bar.high, bar.low, bar.close, bar.open, bar.volume)
+            }
+            auditLogger.log("FORECAST_RESEARCH", "OUTCOME_REPLAY_DECODE_PROFILE", mapOf(
+                "date" to date, "symbol" to symbol,
+                "source_rows" to decoded.sourceRows,
+                "decoded_rows" to candles.size,
+                "bad_timestamps" to decoded.badTimestampRows,
+                "bad_ohlc" to decoded.badOhlcRows,
+                "short_rows" to decoded.shortRows,
+                "first_timestamp_shape" to decoded.firstTimestampShape,
+                "research_only" to true
+            ))
             if (candles.isEmpty()) {
                 auditLogger.log("FORECAST_RESEARCH", "OUTCOME_REPLAY_NO_CANDLES", mapOf(
                     "date" to date, "symbol" to symbol,
-                    "historical_payload_rows" to historical.candles.size,
+                    "historical_payload_rows" to decoded.sourceRows,
+                    "bad_timestamps" to decoded.badTimestampRows,
+                    "bad_ohlc" to decoded.badOhlcRows,
+                    "short_rows" to decoded.shortRows,
+                    "first_timestamp_shape" to decoded.firstTimestampShape,
                     "outcome_written" to false,
                     "five_session_unlock_affected" to true
                 ))
