@@ -1,0 +1,111 @@
+name: Multify v7.9.27 Fixed Restored Speed and Forecast Visibility
+on:
+  push:
+    branches: [v7927-fixed-restore-speed-forecast-visible]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verified-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Android SDK 35
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
+      - name: Verify original Fixed selection and unchanged Alpha/Beta/trading safety
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin v7917-fixed-first-async-market-hub v7926-forecast-close-session-calibration-replay
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+          root=Path('app/src/main/java/com/multify/traderpro')
+          def previous(branch,path):
+              return subprocess.check_output(['git','show',f'origin/{branch}:{path}'])
+          for name in ('FixedForecastQualityPolicy.kt','FixedMarketDiscoveryPolicy.kt'):
+              path=f'app/src/main/java/com/multify/traderpro/engine/{name}'
+              assert Path(path).read_bytes()==previous('v7917-fixed-first-async-market-hub',path),name+' differs from v17'
+          # The original 40-factor score is byte-identical even while corrected session input is retained.
+          fixed='app/src/main/java/com/multify/traderpro/engine/FixedLocalStrategyEngine.kt'
+          def score_section(code):
+              start=code.index('    fun evaluateLong(')
+              end=code.index('    private fun finish(',start)
+              return code[start:end]
+          assert score_section(Path(fixed).read_text())==score_section(previous('v7917-fixed-first-async-market-hub',fixed).decode())
+          quality=(root/'engine/FixedForecastQualityPolicy.kt').read_text()
+          assert 'FixedEntrySafetyOverlay.assess(' not in quality
+          # These modules are never edited by the v27 branch.
+          protected=(
+              'data/network/GrowwApiFactory.kt','data/network/BetaReadOnlyInterceptor.kt',
+              'data/network/BetaResearchGate.kt','data/network/GrowwRateLimitInterceptor.kt',
+              'data/network/GrowwModels.kt','data/network/AlphaAsyncCallFactory.kt',
+              'engine/ForecastEarlyEntryPolicy.kt','engine/ForecastEntryTimingPolicy.kt',
+              'engine/ForecastPublicationPolicy.kt','engine/LocalStrategyEngine.kt',
+              'engine/HardStopLossPolicy.kt','engine/SteppedTrailingPolicy.kt',
+              'service/TradingEngineService.kt',
+          )
+          for name in protected:
+              path=f'app/src/main/java/com/multify/traderpro/{name}'
+              assert Path(path).read_bytes()==previous('v7926-forecast-close-session-calibration-replay',path),name+' unexpectedly changed'
+          repo=(root/'data/repository/TradingRepository.kt').read_text()
+          assert 'FixedLocalStrategyEngine.buildFeatures(quote, historical, 5)' in repo
+          assert 'Dispatchers.Default.limitedParallelism(' in repo
+          assert 'withContext(fixedCpuDispatcher)' in repo
+          assert 'setOf("PRIMARY", "SECONDARY", "RESEARCH")' in repo
+          assert 'RESEARCH_ONLY' in repo
+          assert 'Alpha fallback is disabled while Beta is configured' in repo
+          assert 'ForecastPublicationPolicy.isReady(' in repo
+          assert 'FixedForecastPublicationPolicy.isReady(' in repo
+          assert 'ENABLE_REJECTED_CALIBRATION' in repo  # BUY safety retained; display not gated
+          gradle=Path('app/build.gradle.kts').read_text()
+          assert 'versionCode = 7927' in gradle
+          print('Fixed selection baseline, broker isolation, BUY/SELL safety and Forecast visibility verified')
+          PY
+      - name: Backend tests
+        shell: bash
+        run: |
+          python -m pip install -r backend/requirements.txt
+          PYTHONPATH="$GITHUB_WORKSPACE" PHONE_HMAC_SECRET=test-secret-test-secret-test-secret GROWW_API_KEY=test-api-key GROWW_TOTP_SECRET=JBSWY3DPEHPK3PXP python -m pytest -q backend/tests
+      - name: Android unit tests
+        run: gradle --no-daemon testDebugUnitTest
+      - name: Build APK
+        run: gradle --no-daemon assembleDebug
+      - name: Verify APK package and signature; export checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v7.9.27-fixed-restored-fast-forecast-visible-debug.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/*.apk > dist/APK-SIGNATURE.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/*.apk | head -n 2 > dist/PACKAGE.txt
+          sha256sum dist/*.apk > dist/SHA256SUMS.txt
+          python - <<'PY'
+          import zipfile
+          from pathlib import Path
+          with zipfile.ZipFile('dist/Multify-TraderPro-v7.9.27-exact-source.zip','w',zipfile.ZIP_DEFLATED,compresslevel=6) as z:
+              for p in Path('.').rglob('*'):
+                  if p.is_file() and not any(k in {'.git','.gradle','build','dist'} or (k.startswith('v7') and k[1:].isdigit()) for k in p.parts):
+                      z.write(p,p.as_posix())
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: multify-v7927-fixed-restored-fast-forecast-visible
+          path: dist/
+          if-no-files-found: warn
