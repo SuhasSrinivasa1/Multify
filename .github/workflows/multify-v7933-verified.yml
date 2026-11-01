@@ -104,7 +104,7 @@ jobs:
               "app/src/test/java/com/multify/traderpro/engine/ForecastUnivestLearningPolicyTest.kt",
               "app/src/test/java/com/multify/traderpro/engine/ForecastNewsOpportunityPolicyTest.kt",
               "app/build.gradle.kts",
-              ".github/workflows/multify-v7932-verified.yml"
+              ".github/workflows/multify-v7933-verified.yml"
           }
           assert changed <= authorized, "Unexpected changed files: "+str(changed-authorized)
           for x in ("engine/FixedFinalContract.kt","engine/FixedForecastQualityPolicy.kt",
