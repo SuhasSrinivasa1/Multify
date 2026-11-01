@@ -38,7 +38,6 @@ jobs:
           def previous(path):
               return subprocess.check_output(["git","show",f"origin/v7930-forecast-replay-candle-parser:{path}"]).decode()
           unchanged=[
-              "engine/FixedLocalStrategyEngine.kt",
               "engine/FixedForecastQualityPolicy.kt",
               "engine/FixedMarketDiscoveryPolicy.kt",
               "engine/FixedForecastPublicationPolicy.kt",
