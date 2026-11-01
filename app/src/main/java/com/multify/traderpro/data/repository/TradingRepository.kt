@@ -276,6 +276,12 @@ class TradingRepository @Inject constructor(
     private val fixedLiveDataSecondWindowMs = mutableListOf<Long>()
     private val fixedLiveDataMinuteWindowMs = mutableListOf<Long>()
     private var fixedLiveDataCooldownUntilElapsedMs = 0L
+    // Fixed indicator arithmetic runs on a bounded CPU pool; leave at least one
+    // processor's worth of headroom for Android, trading safety and UI work.
+    // A dispatcher limit does not physically reserve a CPU core.
+    private val fixedCpuDispatcher = Dispatchers.Default.limitedParallelism(
+        (Runtime.getRuntime().availableProcessors() - 1).coerceIn(1, 6)
+    )
     private val fixedHistoricalDataMutex = Mutex()
     private var nextFixedHistoricalAtElapsedMs = 0L
     private var fixedHistoricalCooldownUntilElapsedMs = 0L
@@ -1433,7 +1439,7 @@ class TradingRepository @Inject constructor(
         return learningDao.forecastResearchForDate(date).asSequence()
             .groupBy { it.symbol.uppercase(Locale.US) }
             .values.mapNotNull { it.maxByOrNull { row -> row.scanAtMs } }
-            .filter { it.scanAtMs >= freshAfter && it.qualityTier in setOf("PRIMARY", "SECONDARY") }
+            .filter { it.scanAtMs >= freshAfter && it.qualityTier in setOf("PRIMARY", "SECONDARY", "RESEARCH") }
             .filterNot { it.qualityTier == "PRIMARY" && it.symbol.uppercase(Locale.US) in published }
             .sortedWith(compareByDescending<com.multify.traderpro.data.local.ForecastResearchEntity> {
                 it.qualityTier == "PRIMARY"
@@ -1442,11 +1448,18 @@ class TradingRepository @Inject constructor(
             .mapIndexed { i, row ->
                 ForecastDto(
                     rank = i + 1, symbol = row.symbol, confidence = row.confidence,
-                    score = row.directionalScore, reason = row.rejectionReason,
+                    score = row.directionalScore,
+                    reason = if (row.qualityTier == "RESEARCH")
+                        "RESEARCH ONLY · Not a BUY recommendation · " + row.rejectionReason
+                    else row.rejectionReason,
                     entryPrice = row.entryPrice,
                     targetPct = row.targetPct,
                     targetPrice = row.entryPrice * (1.0 + row.targetPct / 100.0),
-                    status = if (row.qualityTier == "PRIMARY") "AWAITING_CONFIRMATION" else "WATCH_ONLY",
+                    status = when (row.qualityTier) {
+                        "PRIMARY" -> "AWAITING_CONFIRMATION"
+                        "SECONDARY" -> "WATCH_ONLY"
+                        else -> "RESEARCH_ONLY"
+                    },
                     strategy = row.strategy, regime = row.regime,
                     marketRegime = row.marketRegime, generatedAtMs = row.scanAtMs,
                     qualityTier = row.qualityTier, executionEligible = false
@@ -1479,9 +1492,9 @@ class TradingRepository @Inject constructor(
                     executionEligible = false,
                     status = if (pending) "AWAITING_CONFIRMATION" else "ENTRY_SAFETY_HOLD",
                     reason = if (pending)
-                        "Entry safety passed, but the frozen Fixed repeat-confirmation rule has not published this setup. Observation only; BUY disabled."
+                        "Fixed repeat-confirmation rule has not published this setup. Observation only; BUY disabled."
                     else
-                        "Original Fixed PRIMARY ranking vetoed by the unchanged entry-safety overlay. Observation only; BUY disabled.",
+                        "Fixed PRIMARY currently not publication-eligible. Observation only; BUY disabled.",
                     generatedAtMs = row.scanAtMs
                 )
             }.toList()
@@ -2332,7 +2345,9 @@ class TradingRepository @Inject constructor(
                 "next_probe_earliest_seconds" to 60,
                 "fixed_formula_changed" to false
             ))
-            return existing.map { it.toForecastDto() }
+            // Keep researching from a bounded symbol universe even on a cold or
+            // incomplete market-wide pass. ForecastPublicationPolicy still requires
+            // a READY baseline: no orders or production BUYs from incomplete data.
         }
 
         val slot = (now.hour * 60 + now.minute) / 30
@@ -3208,9 +3223,13 @@ class TradingRepository @Inject constructor(
         }
         fixedHistoricalWindowStore.remember(historyKey, start, historical, SystemClock.elapsedRealtime())
         require(historical.candles.size >= 5) { "Insufficient fixed forecast candles" }
-        val features = FixedLocalStrategyEngine.buildFeatures(quote, historical, 5)
-        val signal = ParsedSignal(SignalType.TRADE_RELEASE, symbol = symbol, rawText = "fixed-forecast", confidence = 1.0)
-        val evaluation = FixedLocalStrategyEngine.evaluateLong(signal, features, includeEventPrior = false)
+        // Broker I/O is completed before scheduling CPU-only feature/scoring work.
+        // Identical inputs and scoring; only the execution dispatcher differs.
+        val evaluation = withContext(fixedCpuDispatcher) {
+            val features = FixedLocalStrategyEngine.buildFeatures(quote, historical, 5)
+            val signal = ParsedSignal(SignalType.TRADE_RELEASE, symbol = symbol, rawText = "fixed-forecast", confidence = 1.0)
+            FixedLocalStrategyEngine.evaluateLong(signal, features, includeEventPrior = false)
+        }
         // Diagnostic-only, O(1) non-blocking queue offer. All 40 factor calculations and disk
         // writes execute later on a low-priority worker; never delay Fixed recommendations.
         fixedFactorTelemetry.tryRecord(symbol, evaluation, lastFixedScanAtMs)
