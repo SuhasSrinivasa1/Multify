@@ -4443,6 +4443,7 @@ class TradingRepository @Inject constructor(
                 }.distinctBy { it.headline.uppercase(java.util.Locale.ROOT)
                     .replace(Regex("[^A-Z0-9]"), "").take(180) }
                 val categories = (related.map { it.category } + item.category).distinct().sorted()
+                val distinctCatalysts = related.size.coerceAtLeast(1)
                 val conflicting = forecastNewsJournal.recent(1000).any { other ->
                     other.symbol.equals(item.symbol, true) &&
                         other.direction == "NEGATIVE_OR_AMBIGUOUS" &&
@@ -4478,12 +4479,12 @@ class TradingRepository @Inject constructor(
                 val cap = quote.marketCap?.takeIf { it.isFinite() && it >= 100_000_000.0 }
                 val policy = com.multify.traderpro.engine.ForecastNewsOpportunityPolicy
                 val materiality = policy.materialityPct(amountCrore, cap)
-                val patternKey = policy.patternKey(catalystKey, policy.capBucket(cap), categories.size, materiality)
+                val patternKey = policy.patternKey(catalystKey, policy.capBucket(cap), distinctCatalysts, materiality)
                 val history = stats[patternKey]
                 val evidence = com.multify.traderpro.engine.ForecastNewsOpportunityPolicy.Evidence(history?.observations ?: 0,
                     history?.distinctDays ?: 0, history?.hitRate ?: 0.0)
                 val decision = policy.decide(com.multify.traderpro.engine.ForecastNewsOpportunityPolicy.Context(quote.dayChangePct, spreadBps, ltp,
-                    amountCrore, cap, categories.size, catalystKey, ageMs / 60_000L, evidence))
+                    amountCrore, cap, distinctCatalysts, catalystKey, ageMs / 60_000L, evidence))
                 val settings = preferences.settings.first()
                 val economics = ForecastAdaptiveSelectionPolicy.economics(
                     entryPrice = ltp, targetPct = 1.0, budgetRupees = settings.holdingBudgetRupees,
@@ -4503,7 +4504,7 @@ class TradingRepository @Inject constructor(
                 // fields for historical outcome learning. UNKNOWN remains null.
                 val enriched = linkedMapOf<String, Any?>(
                     "news_pattern_key" to patternKey, "exchange" to "NSE",
-                    "news_category_combo" to catalystKey, "distinct_catalysts" to categories.size,
+                    "news_category_combo" to catalystKey, "distinct_catalysts" to distinctCatalysts,
                     "market_cap_rupees" to cap, "reported_amount_crore" to amountCrore,
                     "news_amount_to_market_cap_pct" to materiality, "cap_bucket" to decision.capBucket,
                     "news_age_minutes" to (ageMs / 60_000L), "carry_forward" to carry,
@@ -4545,7 +4546,7 @@ class TradingRepository @Inject constructor(
                 auditLogger.logAsync("FORECAST_NEWS", "EARLY_CATALYST_DECISION", mapOf(
                     "id" to item.id, "symbol" to item.symbol, "source" to item.source,
                     "exchange" to "NSE", "category" to item.category, "catalyst_combo" to catalystKey,
-                    "pattern_key" to patternKey, "distinct_catalysts" to categories.size,
+                    "pattern_key" to patternKey, "distinct_catalysts" to distinctCatalysts,
                     "age_ms" to ageMs, "carry_forward" to carry,
                     "quote_research_account" to (if (forecastUsesBeta(token)) "BETA" else "ALPHA_FALLBACK"),
                     "quote_ltp" to ltp, "market_cap_rupees" to cap, "amount_crore" to amountCrore,
