@@ -54,13 +54,22 @@ class ForecastNewsMonitor @Inject constructor(
                     if (published > now + 60_000L || published < now - 3L * 24L * 60 * 60_000L) continue
                     val symbol = resolveSymbol(entry.title, entry.summary)
                     val id = sha256(feed.first + "|" + (entry.guid.ifBlank { entry.url.ifBlank { entry.title + published } }))
-                    val near = journal.recent(250).filter { it.symbol == symbol && symbol.isNotBlank() }
+                    val near = journal.recent(500).filter { it.symbol == symbol && symbol.isNotBlank() &&
+                        now - it.firstSeenAtMs in 0L..(24L * 60 * 60_000L) }
+                    val canonicalTitle = normalize(entry.title).take(180)
+                    if (near.any { normalize(it.headline).take(180) == canonicalTitle }) {
+                        audit.logAsync("FORECAST_NEWS", "DUPLICATE_CATALYST_SKIPPED", mapOf(
+                            "symbol" to symbol, "feed" to feed.first,
+                            "reason" to "SAME_NSE_TITLE_IN_MULTIPLE_FEEDS"))
+                        continue
+                    }
+                    // Distinct-title counts, not repeated RSS entries, are used for clustering.
+                    fun uniqueIn(minutes: Long) = near.filter {
+                        now - it.firstSeenAtMs <= minutes * 60_000L
+                    }.distinctBy { normalize(it.headline).take(180) }.size + 1
                     val assess = ForecastNewsPatternPolicy.assess(entry.title, entry.summary,
                         ((now - published) / 60_000L).coerceAtLeast(0),
-                        near.count { now - it.firstSeenAtMs <= 5 * 60_000L } + 1,
-                        near.count { now - it.firstSeenAtMs <= 10 * 60_000L } + 1,
-                        near.count { now - it.firstSeenAtMs <= 15 * 60_000L } + 1,
-                        sourceVerified = true)
+                        uniqueIn(5), uniqueIn(10), uniqueIn(15), sourceVerified = true)
                     val event = ForecastNewsEvent(id, feed.first, symbol, entry.title.take(300),
                         entry.summary.take(1200), entry.url.take(500), assess.category, assess.direction,
                         published, now, gson.toJson(assess.features), assess.confidence,
@@ -74,7 +83,13 @@ class ForecastNewsMonitor @Inject constructor(
                             "direction" to assess.direction, "published_at_ms" to published,
                             "observed_at_ms" to now, "confidence" to assess.confidence,
                             "feature_count" to assess.features.size,
-                            "status" to event.status))
+                            "status" to event.status, "source_exchange" to "NSE",
+                            "reported_amount_crore" to assess.features["reported_amount_crore"],
+                            "catalyst_count_15m" to assess.features["cluster_15m"],
+                            "distinct_recent_nse_titles_24h" to near.distinctBy {
+                                normalize(it.headline).take(180) }.size + 1,
+                            "off_market_collection" to (java.time.Instant.ofEpochMilli(now)
+                                .atZone(java.time.ZoneId.of("Asia/Kolkata")).hour !in 9..15)))
                     }
                 }
             } catch (err: Exception) {
