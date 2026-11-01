@@ -4489,7 +4489,7 @@ class TradingRepository @Inject constructor(
                         strategy = "NEWS_" + item.category, regime = eval.regime,
                         marketRegime = "BREADTH_NEUTRAL", reason = reason,
                         generatedAtMs = at, lastPrice = eval.features.ltp,
-                        lastObservedAtMs = at, qualityTier = "PRIMARY", executionEligible = true)))
+                        lastObservedAtMs = at, qualityTier = "PRIMARY", executionEligible = true))
                 }
                 forecastNewsJournal.update(item.copy(status = if (publish) "PUBLISHED" else "RESEARCH_ONLY",
                     rationale = reason, baselinePrice = eval.features.ltp,
