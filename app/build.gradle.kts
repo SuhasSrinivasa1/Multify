@@ -30,8 +30,8 @@ android {
         applicationId = "com.multify.traderpro.vivoy73final"
         minSdk = 26
         targetSdk = 35
-        versionCode = 7935
-        versionName = "7.9.35-price-band-fixed-shadow"
+        versionCode = 7936
+        versionName = "7.9.36-alpha-idle-fixed-shadow-depth"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
     }

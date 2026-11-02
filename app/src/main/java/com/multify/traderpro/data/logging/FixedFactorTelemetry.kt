@@ -7,6 +7,7 @@ import com.google.gson.GsonBuilder
 import com.google.gson.JsonParser
 import com.multify.traderpro.engine.FixedMultifyFactorFamilies
 import com.multify.traderpro.engine.FixedStrategyEvaluation
+import com.multify.traderpro.data.network.QuotePayload
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
 import java.time.Instant
@@ -42,13 +43,16 @@ class FixedFactorTelemetry @Inject constructor(@ApplicationContext context: Cont
         { _, _ -> dropped.incrementAndGet() }
     )
 
-    fun tryRecord(symbol: String, evaluation: FixedStrategyEvaluation, scanStartedAtMs: Long) {
+    fun tryRecord(
+        symbol: String, evaluation: FixedStrategyEvaluation, scanStartedAtMs: Long,
+        rawQuote: QuotePayload? = null, quoteCapturedAtMs: Long? = null
+    ) {
         // Keep the entire calling-thread path O(1). Heavy transformation takes place only in worker.
         val completedAtMs = System.currentTimeMillis()
         executor.execute {
             runCatching {
                 Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND)
-                val row = buildEvidence(symbol, evaluation, scanStartedAtMs, completedAtMs)
+                val row = buildEvidence(symbol, evaluation, scanStartedAtMs, completedAtMs, rawQuote, quoteCapturedAtMs)
                 val jsonl = gson.toJson(row) + "\n"
                 synchronized(lock) {
                     rotateIfNecessary(jsonl.toByteArray(Charsets.UTF_8).size.toLong())
@@ -64,7 +68,9 @@ class FixedFactorTelemetry @Inject constructor(@ApplicationContext context: Cont
         symbol: String,
         e: FixedStrategyEvaluation,
         scanStartedAtMs: Long,
-        completedAtMs: Long
+        completedAtMs: Long,
+        rawQuote: QuotePayload? = null,
+        quoteCapturedAtMs: Long? = null
     ): Map<String, Any?> {
         val f = e.features
         // The factor raw/score values are invariant to market breadth; the market-regime-weighted
@@ -88,7 +94,9 @@ class FixedFactorTelemetry @Inject constructor(@ApplicationContext context: Cont
             "regime" to e.regime,
             "confidence" to clean(e.confidence),
             "directional_score" to clean(e.directionalScore),
-            "quote_age_ms" to null,
+            "quote_age_ms" to null, // The provider has no quote/source timestamp.
+            "quote_captured_at_ms" to quoteCapturedAtMs,
+            "raw_quote" to FixedQuoteTelemetryPolicy.capture(rawQuote),
             "features" to mapOf(
                 "ltp" to clean(f.ltp), "bid" to clean(f.bid), "ask" to clean(f.ask),
                 "spread_bps" to clean(f.spreadBps), "order_book_imbalance" to clean(f.orderBookImbalance),
