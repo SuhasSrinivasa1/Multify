@@ -1,0 +1,153 @@
+name: Multify v7.9.37 Price / Broker Safety Stable-Signed APK
+on:
+  push:
+    branches: [v7937-safety-price-news-alpha-headroom]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verified-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Android SDK 35
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
+      - name: Source-scope safety gates
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin v7936-alpha-sparecapacity-5m-depth
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+          base="origin/v7936-alpha-sparecapacity-5m-depth"
+          root=Path("app/src/main/java/com/multify/traderpro")
+          protected=[
+            "engine/FixedLocalStrategyEngine.kt","engine/FixedForecastQualityPolicy.kt",
+            "engine/FixedForecastPublicationPolicy.kt","engine/FixedMultifyFactorFamilies.kt",
+            "engine/FixedMarketDiscoveryPolicy.kt","engine/HardStopLossPolicy.kt",
+            "engine/SteppedTrailingPolicy.kt","data/network/GrowwApiFactory.kt",
+            "data/network/BetaReadOnlyInterceptor.kt","engine/ForecastEarlyEntryPolicy.kt",
+            "engine/ForecastPublicationPolicy.kt","engine/LocalStrategyEngine.kt",
+            "engine/ForecastQualityPolicy.kt"
+          ]
+          for name in protected:
+              path="app/src/main/java/com/multify/traderpro/"+name
+              prev=subprocess.check_output(["git","show",f"{base}:{path}"]).decode()
+              assert Path(path).read_text()==prev, "PROTECTED SOURCE CHANGED: "+name
+          s=(root/"data/repository/TradingRepository.kt").read_text()
+          before=subprocess.check_output(["git","show",f"{base}:app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt"]).decode()
+          # Core score and decision-region still identical except the explicit publication price gate and
+          # rejection of out-of-band historical requests. Shadow code is outside the locked region.
+          def locked(source):
+              return source.split("// FIXED_FINAL_LOCK_BEGIN",1)[1].split("// FIXED_FINAL_LOCK_END",1)[0]
+          assert locked(s).count('candleInterval = "15minute"')==2
+          assert 'FixedLocalStrategyEngine.buildFeatures(quote, historical, 15)' in locked(s)
+          assert 'FixedLocalStrategyEngine.buildFeatures(quote, historical, 5)' not in locked(s)
+          assert 'fixedFiveMinuteShadowJournal' in s
+          assert '"fixed_5m_shadow_pairs.json"' in s
+          assert 'daily_recommendation_cap" to "NONE"' in s
+          assert "RecommendationPriceBandPolicy.eligible(ltp)" in s
+          policy=(root/"engine/RecommendationPriceBandPolicy.kt").read_text()
+          assert 'MIN_EXCLUSIVE_RUPEES = 200.0' in policy
+          assert 'MAX_EXCLUSIVE_RUPEES = 5_000.0' in policy
+          assert 'price > MIN_EXCLUSIVE_RUPEES && price < MAX_EXCLUSIVE_RUPEES' in policy
+          assert 'sampleFixedFiveMinuteShadow(fixedShadowOrdinal)' in (root/"service/TradingEngineService.kt").read_text()
+          assert 'FixedShadowSamplingPolicy.shouldSample' not in (root/"service/TradingEngineService.kt").read_text()
+          sh=s.split('suspend fun sampleFixedFiveMinuteShadow(',1)[1].split('suspend fun updateFixedFiveMinuteShadowOutcomes()',1)[0]
+          assert 'apiFactory.groww.historicalCandles(' in sh
+          assert 'candleInterval = "5minute"' in sh
+          assert 'apiFactory.betaGroww' not in sh
+          assert 'apiFactory.groww.quote(' not in sh
+          assert 'orders_allowed" to false' in sh
+          assert 'fixedShadowReferences[symbol]' in s
+          assert 'FixedQuoteTelemetryPolicy.capture(rawQuote)' in (root/"data/logging/FixedFactorTelemetry.kt").read_text()
+          assert 'MIN_INTERVAL_MS = 12L * 60L * 1000L' in (root/"engine/FixedShadowSamplingPolicy.kt").read_text()
+          assert 'candle_interval_minutes" to 15' in (root/"data/logging/FixedFactorTelemetry.kt").read_text()
+          assert 'ForecastNewsPublicationGate.mayPublish(ltp, qualifies, alreadyRecommended)' in s
+          assert '"OUTSIDE_200_5000_EXCLUSIVE_PRICE_BAND"' in s
+          assert 'latestBrokerCooldownUntilMs = latestCooldownUntilMs' in s
+          assert 'ExecutionQuoteLiquidityPolicy.rejectionReason(quote)' in s
+          assert 'POST_429_RESEARCH_QUIET_PERIOD_MS = 30L * 60L * 1000L' in (root/"engine/FixedShadowSamplingPolicy.kt").read_text()
+          assert '"quote_book_status"' in (root/"data/logging/FixedQuoteTelemetryPolicy.kt").read_text()
+          assert 'versionCode = 7937' in Path("app/build.gradle.kts").read_text()
+          changed=set(subprocess.check_output(["git","diff","--name-only",f"{base}...HEAD"]).decode().splitlines())
+          allowed={
+            "app/build.gradle.kts",
+            "app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt",
+            "app/src/main/java/com/multify/traderpro/data/logging/FixedQuoteTelemetryPolicy.kt",
+            "app/src/main/java/com/multify/traderpro/engine/FixedShadowSamplingPolicy.kt",
+            "app/src/main/java/com/multify/traderpro/engine/ExecutionQuoteLiquidityPolicy.kt",
+            "app/src/main/java/com/multify/traderpro/engine/ForecastNewsPublicationGate.kt",
+            "app/src/test/java/com/multify/traderpro/data/logging/FixedQuoteTelemetryPolicyTest.kt",
+            "app/src/test/java/com/multify/traderpro/engine/FixedShadowSamplingPolicyTest.kt",
+            "app/src/test/java/com/multify/traderpro/engine/ExecutionQuoteLiquidityPolicyTest.kt",
+            "app/src/test/java/com/multify/traderpro/engine/ForecastNewsPublicationGateTest.kt",
+            ".github/workflows/multify-v7937-verified.yml",
+            ".github/workflows/multify-v7937-debug-test.yml"
+          }
+          assert changed <= allowed,"Unexpected changed files: "+str(changed-allowed)
+          print("Fixed scoring/SELL/protections locked; 15m unchanged; 5m research-only; uncapped Forecast; strictly bounded prices")
+          PY
+      - name: Backend tests
+        run: |
+          python -m pip install -r backend/requirements.txt
+          PYTHONPATH="$GITHUB_WORKSPACE" PHONE_HMAC_SECRET=test-secret-test-secret-test-secret GROWW_API_KEY=test-api-key GROWW_TOTP_SECRET=JBSWY3DPEHPK3PXP python -m pytest -q backend/tests
+      - name: Android unit tests
+        run: gradle --no-daemon testDebugUnitTest
+      - name: Recover stable production signing identity
+        env:
+          MULTIFY_KEYSTORE_BASE64: ${{ secrets.MULTIFY_KEYSTORE_BASE64 }}
+          MULTIFY_KEYSTORE_PASSWORD: ${{ secrets.MULTIFY_KEYSTORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${MULTIFY_KEYSTORE_BASE64:-}" ] || [ -z "${MULTIFY_KEYSTORE_PASSWORD:-}" ]; then
+            echo "::error::Stable Multify signing secrets unavailable. Refusing ephemeral debug-signing fallback."
+            exit 20
+          fi
+          umask 077
+          printf '%s' "$MULTIFY_KEYSTORE_BASE64" | base64 --decode > app/multify-v4-stable.jks
+          expected="3F:72:D5:C2:4E:67:6C:71:2D:9E:7E:9F:EA:A8:29:96:0B:FC:A9:CD:FF:C9:EA:4D:A6:73:83:72:82:4E:87:55"
+          actual=$(keytool -list -v -keystore app/multify-v4-stable.jks -storepass "$MULTIFY_KEYSTORE_PASSWORD" -alias multifyv4 | grep 'SHA256:' | head -n 1 | sed 's/.*SHA256: *//')
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::Stable signing certificate mismatch. Refusing to create an incompatible APK."
+            exit 21
+          fi
+          echo "Stable signing identity matches SIGNING.md"
+      - name: Build stable-signed APK
+        env:
+          MULTIFY_KEYSTORE_PASSWORD: ${{ secrets.MULTIFY_KEYSTORE_PASSWORD }}
+        run: gradle --no-daemon assembleDebug
+      - name: Verify APK and create checksum
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v7.9.37-news-price-broker-safety-stable-debug.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/*.apk > dist/APK-SIGNATURE.txt
+          grep -qi "3f72d5c24e676c712d9e7e9feaa829960bfca9cdffc9ea4da6738372824e8755" dist/APK-SIGNATURE.txt || {
+            echo "::error::APK not signed by stable production identity"
+            exit 22
+          }
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/*.apk | head -n 2 > dist/PACKAGE.txt
+          sha256sum dist/*.apk > dist/SHA256SUMS.txt
+          git rev-parse HEAD > dist/SOURCE-COMMIT.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: multify-v7937-price-broker-safety-stable
+          path: dist/
+          if-no-files-found: warn

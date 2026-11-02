@@ -83,6 +83,7 @@ import com.multify.traderpro.engine.MultifyPositiveTransferCase
 import com.multify.traderpro.engine.FixedPositiveTransferCase
 import com.multify.traderpro.engine.ForecastQualityDecision
 import com.multify.traderpro.engine.ForecastNewsPatternPolicy
+import com.multify.traderpro.engine.ForecastNewsPublicationGate
 import com.multify.traderpro.engine.ForecastUnivestLearningPolicy
 import com.multify.traderpro.engine.ForecastQualityPolicy
 import com.multify.traderpro.engine.ForecastTargetExpansionPolicy
@@ -93,6 +94,7 @@ import com.multify.traderpro.engine.FixedAdaptiveLearningMath
 import com.multify.traderpro.engine.FixedForecastPublicationPolicy
 import com.multify.traderpro.engine.FixedFinalContract
 import com.multify.traderpro.engine.RecommendationPriceBandPolicy
+import com.multify.traderpro.engine.ExecutionQuoteLiquidityPolicy
 import com.multify.traderpro.engine.FixedShadowSamplingPolicy
 import com.multify.traderpro.engine.FixedForecastQualityDecision
 import com.multify.traderpro.engine.FixedForecastQualityPolicy
@@ -3394,11 +3396,19 @@ class TradingRepository @Inject constructor(
             val live = api.categories.first { it.category == GrowwApiUsageLedger.Category.LIVE_DATA }
             val historical = api.categories.first { it.category == GrowwApiUsageLedger.Category.HISTORICAL }
             val brokerReady = marketDataAvailableForFixed() && !recoveryGate.requiresReconnect()
+            val status = recoveryGate.status(nowMs)
+            val latestCooldownUntilMs = maxOf(
+                status.categoryCooldownUntilMs[GrowwApiUsageLedger.Category.LIVE_DATA] ?: 0L,
+                status.categoryCooldownUntilMs[GrowwApiUsageLedger.Category.HISTORICAL] ?: 0L
+            )
+            val lastObserved429AtMs = maxOf(live.lastRateLimitAtMs, historical.lastRateLimitAtMs)
             val fixedDueIn = millisUntilNextFixedScan()
             if (!FixedShadowSamplingPolicy.canCollect(
                     nowMs, lastSuccess, fixedApiPriorityRequested, marketCriticalTradeInFlight,
                     fixedDueIn, live.usedLastMinute, live.appPerMinuteLimit,
-                    historical.usedLastMinute, historical.appPerMinuteLimit, brokerReady
+                    historical.usedLastMinute, historical.appPerMinuteLimit, brokerReady,
+                    latestBrokerCooldownUntilMs = latestCooldownUntilMs,
+                    lastObserved429AtMs = lastObserved429AtMs
                 )
             ) {
                 auditLogger.logAsync("FIXED_5M_SHADOW", "IDLE_CAPACITY_SKIPPED", mapOf(
@@ -3406,7 +3416,10 @@ class TradingRepository @Inject constructor(
                     "fixed_due_in_ms" to fixedDueIn, "fixed_priority" to fixedApiPriorityRequested,
                     "critical_trade" to marketCriticalTradeInFlight, "broker_ready" to brokerReady,
                     "live_minute" to live.usedLastMinute,
-                    "historical_minute" to historical.usedLastMinute
+                    "historical_minute" to historical.usedLastMinute,
+                    "latest_cooldown_until_ms" to latestCooldownUntilMs,
+                    "last_429_at_ms" to lastObserved429AtMs,
+                    "research_429_quiet_period_ms" to FixedShadowSamplingPolicy.POST_429_RESEARCH_QUIET_PERIOD_MS
                 ))
                 return
             }
@@ -4848,8 +4861,9 @@ class TradingRepository @Inject constructor(
                     decision.eligible && !conflicting && economics.profitableAfterCosts
                 val existing = learningDao.longForecastsForDate(today)
                 val alreadyRecommended = existing.any { it.symbol.equals(item.symbol, true) }
-                val publish = qualifies && !alreadyRecommended
+                val publish = ForecastNewsPublicationGate.mayPublish(ltp, qualifies, alreadyRecommended)
                 val state = when {
+                    !RecommendationPriceBandPolicy.eligible(ltp) -> "OUTSIDE_200_5000_EXCLUSIVE_PRICE_BAND"
                     conflicting -> "CONFLICTING_NEWS"
                     !economics.profitableAfterCosts -> "NET_PROFIT_NOT_POSITIVE"
                     alreadyRecommended -> "DUPLICATE_SAME_DAY"
@@ -4869,6 +4883,7 @@ class TradingRepository @Inject constructor(
                     "evidence_distinct_days" to evidence.distinctDays,
                     "evidence_one_pct_hit_rate" to evidence.hitRate,
                     "evidence_proven" to evidence.proven, "entry_decision" to state,
+                    "news_price_band_eligible" to RecommendationPriceBandPolicy.eligible(ltp),
                     "no_price_spike_required" to true, "news_features_40" to item.featureJson)
                 forecastNewsJournal.update(item.copy(
                     featureJson = researchGson.toJson(enriched),
@@ -4911,6 +4926,8 @@ class TradingRepository @Inject constructor(
                     "hit_rate" to evidence.hitRate, "validated" to evidence.proven,
                     "economics_net_rupees" to economics.netProfitRupees,
                     "result" to state, "published" to publish,
+                    "price_band_eligible" to RecommendationPriceBandPolicy.eligible(ltp),
+                    "price_min_exclusive_rupees" to 200, "price_max_exclusive_rupees" to 5000,
                     "frozen_fixed_untouched" to true, "no_spike_confirmation" to true))
             }
         } finally { guard.unlock() }
@@ -5005,6 +5022,14 @@ class TradingRepository @Inject constructor(
         }
         val ltp = quote.lastPrice ?: error("Groww quote has no LTP")
         require(RecommendationPriceBandPolicy.eligible(ltp)) { "Forecast BUY requires fresh price >₹200 and <₹5,000" }
+        val forecastLiquidityReject = ExecutionQuoteLiquidityPolicy.rejectionReason(quote)
+        if (forecastLiquidityReject != null) {
+            auditLogger.logAsync("FORECAST_AUTO_BUY", "ENTRY_LIQUIDITY_UNVERIFIED", mapOf(
+                "symbol" to row.symbol, "reason" to forecastLiquidityReject,
+                "source" to "FRESH_EXECUTION_QUOTE", "fixed_forecast_models_changed" to false
+            ))
+            error("Forecast BUY blocked: broker book not verified ($forecastLiquidityReject)")
+        }
         require(ltp < row.targetPrice) { "Forecast target already reached; BUY disabled" }
         val margin = apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin")
         val available = (margin.equity?.cncBalanceAvailable ?: margin.clearCash).coerceAtLeast(0.0)
@@ -5511,6 +5536,14 @@ class TradingRepository @Inject constructor(
         }
         val ltp = quote.lastPrice ?: error("Groww quote has no LTP")
         require(RecommendationPriceBandPolicy.eligible(ltp)) { "Fixed BUY requires fresh price >₹200 and <₹5,000" }
+        val fixedLiquidityReject = ExecutionQuoteLiquidityPolicy.rejectionReason(quote)
+        if (fixedLiquidityReject != null) {
+            auditLogger.logAsync("FIXED_BUY", "ENTRY_LIQUIDITY_UNVERIFIED", mapOf(
+                "symbol" to row.symbol, "reason" to fixedLiquidityReject,
+                "source" to "FRESH_EXECUTION_QUOTE", "fixed_scoring_changed" to false
+            ))
+            error("Fixed BUY blocked: broker book not verified ($fixedLiquidityReject)")
+        }
         if (ltp >= row.targetPrice) {
             fixedRecommendationStore.update(row.copy(
                 status = "TARGET_HIT", targetHitAtMs = System.currentTimeMillis(),
@@ -5666,6 +5699,14 @@ class TradingRepository @Inject constructor(
             val ltp = quote.lastPrice?.takeIf { it.isFinite() && it > 0.0 } ?: continue
             if (!RecommendationPriceBandPolicy.eligible(ltp)) {
                 auditLogger.logAsync("FIXED_AUTO_BUY", "PRICE_BAND_REJECTED", mapOf("symbol" to row.symbol, "fresh_ltp" to ltp))
+                continue
+            }
+            val liquidityReject = ExecutionQuoteLiquidityPolicy.rejectionReason(quote)
+            if (liquidityReject != null) {
+                auditLogger.logAsync("FIXED_AUTO_BUY", "ENTRY_LIQUIDITY_UNVERIFIED", mapOf(
+                    "symbol" to row.symbol, "reason" to liquidityReject,
+                    "fresh_quote" to true, "scoring_changed" to false
+                ))
                 continue
             }
             if (ltp >= row.targetPrice) {

@@ -16,10 +16,29 @@ internal object FixedQuoteTelemetryPolicy {
             (if (buy) q.depth?.buy.orEmpty() else q.depth?.sell.orEmpty()).take(5).map {
                 mapOf("price" to clean(it.price), "resting_quantity" to clean(it.quantity))
             }
+        val quoteBookStatus = when {
+            bid == null || ask == null -> "MISSING_BID_OR_ASK"
+            ask < bid -> "CROSSED_MARKET"
+            else -> "VALID_BOOK"
+        }
         val spreadBps = if (bid != null && ask != null && bid > 0.0 && ask >= bid)
             (ask - bid) / ((ask + bid) / 2.0) * 10_000.0 else null
         return mapOf(
             "quote_available" to true,
+            "quote_book_status" to quoteBookStatus,
+            "bid_source" to when {
+                clean(q.bidPrice) != null -> "BROKER_BID_FIELD"
+                bid != null -> "MARKET_DEPTH_FALLBACK"
+                else -> "UNAVAILABLE"
+            },
+            "ask_source" to when {
+                clean(q.offerPrice) != null -> "BROKER_OFFER_FIELD"
+                ask != null -> "MARKET_DEPTH_FALLBACK"
+                else -> "UNAVAILABLE"
+            },
+            "spread_verified" to (quoteBookStatus == "VALID_BOOK"),
+            "volume_available" to (q.volume != null),
+            "bid_ask_missing_is_not_zero" to true,
             "last_price" to clean(q.lastPrice),
             "bid_price" to bid, "ask_price" to ask,
             "bid_quantity" to clean(q.bidQuantity),

@@ -34,6 +34,9 @@ class FixedQuoteTelemetryPolicyTest {
         assertEquals(1800.0, row["total_sell_quantity"])
         assertEquals(47000L, row["day_traded_volume"])
         assertEquals("RESTING_NOT_EXECUTED", row["order_book_quantity_kind"])
+        assertEquals("VALID_BOOK", row["quote_book_status"])
+        assertEquals(true, row["spread_verified"])
+        assertEquals(true, row["volume_available"])
         assertNull(row["executed_buy_volume"])
         assertNull(row["executed_sell_volume"])
         assertEquals(1, row["depth_buy_levels_available"])
@@ -46,6 +49,11 @@ class FixedQuoteTelemetryPolicyTest {
         assertNull(row["bid_price"])
         assertNull(row["ask_price"])
         assertNull(row["day_traded_volume"])
+        assertEquals("MISSING_BID_OR_ASK", row["quote_book_status"])
+        assertEquals(false, row["spread_verified"])
+        assertEquals(false, row["volume_available"])
+        assertEquals("UNAVAILABLE", row["bid_source"])
+        assertEquals("UNAVAILABLE", row["ask_source"])
         assertFalse(FixedQuoteTelemetryPolicy.capture(null)["quote_available"] as Boolean)
     }
 }
