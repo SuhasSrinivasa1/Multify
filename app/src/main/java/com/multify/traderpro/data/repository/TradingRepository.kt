@@ -3097,7 +3097,7 @@ class TradingRepository @Inject constructor(
         val publishable = unseen.filter { item ->
             // User-requested Fixed-only overlay. Apply it here, after the full v7.4.1 universe,
             // breadth and ranking have been calculated, so the underlying model remains 1:1.
-            if (item.evaluation.features.ltp <= FIXED_MIN_STOCK_PRICE_RUPEES) return@filter false
+            if (!item.evaluation.features.ltp.isFinite() || item.evaluation.features.ltp <= FIXED_MIN_STOCK_PRICE_RUPEES) return@filter false
             val currentPrimary = item.quality.tier == "PRIMARY" &&
                 item.quality.publishEligible && item.quality.executionEligible
             FixedForecastPublicationPolicy.isReady(
@@ -5328,6 +5328,9 @@ class TradingRepository @Inject constructor(
             apiFactory.groww.quote(bearer(token), tradingSymbol = row.symbol).requirePayload("Quote ${row.symbol}")
         }
         val ltp = quote.lastPrice ?: error("Groww quote has no LTP")
+        require(ltp.isFinite() && ltp > FIXED_MIN_STOCK_PRICE_RUPEES) {
+            "Fixed BUY disabled: fresh quote must be above ₹${fmt(FIXED_MIN_STOCK_PRICE_RUPEES)}"
+        }
         if (ltp >= row.targetPrice) {
             fixedRecommendationStore.update(row.copy(
                 status = "TARGET_HIT", targetHitAtMs = System.currentTimeMillis(),
@@ -5481,6 +5484,15 @@ class TradingRepository @Inject constructor(
             }
             val quoteElapsedMs = (System.currentTimeMillis() - quoteStartedAtMs).coerceAtLeast(0L)
             val ltp = quote.lastPrice?.takeIf { it.isFinite() && it > 0.0 } ?: continue
+            if (ltp <= FIXED_MIN_STOCK_PRICE_RUPEES) {
+                auditLogger.log("FIXED_AUTO_BUY", "SKIPPED_BELOW_FIXED_PRICE_FLOOR", mapOf(
+                    "symbol" to row.symbol,
+                    "published_entry" to row.entryPrice,
+                    "fresh_ltp" to ltp,
+                    "exclusive_floor" to FIXED_MIN_STOCK_PRICE_RUPEES
+                ))
+                continue
+            }
             if (ltp >= row.targetPrice) {
                 fixedRecommendationStore.update(row.copy(
                     status = "TARGET_HIT", targetHitAtMs = System.currentTimeMillis(),
@@ -9066,7 +9078,7 @@ class TradingRepository @Inject constructor(
         private const val FORECAST_AUTO_BUY_ORDER_PACING_MS = 175L
         private const val FIXED_DIRECT_AUTO_BUY_ORDER_PACING_MS = 175L
         private const val FORECAST_AUTO_BUY_CANCEL_RECHECK_MS = 300L
-        private const val FIXED_MIN_STOCK_PRICE_RUPEES = 100.0
+        private const val FIXED_MIN_STOCK_PRICE_RUPEES = FixedFinalContract.MIN_FIXED_PUBLICATION_PRICE_EXCLUSIVE
         private const val FIXED_PREMARKET_WARMUP_INTERVAL_MS = 5L * 60L * 1000L
         private const val FIXED_V741_FORECAST_SCAN_INTERVAL_MS = 150_000L
         private const val FIXED_V741_FORECAST_SYMBOL_PACING_MS = 25L
