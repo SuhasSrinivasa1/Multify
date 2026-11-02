@@ -6,7 +6,7 @@ package com.multify.traderpro.engine
  * Ground truth:
  * MultifyTraderPro-logs-v7.4.1-forecast-gtt-autobuy-debug-20261021-190239.zip
  * The recommendation engine is the exact v7.4.1 implementation; only the explicitly requested
- * Fixed overlays are allowed outside it: >₹100 publication eligibility, 09:15-15:30 IST session,
+ * Fixed overlays are allowed outside it: >₹150 publication eligibility, 09:15-15:30 IST session,
  * and Fixed-only remaining-wallet execution sizing.
  */
 object FixedFinalContract {
@@ -17,7 +17,7 @@ object FixedFinalContract {
     const val REFERENCE_EXPORT_AT_MS = 1792589559000L
     const val CANONICAL_LEARNING_CALLS = 107
     const val CANONICAL_MULTIFY_MFE_AVG_PCT = 1.1161043030113955
-    const val MIN_FIXED_PUBLICATION_PRICE_EXCLUSIVE = 100.0
+    const val MIN_FIXED_PUBLICATION_PRICE_EXCLUSIVE = 150.0
 
     // This extra call existed only in an older merged diagnostic bundle and was not present in the
     // final v7.4.1 session whose recommendations are the Fixed ground truth.
