@@ -16,6 +16,7 @@ import com.multify.traderpro.data.network.ForecastDto
 import com.multify.traderpro.data.network.GrowwApiUsageLedger
 import com.multify.traderpro.data.network.GrowwRecoveryGate
 import com.multify.traderpro.engine.FixedDataPipelinePolicy
+import com.multify.traderpro.engine.FixedShadowSamplingPolicy
 import com.multify.traderpro.data.repository.TradingRepository
 import com.multify.traderpro.engine.ReleaseIntegrityManifest
 import dagger.hilt.android.AndroidEntryPoint
@@ -408,6 +409,16 @@ class TradingEngineService : Service() {
         }
     }
 
+    // Persistent per-day scan ordinal survives foreground-service restarts.
+    private fun nextFixedShadowScanOrdinal(): Int {
+        val day = ZonedDateTime.now(INDIA).toLocalDate().toString()
+        val prefs = getSharedPreferences("fixed_shadow_sampling_schedule_v1", Context.MODE_PRIVATE)
+        val sameDay = prefs.getString("date", "") == day
+        val next = (if (sameDay) prefs.getInt("completed_fixed_scans", 0) else 0) + 1
+        prefs.edit().putString("date", day).putInt("completed_fixed_scans", next).commit()
+        return next
+    }
+
     private fun startFixedScanWorker() {
         if (fixedScanJob?.isActive == true) return
         fixedScanJob = scope.launch {
@@ -463,6 +474,10 @@ class TradingEngineService : Service() {
                             )) {
                                 auditLogger.log("FIXED_DATA_PIPELINE", "FIXED_SCAN_DEFERRED_BROKER_UNAVAILABLE", mapOf(
                                     "reason" to readiness.name,
+                                    "blocked_api_categories" to listOfNotNull(
+                                        "HISTORICAL".takeIf { historicalCooldownUntilMs > nowMs },
+                                        "LIVE_DATA".takeIf { liveCooldownUntilMs > nowMs }
+                                    ),
                                     "historical_cooldown_until_ms" to historicalCooldownUntilMs,
                                     "live_ltp_cooldown_until_ms" to liveCooldownUntilMs,
                                     "remaining_cooldown_ms" to (cooldownUntilMs - nowMs).coerceAtLeast(0L),
@@ -551,6 +566,23 @@ class TradingEngineService : Service() {
                             ))
                             scope.launch {
                                 notifyNewFixedRecommendationsAfterOrderPath()
+                            }
+                            // No extra full-market scan: outcome update uses Fixed's persisted
+                            // LTP snapshot; at most one in ten completed cycles schedules
+                            // a bounded, read-only Beta 5m/15m paired research comparison.
+                            val fixedShadowOrdinal = nextFixedShadowScanOrdinal()
+                            scope.launch {
+                                runCatching { repository.updateFixedFiveMinuteShadowOutcomes() }
+                                    .onFailure { err -> auditLogger.logAsync("FIXED_5M_SHADOW", "OUTCOME_UPDATE_ERROR", mapOf(
+                                        "error" to (err.message ?: err.javaClass.simpleName)
+                                    )) }
+                                if (FixedShadowSamplingPolicy.shouldSample(fixedShadowOrdinal)) {
+                                    runCatching { repository.sampleFixedFiveMinuteShadow(fixedShadowOrdinal) }
+                                        .onFailure { err -> auditLogger.logAsync("FIXED_5M_SHADOW", "SAMPLE_ERROR", mapOf(
+                                            "scan_number" to fixedShadowOrdinal,
+                                            "error" to (err.message ?: err.javaClass.simpleName)
+                                        )) }
+                                }
                             }
                             // Give Forecast a bounded, broker-budget-aware chance immediately
                             // after Fixed releases the shared scan mutex. It cannot block the

@@ -80,7 +80,7 @@ class FixedFactorTelemetry @Inject constructor(@ApplicationContext context: Cont
             "scan_started_at_ms" to scanStartedAtMs,
             "evaluation_completed_at_ms" to completedAtMs,
             "evaluation_time_utc" to Instant.ofEpochMilli(completedAtMs).toString(),
-            "candle_interval_minutes" to 5,
+            "candle_interval_minutes" to 15,
             "factor_count" to model.factors.size,
             "market_regime_for_factor_raw_scores" to "BREADTH_NEUTRAL_REFERENCE",
             "market_regime_for_live_ranking" to "NOT_CAPTURED_IN_EVALUATION",

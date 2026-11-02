@@ -92,6 +92,8 @@ import com.multify.traderpro.engine.ForecastPublicationPolicy
 import com.multify.traderpro.engine.FixedAdaptiveLearningMath
 import com.multify.traderpro.engine.FixedForecastPublicationPolicy
 import com.multify.traderpro.engine.FixedFinalContract
+import com.multify.traderpro.engine.RecommendationPriceBandPolicy
+import com.multify.traderpro.engine.FixedShadowSamplingPolicy
 import com.multify.traderpro.engine.FixedForecastQualityDecision
 import com.multify.traderpro.engine.FixedForecastQualityPolicy
 import com.multify.traderpro.engine.FixedLocalStrategyEngine
@@ -289,6 +291,8 @@ class TradingRepository @Inject constructor(
         (Runtime.getRuntime().availableProcessors() - 1).coerceIn(1, 6)
     )
     private val fixedHistoricalDataMutex = Mutex()
+    private val fixedFiveMinuteShadowMutex = Mutex()
+    private val fixedFiveMinuteShadowJournal = FixedFiveMinuteShadowJournal(appContext)
     private var nextFixedHistoricalAtElapsedMs = 0L
     private var fixedHistoricalCooldownUntilElapsedMs = 0L
     @Volatile private var activePortfolioMonitorCount = 0
@@ -1306,9 +1310,10 @@ class TradingRepository @Inject constructor(
         val forecastReferences = forecastReferenceStats()
         val snapshot = managedSnapshotLocal()
         val execution = executionStats()
-        val forecasts = learningDao.longForecastsForDate(today).map { it.toForecastDto() }
+        val forecasts = learningDao.longForecastsForDate(today)
+            .filter { RecommendationPriceBandPolicy.eligible(it.entryPrice) }.map { it.toForecastDto() }
         val fixedRecords = fixedRecommendationStore.recommendations(today)
-            .filter { it.entryPrice > FIXED_MIN_STOCK_PRICE_RUPEES }
+            .filter { RecommendationPriceBandPolicy.eligible(it.entryPrice) }
         fixedOutcomePerformanceStore.record(fixedRecords)
         val fixedRolling = fixedOutcomePerformanceStore.rolling()
         val fixedDaily = fixedOutcomePerformanceStore.today()
@@ -1488,9 +1493,10 @@ class TradingRepository @Inject constructor(
             val snapshot = managedSnapshot(token)
             val execution = executionStats()
             val today = LocalDate.now(INDIA).toString()
-            val forecasts = learningDao.longForecastsForDate(today).map { it.toForecastDto() }
+            val forecasts = learningDao.longForecastsForDate(today)
+            .filter { RecommendationPriceBandPolicy.eligible(it.entryPrice) }.map { it.toForecastDto() }
             val fixedForecasts = fixedRecommendationStore.recommendations(today)
-                .filter { it.entryPrice > FIXED_MIN_STOCK_PRICE_RUPEES }
+                .filter { RecommendationPriceBandPolicy.eligible(it.entryPrice) }
                 .map { it.toDto() }
             val champions = learningDao.allForecastChampions()
                 .map { ForecastChampionDto(it.marketRegime, it.regime, it.strategy, it.wins, it.losses, it.sampleCount, it.distinctDays, it.distinctSymbols, it.frozen) }
@@ -1917,7 +1923,7 @@ class TradingRepository @Inject constructor(
                 it.status == "ACTIVE" &&
                     it.executionEligible &&
                     it.qualityTier == "PRIMARY" &&
-                    it.entryPrice > FIXED_MIN_STOCK_PRICE_RUPEES
+                    RecommendationPriceBandPolicy.eligible(it.entryPrice)
             }
             .sortedBy { it.generatedAtMs }
             .map { it.toDto() }
@@ -2280,13 +2286,13 @@ class TradingRepository @Inject constructor(
         val today = now.toLocalDate().toString()
         val existing = learningDao.longForecastsForDate(today)
         if (now.dayOfWeek.value >= 6 || now.toLocalTime() < LocalTime.of(9, 15) || now.toLocalTime() > LocalTime.of(15, 0)) {
-            return existing.map { it.toForecastDto() }
+            return existing.filter { RecommendationPriceBandPolicy.eligible(it.entryPrice) }.map { it.toForecastDto() }
         }
         val nowMs = System.currentTimeMillis()
         val scanInterval = if (forecastDiscoveryNextBatch > 0 || forecastDiscoveryMustClear || forecastWaitingForSharedBaseline || forecastDetailQueue.isNotEmpty())
             45_000L else FORECAST_SCAN_INTERVAL_MS
-        if (!force && nowMs - lastForecastScanAtMs < scanInterval) return existing.map { it.toForecastDto() }
-        val token = forecastMarketToken() ?: return existing.map { it.toForecastDto() }
+        if (!force && nowMs - lastForecastScanAtMs < scanInterval) return existing.filter { RecommendationPriceBandPolicy.eligible(it.entryPrice) }.map { it.toForecastDto() }
+        val token = forecastMarketToken() ?: return existing.filter { RecommendationPriceBandPolicy.eligible(it.entryPrice) }.map { it.toForecastDto() }
         lastForecastScanAtMs = nowMs
         val scanStartedElapsedMs = SystemClock.elapsedRealtime()
         val apiBefore = GrowwApiUsageLedger.snapshot()
@@ -2708,6 +2714,7 @@ class TradingRepository @Inject constructor(
         val completedCalibrationSessions = forecastCalibrationDates().size
         val liveForecastReady = true // Forecast-only: no five-session recommendation gate
         val publishable = unseen.filter { item ->
+            if (!RecommendationPriceBandPolicy.eligible(item.evaluation.features.ltp)) return@filter false
             val currentPrimary =
                 item.quality.tier == "PRIMARY" && item.quality.publishEligible && item.quality.executionEligible &&
                     item.economics.profitableAfterCosts
@@ -2774,6 +2781,8 @@ class TradingRepository @Inject constructor(
             "research" to (tierCounts["RESEARCH"] ?: 0),
             "published_count" to all.size,
             "daily_recommendation_cap" to "NONE",
+            "price_min_exclusive" to 200,
+            "price_max_exclusive" to 5000,
             "newly_publishable_count" to publishable.size,
             "base_target_pct" to targetPct,
             "max_published_target_pct" to (publishable.maxOfOrNull { it.targetPct } ?: targetPct),
@@ -2889,7 +2898,7 @@ class TradingRepository @Inject constructor(
             "live_forecast_unlocked" to liveForecastReady,
             "fixed_formula_changed" to false
         ))
-        return all.map { it.toForecastDto() }
+        return all.filter { RecommendationPriceBandPolicy.eligible(it.entryPrice) }.map { it.toForecastDto() }
     }
 
     // FIXED_FINAL_LOCK_BEGIN: FIXED-V741-20261021-190239-FINAL
@@ -2898,7 +2907,7 @@ class TradingRepository @Inject constructor(
         val now = ZonedDateTime.now(INDIA)
         val today = now.toLocalDate().toString()
         val existing = fixedRecommendationStore.recommendations(today)
-            .filter { it.entryPrice > FIXED_MIN_STOCK_PRICE_RUPEES }
+            .filter { RecommendationPriceBandPolicy.eligible(it.entryPrice) }
         if (now.dayOfWeek.value >= 6 || now.toLocalTime() < LocalTime.of(9, 15) || now.toLocalTime() >= LocalTime.of(15, 30)) {
             return existing.map { it.toDto() }
         }
@@ -3097,7 +3106,7 @@ class TradingRepository @Inject constructor(
         val publishable = unseen.filter { item ->
             // User-requested Fixed-only overlay. Apply it here, after the full v7.4.1 universe,
             // breadth and ranking have been calculated, so the underlying model remains 1:1.
-            if (item.evaluation.features.ltp <= FIXED_MIN_STOCK_PRICE_RUPEES) return@filter false
+            if (!RecommendationPriceBandPolicy.eligible(item.evaluation.features.ltp)) return@filter false
             val currentPrimary = item.quality.tier == "PRIMARY" &&
                 item.quality.publishEligible && item.quality.executionEligible
             FixedForecastPublicationPolicy.isReady(
@@ -3139,14 +3148,16 @@ class TradingRepository @Inject constructor(
         }
 
         val all = fixedRecommendationStore.recommendations(today)
-            .filter { it.entryPrice > FIXED_MIN_STOCK_PRICE_RUPEES }
+            .filter { RecommendationPriceBandPolicy.eligible(it.entryPrice) }
         val tierCounts = ranked.groupingBy { it.quality.tier }.eachCount()
         auditLogger.log("FIXED_ENGINE", "LONG_SCAN_TIERED", mapOf(
             "snapshot_id" to snapshot.payload.snapshotId,
             "snapshot_sha256" to snapshot.sha256,
             "final_contract_id" to FixedFinalContract.CONTRACT_ID,
             "reference_log_sha256" to FixedFinalContract.SOURCE_LOG_SHA256,
-            "price_gate_stage" to "PUBLICATION_ONLY",
+            "price_gate_stage" to "EARLY_HISTORICAL_SKIP_AND_PUBLICATION",
+            "price_min_exclusive" to 200,
+            "price_max_exclusive" to 5000,
             "date" to today,
             "evaluated" to evaluated.size,
             "primary" to (tierCounts["PRIMARY"] ?: 0),
@@ -3154,6 +3165,8 @@ class TradingRepository @Inject constructor(
             "research" to (tierCounts["RESEARCH"] ?: 0),
             "published_count" to all.size,
             "daily_recommendation_cap" to "NONE",
+            "price_min_exclusive" to 200,
+            "price_max_exclusive" to 5000,
             "newly_publishable_count" to publishable.size,
             "target_pct" to targetPct,
             "frozen_multify_mfe_avg_pct" to learnedAverage,
@@ -3187,6 +3200,7 @@ class TradingRepository @Inject constructor(
         val quote = withFixedLiveDataSlot {
             apiFactory.groww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Fixed quote $symbol")
         }
+        require(RecommendationPriceBandPolicy.eligible(quote.lastPrice)) { "FIXED_PRICE_BAND_OUTSIDE" }
         // Token-scope the RAM snapshot so a reconnect or account change cannot reuse candles.
         val historyKey = sha256(token).take(12) + ":" + symbol
         val incremental = fixedHistoricalWindowStore.request(historyKey, start, SystemClock.elapsedRealtime())
@@ -3352,6 +3366,137 @@ class TradingRepository @Inject constructor(
         return null
     }
     // FIXED_FINAL_LOCK_END: FIXED-V741-20261021-190239-FINAL
+
+    /**
+     * Experimental, read-only Fixed comparison. Production Fixed remains on 15m candles.
+     * Only called by the independent worker for every tenth successfully completed Fixed scan.
+     * Six candidate symbols maximum; Beta market-data account required to avoid Alpha contention.
+     * Paired 5m and 15m features share the same fresh quote and timestamp.
+     */
+    suspend fun sampleFixedFiveMinuteShadow(completedScanNumber: Int) {
+        if (!FixedShadowSamplingPolicy.shouldSample(completedScanNumber)) return
+        if (!fixedFiveMinuteShadowMutex.tryLock()) {
+            auditLogger.logAsync("FIXED_5M_SHADOW", "SAMPLE_SKIPPED_BUSY", mapOf("scan_number" to completedScanNumber))
+            return
+        }
+        try {
+            if (!secretStore.hasBetaCredentials() || !betaResearchAuthenticated() ||
+                marketCriticalTradeInFlight || fixedApiPriorityRequested
+            ) {
+                auditLogger.logAsync("FIXED_5M_SHADOW", "SAMPLE_DEFERRED", mapOf(
+                    "scan_number" to completedScanNumber, "beta_required" to true,
+                    "critical_trade" to marketCriticalTradeInFlight, "fixed_priority" to fixedApiPriorityRequested
+                ))
+                return
+            }
+            val now = ZonedDateTime.now(INDIA)
+            if (now.dayOfWeek.value >= 6 || now.toLocalTime() !in LocalTime.of(9, 15)..LocalTime.of(15, 10)) return
+            val date = now.toLocalDate().toString()
+            val market = fixedMarketDiscoveryStateStore.load(date)
+            val prices = market?.previousLtps.orEmpty()
+            val previouslyPublished = fixedRecommendationStore.recommendations(date)
+                .asSequence().filter { RecommendationPriceBandPolicy.eligible(it.entryPrice) }
+                .map { it.symbol }.take(3).toList()
+            val broad = prices.entries.asSequence()
+                .filter { RecommendationPriceBandPolicy.eligible(it.value) }
+                .sortedByDescending { (symbol, ltp) ->
+                    market?.sessionOpenLtps?.get(symbol)?.takeIf { it > 0.0 }
+                        ?.let { ltp / it - 1.0 } ?: 0.0
+                }.map { it.key }.toList()
+            val symbols = (previouslyPublished + broad).distinct().take(FixedShadowSamplingPolicy.MAX_PAIRED_SYMBOLS_PER_SAMPLE)
+            val token = forecastMarketToken()
+            if (token == null || symbols.isEmpty()) {
+                auditLogger.logAsync("FIXED_5M_SHADOW", "SAMPLE_SKIPPED_NO_DATA", mapOf("scan_number" to completedScanNumber))
+                return
+            }
+            val start = now.minusDays(4).toLocalDate().atTime(9, 15).format(HIST_FORMAT)
+            val end = now.toLocalDateTime().format(HIST_FORMAT)
+            val target = ensureFixedEngineSnapshot().let(::fixedSnapshotMultifyMfeAverage)
+            val targetPct = FixedForecastQualityPolicy.adaptiveTargetPct(target, emptyList())
+            var compared = 0
+            for (symbol in symbols) {
+                if (marketCriticalTradeInFlight || fixedApiPriorityRequested) break
+                val attemptedAt = System.currentTimeMillis()
+                val result = runCatching {
+                    // Never use the execution token's Alpha rate budget for this research.
+                    val quote = apiFactory.betaGroww.quote(bearer(token), tradingSymbol = symbol)
+                        .requirePayload("Fixed shadow Beta quote $symbol")
+                    val price = quote.lastPrice
+                    require(RecommendationPriceBandPolicy.eligible(price)) { "OUTSIDE_PRICE_BAND" }
+                    val h15 = apiFactory.betaGroww.historicalCandles(
+                        bearer(token), growwSymbol = "NSE-$symbol", startTime = start, endTime = end,
+                        candleInterval = "15minute").requirePayload("Fixed shadow 15m $symbol")
+                    val h5 = apiFactory.betaGroww.historicalCandles(
+                        bearer(token), growwSymbol = "NSE-$symbol", startTime = start, endTime = end,
+                        candleInterval = "5minute").requirePayload("Fixed shadow 5m $symbol")
+                    require(h15.candles.size >= 5 && h5.candles.size >= 5) { "INSUFFICIENT_SHADOW_HISTORY" }
+                    val signal = ParsedSignal(SignalType.TRADE_RELEASE, symbol = symbol, rawText = "fixed-five-minute-shadow", confidence = 1.0)
+                    val fifteen = FixedLocalStrategyEngine.evaluateLong(
+                        signal, FixedLocalStrategyEngine.buildFeatures(quote, h15, 15), includeEventPrior = false)
+                    val five = FixedLocalStrategyEngine.evaluateLong(
+                        signal, FixedLocalStrategyEngine.buildFeatures(quote, h5, 5), includeEventPrior = false)
+                    val marketRegime = "BREADTH_NEUTRAL"
+                    val tier15 = FixedForecastQualityPolicy.evaluate(fifteen, targetPct, marketRegime).tier
+                    val tier5 = FixedForecastQualityPolicy.evaluate(five, targetPct, marketRegime).tier
+                    val pair = FixedFiveMinuteShadowPair(
+                        date = date, atMs = attemptedAt, symbol = symbol, entryPrice = price!!,
+                        targetPct = targetPct, fifteenMinuteTier = tier15, fiveMinuteTier = tier5,
+                        fifteenMinuteConfidence = fifteen.confidence, fiveMinuteConfidence = five.confidence,
+                        fifteenMinuteDirection = fifteen.directionalScore, fiveMinuteDirection = five.directionalScore,
+                        fifteenMinuteStrategy = fifteen.strategy, fiveMinuteStrategy = five.strategy
+                    )
+                    fixedFiveMinuteShadowJournal.append(pair)
+                    auditLogger.logAsync("FIXED_5M_SHADOW", "PAIRED_SIGNAL_CAPTURED", mapOf(
+                        "date" to date, "symbol" to symbol, "at_ms" to attemptedAt,
+                        "entry_price" to price, "target_pct" to targetPct,
+                        "tier_15m" to tier15, "tier_5m" to tier5,
+                        "confidence_15m" to fifteen.confidence, "confidence_5m" to five.confidence,
+                        "direction_15m" to fifteen.directionalScore, "direction_5m" to five.directionalScore,
+                        "strategy_15m" to fifteen.strategy, "strategy_5m" to five.strategy,
+                        "orders_allowed" to false, "fixed_scoring_changed" to false,
+                        "same_symbol_same_quote" to true, "calendar_day_comparison" to true
+                    ))
+                }
+                if (result.isSuccess) compared++ else {
+                    val error = result.exceptionOrNull()
+                    auditLogger.logAsync("FIXED_5M_SHADOW", "PAIR_FAILED", mapOf(
+                        "symbol" to symbol, "error" to (error?.message ?: "UNKNOWN"),
+                        "scan_number" to completedScanNumber
+                    ))
+                    if ((error?.message ?: "").contains("429")) break
+                }
+                delay(1_000L)
+            }
+            auditLogger.logAsync("FIXED_5M_SHADOW", "SAMPLE_COMPLETED", mapOf(
+                "scan_number" to completedScanNumber,
+                "selection" to "ONE_IN_TEN_COMPLETED_FIXED_SCANS",
+                "requested" to symbols.size, "paired" to compared,
+                "max_paired_symbols" to FixedShadowSamplingPolicy.MAX_PAIRED_SYMBOLS_PER_SAMPLE,
+                "beta_only" to true, "price_min_exclusive" to 200, "price_max_exclusive" to 5000,
+                "orders_allowed" to false
+            ))
+        } finally {
+            fixedFiveMinuteShadowMutex.unlock()
+        }
+    }
+
+    /** Reuse Fixed's existing full-market LTP capture; never generate extra broker requests. */
+    suspend fun updateFixedFiveMinuteShadowOutcomes() {
+        val today = LocalDate.now(INDIA).toString()
+        val market = fixedMarketDiscoveryStateStore.load(today) ?: return
+        val updated = fixedFiveMinuteShadowJournal.updateObservedPrices(today, market.previousLtps, System.currentTimeMillis())
+        updated.forEach { pair ->
+            auditLogger.logAsync("FIXED_5M_SHADOW", "PAIRED_OUTCOME_UPDATED", mapOf(
+                "date" to today, "symbol" to pair.symbol, "at_ms" to pair.atMs,
+                "max_favourable_pct" to pair.maxFavourablePct, "max_adverse_pct" to pair.maxAdversePct,
+                "target_observed" to pair.targetObserved, "observations" to pair.observations,
+                "15m_primary" to pair.fifteenMinutePrimary, "5m_primary" to pair.fiveMinutePrimary,
+                "outcome_basis" to "SAMPLED_FIXED_FULL_MARKET_LTP", "realised_pnl" to false
+            ))
+        }
+    }
+
+
 
     /** Forecast-only deterministic checkpoint. The Fixed universe/ranking is not touched. */
     private fun forecastNextEvaluationTranche(date: String, candidates: List<String>): List<String> {
@@ -4523,6 +4668,13 @@ class TradingRepository @Inject constructor(
                 alphaCall = { apiFactory.groww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Quote $symbol") },
                 betaCall = { apiFactory.betaGroww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Beta quote $symbol") })
         }
+        // Avoid candle-API use for an out-of-band Forecast quote.
+        if (!RecommendationPriceBandPolicy.eligible(quote.lastPrice)) {
+            auditLogger.logAsync("FORECAST_RESEARCH", "PRICE_BAND_SKIPPED_HISTORICAL", mapOf(
+                "symbol" to symbol, "ltp" to quote.lastPrice, "min_exclusive" to 200, "max_exclusive" to 5000
+            ))
+            throw IllegalArgumentException("FORECAST_PRICE_BAND_OUTSIDE")
+        }
         val bestBid = quote.bidPrice?.takeIf { it.isFinite() && it > 0.0 }
             ?: quote.depth?.buy?.mapNotNull { level -> level.price?.takeIf { it.isFinite() && it > 0.0 } }?.maxOrNull()
         val bestAsk = quote.offerPrice?.takeIf { it.isFinite() && it > 0.0 }
@@ -4813,6 +4965,7 @@ class TradingRepository @Inject constructor(
             return "Legacy Forecast entry order is still being migrated for ${row.symbol}; duplicate BUY blocked"
         }
         require(row.status == "ACTIVE") { "$symbol forecast is no longer active" }
+        require(RecommendationPriceBandPolicy.eligible(row.entryPrice)) { "Forecast BUY requires published price >₹200 and <₹5,000" }
         require(forecastLiveUnlocked()) { "Forecast BUY requires five completed outcome-validated research sessions" }
         require(row.executionEligible) { "$symbol is ${row.qualityTier}; only PRIMARY forecast setups can place a real forecast BUY" }
         require(row.targetPct + 1e-9 >= ForecastQualityPolicy.MIN_TARGET_PCT) { "Forecast target is below the 1% quality floor" }
@@ -4823,6 +4976,7 @@ class TradingRepository @Inject constructor(
             apiFactory.groww.quote(bearer(token), tradingSymbol = row.symbol).requirePayload("Quote ${row.symbol}")
         }
         val ltp = quote.lastPrice ?: error("Groww quote has no LTP")
+        require(RecommendationPriceBandPolicy.eligible(ltp)) { "Forecast BUY requires fresh price >₹200 and <₹5,000" }
         require(ltp < row.targetPrice) { "Forecast target already reached; BUY disabled" }
         val margin = apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin")
         val available = (margin.equity?.cncBalanceAvailable ?: margin.clearCash).coerceAtLeast(0.0)
@@ -4888,7 +5042,7 @@ class TradingRepository @Inject constructor(
         preIndependentExecutionGuard(settings)
         val today = now.toLocalDate().toString()
         val rows = learningDao.longForecastsForDate(today)
-            .filter { it.status == "ACTIVE" && it.executionEligible && it.qualityTier == "PRIMARY" }
+            .filter { it.status == "ACTIVE" && it.executionEligible && it.qualityTier == "PRIMARY" && RecommendationPriceBandPolicy.eligible(it.entryPrice) }
             .sortedBy { it.generatedAtMs }
         var submitted = 0
         for (row in rows) {
@@ -5318,7 +5472,7 @@ class TradingRepository @Inject constructor(
         }
 
         require(row.status == "ACTIVE") { "$symbol Fixed recommendation is no longer active" }
-        require(row.entryPrice > FIXED_MIN_STOCK_PRICE_RUPEES) { "Fixed only executes recommendations above ₹${fmt(FIXED_MIN_STOCK_PRICE_RUPEES)}" }
+        require(RecommendationPriceBandPolicy.eligible(row.entryPrice)) { "Fixed executes only stocks strictly between ₹200 and ₹5,000" }
         require(row.executionEligible && row.qualityTier == "PRIMARY") { "Only PRIMARY Fixed recommendations can place a real BUY" }
         if (managedDao.openPosition(ENGINE_FIXED_HOLDING, row.symbol) != null) {
             return "${row.symbol} already has a Fixed holding; duplicate Fixed BUY blocked"
@@ -5328,6 +5482,7 @@ class TradingRepository @Inject constructor(
             apiFactory.groww.quote(bearer(token), tradingSymbol = row.symbol).requirePayload("Quote ${row.symbol}")
         }
         val ltp = quote.lastPrice ?: error("Groww quote has no LTP")
+        require(RecommendationPriceBandPolicy.eligible(ltp)) { "Fixed BUY requires fresh price >₹200 and <₹5,000" }
         if (ltp >= row.targetPrice) {
             fixedRecommendationStore.update(row.copy(
                 status = "TARGET_HIT", targetHitAtMs = System.currentTimeMillis(),
@@ -5420,7 +5575,7 @@ class TradingRepository @Inject constructor(
                 it.status == "ACTIVE" &&
                     it.executionEligible &&
                     it.qualityTier == "PRIMARY" &&
-                    it.entryPrice > FIXED_MIN_STOCK_PRICE_RUPEES
+                    RecommendationPriceBandPolicy.eligible(it.entryPrice)
             }
             .sortedBy { it.generatedAtMs }
 
@@ -5481,6 +5636,10 @@ class TradingRepository @Inject constructor(
             }
             val quoteElapsedMs = (System.currentTimeMillis() - quoteStartedAtMs).coerceAtLeast(0L)
             val ltp = quote.lastPrice?.takeIf { it.isFinite() && it > 0.0 } ?: continue
+            if (!RecommendationPriceBandPolicy.eligible(ltp)) {
+                auditLogger.logAsync("FIXED_AUTO_BUY", "PRICE_BAND_REJECTED", mapOf("symbol" to row.symbol, "fresh_ltp" to ltp))
+                continue
+            }
             if (ltp >= row.targetPrice) {
                 fixedRecommendationStore.update(row.copy(
                     status = "TARGET_HIT", targetHitAtMs = System.currentTimeMillis(),
@@ -5836,7 +5995,7 @@ class TradingRepository @Inject constructor(
         val today = LocalDate.now(INDIA).toString()
         val rows = learningDao.pendingLongForecastNotifications(today)
         rows.forEach { learningDao.markLongForecastNotified(it.id) }
-        return rows.map { it.toForecastDto() }
+        return rows.filter { RecommendationPriceBandPolicy.eligible(it.entryPrice) }.map { it.toForecastDto() }
     }
 
     /**
@@ -8836,6 +8995,7 @@ class TradingRepository @Inject constructor(
                 add("research.json", research)
                 add("forecast_auto_buy_orders.json", forecastAutoBuyOrders)
                 add("fixed_recommendations.json", fixedRecommendations)
+                add("fixed_5m_shadow_pairs.json", fixedFiveMinuteShadowJournal.all())
                 add("fixed_auto_buy_orders.json", fixedAutoBuyOrders)
                 fixedFactorTelemetry.appendExportEntry(zip)
                 add("api_usage_snapshot.json", GrowwApiUsageLedger.snapshot())
@@ -9066,7 +9226,7 @@ class TradingRepository @Inject constructor(
         private const val FORECAST_AUTO_BUY_ORDER_PACING_MS = 175L
         private const val FIXED_DIRECT_AUTO_BUY_ORDER_PACING_MS = 175L
         private const val FORECAST_AUTO_BUY_CANCEL_RECHECK_MS = 300L
-        private const val FIXED_MIN_STOCK_PRICE_RUPEES = 100.0
+        private const val FIXED_MIN_STOCK_PRICE_RUPEES = 200.0
         private const val FIXED_PREMARKET_WARMUP_INTERVAL_MS = 5L * 60L * 1000L
         private const val FIXED_V741_FORECAST_SCAN_INTERVAL_MS = 150_000L
         private const val FIXED_V741_FORECAST_SYMBOL_PACING_MS = 25L
