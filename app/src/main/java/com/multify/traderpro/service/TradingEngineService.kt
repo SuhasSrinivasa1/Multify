@@ -16,7 +16,6 @@ import com.multify.traderpro.data.network.ForecastDto
 import com.multify.traderpro.data.network.GrowwApiUsageLedger
 import com.multify.traderpro.data.network.GrowwRecoveryGate
 import com.multify.traderpro.engine.FixedDataPipelinePolicy
-import com.multify.traderpro.engine.FixedShadowSamplingPolicy
 import com.multify.traderpro.data.repository.TradingRepository
 import com.multify.traderpro.engine.ReleaseIntegrityManifest
 import dagger.hilt.android.AndroidEntryPoint
@@ -567,22 +566,20 @@ class TradingEngineService : Service() {
                             scope.launch {
                                 notifyNewFixedRecommendationsAfterOrderPath()
                             }
-                            // No extra full-market scan: outcome update uses Fixed's persisted
-                            // LTP snapshot; at most one in ten completed cycles schedules
-                            // a bounded, read-only Beta 5m/15m paired research comparison.
+                            // No second NSE scan. Only unused Alpha API headroom may support
+                            // one read-only five-minute research candle request. Production
+                            // Fixed scanning and its 15-minute scoring are never sacrificed.
                             val fixedShadowOrdinal = nextFixedShadowScanOrdinal()
                             scope.launch {
                                 runCatching { repository.updateFixedFiveMinuteShadowOutcomes() }
                                     .onFailure { err -> auditLogger.logAsync("FIXED_5M_SHADOW", "OUTCOME_UPDATE_ERROR", mapOf(
                                         "error" to (err.message ?: err.javaClass.simpleName)
                                     )) }
-                                if (FixedShadowSamplingPolicy.shouldSample(fixedShadowOrdinal)) {
-                                    runCatching { repository.sampleFixedFiveMinuteShadow(fixedShadowOrdinal) }
-                                        .onFailure { err -> auditLogger.logAsync("FIXED_5M_SHADOW", "SAMPLE_ERROR", mapOf(
-                                            "scan_number" to fixedShadowOrdinal,
-                                            "error" to (err.message ?: err.javaClass.simpleName)
-                                        )) }
-                                }
+                                runCatching { repository.sampleFixedFiveMinuteShadow(fixedShadowOrdinal) }
+                                    .onFailure { err -> auditLogger.logAsync("FIXED_5M_SHADOW", "SAMPLE_ERROR", mapOf(
+                                        "scan_number" to fixedShadowOrdinal,
+                                        "error" to (err.message ?: err.javaClass.simpleName)
+                                    )) }
                             }
                             // Give Forecast a bounded, broker-budget-aware chance immediately
                             // after Fixed releases the shared scan mutex. It cannot block the
