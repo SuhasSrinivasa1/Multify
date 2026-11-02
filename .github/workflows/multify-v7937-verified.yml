@@ -97,7 +97,8 @@ jobs:
             "app/src/test/java/com/multify/traderpro/engine/FixedShadowSamplingPolicyTest.kt",
             "app/src/test/java/com/multify/traderpro/engine/ExecutionQuoteLiquidityPolicyTest.kt",
             "app/src/test/java/com/multify/traderpro/engine/ForecastNewsPublicationGateTest.kt",
-            ".github/workflows/multify-v7937-verified.yml"
+            ".github/workflows/multify-v7937-verified.yml",
+            ".github/workflows/multify-v7937-debug-test.yml"
           }
           assert changed <= allowed,"Unexpected changed files: "+str(changed-allowed)
           print("Fixed scoring/SELL/protections locked; 15m unchanged; 5m research-only; uncapped Forecast; strictly bounded prices")
