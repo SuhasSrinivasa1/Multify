@@ -83,6 +83,7 @@ import com.multify.traderpro.engine.MultifyPositiveTransferCase
 import com.multify.traderpro.engine.FixedPositiveTransferCase
 import com.multify.traderpro.engine.ForecastQualityDecision
 import com.multify.traderpro.engine.ForecastNewsPatternPolicy
+import com.multify.traderpro.engine.ForecastNewsPublicationGate
 import com.multify.traderpro.engine.ForecastUnivestLearningPolicy
 import com.multify.traderpro.engine.ForecastQualityPolicy
 import com.multify.traderpro.engine.ForecastTargetExpansionPolicy
@@ -4848,8 +4849,9 @@ class TradingRepository @Inject constructor(
                     decision.eligible && !conflicting && economics.profitableAfterCosts
                 val existing = learningDao.longForecastsForDate(today)
                 val alreadyRecommended = existing.any { it.symbol.equals(item.symbol, true) }
-                val publish = qualifies && !alreadyRecommended
+                val publish = ForecastNewsPublicationGate.mayPublish(ltp, qualifies, alreadyRecommended)
                 val state = when {
+                    !RecommendationPriceBandPolicy.eligible(ltp) -> "OUTSIDE_200_5000_EXCLUSIVE_PRICE_BAND"
                     conflicting -> "CONFLICTING_NEWS"
                     !economics.profitableAfterCosts -> "NET_PROFIT_NOT_POSITIVE"
                     alreadyRecommended -> "DUPLICATE_SAME_DAY"
@@ -4869,6 +4871,7 @@ class TradingRepository @Inject constructor(
                     "evidence_distinct_days" to evidence.distinctDays,
                     "evidence_one_pct_hit_rate" to evidence.hitRate,
                     "evidence_proven" to evidence.proven, "entry_decision" to state,
+                    "news_price_band_eligible" to RecommendationPriceBandPolicy.eligible(ltp),
                     "no_price_spike_required" to true, "news_features_40" to item.featureJson)
                 forecastNewsJournal.update(item.copy(
                     featureJson = researchGson.toJson(enriched),
@@ -4911,6 +4914,8 @@ class TradingRepository @Inject constructor(
                     "hit_rate" to evidence.hitRate, "validated" to evidence.proven,
                     "economics_net_rupees" to economics.netProfitRupees,
                     "result" to state, "published" to publish,
+                    "price_band_eligible" to RecommendationPriceBandPolicy.eligible(ltp),
+                    "price_min_exclusive_rupees" to 200, "price_max_exclusive_rupees" to 5000,
                     "frozen_fixed_untouched" to true, "no_spike_confirmation" to true))
             }
         } finally { guard.unlock() }
