@@ -14,8 +14,10 @@ class FixedFinalContractTest {
         assertEquals(1.1161043030113955, FixedFinalContract.CANONICAL_MULTIFY_MFE_AVG_PCT, 1e-12)
     }
 
-    @Test fun hundredRupeeRuleIsAnOutputOverlayNotAModelUniverseFilter() {
-        assertTrue(FixedFinalContract.MIN_FIXED_PUBLICATION_PRICE_EXCLUSIVE == 100.0)
+    @Test fun hundredFiftyRupeeRuleIsAnOutputOverlayNotAModelUniverseFilter() {
+        assertEquals(150.0, FixedFinalContract.MIN_FIXED_PUBLICATION_PRICE_EXCLUSIVE, 0.0)
+        assertFalse(150.0 > FixedFinalContract.MIN_FIXED_PUBLICATION_PRICE_EXCLUSIVE)
+        assertTrue(150.01 > FixedFinalContract.MIN_FIXED_PUBLICATION_PRICE_EXCLUSIVE)
         assertTrue("BOHRAIND" in FixedFinalContract.REFERENCE_FORECAST_SYMBOLS)
         assertFalse("BOHRAIND" in FixedFinalContract.REFERENCE_FIXED_ELIGIBLE_SYMBOLS)
         assertTrue("IPCALAB" in FixedFinalContract.REFERENCE_FIXED_ELIGIBLE_SYMBOLS)
