@@ -10,7 +10,8 @@ object FixedShadowSamplingPolicy {
     const val MIN_FIXED_HEADROOM_MS = 5_000L
     const val MAX_REFERENCE_AGE_MS = 5L * 60L * 1000L
     const val MAX_PAIRED_SYMBOLS_PER_SAMPLE = 1
-    const val MAX_UTILIZATION_PERCENT = 45
+    const val MAX_UTILIZATION_PERCENT = 30
+    const val POST_429_RESEARCH_QUIET_PERIOD_MS = 30L * 60L * 1000L
 
     fun canCollect(
         nowMs: Long,
@@ -22,9 +23,16 @@ object FixedShadowSamplingPolicy {
         livePerMinuteLimit: Int,
         historicalUsedLastMinute: Int,
         historicalPerMinuteLimit: Int,
-        brokerReady: Boolean
+        brokerReady: Boolean,
+        latestBrokerCooldownUntilMs: Long = 0L,
+        lastObserved429AtMs: Long = 0L
     ): Boolean {
         if (!brokerReady || fixedPriority || criticalTrade) return false
+        // No discretionary research while 429 protection is active or recently expired.
+        if (latestBrokerCooldownUntilMs > 0L &&
+            nowMs - latestBrokerCooldownUntilMs < POST_429_RESEARCH_QUIET_PERIOD_MS) return false
+        if (lastObserved429AtMs > 0L &&
+            nowMs - lastObserved429AtMs < POST_429_RESEARCH_QUIET_PERIOD_MS) return false
         if (lastSuccessfulAtMs > 0 && nowMs - lastSuccessfulAtMs < MIN_INTERVAL_MS) return false
         if (millisUntilNextFixed < MIN_FIXED_HEADROOM_MS) return false
         if (livePerMinuteLimit <= 0 || historicalPerMinuteLimit <= 0) return false
