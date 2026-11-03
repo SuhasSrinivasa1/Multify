@@ -40,7 +40,7 @@ object SteppedTrailingPolicy {
     fun nextTriggerGainPct(currentStopGainPct: Double?): Double =
         if (currentStopGainPct == null) ARM_TRIGGER_PCT
         else if (currentStopGainPct < INITIAL_STOP_GAIN_PCT + STEP_PCT - 1e-9) SECOND_TRIGGER_PCT
-        else SECOND_TRIGGER_PCT + ((currentStopGainPct - (INITIAL_STOP_GAIN_PCT + STEP_PCT)) / STEP_PCT + 1.0).toInt() * STEP_PCT
+        else SECOND_TRIGGER_PCT + floor(((currentStopGainPct - INITIAL_STOP_GAIN_PCT) / STEP_PCT) + 1e-9).toInt().coerceAtLeast(1) * STEP_PCT
 
     fun state(entryPrice: Double, highWaterPrice: Double, currentStopPrice: Double?): SteppedTrailState {
         val highGain = gainPct(entryPrice, highWaterPrice)
