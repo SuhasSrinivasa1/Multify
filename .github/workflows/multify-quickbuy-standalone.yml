@@ -1,0 +1,99 @@
+name: Multify QuickBuy v1.0.0 — standalone APK
+
+on:
+  push:
+    branches: [multify-quickbuy-only-20261103]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  android-quickbuy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Android 35 SDK
+        shell: bash
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Verify QuickBuy isolation and protected trade policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'applicationId = "com.multify.quickbuy"' app/build.gradle.kts
+          grep -F 'QuickBuyApp()' app/src/main/java/com/multify/traderpro/MainActivity.kt
+          grep -F 'MULTIFY_BOOK_PROFIT_NOT_AN_EXIT' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
+          grep -F 'startPositionMonitorWorker()' app/src/main/java/com/multify/traderpro/service/TradingEngineService.kt
+          grep -F 'multifyBuyLifecycleMutex.withLock' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
+          grep -F 'GttProtectionReadinessPolicy.verified(' app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt
+          grep -F 'ARM_TRIGGER_PCT = 0.55' app/src/main/java/com/multify/traderpro/engine/SteppedTrailingPolicy.kt
+          python - <<'PY'
+          from pathlib import Path
+          service = Path('app/src/main/java/com/multify/traderpro/service/TradingEngineService.kt').read_text()
+          start = service.split('private fun startEngineLoop() {',1)[1].split('private fun startPositionMonitorWorker() {',1)[0]
+          assert 'startFixedScanWorker()' not in start
+          assert 'startForecastScanWorker()' not in start
+          assert 'startForecastNewsWorker()' not in start
+          assert 'runAfterHoursResearch(' not in start
+          assert 'startPositionMonitorWorker()' in start
+          repo = Path('app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt').read_text()
+          process = repo.split('suspend fun processEvent(',1)[1].split('private suspend fun handleMultifyBuy(',1)[0]
+          assert process.index('SignalType.BOOK_PROFIT) {') < process.index('val marketCritical')
+          print('QuickBuy isolation and non-executable Book Profit verified')
+          PY
+
+      - name: Android unit tests
+        run: gradle --no-daemon :app:testDebugUnitTest
+
+      - name: Build signed debug APK
+        run: gradle --no-daemon :app:assembleDebug
+
+      - name: Verify APK and stage output
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          apk="app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$apk"
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose "$apk"
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$apk" | grep 'package: name=\x27com.multify.quickbuy\x27'
+          cp "$apk" dist/Multify-QuickBuy-v1.0.0-debug.apk
+          (cd dist && sha256sum *.apk > SHA256SUMS.txt)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Multify-QuickBuy-v1.0.0-verified
+          path: dist/
+          if-no-files-found: error
+
+      - name: Publish standalone installable APK
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="multify-quickbuy-v1.0.0"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/Multify-QuickBuy-v1.0.0-debug.apk dist/SHA256SUMS.txt --clobber
+          else
+            gh release create "$tag" --target "$GITHUB_SHA" \
+              --title "Multify QuickBuy v1.0.0 (standalone debug-signed APK)" \
+              --notes "A separate Android app for approved Multify notification BUYs and the existing app-owned independent protected SELL policy. No Fixed/Forecast scans. Install and validate notification source, Groww auth, DDPI, static IP, broker GTT and safety ARM before any live execution." \
+              dist/Multify-QuickBuy-v1.0.0-debug.apk dist/SHA256SUMS.txt
+          fi
