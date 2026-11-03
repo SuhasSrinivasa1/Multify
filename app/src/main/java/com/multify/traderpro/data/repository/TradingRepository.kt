@@ -3914,6 +3914,43 @@ class TradingRepository @Inject constructor(
             "entry_features_used_only_after_verified_same_day_exit" to true))
     }
 
+    private suspend fun recoverUnivestExitPrices(token: String): Int {
+        if (!secretStore.hasBetaCredentials() || !forecastUsesBeta(token)) return 0
+        var count = 0
+        for (record in forecastUnivestJournal.pendingExitPricing()) {
+            val exit = record.exitNotificationAtMs ?: continue
+            val t = Instant.ofEpochMilli(exit).atZone(INDIA)
+            val from = t.minusMinutes(3).toLocalDateTime().format(HIST_FORMAT)
+            val until = t.plusMinutes(4).toLocalDateTime().format(HIST_FORMAT)
+            val history = runCatching {
+                apiFactory.betaGroww.historicalCandles(
+                    bearer(token), growwSymbol = "NSE-${record.symbol}",
+                    startTime = from, endTime = until, candleInterval = "1minute"
+                ).requirePayload("Univest exit market evidence")
+            }.getOrNull() ?: continue
+            val estimate = history.candles.mapNotNull { c ->
+                if (c.size < 5) return@mapNotNull null
+                val ts = researchCandleTimestampMs(c[0]) ?: return@mapNotNull null
+                val closeAt = ts + 60_000L
+                val price = runCatching { c[4].asDouble }.getOrNull()
+                if (closeAt < exit || closeAt - exit > 180_000L ||
+                    price == null || !price.isFinite() || price <= 0.0) null
+                else Pair(closeAt, price)
+            }.minByOrNull { it.first } ?: continue
+            if (forecastUnivestJournal.quoteExit(
+                record.key, estimate.second, estimate.first,
+                "GROWW_BETA_1M_CANDLE_PROXY"
+            ) != null) {
+                count++
+                auditLogger.logAsync("FORECAST_UNIVEST", "EXIT_MARKET_ESTIMATE_NOT_TRAINED", mapOf(
+                    "symbol" to record.symbol, "market_price" to estimate.second,
+                    "training_eligible" to false
+                ))
+            }
+        }
+        return count
+    }
+
     private fun univestHistoricalCases(beforeDate: String): List<ForecastUnivestLearningPolicy.ClosedCase> {
         val completed = forecastUnivestJournal.training(beforeDate)
         val days = completed.map { ForecastUnivestLearningPolicy.date(it.entryNotificationAtMs) }
