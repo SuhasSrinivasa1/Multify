@@ -566,21 +566,9 @@ class TradingEngineService : Service() {
                             scope.launch {
                                 notifyNewFixedRecommendationsAfterOrderPath()
                             }
-                            // No second NSE scan. Only unused Alpha API headroom may support
-                            // one read-only five-minute research candle request. Production
-                            // Fixed scanning and its 15-minute scoring are never sacrificed.
-                            val fixedShadowOrdinal = nextFixedShadowScanOrdinal()
-                            scope.launch {
-                                runCatching { repository.updateFixedFiveMinuteShadowOutcomes() }
-                                    .onFailure { err -> auditLogger.logAsync("FIXED_5M_SHADOW", "OUTCOME_UPDATE_ERROR", mapOf(
-                                        "error" to (err.message ?: err.javaClass.simpleName)
-                                    )) }
-                                runCatching { repository.sampleFixedFiveMinuteShadow(fixedShadowOrdinal) }
-                                    .onFailure { err -> auditLogger.logAsync("FIXED_5M_SHADOW", "SAMPLE_ERROR", mapOf(
-                                        "scan_number" to fixedShadowOrdinal,
-                                        "error" to (err.message ?: err.javaClass.simpleName)
-                                    )) }
-                            }
+                            // Fixed production uses only 15-minute candles. The optional read-only
+                            // Fixed 5-minute comparison was retired to eliminate even potential
+                            // additional Alpha historical requests. Keep Forecast scheduling separate.
                             // Give Forecast a bounded, broker-budget-aware chance immediately
                             // after Fixed releases the shared scan mutex. It cannot block the
                             // Fixed notification path or the portfolio protection monitor.

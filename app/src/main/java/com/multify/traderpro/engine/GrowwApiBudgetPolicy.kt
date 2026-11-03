@@ -30,11 +30,12 @@ object GrowwApiBudgetPolicy {
     const val RATE_LIMIT_COOLDOWN_MS = 5_000L
     const val FIXED_HISTORICAL_MIN_GAP_MS = 20L
 
+    // Discovery/evaluation consumes a conservative subset of Alpha LIVE_DATA capacity.
+    // Keep the rest available to immediate Multify quotes and app-owned SELL monitoring.
+    // These limits affect scheduling only, never the frozen Fixed decision formula.
     fun fixedLiveDataPerSecond(hasOpenHoldings: Boolean): Int =
-        if (hasOpenHoldings) APP_LIVE_DATA_PER_SECOND - SELL_MONITOR_RESERVED_PER_SECOND
-        else APP_LIVE_DATA_PER_SECOND
+        if (hasOpenHoldings) 3 else 4
 
     fun fixedLiveDataPerMinute(hasOpenHoldings: Boolean): Int =
-        if (hasOpenHoldings) APP_LIVE_DATA_PER_MINUTE - SELL_MONITOR_RESERVED_PER_MINUTE
-        else APP_LIVE_DATA_PER_MINUTE
+        if (hasOpenHoldings) 90 else 120
 }
