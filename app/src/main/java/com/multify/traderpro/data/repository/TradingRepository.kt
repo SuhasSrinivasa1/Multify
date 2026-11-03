@@ -115,6 +115,7 @@ import com.multify.traderpro.engine.FixedHistoricalSlotPolicy
 import com.multify.traderpro.engine.FixedStrategyEvaluation
 import com.multify.traderpro.engine.GrowwDeliveryCostPolicy
 import com.multify.traderpro.engine.GrowwApiBudgetPolicy
+import com.multify.traderpro.engine.MarketDataPriorityAdmissionPolicy
 import com.multify.traderpro.engine.HardStopLossPolicy
 import com.multify.traderpro.engine.AppPositionOwnershipPolicy
 import com.multify.traderpro.engine.HoldingSmartOrderPolicy
@@ -7295,7 +7296,10 @@ class TradingRepository @Inject constructor(
 
     private suspend fun portfolioMonitorCount(inventory: BrokerInventorySnapshot? = brokerInventorySnapshot): Int {
         // Broker holdings NOT opened by this app must never count as managed holdings.
-        return managedDao.openPositions().count(::appOwned).also { activePortfolioMonitorCount = it }
+        return managedDao.openPositions().count(::appOwned).also {
+            activePortfolioMonitorCount = it
+            MarketDataPriorityAdmissionPolicy.updateManagedHoldings(it)
+        }
     }
 
     suspend fun monitorManagedPositions(): Int {
@@ -7303,6 +7307,9 @@ class TradingRepository @Inject constructor(
         val marketOpen = marketSession() == "OPEN"
         val now = System.currentTimeMillis()
         val managedOpen = managedDao.openPositions().any(::appOwned)
+        // Refresh this immediately so quote admission reserves SELL capacity
+        // before the first portfolio market-data request of each monitoring pass.
+        MarketDataPriorityAdmissionPolicy.updateManagedHoldings(if (managedOpen) 1 else 0)
         val nonTradingCooldownUntil = recoveryGate.status().categoryCooldownUntilMs[GrowwApiUsageLedger.Category.NON_TRADING] ?: 0L
         if (nonTradingCooldownUntil > now) {
             val cooldownAuditKey = "__NON_TRADING_COOLDOWN__"
@@ -7587,7 +7594,8 @@ class TradingRepository @Inject constructor(
             val payload = withBulkMarketDataSlot {
                 apiFactory.groww.ltp(
                     bearer(token),
-                    exchangeSymbols = exchangeSymbols
+                    exchangeSymbols = exchangeSymbols,
+                    trafficPriority = MarketDataPriorityAdmissionPolicy.PROTECTION
                 ).requirePayload("Batch holding LTP")
             }
             payload.forEach { (key, value) ->
