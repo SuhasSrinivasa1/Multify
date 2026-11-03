@@ -8,6 +8,7 @@ import org.json.JSONObject
 import java.io.File
 import java.security.MessageDigest
 import java.time.Instant
+import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -23,6 +24,7 @@ class DecisionEvidenceJournal @Inject constructor(@ApplicationContext context: C
     private val directory = File(context.filesDir, "decision_evidence").apply { mkdirs() }
     private val activeFile = File(directory, "decision_evidence.jsonl")
     private val lock = Any()
+    private val failedWrites = AtomicLong(0L)
 
     fun capture(category: String, event: String, details: JSONObject, timestampMs: Long) {
         if (!DecisionEvidencePolicy.shouldCapture(category, event)) return
@@ -33,7 +35,9 @@ class DecisionEvidenceJournal @Inject constructor(@ApplicationContext context: C
                 val value = details.opt(key)
                 if (value != null && value != JSONObject.NULL) {
                     when (value) {
-                        is JSONObject -> clean.put(key, JSONObject(value.toString().take(16_000)))
+                        is JSONObject -> if (value.toString().length <= 16_000)
+                            clean.put(key, value)
+                        else clean.put(key, "OVERSIZED_NESTED_CONTEXT_IN_MAIN_AUDIT")
                         is Number, is Boolean -> clean.put(key, value)
                         else -> clean.put(key, value.toString().take(500))
                     }
@@ -54,7 +58,7 @@ class DecisionEvidenceJournal @Inject constructor(@ApplicationContext context: C
                 rotateIfNeeded()
                 activeFile.appendText(serialized + "\n")
             }
-        }
+        }.onFailure { failedWrites.incrementAndGet() }
         // Evidence storage is strictly advisory. A disk failure must not block a BUY,
         // SELL, broker reconciliation, or creation of a protective GTT.
     }
@@ -83,6 +87,8 @@ class DecisionEvidenceJournal @Inject constructor(@ApplicationContext context: C
         added
     }
 
+    fun failedWriteCount(): Long = failedWrites.get()
+
     fun lineCount(): Int = synchronized(lock) {
         files().sumOf { file -> file.useLines { it.count() } }
     }
@@ -97,7 +103,8 @@ class DecisionEvidenceJournal @Inject constructor(@ApplicationContext context: C
 
     private fun files(): List<File> = directory.listFiles()
         ?.filter { it.isFile && it.name.startsWith("decision_evidence") && it.name.endsWith(".jsonl") }
-        ?.sortedBy { it.name }
+        ?.sortedWith(compareBy<File> { if (it.name == "decision_evidence.jsonl") 1 else 0 }
+            .thenBy { it.name })
         .orEmpty()
 
     private fun rotateIfNeeded() {
@@ -113,7 +120,7 @@ class DecisionEvidenceJournal @Inject constructor(@ApplicationContext context: C
     companion object {
         private const val SEGMENT_BYTES = 8L * 1024L * 1024L
         private const val MAX_LINE_CHARS = 48_000
-        private const val MAX_IMPORT_CHARS = 32 * 1024 * 1024
+        private const val MAX_IMPORT_CHARS = 128 * 1024 * 1024
         private const val MAX_IMPORT_ROWS = 50_000
     }
 }
