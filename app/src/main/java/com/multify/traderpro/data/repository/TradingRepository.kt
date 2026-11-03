@@ -9487,6 +9487,7 @@ class TradingRepository @Inject constructor(
                     "forecast_univest_file" to "forecast_univest_same_day.jsonl",
                     "decision_evidence_file" to "decision_evidence.jsonl",
                     "decision_evidence_rows" to decisionEvidenceJournal.lineCount(),
+                    "decision_evidence_write_failures" to decisionEvidenceJournal.failedWriteCount(),
                     "decision_evidence_trading_effect" to "NONE",
                     "univest_48_factor_cohort" to "official 1-3 month entry + same-day exit + both Groww quote prices; no broker trade assumed",
                     "univest_cohort_stats" to forecastUnivestJournal.summary(),
