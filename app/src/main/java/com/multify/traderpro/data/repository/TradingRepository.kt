@@ -3482,13 +3482,17 @@ class TradingRepository @Inject constructor(
                 return
             }
             val today = now.toLocalDate().toString()
+            // Rotate across eligible evaluated symbols (including non-recommendations).
+            // Otherwise a single published symbol would dominate all shadow samples.
             val preferred = fixedRecommendationStore.recommendations(today).map { it.symbol }
-            val candidate = (preferred + fixedShadowReferences.keys.sorted()).distinct().firstNotNullOfOrNull { symbol ->
+            val candidates = (preferred + fixedShadowReferences.keys.sorted()).distinct().mapNotNull { symbol ->
                 fixedShadowReferences[symbol]?.takeIf {
                     RecommendationPriceBandPolicy.eligible(it.quote.lastPrice) &&
                         (nowMs - it.quoteCapturedAtMs) in 0L..FixedShadowSamplingPolicy.MAX_REFERENCE_AGE_MS
                 }?.let { symbol to it }
             }
+            val candidate = if (candidates.isEmpty()) null
+                else candidates[Math.floorMod(completedScanNumber, candidates.size)]
             if (candidate == null) {
                 auditLogger.logAsync("FIXED_5M_SHADOW", "NO_FRESH_PRODUCTION_15M_REFERENCE")
                 return
@@ -3565,6 +3569,9 @@ class TradingRepository @Inject constructor(
                 "extra_historical_requests" to 1,
                 "one_in_ten_sampling_removed" to true,
                 "orders_allowed" to false, "production_fixed_candles" to "15minute",
+                "comparison_group" to pair.comparisonGroup,
+                "session_bucket" to pair.sessionBucket,
+                "both_variants_same_15m_reference_quote" to true,
                 "5m_research_only" to true, "same_production_quote" to true,
                 "outcomes_are_sampled_not_realised" to true
             ))
@@ -3589,6 +3596,10 @@ class TradingRepository @Inject constructor(
                 "date" to today, "symbol" to pair.symbol, "at_ms" to pair.atMs,
                 "max_favourable_pct" to pair.maxFavourablePct, "max_adverse_pct" to pair.maxAdversePct,
                 "target_observed" to pair.targetObserved, "observations" to pair.observations,
+                "target_before_sampled_2pct_adverse" to pair.sampledTargetBeforeRisk,
+                "first_target_sample_at_ms" to pair.firstTargetObservedAtMs,
+                "first_two_pct_risk_sample_at_ms" to pair.firstTwoPctRiskObservedAtMs,
+                "comparison_group" to pair.comparisonGroup, "session_bucket" to pair.sessionBucket,
                 "15m_primary" to pair.fifteenMinutePrimary, "5m_primary" to pair.fiveMinutePrimary,
                 "outcome_basis" to "SAMPLED_FIXED_FULL_MARKET_LTP", "realised_pnl" to false
             ))
@@ -9144,6 +9155,16 @@ class TradingRepository @Inject constructor(
                 add("forecast_auto_buy_orders.json", forecastAutoBuyOrders)
                 add("fixed_recommendations.json", fixedRecommendations)
                 add("fixed_5m_shadow_pairs.json", fixedFiveMinuteShadowJournal.all())
+                add("fixed_5m_shadow_comparison_summary.json", mapOf(
+                    "source" to "READ_ONLY_SAME_ENTRY_SAMPLED_LTP",
+                    "session_bucket_open" to "09:15-10:15 IST",
+                    "shared_target_same_price_path" to true,
+                    "success_not_realised_profit" to true,
+                    "intrabar_highs_unknown" to true,
+                    "trading_15m_fixed_unchanged" to true,
+                    "cohorts" to fixedFiveMinuteShadowJournal.cohortSummary(),
+                    "pair_count" to fixedFiveMinuteShadowJournal.all().size
+                ))
                 add("fixed_auto_buy_orders.json", fixedAutoBuyOrders)
                 fixedFactorTelemetry.appendExportEntry(zip)
                 add("api_usage_snapshot.json", GrowwApiUsageLedger.snapshot())
