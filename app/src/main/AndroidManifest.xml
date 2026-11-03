@@ -17,7 +17,7 @@
         android:fullBackupContent="false"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
-        android:label="Multify Trader Pro"
+        android:label="Multify QuickBuy"
         android:largeHeap="true"
         android:networkSecurityConfig="@xml/network_security_config"
         android:supportsRtl="true"
@@ -60,7 +60,7 @@
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="User-requested market monitoring, forecast learning, and risk monitoring for app-owned CNC holdings" />
+                android:value="User-requested Multify BUY notification execution and protective monitoring for app-owned CNC holdings" />
         </service>
 
         <service
