@@ -11,6 +11,7 @@ import okhttp3.Request
 import java.io.IOException
 import com.multify.traderpro.engine.GrowwApiBudgetPolicy
 import com.multify.traderpro.engine.MarketDataPriorityAdmissionPolicy
+import com.multify.traderpro.engine.GrowwRetryAfterPolicy
 import com.multify.traderpro.engine.AlphaLtpPacingPolicy
 import okhttp3.Interceptor
 import okhttp3.Response
@@ -74,7 +75,7 @@ internal class GrowwRateLimitInterceptor(
         GrowwApiUsageLedger.recordResponse(category, networkMs, response.code)
         if (response.code == 429) {
             val rawRetryAfter = response.header("Retry-After")
-            val retryAfterMs = parseRetryAfterMs(rawRetryAfter)
+            val retryAfterMs = GrowwRetryAfterPolicy.retryAfterMs(rawRetryAfter, System.currentTimeMillis())
             val appliedCooldownMs = recoveryGate.on429(category, retryAfterMs)
             synchronized(lock) {
                 val state = states.getValue(category)
@@ -236,10 +237,6 @@ internal class GrowwRateLimitInterceptor(
         else -> GrowwApiUsageLedger.Category.NON_TRADING
     }
 
-    private fun parseRetryAfterMs(raw: String?): Long {
-        val seconds = raw?.trim()?.toLongOrNull() ?: return 0L
-        return (seconds.coerceIn(0L, 120L) * 1_000L)
-    }
 
     companion object {
         private const val AUDIT_WAIT_THRESHOLD_MS = 500L
