@@ -6,7 +6,6 @@ import org.junit.Test
 class MarketDataPriorityAdmissionPolicyTest {
     @Test fun reservesSellQuoteCapacityOnlyWhileManagingHoldings() {
         val p = MarketDataPriorityAdmissionPolicy
-        assertEquals(p.Allowance(0,0), p.Allowance(0,0))
         val ordinary = p.allowedLiveTraffic(true, false)
         val protected = p.allowedLiveTraffic(true, true)
         val empty = p.allowedLiveTraffic(false, false)
@@ -26,5 +25,9 @@ class MarketDataPriorityAdmissionPolicyTest {
         assertTrue(p.isProtectionHeader(p.PROTECTION))
         assertFalse(p.isProtectionHeader(null))
         assertFalse(p.isProtectionHeader("RESEARCH"))
+        assertEquals(125L, p.ltpPriorityYieldMs(true, false, 1))
+        assertEquals(0L, p.ltpPriorityYieldMs(true, true, 1))
+        assertEquals(0L, p.ltpPriorityYieldMs(false, false, 1))
+        assertEquals(0L, p.ltpPriorityYieldMs(true, false, 0))
     }
 }
