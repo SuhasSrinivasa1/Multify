@@ -16,7 +16,8 @@ import javax.inject.Singleton
 
 @Singleton
 class AuditLogger @Inject constructor(
-    @ApplicationContext context: Context
+    @ApplicationContext context: Context,
+    private val decisionEvidenceJournal: DecisionEvidenceJournal
 ) {
     private val directory = File(context.filesDir, "audit").apply { mkdirs() }
     private val file = File(directory, "system_audit.jsonl")
@@ -102,6 +103,9 @@ class AuditLogger @Inject constructor(
                 }
                 obj.put("details", safe)
                 file.appendText(obj.toString() + "\n")
+                // Keep curated decisions/outcomes in a separate persistent evidence journal.
+                // Never let an evidence write failure block broker/order protection.
+                decisionEvidenceJournal.capture(category, event, safe, timestampMs)
             }
         }
     }

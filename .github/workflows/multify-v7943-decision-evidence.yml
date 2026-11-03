@@ -1,0 +1,118 @@
+name: Multify v7.9.43 Persistent Decision Evidence APK
+on:
+  push:
+    branches: [v7943-persistent-decision-evidence]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verified-test-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Install Android SDK 35
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
+      - name: Assert protected Fixed strategy and SELL rules byte-for-byte unchanged
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin v7942-univest-multify-sameday-learning
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+          ref='origin/v7942-univest-multify-sameday-learning'
+          paths=[
+            'app/src/main/java/com/multify/traderpro/engine/FixedLocalStrategyEngine.kt',
+            'app/src/main/java/com/multify/traderpro/engine/FixedForecastQualityPolicy.kt',
+            'app/src/main/java/com/multify/traderpro/engine/FixedForecastPublicationPolicy.kt',
+            'app/src/main/java/com/multify/traderpro/engine/FixedMarketDiscoveryPolicy.kt',
+            'app/src/main/java/com/multify/traderpro/engine/FixedFinalContract.kt',
+            'app/src/main/java/com/multify/traderpro/engine/HardStopLossPolicy.kt',
+            'app/src/main/java/com/multify/traderpro/engine/SteppedTrailingPolicy.kt',
+            'app/src/main/java/com/multify/traderpro/engine/NetGainTrailingPolicy.kt',
+            'app/src/main/java/com/multify/traderpro/engine/HoldingSmartOrderPolicy.kt',
+          ]
+          for p in paths:
+            baseline=subprocess.check_output(['git','show',f'{ref}:{p}'])
+            actual=Path(p).read_bytes()
+            assert actual==baseline,f'PROTECTED CODE CHANGED: {p}'
+          # Compare Fixed-only repository regions byte-for-byte against v7.9.42.
+          p='app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt'
+          old=subprocess.check_output(['git','show',f'{ref}:{p}']).decode()
+          new=Path(p).read_text()
+          def fixed_slice(t,start,end):
+            i=t.index(start); j=t.index(end,i)
+            return t[i:j]
+          for first,last in (
+            ('suspend fun generateFixedForecasts(', 'private fun fixedSnapshotMultifyMfeAverage('),
+            ('private suspend fun fixedForecastEvaluation(', '// FIXED_FINAL_LOCK_END:')
+          ):
+            assert fixed_slice(old,first,last)==fixed_slice(new,first,last),first+' changed'
+          assert 'candleInterval = "15minute"' in new
+          assert 'qualifiesVerifiedClose(' in new
+          assert 'forecastSourceNotificationJournal.archive()' in new
+          assert 'decisionEvidenceJournal.archive()' in new
+          assert 'decisionEvidenceJournal.restoreArchived(it)' in new
+          assert 'DecisionEvidenceJournal' in Path('app/src/main/java/com/multify/traderpro/data/logging/AuditLogger.kt').read_text()
+          policy=Path('app/src/main/java/com/multify/traderpro/engine/DecisionEvidencePolicy.kt').read_text()
+          assert 'FIXED_ENGINE/LONG_SCAN_TIERED' in policy
+          assert 'FORECAST_UNIVEST/SAME_DAY_EXIT_OUTCOME' in policy
+          service=Path('app/src/main/java/com/multify/traderpro/service/TradingEngineService.kt').read_text()
+          assert 'repository.sampleFixedFiveMinuteShadow(' not in service
+          assert 'repository.updateFixedFiveMinuteShadowOutcomes(' not in service
+          repo=Path('app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt').read_text()
+          assert 'candleInterval = "15minute"' in repo
+          assert 'candleInterval = "1minute"' in repo
+          gradle=Path('app/build.gradle.kts').read_text()
+          assert 'versionCode = 7943' in gradle
+          print('Fixed 15m scoring, protected Fixed repository slices, BUY/SELL/GTT policies match v7.9.42')
+          PY
+      - name: Backend tests
+        shell: bash
+        run: |
+          python -m pip install -r backend/requirements.txt
+          PYTHONPATH="$GITHUB_WORKSPACE" PHONE_HMAC_SECRET=test-secret-test-secret-test-secret GROWW_API_KEY=test-api-key GROWW_TOTP_SECRET=JBSWY3DPEHPK3PXP python -m pytest -q backend/tests
+      - name: Android unit tests
+        run: gradle --no-daemon testDebugUnitTest
+      - name: Build debug APK
+        run: gradle --no-daemon assembleDebug
+      - name: Verify APK signature and exact package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v7.9.43-fixed-15m-api-reliability-debug.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/*.apk > dist/APK-SIGNATURE.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/*.apk | head -n 2 > dist/PACKAGE.txt
+          grep -q "versionCode='7943'" dist/PACKAGE.txt
+          sha256sum dist/*.apk > dist/SHA256SUMS.txt
+          git rev-parse HEAD > dist/SOURCE-COMMIT.txt
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile, ZIP_DEFLATED
+          with ZipFile('dist/Multify-TraderPro-v7.9.43-exact-source.zip','w',ZIP_DEFLATED) as z:
+            for p in Path('.').rglob('*'):
+              if p.is_file() and not any(part in {'.git','.gradle','build','dist'} for part in p.parts):
+                z.write(p,p.as_posix())
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: multify-v7943-decision-evidence
+          path: dist/
+          if-no-files-found: warn
