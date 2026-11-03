@@ -1990,6 +1990,19 @@ class TradingRepository @Inject constructor(
         val date = LocalDate.now(INDIA).toString()
         val observations = fixedRecommendationStore.observations(date)
         val newest = observations.maxOfOrNull { it.scanAtMs } ?: return 0
+        // The frozen session-open vector may originate from a fresh installation's
+        // first afternoon sweep. Do not label this reference the official NSE open.
+        val baselineAuditPrefs = appContext.getSharedPreferences(
+            "fixed_shadow_baseline_source_v80", Context.MODE_PRIVATE)
+        if (baselineAuditPrefs.getString("date", "") != date) {
+            baselineAuditPrefs.edit().putString("date", date)
+                .putLong("first_app_observed_scan_at_ms", newest).commit()
+            auditLogger.logAsync("FIXED_DIAGNOSTIC", "DISCOVERY_BASELINE_PROVENANCE",
+                mapOf("date" to date, "first_app_observed_scan_at_ms" to newest,
+                    "source" to "FIRST_APP_OBSERVATION_NOT_VERIFIED_0915_NSE_OPEN",
+                    "affects_fixed_discovery_inputs" to false,
+                    "new_broker_requests" to 0))
+        }
         val official = fixedRecommendationStore.recommendations(date)
         val bySymbol = official.associateBy { it.symbol.uppercase(Locale.US) }
         var captured = 0
@@ -9525,6 +9538,11 @@ class TradingRepository @Inject constructor(
                     "fixed_factor_telemetry_written_total" to fixedFactorTelemetry.writtenCount(),
                     "fixed_factor_telemetry_nonblocking" to true,
                     "fixed_factor_telemetry_file" to "fixed_factor_snapshots.jsonl",
+                    "fixed_early_watch_file" to "fixed_early_watch.json",
+                    "fixed_early_watch_read_only" to true,
+                    "fixed_quality_shadow_no_buy_filter" to true,
+                    "quote_http_timing_exchange_age_unknown" to true,
+                    "fixed_peak_research_feed_enabled" to false,
                     "fixed_scan_profile_event" to "FIXED_SCAN_PROFILE",
                     "forecast_scan_profile_event" to "FORECAST_SCAN_PROFILE",
                     "trailing_profile_event" to "TRAILING_MONITOR_PROFILE",
