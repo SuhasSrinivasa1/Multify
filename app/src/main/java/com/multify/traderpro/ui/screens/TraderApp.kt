@@ -971,6 +971,8 @@ private fun FixedScreen(
                                 (watch.observedSpreadBps?.let { String.format(Locale.US, "%.0f bps", it) }
                                     ?: watch.quoteBookStatus) +
                                 " · day shares: " + (watch.dayTradedShares?.toString() ?: "not reported") +
+                                " · day move: " + (watch.dayChangePct?.let {
+                                    String.format(Locale.US, "%+.1f%%", it) } ?: "unknown") +
                                 " · distance from quote high: " +
                                 (watch.distanceFromQuoteDayHighPct?.let {
                                     String.format(Locale.US, "%.2f%%", it)
