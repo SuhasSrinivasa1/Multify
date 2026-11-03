@@ -72,7 +72,10 @@ class ForecastUnivestJournal @Inject constructor(@ApplicationContext context: Co
         val row = old.copy(exitNotificationAtMs = at, exitReceivedAtMs = received, status = "SAME_DAY_EXIT_RECEIVED")
         persist(row); row
     }
-    fun quoteExit(key: String, price: Double, at: Long): ForecastUnivestCampaign? = synchronized(lock) {
+    /** Exits can be completed using a bounded historical candle after a live-quote outage.
+     * The price source remains explicit: a candle proxy is not an executed trade.
+     */
+    fun quoteExit(key: String, price: Double, at: Long, source: String = "GROWW_BETA_LIVE_QUOTE"): ForecastUnivestCampaign? = synchronized(lock) {
         val old = latest[key] ?: return@synchronized null
         val exitTime = old.exitNotificationAtMs ?: return@synchronized null
         if (old.exitPrice != null || price <= 0.0 || !price.isFinite() || at < exitTime || at - exitTime > 180_000L) return@synchronized null
@@ -80,9 +83,13 @@ class ForecastUnivestJournal @Inject constructor(@ApplicationContext context: Co
         val eligible = entry != null && entry > 0 && old.features48Json != null && old.featureCaptureAtMs != null &&
             old.featureCaptureAtMs < exitTime && ForecastUnivestLearningPolicy.sameTradingDay(old.entryNotificationAtMs, exitTime)
         val pct = if (eligible) (price / entry!! - 1.0) * 100.0 else null
-        val row = old.copy(exitPrice = price, exitPriceSource = "GROWW_BETA_LIVE_QUOTE", outcomePct = pct,
+        val row = old.copy(exitPrice = price, exitPriceSource = source, outcomePct = pct,
             status = if (pct != null && pct.isFinite()) "CLOSED_SAME_DAY_VERIFIED" else "CLOSED_INSUFFICIENT_ENTRY_EVIDENCE")
         persist(row); row
+    }
+    fun pendingExitPricing(): List<ForecastUnivestCampaign> = synchronized(lock) {
+        latest.values.filter { it.exitNotificationAtMs != null && it.exitPrice == null &&
+            it.status == "SAME_DAY_EXIT_RECEIVED" && it.entryPrice != null }.take(6)
     }
     fun training(beforeDate: String): List<ForecastUnivestCampaign> = synchronized(lock) {
         latest.values.filter { row ->
