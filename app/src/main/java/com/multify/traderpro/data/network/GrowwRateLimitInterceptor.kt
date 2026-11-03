@@ -10,6 +10,7 @@ import kotlinx.coroutines.delay
 import okhttp3.Request
 import java.io.IOException
 import com.multify.traderpro.engine.GrowwApiBudgetPolicy
+import com.multify.traderpro.engine.MarketDataPriorityAdmissionPolicy
 import com.multify.traderpro.engine.AlphaLtpPacingPolicy
 import okhttp3.Interceptor
 import okhttp3.Response
@@ -66,7 +67,9 @@ internal class GrowwRateLimitInterceptor(
         }
         GrowwApiUsageLedger.recordRequest(category)
         val started = SystemClock.elapsedRealtime()
-        val response = chain.proceed(request)
+        // Request priority is internal scheduler metadata, never a Groww API header.
+        val response = chain.proceed(request.newBuilder()
+            .removeHeader(MarketDataPriorityAdmissionPolicy.HEADER).build())
         val networkMs = (SystemClock.elapsedRealtime() - started).coerceAtLeast(0L)
         GrowwApiUsageLedger.recordResponse(category, networkMs, response.code)
         if (response.code == 429) {
@@ -128,7 +131,9 @@ internal class GrowwRateLimitInterceptor(
     internal suspend fun acquirePermit(request: Request) {
         val path = request.url.encodedPath
         val category = classify(request.method, path)
-        val limits = limits(category)
+        val protection = category == GrowwApiUsageLedger.Category.LIVE_DATA &&
+            MarketDataPriorityAdmissionPolicy.isProtectionHeader(
+                request.header(MarketDataPriorityAdmissionPolicy.HEADER))
         var totalWaitMs = 0L
         var dominantReason = "NONE"
         while (true) {
@@ -141,6 +146,14 @@ internal class GrowwRateLimitInterceptor(
             val waitMs = synchronized(lock) {
                 val now = SystemClock.elapsedRealtime()
                 val state = states.getValue(category)
+                // Centralized quota: protect one live request/second and sixty/minute
+                // for existing holdings. Ordinary Fixed/Forecast research uses only
+                // the residual allowance; protection still obeys Groww's hard budget.
+                val limits = if (category == GrowwApiUsageLedger.Category.LIVE_DATA) {
+                    val admission = MarketDataPriorityAdmissionPolicy.allowedLiveTraffic(
+                        MarketDataPriorityAdmissionPolicy.hasManagedHoldings, protection)
+                    Limits(admission.perSecond, admission.perMinute)
+                } else limits(category)
                 prune(state.second, now - 1_000L)
                 prune(state.minute, now - 60_000L)
                 val cooldownWait = (state.cooldownUntilMs - now).coerceAtLeast(0L)
