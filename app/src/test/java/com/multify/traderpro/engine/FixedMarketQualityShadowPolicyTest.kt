@@ -20,6 +20,18 @@ class FixedMarketQualityShadowPolicyTest {
         assertTrue("PRICE_CHASING_SHADOW" in row.warnings)
         assertEquals(2600.0, row.estimatedTradedValueRupees!!, 1.0)
     }
+    @Test fun extremeDayMoveIsFlaggedEvenWhenLiquidityLooksGood() {
+        val quote = QuotePayload(lastPrice = 278.0, bidPrice = 277.95,
+            offerPrice = 278.05, volume = 69_579_373L,
+            dayChangePct = 85.9867, high = 290.0)
+        val row = FixedMarketQualityShadowPolicy.assess(quote)
+        assertTrue(row.observedSpreadBps!! < 40.0)
+        assertEquals(85.9867, row.brokerReportedDayChangePct!!, 0.0001)
+        assertTrue("EXTREME_DAY_RISE_SHADOW" in row.warnings)
+        assertTrue("ALREADY_UP_OVER_5PCT_SHADOW" in row.warnings)
+        assertFalse("LOW_ABSOLUTE_VOLUME_SHADOW" in row.warnings)
+    }
+
     @Test fun crossedAndMissingBooksAreNeverZeroSpread() {
         val crossed = FixedMarketQualityShadowPolicy.assess(
             QuotePayload(lastPrice = 100.0, bidPrice = 101.0, offerPrice = 100.0))
