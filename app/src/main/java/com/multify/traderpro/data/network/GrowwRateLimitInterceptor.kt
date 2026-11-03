@@ -70,10 +70,21 @@ internal class GrowwRateLimitInterceptor(
         }
         GrowwApiUsageLedger.recordRequest(category)
         val started = SystemClock.elapsedRealtime()
+        val requestStartedAtMs = System.currentTimeMillis()
         // Request priority is internal scheduler metadata, never a Groww API header.
         val response = chain.proceed(request.newBuilder()
             .removeHeader(MarketDataPriorityAdmissionPolicy.HEADER).build())
         val networkMs = (SystemClock.elapsedRealtime() - started).coerceAtLeast(0L)
+        if (path == "/v1/live-data/quote" &&
+            request.url.queryParameter("exchange").equals("NSE", ignoreCase = true) &&
+            request.url.queryParameter("segment").equals("CASH", ignoreCase = true)) {
+            // Broker payload exposes no provider source timestamp. This records only
+            // the precise client HTTP request/response timing for shadow diagnostics.
+            FixedQuoteTimingRegistry.record(
+                request.url.queryParameter("trading_symbol"),
+                requestStartedAtMs, System.currentTimeMillis(), networkMs, response.code
+            )
+        }
         GrowwApiUsageLedger.recordResponse(category, networkMs, response.code)
         if (response.code == 429) {
             val rawRetryAfter = response.header("Retry-After")

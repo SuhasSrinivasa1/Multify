@@ -6,6 +6,8 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.content.ContextCompat
@@ -17,6 +19,7 @@ import com.multify.traderpro.data.network.GrowwApiUsageLedger
 import com.multify.traderpro.data.network.GrowwRecoveryGate
 import com.multify.traderpro.engine.FixedDataPipelinePolicy
 import com.multify.traderpro.engine.FixedPublicationTimingPolicy
+import com.multify.traderpro.engine.MobileEngineHealthPolicy
 import com.multify.traderpro.data.repository.TradingRepository
 import com.multify.traderpro.engine.ReleaseIntegrityManifest
 import dagger.hilt.android.AndroidEntryPoint
@@ -44,6 +47,7 @@ class TradingEngineService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var engineJob: Job? = null
+    private var mobileHealthJob: Job? = null
     private var positionMonitorJob: Job? = null
     private var fixedScanJob: Job? = null
     private var forecastScanJob: Job? = null
@@ -66,6 +70,8 @@ class TradingEngineService : Service() {
     @Volatile private var lastForecastOutcomeCount = 0
     @Volatile private var lastFixedOutcomeCount = 0
     @Volatile private var lastFixedCycleCompletedAtMs = 0L
+    @Volatile private var lastPositionPassSucceededAtMs = 0L
+    @Volatile private var mobileHealthStatus = "INITIALIZING"
 
     override fun onCreate() {
         super.onCreate()
@@ -131,6 +137,7 @@ class TradingEngineService : Service() {
         forecastScanJob?.cancel()
         forecastNewsJob?.cancel()
         engineJob?.cancel()
+        mobileHealthJob?.cancel()
         scope.cancel()
         auditLogger.log("RUNTIME", "FOREGROUND_ENGINE_DESTROYED")
         super.onDestroy()
@@ -163,6 +170,7 @@ class TradingEngineService : Service() {
     }
 
     private fun startEngineLoop() {
+        startMobileHealthWorker()
         startPositionMonitorWorker()
         startFixedScanWorker()
         startForecastScanWorker()
@@ -336,6 +344,73 @@ class TradingEngineService : Service() {
         }
     }
 
+    /**
+     * Foreground-service watchdog is independent of trading workers. It can restart an
+     * *exited* worker, but NEVER cancels a slow or active SELL/GTT reconciliation or
+     * forces a Fixed scan across the original cadence/cooldown. No broker calls.
+     */
+    private fun startMobileHealthWorker() {
+        if (mobileHealthJob?.isActive == true) return
+        mobileHealthJob = scope.launch(Dispatchers.IO.limitedParallelism(1)) {
+            var lastAuditedAtMs = 0L
+            var previousStatus = ""
+            while (isActive) {
+                try {
+                    val nowMs = System.currentTimeMillis()
+                    val clock = ZonedDateTime.now(INDIA)
+                    val marketOpen = clock.dayOfWeek.value < 6 &&
+                        clock.toLocalTime() >= LocalTime.of(9, 15) &&
+                        clock.toLocalTime() < LocalTime.of(15, 30)
+                    val connected = runCatching {
+                        val manager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+                        manager.getNetworkCapabilities(manager.activeNetwork)
+                            ?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true
+                    }.getOrDefault(false)
+                    val snapshot = MobileEngineHealthPolicy.assess(
+                        marketOpen, fixedScanJob?.isActive == true,
+                        positionMonitorJob?.isActive == true, connected,
+                        nowMs, lastFixedCycleCompletedAtMs, lastPositionPassSucceededAtMs,
+                        lastKnownManagedCount
+                    )
+                    mobileHealthStatus = snapshot.status
+                    if (snapshot.status != previousStatus ||
+                        nowMs - lastAuditedAtMs >= MOBILE_HEALTH_AUDIT_INTERVAL_MS) {
+                        auditLogger.logAsync("MOBILE_HEALTH", "ENGINE_WATCHDOG", mapOf(
+                            "status" to snapshot.status,
+                            "market_open" to marketOpen, "network_validated" to connected,
+                            "app_owned_holdings" to lastKnownManagedCount,
+                            "fixed_scan_progress_age_ms" to snapshot.fixedProgressAgeMs,
+                            "position_monitor_success_age_ms" to snapshot.holdingMonitorAgeMs,
+                            "fixed_worker_running" to snapshot.fixedWorkerRunning,
+                            "position_worker_running" to snapshot.positionWorkerRunning,
+                            "fixed_stalled_only_diagnostic" to snapshot.fixedScanStalled,
+                            "holding_monitor_stale" to snapshot.protectionMonitorStalled,
+                            "cpu_wake_lock_held" to (positionMonitoringWakeLock?.isHeld == true),
+                            "screen_interactive" to
+                                (getSystemService(Context.POWER_SERVICE) as PowerManager).isInteractive,
+                            "fixed_formula_changed" to false
+                        ))
+                        previousStatus = snapshot.status
+                        lastAuditedAtMs = nowMs
+                    }
+                    // Only exited jobs are restarted. Active scans/SELLs may be
+                    // broker-blocked and MUST NOT be cancelled or duplicated.
+                    if (positionMonitorJob?.isActive != true) startPositionMonitorWorker()
+                    if (fixedScanJob?.isActive != true) startFixedScanWorker()
+                    if (engineJob?.isActive != true) startEngineLoop()
+                    if (forecastScanJob?.isActive != true) startForecastScanWorker()
+                    if (forecastNewsJob?.isActive != true) startForecastNewsWorker()
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (t: Throwable) {
+                    auditLogger.logAsync("MOBILE_HEALTH", "WATCHDOG_ERROR",
+                        mapOf("error" to t.javaClass.simpleName))
+                }
+                delay(MOBILE_HEALTH_INTERVAL_MS)
+            }
+        }
+    }
+
     private fun startPositionMonitorWorker() {
         if (positionMonitorJob?.isActive == true) return
         positionMonitorJob = scope.launch {
@@ -356,6 +431,7 @@ class TradingEngineService : Service() {
                     val succeeded = failure == null
                     lastManagedMonitorSucceeded = succeeded
                     if (succeeded) {
+                        lastPositionPassSucceededAtMs = System.currentTimeMillis()
                         val count = result.getOrThrow().coerceAtLeast(0)
                         lastKnownManagedCount = count
                         if (!repository.brokerSessionHealthy()) {
@@ -564,6 +640,15 @@ class TradingEngineService : Service() {
                                 "order_path_completed" to true,
                                 "fixed_model_changed" to false
                             ))
+                            scope.launch(Dispatchers.IO.limitedParallelism(1)) {
+                                runCatching { repository.captureFixedEarlyWatchAfterScan() }
+                                    .onFailure {
+                                        if (it !is CancellationException) auditLogger.logAsync(
+                                            "FIXED_EARLY_WATCH", "RECONCILIATION_ERROR",
+                                            mapOf("reason" to it.javaClass.simpleName,
+                                                "fixed_logic_changed" to false))
+                                    }
+                            }
                             scope.launch {
                                 notifyNewFixedRecommendationsAfterOrderPath()
                             }
@@ -850,7 +935,7 @@ class TradingEngineService : Service() {
             positionMonitoringWakeLock?.isHeld == true -> "Monitoring $managedCount holding(s) · CPU awake"
             else -> "Monitoring $managedCount holding(s) · CPU wake lock unavailable"
         }
-        val text = monitorStatus + " · " + forecastOutcomeCount + " adaptive + " + fixedOutcomeCount + " fixed outcomes" +
+        val text = monitorStatus + " · engine " + mobileHealthStatus + " · " + forecastOutcomeCount + " adaptive + " + fixedOutcomeCount + " fixed outcomes" +
             " · " + GrowwApiUsageLedger.snapshot().compact()
         getSystemService(NotificationManager::class.java)
             .notify(FOREGROUND_NOTIFICATION_ID, engineNotification(text))
@@ -903,6 +988,8 @@ class TradingEngineService : Service() {
         private const val FOREGROUND_NOTIFICATION_ID = 68090
         private const val HEARTBEAT_INTERVAL_MS = 15_000L
         private const val API_USAGE_AUDIT_INTERVAL_MS = 30_000L
+        private const val MOBILE_HEALTH_INTERVAL_MS = 15_000L
+        private const val MOBILE_HEALTH_AUDIT_INTERVAL_MS = 5L * 60_000L
         private const val POSITION_LOOP_INTERVAL_MS = 1_000L
         private const val PORTFOLIO_POSITION_LOOP_INTERVAL_MS = 1_000L
         private const val POSITION_MONITOR_ERROR_RETRY_MS = 1_000L

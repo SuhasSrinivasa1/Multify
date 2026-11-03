@@ -74,6 +74,27 @@ data class UnivestResearchDto(
     val exitPriceSource: String = "UNKNOWN"
 )
 
+/** Diagnostic-only first PRIMARY observations; these have NO BUY permission. */
+data class FixedEarlyWatchDto(
+    val symbol: String = "",
+    val firstPrimaryScanAtMs: Long = 0L,
+    val firstEvaluatedAtMs: Long = 0L,
+    val firstPrimaryPrice: Double = 0.0,
+    val latestEvaluatedAtMs: Long = 0L,
+    val latestPrice: Double = 0.0,
+    val confirmationObservations: Int = 0,
+    val officialPublished: Boolean = false,
+    val officialEntryPrice: Double? = null,
+    val officialStatus: String? = null,
+    val runupPct: Double = 0.0,
+    val observedSpreadBps: Double? = null,
+    val quoteBookStatus: String = "UNAVAILABLE",
+    val dayTradedShares: Long? = null,
+    val dayChangePct: Double? = null,
+    val distanceFromQuoteDayHighPct: Double? = null,
+    val warnings: List<String> = emptyList()
+)
+
 data class DashboardDto(
     val serviceStatus: String = "device",
     val armed: Boolean = false,
@@ -92,6 +113,7 @@ data class DashboardDto(
     val fixedForecasts: List<ForecastDto> = emptyList(),
     val forecastWatchlist: List<ForecastDto> = emptyList(),
     val fixedWatchlist: List<ForecastDto> = emptyList(),
+    val fixedEarlyWatch: List<FixedEarlyWatchDto> = emptyList(),
     val forecastChampions: List<ForecastChampionDto> = emptyList(),
     val research: ResearchDto = ResearchDto(),
     val univestResearch: List<UnivestResearchDto> = emptyList(),
