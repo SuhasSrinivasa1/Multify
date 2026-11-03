@@ -7,7 +7,7 @@ import java.time.ZoneId
 
 class ForecastNewsOpportunityPolicyTest {
     private val p = ForecastNewsOpportunityPolicy
-    private val proven = ForecastNewsOpportunityPolicy.Evidence(40, 8, .80)
+    private val proven = ForecastNewsOpportunityPolicy.Evidence(40, 8, .80, 1.45)
     private val notProven = ForecastNewsOpportunityPolicy.Evidence(19, 4, .95)
 
     private fun context(change: Double? = 0.2, spread: Double? = 18.0,
@@ -21,6 +21,10 @@ class ForecastNewsOpportunityPolicyTest {
         assertEquals("VALIDATED_PRE_SPIKE_CATALYST", result.reason)
         assertEquals(10.0, result.materialityPct!!, 1e-6)
         assertTrue(result.patternKey.contains("MULTI"))
+    }
+    @Test fun validatedButMeanExactlyOnePercentIsNotActionable() {
+        assertEquals("AVERAGE_GAIN_NOT_ABOVE_1PCT",
+            p.decide(context(evidence = ForecastNewsOpportunityPolicy.Evidence(40,8,.80,1.0))).reason)
     }
     @Test fun highHistoricalPercentageWithoutEnoughCasesIsNotProven() {
         assertEquals("PATTERN_NOT_VALIDATED", p.decide(context(evidence = notProven)).reason)

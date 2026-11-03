@@ -12,7 +12,7 @@ object ForecastNewsPatternPolicy {
     private val categories = linkedMapOf(
         "EARNINGS" to listOf("quarterly results", "financial results", "quarter ended", "annual results"),
         "PROFIT_MARGIN" to listOf("net profit", "ebitda", "operating margin", "profit after tax"),
-        "ORDER_CONTRACT" to listOf("order received", "work order", "contract awarded", "order win", "letter of award"),
+        "ORDER_CONTRACT" to listOf("order received", "work order", "contracts awarded", "contract awarded", "order win", "letter of award", "orders secured", "new orders", "orders worth", "receipt of order", "orders bagged"),
         "INSTITUTIONAL_DEAL" to listOf("bulk deal", "block deal", "institutional investment", "stake acquisition"),
         "CUSTOMER_GROWTH" to listOf("subscribers", "customer base", "user growth", "new customers"),
         "EXPANSION" to listOf("capacity expansion", "new plant", "new facility", "expansion", "commercial production"),
@@ -34,7 +34,7 @@ object ForecastNewsPatternPolicy {
         "RATING_UPGRADE" to listOf("credit rating upgraded", "rating upgrade", "outlook upgraded")
     )
     private val negative = listOf("loss widened", "profit declined", "revenue declined", "guidance cut", "penalty", "fraud", "default", "downgrade", "resigned", "termination", "order cancelled", "guidance lowered", "regulatory warning", "dilution", "pledge", "lawsuit", "insolvency", "fraud investigation")
-    private val positive = listOf("rose", "grew", "increased", "improved", "surge", "record", "awarded", "approved", "secured", "wins", "expands", "raises", "secured", "granted", "launched", "upgraded", "inflow", "reduced debt", "awarded contract")
+    private val positive = listOf("rose", "grew", "increased", "improved", "surge", "record", "awarded", "approved", "secured", "wins", "expands", "raises", "received orders", "bags order", "bagged orders", "orders worth", "order book strengthened", "granted", "launched", "upgraded", "inflow", "reduced debt", "awarded contract")
     private val percent = Regex("([+-]?\\d+(?:\\.\\d+)?)\\s*%")
     private val money = Regex("(?:₹|rs\\.?|inr)\\s*([\\d,]+(?:\\.\\d+)?)\\s*(crore|cr|lakh|million|billion)?", RegexOption.IGNORE_CASE)
 
@@ -43,7 +43,10 @@ object ForecastNewsPatternPolicy {
         val all = (title + " " + summary).lowercase(Locale.ROOT)
         val category = categories.entries.firstOrNull { e -> e.value.any { all.contains(it) } }?.key ?: "OTHER"
         val negatives = negative.count { all.contains(it) }
-        val positives = positive.count { all.contains(it) }
+        val positives = positive.count { all.contains(it) } +
+            (if (category == "ORDER_CONTRACT" &&
+                Regex("\\b(secured|bagged|awarded|received|won)\\b").containsMatchIn(all) &&
+                Regex("\\b(order|orders|contract|contracts)\\b").containsMatchIn(all)) 1 else 0)
         val direction = when {
             negatives > 0 -> "NEGATIVE_OR_AMBIGUOUS"
             positives > 0 && category != "OTHER" -> "POSITIVE_POSSIBLE"

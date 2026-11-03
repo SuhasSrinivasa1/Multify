@@ -13,7 +13,7 @@ object ForecastNewsOpportunityPolicy {
     const val MIN_PATTERN_DAYS = 5
     const val MIN_PATTERN_HIT_RATE = 0.75
 
-    data class Evidence(val observations: Int = 0, val distinctDays: Int = 0, val hitRate: Double = 0.0) {
+    data class Evidence(val observations: Int = 0, val distinctDays: Int = 0, val hitRate: Double = 0.0, val averageMfePct: Double = 0.0) {
         val proven: Boolean get() = observations >= MIN_PATTERN_SAMPLES &&
             distinctDays >= MIN_PATTERN_DAYS && hitRate >= MIN_PATTERN_HIT_RATE
     }
@@ -63,6 +63,7 @@ object ForecastNewsOpportunityPolicy {
         val key = patternKey(c.category, cap, c.distinctCatalysts, material)
         val reason = when {
             !c.evidence.proven -> "PATTERN_NOT_VALIDATED"
+            c.evidence.averageMfePct <= 1.0 -> "AVERAGE_GAIN_NOT_ABOVE_1PCT"
             c.lastPrice <= 0.0 || !c.lastPrice.isFinite() -> "INVALID_QUOTE"
             c.dayChangePct == null || !c.dayChangePct.isFinite() -> "PRICE_REACTION_UNKNOWN"
             c.dayChangePct > MAX_ALREADY_MOVED_PCT -> "ALREADY_MOVED"

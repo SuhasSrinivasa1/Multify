@@ -22,8 +22,29 @@ internal data class FixedFiveMinuteShadowPair(
     val maxFavourablePct: Double = 0.0,
     val maxAdversePct: Double = 0.0,
     val observations: Int = 0,
-    val lastObservedAtMs: Long = 0L
+    val lastObservedAtMs: Long = 0L,
+    val firstTargetObservedAtMs: Long? = null,
+    val firstTwoPctRiskObservedAtMs: Long? = null
 ) {
+    // Both variants see the same entry quote and subsequently sampled LTP path;
+    // only their hypothetical qualification differs. No fills/orders are claimed.
+    val sessionBucket: String get() {
+        val time = java.time.Instant.ofEpochMilli(atMs)
+            .atZone(java.time.ZoneId.of("Asia/Kolkata")).toLocalTime()
+        return if (time < java.time.LocalTime.of(10, 15)) "OPEN_0915_1015"
+               else if (time < java.time.LocalTime.of(13, 0)) "MID_SESSION"
+               else "LATE_SESSION"
+    }
+    val comparisonGroup: String get() = when {
+        fifteenMinutePrimary && fiveMinutePrimary -> "BOTH_PRIMARY"
+        fifteenMinutePrimary -> "ONLY_15M_PRIMARY"
+        fiveMinutePrimary -> "ONLY_5M_PRIMARY"
+        else -> "NEITHER_PRIMARY"
+    }
+    val sampledTargetBeforeRisk: Boolean get() =
+        firstTargetObservedAtMs != null &&
+            (firstTwoPctRiskObservedAtMs == null ||
+                firstTargetObservedAtMs < firstTwoPctRiskObservedAtMs)
     val fifteenMinutePrimary get() = fifteenMinuteTier == "PRIMARY"
     val fiveMinutePrimary get() = fiveMinuteTier == "PRIMARY"
     val targetObserved get() = maxFavourablePct >= targetPct
@@ -61,7 +82,11 @@ internal class FixedFiveMinuteShadowJournal(context: Context) {
                     maxFavourablePct = maxOf(row.maxFavourablePct, pct),
                     maxAdversePct = minOf(row.maxAdversePct, pct),
                     observations = row.observations + 1,
-                    lastObservedAtMs = nowMs
+                    lastObservedAtMs = nowMs,
+                    firstTargetObservedAtMs = row.firstTargetObservedAtMs
+                        ?: if (pct >= row.targetPct) nowMs else null,
+                    firstTwoPctRiskObservedAtMs = row.firstTwoPctRiskObservedAtMs
+                        ?: if (pct <= -2.0) nowMs else null
                 )
                 dirty = true
                 updates.add(revised)
@@ -71,6 +96,19 @@ internal class FixedFiveMinuteShadowJournal(context: Context) {
         if (dirty) save(result)
         return updates
     }
+
+    data class CohortStats(
+        val sessionBucket: String, val comparisonGroup: String, val observations: Int,
+        val targetObserved: Int, val targetBeforeTwoPctRisk: Int, val noForwardObservations: Int
+    )
+    @Synchronized fun cohortSummary(): List<CohortStats> = all()
+        .groupBy { it.sessionBucket to it.comparisonGroup }
+        .map { (key, rows) -> CohortStats(
+            key.first, key.second, rows.size,
+            rows.count { it.targetObserved && it.observations > 0 },
+            rows.count { it.sampledTargetBeforeRisk && it.observations > 0 },
+            rows.count { it.observations == 0 }
+        ) }.sortedWith(compareBy({ it.sessionBucket }, { it.comparisonGroup }))
 
     private fun save(rows: List<FixedFiveMinuteShadowPair>) {
         val dates = rows.map { it.date }.distinct().sortedDescending().take(5).toSet()

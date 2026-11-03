@@ -27,8 +27,8 @@ class FixedShadowSamplingPolicyTest {
         assertFalse(allowed(fixed = true))
         assertFalse(allowed(trade = true))
         assertFalse(allowed(untilFixed = 3_000))
-        assertFalse(allowed(liveUsed = 65))
-        assertFalse(allowed(historicalUsed = 14))
+        assertFalse(allowed(liveUsed = 85))
+        assertFalse(allowed(historicalUsed = 19))
         assertFalse(allowed(brokerReady = false))
     }
 
