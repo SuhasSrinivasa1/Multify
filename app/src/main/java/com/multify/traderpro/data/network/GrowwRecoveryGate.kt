@@ -69,11 +69,15 @@ class GrowwRecoveryGate @Inject constructor(@ApplicationContext context: Context
     /** After a 429, cease requests to the affected endpoint category, not a sleep on an HTTP thread. */
     fun on429(category: GrowwApiUsageLedger.Category, retryAfterMs: Long, now: Long = System.currentTimeMillis()): Long = synchronized(lock) {
         val history = rolling(historyKey(category), now, HOUR_MS)
-        val failures = history.size + 1
-        val duration = GrowwRecoveryPolicy.cooldownMs(failures, retryAfterMs)
+        // Multiple requests may already be in flight when Groww begins returning 429.
+        // Count responses arriving in the same short burst as ONE incident. Respect a
+        // longer Retry-After, but don't turn a simultaneous triple 429 into an hour.
+        val sameIncident = history.lastOrNull()?.let { now - it < SAME_INCIDENT_WINDOW_MS } == true
+        val failures = history.size + if (sameIncident) 0 else 1
+        val duration = GrowwRecoveryPolicy.cooldownMs(failures.coerceAtLeast(1), retryAfterMs)
         val until = maxOf(preferences.getLong(cooldownKey(category), 0L), now + duration)
         preferences.edit()
-            .putString(historyKey(category), (history + now).joinToString(","))
+            .putString(historyKey(category), (if (sameIncident) history else history + now).joinToString(","))
             .putLong(cooldownKey(category), until)
             .commit()
         duration
@@ -99,6 +103,7 @@ class GrowwRecoveryGate @Inject constructor(@ApplicationContext context: Context
     private fun historyKey(category: GrowwApiUsageLedger.Category) = "429_times_${category.name}"
 
     companion object {
+        private const val SAME_INCIDENT_WINDOW_MS = 5_000L
         private const val MINUTE_MS = 60_000L
         private const val HOUR_MS = 60L * MINUTE_MS
         private const val DAY_MS = 24L * HOUR_MS
