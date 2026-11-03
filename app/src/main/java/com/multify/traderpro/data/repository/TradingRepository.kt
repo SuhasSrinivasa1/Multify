@@ -84,6 +84,7 @@ import com.multify.traderpro.engine.FixedPositiveTransferCase
 import com.multify.traderpro.engine.ForecastQualityDecision
 import com.multify.traderpro.engine.ForecastNewsPatternPolicy
 import com.multify.traderpro.engine.ForecastNewsPublicationGate
+import com.multify.traderpro.engine.ForecastExpectedAverageGainPolicy
 import com.multify.traderpro.engine.ForecastUnivestLearningPolicy
 import com.multify.traderpro.engine.ForecastQualityPolicy
 import com.multify.traderpro.engine.ForecastTargetExpansionPolicy
@@ -327,7 +328,8 @@ class TradingRepository @Inject constructor(
         val championKey: String,
         val targetPct: Double,
         val economics: ForecastEconomicsDecision,
-        val evidenceDiagnostics: ForecastEvidenceDiagnostics
+        val evidenceDiagnostics: ForecastEvidenceDiagnostics,
+        val expectedGain: ForecastExpectedAverageGainPolicy.Estimate
     )
 
     private data class FixedCandidate(
@@ -2492,6 +2494,16 @@ class TradingRepository @Inject constructor(
             )
         }
         val timingHistoricalExamples = timingExamples(priorResearchAll)
+        val completedForecastOutcomes = priorResearchAll.mapNotNull { row ->
+            val mfe = row.outcomeMfePct ?: return@mapNotNull null
+            if (!mfe.isFinite() || mfe < 0.0 || mfe >= 25.0) return@mapNotNull null
+            ForecastHistoricalOutcome(
+                date = row.researchDate, symbol = row.symbol,
+                strategy = row.strategy, regime = row.regime, marketRegime = row.marketRegime,
+                maxFavourablePct = mfe, maxAdversePct = row.outcomeMaePct ?: 0.0,
+                closePct = row.outcomeClosePct ?: 0.0, targetHit = row.outcomeTargetHit == true
+            )
+        }
         val historicalOutcomes = priorResearchAll.mapNotNull { row ->
             val mfe = row.outcomeMfePct ?: return@mapNotNull null
             val mae = row.outcomeMaePct ?: return@mapNotNull null
@@ -2628,6 +2640,8 @@ class TradingRepository @Inject constructor(
                 spreadBps = row.second.features.spreadBps,
                 atrPct = atrPct
             )
+            val expectedGain = ForecastExpectedAverageGainPolicy.estimate(
+                row.second.strategy, row.second.regime, marketRegime, completedForecastOutcomes)
             val evidenceDiagnostics = ForecastAdaptiveSelectionPolicy.diagnostics(
                 strategy = row.second.strategy,
                 regime = row.second.regime,
@@ -2648,7 +2662,8 @@ class TradingRepository @Inject constructor(
                 championKey = key,
                 targetPct = candidateTargetPct,
                 economics = economics,
-                evidenceDiagnostics = evidenceDiagnostics
+                evidenceDiagnostics = evidenceDiagnostics,
+                expectedGain = expectedGain
             )
         }.sortedWith(
             compareByDescending<ForecastCandidate> {
@@ -2666,6 +2681,10 @@ class TradingRepository @Inject constructor(
             "research" to ranked.count { it.quality.tier == "RESEARCH" },
             "spread_unavailable" to ranked.count { it.evaluation.features.spreadBps == null },
             "net_economics_unprofitable" to ranked.count { !it.economics.profitableAfterCosts },
+            "expected_avg_gain_gt_1pct" to ranked.count { it.expectedGain.eligible },
+            "average_gain_not_yet_validated" to ranked.count { it.expectedGain.averageMfePct == null },
+            "average_gain_pct_threshold_exclusive" to 1.0,
+            "rupee_profit_publication_threshold" to "NONE",
             "adaptive_target_pct" to targetPct,
             "multify_baseline_mfe_pct" to learned.longAveragePct,
             "prior_forecast_mfe_samples" to priorMfe.size,
@@ -2727,7 +2746,7 @@ class TradingRepository @Inject constructor(
             if (!RecommendationPriceBandPolicy.eligible(item.evaluation.features.ltp)) return@filter false
             val currentPrimary =
                 item.quality.tier == "PRIMARY" && item.quality.publishEligible && item.quality.executionEligible &&
-                    item.economics.profitableAfterCosts
+                    item.expectedGain.eligible
             ForecastPublicationPolicy.isReady(
                 discoveryBaselineReady = discoveryPass.baselineReady,
                 currentPrimary = currentPrimary,
@@ -2737,17 +2756,50 @@ class TradingRepository @Inject constructor(
             )
         }
 
-        publishable.forEachIndexed { index, item ->
-            val price = item.evaluation.features.ltp
+        var publishedFresh = 0
+        publishable.forEach { item ->
+            // A fresh quote is mandatory before publishing; never bypass Fixed/order priority.
+            if (fixedApiPriorityRequested || marketCriticalTradeInFlight ||
+                !forecastMarketCapacityAvailable()) {
+                auditLogger.logAsync("FORECAST", "FRESH_QUOTE_DEFERRED", mapOf(
+                    "symbol" to item.symbol, "reason" to "BROKER_PRIORITY_OR_CAPACITY"))
+                return@forEach
+            }
+            val fresh = runCatching {
+                withForecastLiveDataSlot {
+                    betaMarketRead(token, BetaResearchGate.Type.LIVE,
+                        alphaCall = { apiFactory.groww.quote(bearer(token), tradingSymbol = item.symbol)
+                            .requirePayload("Fresh Forecast publish quote ${item.symbol}") },
+                        betaCall = { apiFactory.betaGroww.quote(bearer(token), tradingSymbol = item.symbol)
+                            .requirePayload("Fresh Beta Forecast publish quote ${item.symbol}") })
+                }
+            }.getOrNull()
+            val price = fresh?.lastPrice?.takeIf { RecommendationPriceBandPolicy.eligible(it) }
+            val oldPrice = item.evaluation.features.ltp
+            val oldTargetPrice = oldPrice * (1.0 + item.targetPct / 100.0)
+            val moveFromSignalPct = price?.let { (it / oldPrice - 1.0) * 100.0 }
+            val remainingUpsidePct = price?.let { (oldTargetPrice / it - 1.0) * 100.0 }
+            if (price == null || moveFromSignalPct == null || remainingUpsidePct == null ||
+                !moveFromSignalPct.isFinite() || !remainingUpsidePct.isFinite() ||
+                moveFromSignalPct !in -0.50..0.40 || remainingUpsidePct <= 1.0) {
+                auditLogger.logAsync("FORECAST", "PUBLICATION_FRESHNESS_REJECTED", mapOf(
+                    "symbol" to item.symbol, "original_price" to oldPrice,
+                    "fresh_price" to price, "signal_move_pct" to moveFromSignalPct,
+                    "remaining_upside_pct" to remainingUpsidePct,
+                    "min_remaining_upside_exclusive_pct" to 1.0))
+                return@forEach
+            }
+            val publishAtMs = System.currentTimeMillis()
+            publishedFresh++
             val quality = item.quality
             learningDao.upsertLongForecast(
                 LongForecastEntity(
                     forecastDate = today,
-                    rank = existing.size + index + 1,
+                    rank = existing.size + publishedFresh,
                     symbol = item.symbol,
                     entryPrice = price,
-                    targetPct = item.targetPct,
-                    targetPrice = price * (1.0 + item.targetPct / 100.0),
+                    targetPct = remainingUpsidePct,
+                    targetPrice = oldTargetPrice,
                     confidence = item.evaluation.confidence,
                     score = item.score,
                     strategy = item.evaluation.strategy,
@@ -2766,15 +2818,19 @@ class TradingRepository @Inject constructor(
                         " · family " + item.factorModel.dominantFamily +
                         " · family consensus " + fmt(item.factorModel.consensusScore * 100.0) + "%" +
                         " · capacity " + fmt(quality.volatilityCapacityPct) + "% for " + fmt(item.targetPct) + "% target" +
-                        " · est net ₹" + fmt(item.economics.netProfitRupees) +
+                        " · expected prior average price upside " + fmt(item.expectedGain.averageMfePct ?: 0.0) +
+                         "% (" + item.expectedGain.observations + " comparisons/" +
+                         item.expectedGain.distinctDays + " days)" +
+                         " · fresh quote change " + fmt(moveFromSignalPct) + "%" +
+                         " · est net ₹" + fmt(item.economics.netProfitRupees) +
                         " (" + fmt(item.economics.netReturnPct) + "%) after charges/slippage" +
                         " · risk-adjusted " + fmt(item.economics.riskAdjustedScore) +
                         " · evidence " + item.evidenceDiagnostics.sampleCount + " samples/" +
                         item.evidenceDiagnostics.distinctDays + "d/" + item.evidenceDiagnostics.distinctSymbols + " stocks" +
                         if (item.targetPct > targetPct) " · positive Fixed upside expansion +" + fmt(item.targetPct - targetPct) + "pp" else "",
-                    generatedAtMs = nowMs,
+                    generatedAtMs = publishAtMs,
                     lastPrice = price,
-                    lastObservedAtMs = nowMs,
+                    lastObservedAtMs = publishAtMs,
                     qualityTier = quality.tier,
                     executionEligible = quality.executionEligible && liveForecastReady
                 )
@@ -2793,7 +2849,9 @@ class TradingRepository @Inject constructor(
             "daily_recommendation_cap" to "NONE",
             "price_min_exclusive" to 200,
             "price_max_exclusive" to 5000,
-            "newly_publishable_count" to publishable.size,
+            "newly_publishable_count" to publishedFresh,
+            "pre_freshness_publishable_count" to publishable.size,
+            "price_revalidated_before_publish" to true,
             "base_target_pct" to targetPct,
             "max_published_target_pct" to (publishable.maxOfOrNull { it.targetPct } ?: targetPct),
             "positive_target_expansion_enabled" to true,
@@ -3581,6 +3639,10 @@ class TradingRepository @Inject constructor(
                 "estimated_slippage_rupees" to item.economics.estimatedSlippageRupees,
                 "risk_adjusted_score" to item.economics.riskAdjustedScore,
                 "downside_proxy_pct" to item.economics.downsideProxyPct,
+                "expected_average_gain_pct" to item.expectedGain.averageMfePct,
+                "expected_gain_observations" to item.expectedGain.observations,
+                "expected_gain_distinct_days" to item.expectedGain.distinctDays,
+                "expected_gain_gt_one_pct" to item.expectedGain.eligible,
                 "historical_sample_count" to item.evidenceDiagnostics.sampleCount,
                 "historical_distinct_days" to item.evidenceDiagnostics.distinctDays,
                 "historical_distinct_symbols" to item.evidenceDiagnostics.distinctSymbols,
