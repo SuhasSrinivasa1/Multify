@@ -7816,7 +7816,10 @@ class TradingRepository @Inject constructor(
         triggerPrice: Double,
         direction: String,
         mode: String
-    ): ManagedPositionEntity {
+    ): ManagedPositionEntity = protectiveGttCreationMutex.withLock {
+        // The position monitor and post-fill protection may race.
+        val persisted = managedDao.openPositionById(position.id)
+        if (persisted != null && !persisted.smartOrderId.isNullOrBlank()) return@withLock persisted
         require(position.side == "LONG" && position.product == "CNC") { "GTT protection is only for tracked CNC LONG holdings" }
         require(safeAppSellScope(token, position, forceGttRefresh = true)) { "GTT SELL blocked: ${position.symbol} is not exclusively app-bought" }
         require(direction in setOf("UP", "DOWN"))
@@ -7898,7 +7901,7 @@ class TradingRepository @Inject constructor(
             "mode" to mode,
             "status" to updated.smartOrderStatus
         ))
-        return updated
+        return@withLock updated
     }
 
     private suspend fun modifyPositionGtt(
@@ -9438,6 +9441,15 @@ class TradingRepository @Inject constructor(
         require(demat <= 0 && cnc <= 0 && managedDao.openPositions().none { it.symbol.equals(symbol, true) }) {
             "BUY blocked: $symbol already exists in Groww/app holdings; ownership must stay separate"
         }
+        val unprotected = managedDao.openPositions().filter(::appOwned).filterNot {
+            com.multify.traderpro.engine.GttProtectionReadinessPolicy.verified(
+                it.smartOrderMode, it.smartOrderId, it.smartOrderStatus)
+        }
+        if (unprotected.isNotEmpty()) auditLogger.log("SAFETY", "NEW_BUY_BLOCKED_UNPROTECTED_HOLDING", mapOf(
+            "symbol" to symbol, "unprotected_symbols" to unprotected.map { it.symbol },
+            "critical_trading_priority" to true
+        ))
+        require(unprotected.isEmpty()) { "New BUY blocked: app-owned holding lacks verified broker GTT" }
         submitMarketOrder(token, symbol, "BUY", qty, "CNC", reference, notificationStartedNs)
     }
 
