@@ -73,6 +73,27 @@ class ForecastNewsMonitor @Inject constructor(
                     val symbol = resolveSymbol(entry.title, entry.summary)
                     if (symbol.isBlank()) unresolvedSymbols++
                     val id = sha256(feed.first + "|" + (entry.guid.ifBlank { entry.url.ifBlank { entry.title + published } }))
+                    // Existing unresolved events are retained by ID but may be promoted to
+                    // research when a refreshed NSE catalog uniquely resolves their issuer.
+                    val old = journal.recent(1500).firstOrNull { it.id == id }
+                    if (old != null) {
+                        if (old.symbol.isBlank() && symbol.isNotBlank()) {
+                            val reassessed = ForecastNewsPatternPolicy.assess(entry.title, entry.summary,
+                                ((now - published) / 60_000L).coerceAtLeast(0), 1, 1, 1, sourceVerified = true)
+                            journal.update(old.copy(
+                                symbol = symbol,
+                                category = reassessed.category, direction = reassessed.direction,
+                                classificationConfidence = reassessed.confidence,
+                                featureJson = gson.toJson(reassessed.features),
+                                status = if (reassessed.direction == "POSITIVE_POSSIBLE") "NEW" else "RESEARCH_ONLY",
+                                rationale = "RE_RESOLVED_NSE_COMPANY_NAME"
+                            ))
+                            audit.logAsync("FORECAST_NEWS", "UNRESOLVED_SYMBOL_RECOVERED", mapOf(
+                                "id" to id, "symbol" to symbol, "direction" to reassessed.direction))
+                        }
+                        duplicateIds++
+                        continue
+                    }
                     val near = journal.recent(500).filter { it.symbol == symbol && symbol.isNotBlank() &&
                         now - it.firstSeenAtMs in 0L..(24L * 60 * 60_000L) }
                     val canonicalTitle = normalize(entry.title).take(180)
@@ -123,6 +144,8 @@ class ForecastNewsMonitor @Inject constructor(
         audit.logAsync("FORECAST_NEWS", "POLL_PROFILE", mapOf("items_examined" to examined,
             "new_events" to newlyStored, "source_failures" to failures,
             "catalog_size" to companyByName.size, "poll_started_at_ms" to now,
+            "symbol_resolution_policy" to "ANCHORED_UNAMBIGUOUS_CORPORATE_NAME",
+            "unresolved_titles_are_research_not_orders" to true,
             "date_parse_failed" to missingDate, "future_dated" to futureDates,
             "older_than_72h" to staleDates, "dated_in_window" to eligibleDatedItems,
             "unresolved_nse_symbol" to unresolvedSymbols,
@@ -163,15 +186,9 @@ class ForecastNewsMonitor @Inject constructor(
         }
     }
 
-    private fun resolveSymbol(title: String, summary: String): String {
-        val catalog = companyByName
-        val normalizedTitle = normalize(title.substringBefore(" - ").substringBefore(" has informed"))
-        catalog[normalizedTitle]?.let { return it }
-        // Exact bounded company-name prefix matching. Avoid fuzzy guessing that might cause a BUY on the wrong NSE symbol.
-        return catalog.entries.firstOrNull { (name, _) ->
-            name.length >= 8 && (normalizedTitle == name || normalizedTitle.startsWith("$name "))
-        }?.value ?: ""
-    }
+    private fun resolveSymbol(title: String, summary: String): String =
+        ForecastNewsSymbolResolutionPolicy.resolve(title, companyByName)
+
 
     internal fun parseDate(s: String): Long? = ForecastNewsDatePolicy.parse(s)
 
