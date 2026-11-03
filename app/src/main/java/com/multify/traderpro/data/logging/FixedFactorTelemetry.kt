@@ -54,7 +54,7 @@ class FixedFactorTelemetry @Inject constructor(@ApplicationContext context: Cont
         // Capture the HTTP timing association BEFORE the asynchronous writer queue
         // can delay this row or another worker can overwrite the symbol's last quote.
         val correlatedHttp = FixedQuoteTimingRegistry.closestCompletedQuote(
-            symbol, quoteCapturedAtMs ?: completedAtMs)
+            symbol, scanStartedAtMs, quoteCapturedAtMs ?: completedAtMs)
         executor.execute {
             runCatching {
                 Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND)
@@ -85,7 +85,7 @@ class FixedFactorTelemetry @Inject constructor(@ApplicationContext context: Cont
         // family consensus from the live ranking is NOT reconstructed or claimed here.
         val model = FixedMultifyFactorFamilies.evaluate(e, "BREADTH_NEUTRAL")
         val quoteNetwork = quoteHttpTiming ?: FixedQuoteTimingRegistry.closestCompletedQuote(
-            symbol, quoteCapturedAtMs ?: completedAtMs)
+            symbol, scanStartedAtMs, quoteCapturedAtMs ?: completedAtMs)
         val quality = FixedMarketQualityShadowPolicy.assess(rawQuote)
         val atr = f.atr14?.takeIf { it.isFinite() && it > 0.0 }
         fun clean(v: Double?): Double? = v?.takeIf { it.isFinite() }
