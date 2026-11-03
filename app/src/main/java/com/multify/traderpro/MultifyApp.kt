@@ -11,12 +11,16 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import com.multify.traderpro.worker.NseSymbolSyncWorker
-import com.multify.traderpro.worker.ForecastNewsSyncWorker
 import com.multify.traderpro.data.network.GrowwRateLimitInterceptor
 import com.multify.traderpro.data.network.GrowwRecoveryGate
 import com.multify.traderpro.data.preferences.AppPreferences
 import dagger.hilt.android.HiltAndroidApp
 import java.util.concurrent.TimeUnit
+import java.time.Duration
+import java.time.DayOfWeek
+import java.time.ZoneId
+import java.time.ZonedDateTime
+import java.time.temporal.TemporalAdjusters
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import javax.inject.Inject
@@ -46,17 +50,19 @@ class MultifyApp : Application(), Configuration.Provider {
             ExistingWorkPolicy.KEEP,
             OneTimeWorkRequestBuilder<NseSymbolSyncWorker>().setConstraints(network).build()
         )
-        // Android WorkManager cannot run 60-second jobs; this only recovers news
-        // monitoring if the foreground service was stopped by the OS.
+        // NSE symbol master is not polled during market hours. Refresh weekly over the weekend.
+        // WorkManager may defer the exact run because of Android battery scheduling.
+        val indiaNow = ZonedDateTime.now(ZoneId.of("Asia/Kolkata"))
+        var saturday = indiaNow.with(TemporalAdjusters.nextOrSame(DayOfWeek.SATURDAY))
+            .withHour(10).withMinute(0).withSecond(0).withNano(0)
+        if (!saturday.isAfter(indiaNow)) saturday = saturday.plusWeeks(1)
+        val untilWeekendMs = Duration.between(indiaNow, saturday).toMillis()
         wm.enqueueUniquePeriodicWork(
-            "forecast-news-fallback-15m", ExistingPeriodicWorkPolicy.UPDATE,
-            PeriodicWorkRequestBuilder<ForecastNewsSyncWorker>(15, TimeUnit.MINUTES)
-                .setConstraints(network).build()
-        )
-        wm.enqueueUniquePeriodicWork(
-            "nse-symbol-master-monthly",
+            "nse-symbol-master-weekend",
             ExistingPeriodicWorkPolicy.UPDATE,
-            PeriodicWorkRequestBuilder<NseSymbolSyncWorker>(30, TimeUnit.DAYS).setConstraints(network).build()
+            PeriodicWorkRequestBuilder<NseSymbolSyncWorker>(7, TimeUnit.DAYS)
+                .setInitialDelay(untilWeekendMs, TimeUnit.MILLISECONDS)
+                .setConstraints(network).build()
         )
     }
 }
