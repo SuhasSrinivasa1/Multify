@@ -98,6 +98,8 @@ jobs:
             "app/build.gradle.kts",
             "app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt",
             "app/src/main/java/com/multify/traderpro/data/repository/FixedFiveMinuteShadowJournal.kt",
+            "app/src/main/java/com/multify/traderpro/engine/FixedShadowSamplingPolicy.kt",
+            "app/src/test/java/com/multify/traderpro/engine/FixedShadowSamplingPolicyTest.kt",
             "app/src/main/java/com/multify/traderpro/data/repository/ForecastNewsMonitor.kt",
             "app/src/main/java/com/multify/traderpro/data/repository/ForecastNewsSymbolResolutionPolicy.kt",
             "app/src/main/java/com/multify/traderpro/engine/ForecastExpectedAverageGainPolicy.kt",
