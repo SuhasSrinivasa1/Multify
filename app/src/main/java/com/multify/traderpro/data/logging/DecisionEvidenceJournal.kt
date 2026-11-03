@@ -38,6 +38,9 @@ class DecisionEvidenceJournal @Inject constructor(@ApplicationContext context: C
                         is JSONObject -> if (value.toString().length <= 16_000)
                             clean.put(key, value)
                         else clean.put(key, "OVERSIZED_NESTED_CONTEXT_IN_MAIN_AUDIT")
+                        is org.json.JSONArray -> if (value.toString().length <= 16_000)
+                            clean.put(key, value)
+                        else clean.put(key, "OVERSIZED_VOTES_IN_MAIN_AUDIT")
                         is Number, is Boolean -> clean.put(key, value)
                         else -> clean.put(key, value.toString().take(500))
                     }
