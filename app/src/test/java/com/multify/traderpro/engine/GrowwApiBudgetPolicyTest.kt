@@ -11,8 +11,10 @@ class GrowwApiBudgetPolicyTest {
         assertTrue(GrowwApiBudgetPolicy.APP_LIVE_DATA_PER_MINUTE < GrowwApiBudgetPolicy.LIVE_DATA_HARD_PER_MINUTE)
     }
     @Test fun fixedKeepsSellMonitorReserve() {
-        assertEquals(6, GrowwApiBudgetPolicy.fixedLiveDataPerSecond(true))
-        assertEquals(150, GrowwApiBudgetPolicy.fixedLiveDataPerMinute(true))
+        assertEquals(3, GrowwApiBudgetPolicy.fixedLiveDataPerSecond(true))
+        assertEquals(90, GrowwApiBudgetPolicy.fixedLiveDataPerMinute(true))
+        assertEquals(4, GrowwApiBudgetPolicy.fixedLiveDataPerSecond(false))
+        assertEquals(120, GrowwApiBudgetPolicy.fixedLiveDataPerMinute(false))
     }
     @Test fun otherBucketsKeepHeadroom() {
         assertEquals(150, GrowwApiBudgetPolicy.APP_ORDER_PER_MINUTE)
