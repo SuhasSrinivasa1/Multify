@@ -51,10 +51,15 @@ class FixedFactorTelemetry @Inject constructor(@ApplicationContext context: Cont
     ) {
         // Keep the entire calling-thread path O(1). Heavy transformation takes place only in worker.
         val completedAtMs = System.currentTimeMillis()
+        // Capture the HTTP timing association BEFORE the asynchronous writer queue
+        // can delay this row or another worker can overwrite the symbol's last quote.
+        val correlatedHttp = FixedQuoteTimingRegistry.closestCompletedQuote(
+            symbol, quoteCapturedAtMs ?: completedAtMs)
         executor.execute {
             runCatching {
                 Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND)
-                val row = buildEvidence(symbol, evaluation, scanStartedAtMs, completedAtMs, rawQuote, quoteCapturedAtMs)
+                val row = buildEvidence(symbol, evaluation, scanStartedAtMs, completedAtMs,
+                    rawQuote, quoteCapturedAtMs, correlatedHttp)
                 val jsonl = gson.toJson(row) + "\n"
                 synchronized(lock) {
                     rotateIfNecessary(jsonl.toByteArray(Charsets.UTF_8).size.toLong())
@@ -72,13 +77,14 @@ class FixedFactorTelemetry @Inject constructor(@ApplicationContext context: Cont
         scanStartedAtMs: Long,
         completedAtMs: Long,
         rawQuote: QuotePayload? = null,
-        quoteCapturedAtMs: Long? = null
+        quoteCapturedAtMs: Long? = null,
+        quoteHttpTiming: FixedQuoteTimingRegistry.Sample? = null
     ): Map<String, Any?> {
         val f = e.features
         // The factor raw/score values are invariant to market breadth; the market-regime-weighted
         // family consensus from the live ranking is NOT reconstructed or claimed here.
         val model = FixedMultifyFactorFamilies.evaluate(e, "BREADTH_NEUTRAL")
-        val quoteNetwork = FixedQuoteTimingRegistry.closestCompletedQuote(
+        val quoteNetwork = quoteHttpTiming ?: FixedQuoteTimingRegistry.closestCompletedQuote(
             symbol, quoteCapturedAtMs ?: completedAtMs)
         val quality = FixedMarketQualityShadowPolicy.assess(rawQuote)
         val atr = f.atr14?.takeIf { it.isFinite() && it > 0.0 }
