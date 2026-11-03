@@ -3511,7 +3511,7 @@ class TradingRepository @Inject constructor(
             val before = System.currentTimeMillis()
             // Never occupy Fixed's request slot waiting for a full network timeout.
             val history = withTimeoutOrNull(
-                (millisUntilNextFixedScan() - 1_500L).coerceIn(500L, 2_500L)
+                (millisUntilNextFixedScan() - 1_500L).coerceIn(500L, 4_000L)
             ) {
                 if (fixedApiPriorityRequested || marketCriticalTradeInFlight || !marketDataAvailableForFixed()) null
                 else apiFactory.groww.historicalCandles(
