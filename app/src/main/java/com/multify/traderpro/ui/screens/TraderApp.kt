@@ -944,6 +944,50 @@ private fun FixedScreen(
             }
         }
         item {
+            val early = dashboard?.fixedEarlyWatch.orEmpty()
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                shape = RoundedCornerShape(20.dp)) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                    Text("Fixed Early Watch · research only", fontWeight = FontWeight.SemiBold)
+                    Text("First valid PRIMARY observations are saved BEFORE repeated confirmation. These are not official Fixed calls and cannot BUY. Prices, bid–ask spread and absolute volume are observational; no live filters have changed.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (early.isEmpty()) {
+                        Text("Awaiting the first complete Fixed PRIMARY evaluation.",
+                            style = MaterialTheme.typography.bodySmall)
+                    } else {
+                        early.take(12).forEach { watch ->
+                            HorizontalDivider()
+                            Text(watch.symbol + " · " +
+                                if (watch.officialPublished) "Official Fixed published" else "Awaiting original confirmation",
+                                fontWeight = FontWeight.Medium)
+                            Text("First PRIMARY ₹" +
+                                String.format(Locale.US, "%.2f", watch.firstPrimaryPrice) +
+                                " · latest ₹" + String.format(Locale.US, "%.2f", watch.latestPrice) +
+                                " · move " + String.format(Locale.US, "%+.2f%%", watch.runupPct) +
+                                " · primary scans " + watch.confirmationObservations,
+                                style = MaterialTheme.typography.bodySmall)
+                            Text("Observed spread: " +
+                                (watch.observedSpreadBps?.let { String.format(Locale.US, "%.0f bps", it) }
+                                    ?: watch.quoteBookStatus) +
+                                " · day shares: " + (watch.dayTradedShares?.toString() ?: "not reported") +
+                                " · distance from quote high: " +
+                                (watch.distanceFromQuoteDayHighPct?.let {
+                                    String.format(Locale.US, "%.2f%%", it)
+                                } ?: "unknown"),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            if (watch.warnings.isNotEmpty()) {
+                                Text("Shadow warnings: " + watch.warnings.joinToString(", "),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        item {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
                 Button(onClick = onGenerate, modifier = Modifier.weight(1f)) { Text("Refresh Fixed") }
                 OutlinedButton(
