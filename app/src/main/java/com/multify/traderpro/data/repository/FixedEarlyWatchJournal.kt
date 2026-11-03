@@ -5,6 +5,7 @@ import com.google.gson.GsonBuilder
 import com.multify.traderpro.data.network.FixedEarlyWatchDto
 import com.multify.traderpro.data.network.QuotePayload
 import com.multify.traderpro.engine.FixedMarketQualityShadowPolicy
+import com.multify.traderpro.engine.FixedEarlyWatchPolicy
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -44,8 +45,8 @@ internal data class FixedEarlyWatchRecord(
         officialPublished = publishedScanAtMs != null,
         officialEntryPrice = publishedEntryPrice,
         officialStatus = publishedStatus,
-        runupPct = publishedEntryPrice?.let { (it / firstPrimaryPrice - 1.0) * 100.0 }
-            ?: (lastPrice / firstPrimaryPrice - 1.0) * 100.0,
+        runupPct = FixedEarlyWatchPolicy.advanceFromFirstPrimary(
+            firstPrimaryPrice, publishedEntryPrice ?: lastPrice) ?: 0.0,
         observedSpreadBps = observedSpreadBps,
         quoteBookStatus = quoteBookStatus,
         dayTradedShares = dayTradedShares,
@@ -73,7 +74,8 @@ class FixedEarlyWatchJournal @Inject constructor(@ApplicationContext context: Co
         val index = rows.indexOfFirst { it.date == date && it.symbol.equals(observation.symbol, true) }
         val prior = rows.getOrNull(index)
         // One evidence row per symbol/scan, even if service restart causes a replay.
-        val newScan = prior == null || prior.lastPrimaryScanAtMs != observation.scanAtMs
+        val newScan = FixedEarlyWatchPolicy.independentObservation(
+            prior?.lastPrimaryScanAtMs, observation.scanAtMs)
         val shadow = FixedMarketQualityShadowPolicy.assess(quote, prior?.firstPrimaryPrice ?: price)
         val row = FixedEarlyWatchRecord(
             date = date, symbol = observation.symbol.uppercase(),
