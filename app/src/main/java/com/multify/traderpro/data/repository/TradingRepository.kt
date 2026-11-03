@@ -85,6 +85,7 @@ import com.multify.traderpro.engine.ForecastQualityDecision
 import com.multify.traderpro.engine.ForecastNewsPatternPolicy
 import com.multify.traderpro.engine.ForecastNewsPublicationGate
 import com.multify.traderpro.engine.ForecastExpectedAverageGainPolicy
+import com.multify.traderpro.engine.ForecastNotificationFreshnessPolicy
 import com.multify.traderpro.engine.ForecastUnivestLearningPolicy
 import com.multify.traderpro.engine.ForecastQualityPolicy
 import com.multify.traderpro.engine.ForecastTargetExpansionPolicy
@@ -2927,7 +2928,7 @@ class TradingRepository @Inject constructor(
                     "publication_ready" to ForecastPublicationPolicy.isReady(
                         discoveryPass.baselineReady,
                         it.quality.tier == "PRIMARY" && it.quality.publishEligible && it.quality.executionEligible &&
-                            it.economics.profitableAfterCosts,
+                            it.expectedGain.eligible,
                         it.symbol in discoveredSymbols,
                         priorPrimaryHits(it.symbol)
                     ),
@@ -4847,7 +4848,12 @@ class TradingRepository @Inject constructor(
             val stats = forecastNewsJournal.completedPatternStats(cutoff).associateBy { it.key }
             val pending = forecastNewsJournal.dueForEvaluation(System.currentTimeMillis(), limit = 5)
             for (item in pending) {
-                if (fixedApiPriorityRequested || marketCriticalTradeInFlight) break
+                if (fixedApiPriorityRequested || marketCriticalTradeInFlight ||
+                    !forecastMarketCapacityAvailable()) {
+                    auditLogger.logAsync("FORECAST_NEWS", "EVALUATION_DEFERRED_BROKER_CAPACITY", mapOf(
+                        "pending" to pending.size, "fixed_priority_sacrificed" to false))
+                    break
+                }
                 // An after-hours report may be actionable at the next open, but stale
                 // intraday reports must NOT become retroactive recommendations.
                 val evaluatedAt = System.currentTimeMillis()
@@ -5054,7 +5060,8 @@ class TradingRepository @Inject constructor(
 
     /** One-minute outcome snapshots, bounded to avoid stealing API calls from Fixed or SELL. */
     suspend fun monitorForecastNewsOutcomes() {
-        if (marketSession() != "OPEN" || fixedApiPriorityRequested || marketCriticalTradeInFlight) return
+        if (marketSession() != "OPEN" || fixedApiPriorityRequested || marketCriticalTradeInFlight ||
+            !forecastMarketCapacityAvailable()) return
         val token = forecastMarketToken() ?: return
         for (item in forecastNewsJournal.dueForOutcome(System.currentTimeMillis(), 2)) {
             val initial = item.baselinePrice?.takeIf { it > 0.0 } ?: continue
@@ -5101,6 +5108,9 @@ class TradingRepository @Inject constructor(
         }
         require(row.status == "ACTIVE") { "$symbol forecast is no longer active" }
         require(RecommendationPriceBandPolicy.eligible(row.entryPrice)) { "Forecast BUY requires published price >₹200 and <₹5,000" }
+        require(ForecastNotificationFreshnessPolicy.fresh(row.generatedAtMs, System.currentTimeMillis())) {
+            "Forecast BUY blocked: recommendation older than 120 seconds"
+        }
         require(forecastLiveUnlocked()) { "Forecast BUY requires five completed outcome-validated research sessions" }
         require(row.executionEligible) { "$symbol is ${row.qualityTier}; only PRIMARY forecast setups can place a real forecast BUY" }
         require(row.targetPct + 1e-9 >= ForecastQualityPolicy.MIN_TARGET_PCT) { "Forecast target is below the 1% quality floor" }
@@ -6152,9 +6162,19 @@ class TradingRepository @Inject constructor(
     }
     suspend fun pendingLongForecastNotifications(): List<ForecastDto> {
         val today = LocalDate.now(INDIA).toString()
+        val nowMs = System.currentTimeMillis()
         val rows = learningDao.pendingLongForecastNotifications(today)
-        rows.forEach { learningDao.markLongForecastNotified(it.id) }
-        return rows.filter { RecommendationPriceBandPolicy.eligible(it.entryPrice) }.map { it.toForecastDto() }
+        rows.forEach { row ->
+            learningDao.markLongForecastNotified(row.id)
+            if (!ForecastNotificationFreshnessPolicy.fresh(row.generatedAtMs, nowMs))
+                auditLogger.logAsync("FORECAST", "STALE_NOTIFICATION_RESEARCH_ONLY", mapOf(
+                    "symbol" to row.symbol, "generated_at_ms" to row.generatedAtMs,
+                    "age_ms" to (nowMs - row.generatedAtMs), "orders_sent" to false))
+        }
+        return rows.filter {
+            RecommendationPriceBandPolicy.eligible(it.entryPrice) &&
+                ForecastNotificationFreshnessPolicy.fresh(it.generatedAtMs, nowMs)
+        }.map { it.toForecastDto() }
     }
 
     /**
