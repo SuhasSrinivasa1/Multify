@@ -49,7 +49,8 @@ interface GrowwApi {
     suspend fun ltp(
         @Header("Authorization") authorization: String,
         @Query("segment") segment: String = "CASH",
-        @Query("exchange_symbols") exchangeSymbols: String
+        @Query("exchange_symbols") exchangeSymbols: String,
+        @Header("X-Multify-Request-Priority") trafficPriority: String? = null
     ): ApiEnvelope<Map<String, Double>>
 
     @GET("v1/historical/candles")
