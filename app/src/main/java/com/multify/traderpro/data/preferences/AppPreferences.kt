@@ -19,7 +19,7 @@ private val Context.dataStore by preferencesDataStore(name = "multify_settings")
 data class AppSettings(
     val expectedStaticIp: String = "",
     val packageFilter: String = "",
-    val holdingBudgetRupees: Long = 200_000L,
+    val holdingBudgetRupees: Long = 10_000L,
     val armEnabled: Boolean = false,
     val forecastScannerEnabled: Boolean = false,
     val forecastAutoBuyEnabled: Boolean = false,
