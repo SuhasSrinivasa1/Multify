@@ -53,6 +53,7 @@ import com.multify.traderpro.data.network.PositionDto
 import com.multify.traderpro.data.network.QuotePayload
 import com.multify.traderpro.data.network.RecentDecisionDto
 import com.multify.traderpro.data.network.ResearchDto
+import com.multify.traderpro.data.network.UnivestResearchDto
 import com.multify.traderpro.data.network.SmartOrderPayload
 import com.multify.traderpro.data.network.RiskStatusDto
 import com.multify.traderpro.data.network.TokenRequest
@@ -1430,6 +1431,11 @@ class TradingRepository @Inject constructor(
             forecastWatchlist = secondaryForecastWatchlist(today),
             fixedWatchlist = emptyList(),
             research = research,
+            univestResearch = forecastUnivestJournal.recent().map { row ->
+                UnivestResearchDto(row.symbol, row.status, row.entryPrice, row.exitPrice,
+                    row.outcomePct, row.observedFactorCount,
+                    row.entryPriceSource, row.exitPriceSource)
+            },
             health = EngineHealthDto(
                 listener = if (listenerAge <= 60_000L) "HEALTHY" else "UNHEALTHY",
                 broker = if (settings.brokerAuthenticated) "CONNECTED · CACHED" else "DISCONNECTED",
@@ -1578,6 +1584,11 @@ class TradingRepository @Inject constructor(
                 forecastWatchlist = secondaryForecastWatchlist(today),
             fixedWatchlist = emptyList(), forecastChampions = champions,
                 research = research,
+            univestResearch = forecastUnivestJournal.recent().map { row ->
+                UnivestResearchDto(row.symbol, row.status, row.entryPrice, row.exitPrice,
+                    row.outcomePct, row.observedFactorCount,
+                    row.entryPriceSource, row.exitPriceSource)
+            },
                 health = EngineHealthDto(
                     listener = if (listenerAge <= 60_000L) "HEALTHY" else "UNHEALTHY",
                     broker = "CONNECTED",
@@ -9578,6 +9589,10 @@ class TradingRepository @Inject constructor(
         risk = RiskStatusDto(maxExposure = settings.holdingBudgetRupees.toDouble(), riskMode = if (settings.safetyHalt) "HALTED" else "DISARMED"),
         fixedSnapshot = fixedSnapshotDto(fixedSnapshot),
         forecastReferences = runCatching { forecastReferenceStats() }.getOrDefault(ForecastReferenceStatsDto()),
+        univestResearch = forecastUnivestJournal.recent().map { row ->
+            UnivestResearchDto(row.symbol, row.status, row.entryPrice, row.exitPrice,
+                row.outcomePct, row.observedFactorCount, row.entryPriceSource, row.exitPriceSource)
+        },
         forecastWatchlist = secondaryForecastWatchlist(LocalDate.now(INDIA).toString()),
         fixedWatchlist = emptyList()
     )
