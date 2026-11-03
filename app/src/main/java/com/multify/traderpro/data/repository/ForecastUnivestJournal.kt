@@ -72,7 +72,10 @@ class ForecastUnivestJournal @Inject constructor(@ApplicationContext context: Co
         val row = old.copy(exitNotificationAtMs = at, exitReceivedAtMs = received, status = "SAME_DAY_EXIT_RECEIVED")
         persist(row); row
     }
-    fun quoteExit(key: String, price: Double, at: Long): ForecastUnivestCampaign? = synchronized(lock) {
+    /** Exits can be completed using a bounded historical candle after a live-quote outage.
+     * The price source remains explicit: a candle proxy is not an executed trade.
+     */
+    fun quoteExit(key: String, price: Double, at: Long, source: String = "GROWW_BETA_LIVE_QUOTE"): ForecastUnivestCampaign? = synchronized(lock) {
         val old = latest[key] ?: return@synchronized null
         val exitTime = old.exitNotificationAtMs ?: return@synchronized null
         if (old.exitPrice != null || price <= 0.0 || !price.isFinite() || at < exitTime || at - exitTime > 180_000L) return@synchronized null
@@ -80,9 +83,13 @@ class ForecastUnivestJournal @Inject constructor(@ApplicationContext context: Co
         val eligible = entry != null && entry > 0 && old.features48Json != null && old.featureCaptureAtMs != null &&
             old.featureCaptureAtMs < exitTime && ForecastUnivestLearningPolicy.sameTradingDay(old.entryNotificationAtMs, exitTime)
         val pct = if (eligible) (price / entry!! - 1.0) * 100.0 else null
-        val row = old.copy(exitPrice = price, exitPriceSource = "GROWW_BETA_LIVE_QUOTE", outcomePct = pct,
-            status = if (pct != null && pct.isFinite()) "CLOSED_SAME_DAY_VERIFIED" else "CLOSED_INSUFFICIENT_ENTRY_EVIDENCE")
+        val row = old.copy(exitPrice = price, exitPriceSource = source, outcomePct = pct,
+            status = if (pct == null || !pct.isFinite()) "CLOSED_INSUFFICIENT_ENTRY_EVIDENCE" else if (source.contains("CANDLE_PROXY")) "CLOSED_SAME_DAY_MARKET_ESTIMATE" else "CLOSED_SAME_DAY_VERIFIED")
         persist(row); row
+    }
+    fun pendingExitPricing(): List<ForecastUnivestCampaign> = synchronized(lock) {
+        latest.values.filter { it.exitNotificationAtMs != null && it.exitPrice == null &&
+            it.status == "SAME_DAY_EXIT_RECEIVED" && it.entryPrice != null }.take(6)
     }
     fun training(beforeDate: String): List<ForecastUnivestCampaign> = synchronized(lock) {
         latest.values.filter { row ->
@@ -90,11 +97,16 @@ class ForecastUnivestJournal @Inject constructor(@ApplicationContext context: Co
                 ForecastUnivestLearningPolicy.date(row.entryNotificationAtMs) < beforeDate
         }.toList()
     }
+    fun recent(limit: Int = 15): List<ForecastUnivestCampaign> = synchronized(lock) {
+        latest.values.sortedByDescending { it.exitReceivedAtMs ?: it.entryReceivedAtMs }.take(limit)
+    }
     fun summary(): Map<String, Any> = synchronized(lock) {
         mapOf("received_entries" to latest.size,
             "completed_same_day" to latest.values.count { it.status == "CLOSED_SAME_DAY_VERIFIED" },
             "awaiting_evidence" to latest.values.count { it.status != "CLOSED_SAME_DAY_VERIFIED" },
-            "positive_closures" to latest.values.count { it.status == "CLOSED_SAME_DAY_VERIFIED" && (it.outcomePct ?: 0.0) > 0.0 })
+            "positive_closures" to latest.values.count { it.status == "CLOSED_SAME_DAY_VERIFIED" && (it.outcomePct ?: 0.0) > 0.0 },
+            "market_estimates_not_in_training" to latest.values.count { it.status == "CLOSED_SAME_DAY_MARKET_ESTIMATE" },
+            "pending_exit_prices" to latest.values.count { it.status == "SAME_DAY_EXIT_RECEIVED" })
     }
     fun archive(): String = synchronized(lock) { if (file.exists()) file.readText() else "" }
     fun restore(jsonl: String): Int = synchronized(lock) {

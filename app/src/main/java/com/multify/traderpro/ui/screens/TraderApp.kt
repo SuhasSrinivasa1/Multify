@@ -614,7 +614,7 @@ private fun ForecastScreen(
         item {
             SectionTitle(
                 "LONG holding forecast",
-                "EARLY ENTRY · NSE market scanning, NSE news intelligence, Multify positive-pattern research, Fixed outcome transfer, and official Univest 1–3 month calls closed the same day. Univest is research-only, capturing 48 entry-time factors and learning only after verified entry/exit quotes; it never places Univest orders."
+                "EARLY ENTRY · NSE market scanning, NSE news intelligence, Multify positive-pattern research, Fixed outcome transfer, and official Univest cash-equity calls closed the same day. Univest is research-only, capturing 48 entry-time factors and learning only after verified entry/exit quotes; it never places Univest orders."
             )
         }
         item {
@@ -719,6 +719,36 @@ private fun ForecastScreen(
             }
         }
         item { ForecastTable(rows, onBuy, state.settings.brokerAuthenticated && state.settings.staticIpMatched && state.settings.brokerDdpiEnabled && !state.settings.safetyHalt, fixedClockMsForTable = forecastClockMs) }
+        item {
+            val official = dashboard?.univestResearch.orEmpty()
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                shape = RoundedCornerShape(20.dp)) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                    Text("Univest · official alerts / same-day closes", fontWeight = FontWeight.SemiBold)
+                    Text("Research only · no Univest orders. Entry-time factors and matched exit evidence are shown below. A market-price estimate is not a verified provider exit.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (official.isEmpty()) {
+                        Text("No official Univest entry captured yet on this installation.",
+                            style = MaterialTheme.typography.bodySmall)
+                    } else {
+                        official.take(12).forEach { row ->
+                            HorizontalDivider()
+                            Text(row.symbol + " · " + row.status, fontWeight = FontWeight.Medium)
+                            Text("Entry: " + (row.entryPrice?.let { String.format(Locale.US, "₹%.2f", it) } ?: "missing") +
+                                " · Exit: " + (row.exitPrice?.let { String.format(Locale.US, "₹%.2f", it) } ?: "pending") +
+                                " · Factors: " + row.observedFactorCount + "/48",
+                                style = MaterialTheme.typography.bodySmall)
+                            Text("Price evidence: " + row.entryPriceSource + " / " + row.exitPriceSource +
+                                (row.outcomePct?.let { " · market move " + String.format(Locale.US, "%+.2f%%", it) } ?: ""),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
+            }
+        }
+
         item {
             val watchlist = dashboard?.forecastWatchlist.orEmpty()
             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),

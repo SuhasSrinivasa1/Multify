@@ -62,6 +62,18 @@ data class RecentDecisionDto(
     val quantity: Int = 0
 )
 
+/** Univest entries and same-day close evidence are Forecast research only. */
+data class UnivestResearchDto(
+    val symbol: String,
+    val status: String,
+    val entryPrice: Double? = null,
+    val exitPrice: Double? = null,
+    val outcomePct: Double? = null,
+    val observedFactorCount: Int = 0,
+    val entryPriceSource: String = "UNKNOWN",
+    val exitPriceSource: String = "UNKNOWN"
+)
+
 data class DashboardDto(
     val serviceStatus: String = "device",
     val armed: Boolean = false,
@@ -82,6 +94,7 @@ data class DashboardDto(
     val fixedWatchlist: List<ForecastDto> = emptyList(),
     val forecastChampions: List<ForecastChampionDto> = emptyList(),
     val research: ResearchDto = ResearchDto(),
+    val univestResearch: List<UnivestResearchDto> = emptyList(),
     val health: EngineHealthDto = EngineHealthDto(),
     val fixedHealth: EngineHealthDto = EngineHealthDto(),
     val fixedSnapshot: FixedSnapshotDto = FixedSnapshotDto(),

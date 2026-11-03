@@ -6,7 +6,7 @@ import java.util.Locale
 import kotlin.math.abs
 
 /**
- * Research-only Univest notification grammar, adapted from Univest-AutoTrade/UnivestParser.
+ * Research-only official Univest cash-equity notification grammar.
  * Not an order signal. The 48 features are 40 independently observed factor raws + 8
  * entry-time context values. Missing factors remain null, never fabricated as zero.
  */
@@ -35,17 +35,24 @@ object ForecastUnivestLearningPolicy {
             ?: compact.find(text)?.groupValues?.get(1))?.trim()?.uppercase(Locale.ROOT)
             ?.removeSuffix("-BE") ?: return null
         if (!symbol.matches(Regex("[A-Z][A-Z0-9&.\\-]{1,29}"))) return null
+        // Official-package, explicitly labelled NSE cash-equity symbols only.
         if (listOf("equity profit of the day", "book profit for the day", "book profits for the day",
                 "equity profit booked", "profit booked", "book profit", "close position",
                 "exit stock", "exit recommendation", "recommendation closed", "advisory closed",
-                "sell recommendation", "exit now").any { lower.contains(it) }) return Signal(Type.EXIT, symbol, null)
+                "sell recommendation", "exit now", "target achieved", "target hit",
+                "profit of the day", "square off", "squared off", "position closed",
+                "stock closed", "exit call").any { lower.contains(it) }) return Signal(Type.EXIT, symbol, null)
         if (!listOf("new advisory pick", "new equity pick", "new stock pick", "equity pick",
                 "stock recommendation", "new recommendation", "equity recommendation",
-                "new investment idea", "new stock recommendation").any { lower.contains(it) }) return null
-        val window = duration.find(text) ?: return null
-        val start = window.groupValues[1].toDoubleOrNull() ?: return null
-        val end = window.groupValues[2].takeIf { it.isNotEmpty() }?.toDoubleOrNull() ?: start
-        if (start < 1.0 || end < start || end > 3.0) return null
+                "new investment idea", "new stock recommendation", "buy recommendation",
+                "stock advisory", "advisory pick", "buy call", "fresh buy",
+                "new buy", "new pick", "buy signal").any { lower.contains(it) }) return null
+        // Accept explicitly labelled official cash-equity picks with other or missing
+        // horizons. A short-horizon winner must not disappear because it says 2 days.
+        val window = duration.find(text)
+        val start = window?.groupValues?.get(1)?.toDoubleOrNull()
+        val end = window?.groupValues?.get(2)?.takeIf { it.isNotEmpty() }?.toDoubleOrNull() ?: start
+        if (start != null && (start <= 0.0 || end == null || end < start || end > 36.0)) return null
         return Signal(Type.ENTRY, symbol, end)
     }
 

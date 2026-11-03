@@ -53,6 +53,7 @@ import com.multify.traderpro.data.network.PositionDto
 import com.multify.traderpro.data.network.QuotePayload
 import com.multify.traderpro.data.network.RecentDecisionDto
 import com.multify.traderpro.data.network.ResearchDto
+import com.multify.traderpro.data.network.UnivestResearchDto
 import com.multify.traderpro.data.network.SmartOrderPayload
 import com.multify.traderpro.data.network.RiskStatusDto
 import com.multify.traderpro.data.network.TokenRequest
@@ -206,6 +207,7 @@ class TradingRepository @Inject constructor(
     private val forecastNewsJournal: ForecastNewsJournal,
     private val nseMarketCapResearch: NseMarketCapResearch,
     private val forecastUnivestJournal: ForecastUnivestJournal,
+    private val forecastSourceNotificationJournal: ForecastSourceNotificationJournal,
     private val marketDiscoveryStateStore: MarketDiscoveryStateStore,
     private val forecastAutoBuyOrderStore: ForecastAutoBuyOrderStore,
     private val fixedEngineSnapshotStore: FixedEngineSnapshotStore,
@@ -756,7 +758,16 @@ class TradingRepository @Inject constructor(
         reportedReturnPct: Double?,
         eventAtMs: Long = System.currentTimeMillis()
     ): LearningCallEntity? {
-        val call = learningDao.latestLiveCallBefore(symbol, eventAtMs) ?: learningDao.latestLiveCall(symbol) ?: return null
+        val call = learningDao.latestLiveCallBefore(symbol, eventAtMs) ?: return null
+        // Never assign an official close to a stale/past-day or already closed BUY.
+        if (call.buyAtMs <= 0L || call.sellEventId != null ||
+            !ForecastUnivestLearningPolicy.sameTradingDay(call.buyAtMs, eventAtMs)) {
+            auditLogger.logAsync("MULTIFY_RESEARCH", "UNMATCHED_OFFICIAL_CLOSE", mapOf(
+                "event_id" to eventId, "symbol" to symbol,
+                "reason" to "NO_OPEN_SAME_DAY_BUY", "research_only" to true
+            ))
+            return null
+        }
         val reported = reportedReturnPct?.takeIf { it.isFinite() && abs(it) < 25.0 }
         val pct = reported ?: AdaptiveLearningMath.realizedReturnPct(null, call.entryPrice, price)
         if (pct == null && price == null) return null
@@ -1420,6 +1431,11 @@ class TradingRepository @Inject constructor(
             forecastWatchlist = secondaryForecastWatchlist(today),
             fixedWatchlist = emptyList(),
             research = research,
+            univestResearch = forecastUnivestJournal.recent().map { row ->
+                UnivestResearchDto(row.symbol, row.status, row.entryPrice, row.exitPrice,
+                    row.outcomePct, row.observedFactorCount,
+                    row.entryPriceSource, row.exitPriceSource)
+            },
             health = EngineHealthDto(
                 listener = if (listenerAge <= 60_000L) "HEALTHY" else "UNHEALTHY",
                 broker = if (settings.brokerAuthenticated) "CONNECTED · CACHED" else "DISCONNECTED",
@@ -1568,6 +1584,11 @@ class TradingRepository @Inject constructor(
                 forecastWatchlist = secondaryForecastWatchlist(today),
             fixedWatchlist = emptyList(), forecastChampions = champions,
                 research = research,
+            univestResearch = forecastUnivestJournal.recent().map { row ->
+                UnivestResearchDto(row.symbol, row.status, row.entryPrice, row.exitPrice,
+                    row.outcomePct, row.observedFactorCount,
+                    row.entryPriceSource, row.exitPriceSource)
+            },
                 health = EngineHealthDto(
                     listener = if (listenerAge <= 60_000L) "HEALTHY" else "UNHEALTHY",
                     broker = "CONNECTED",
@@ -2238,15 +2259,63 @@ class TradingRepository @Inject constructor(
         return parsed.filter { it.first in dates }.sortedByDescending { it.third }.map { it.second }
     }
 
+    /** Make completed official same-day Multify winners part of cross-symbol
+     * Forecast factor learning. Only previously stored entry-time features qualify.
+     * This is offline/local and never changes Fixed or requests a broker quote.
+     */
+    private suspend fun materializeOfficialMultifyWinnerFeatures(): Int {
+        val calls = learningDao.allCalls().filter {
+            ForecastMultifyPositiveTransferPolicy.qualifiesVerifiedClose(
+                it.source, it.action, it.buyEventId, it.sellEventId,
+                it.buyAtMs, it.sellAtMs, it.longRealizedPct
+            )
+        }
+        if (calls.isEmpty()) return 0
+        val references = learningDao.allForecastResearch()
+            .filter { it.qualityTier == "MULTIFY_REFERENCE" && it.multifyEventId != null }
+            .groupBy { it.multifyEventId }
+        var count = 0
+        for (call in calls) {
+            val ref = references[call.buyEventId]?.filter {
+                it.scanAtMs >= call.buyAtMs && it.scanAtMs <= (call.sellAtMs ?: 0L)
+            }?.minByOrNull { it.scanAtMs } ?: continue
+            if (ref.featureJson.isBlank() || ref.featureJson == "{}") continue
+            val info = evidenceFeatureSummary(ref.featureJson)
+            val gain = call.longRealizedPct ?: continue
+            val mfe = call.multifyMfePct ?: gain
+            learningDao.upsertForecastPositiveEvidence(ForecastPositiveEvidenceEntity(
+                evidenceKey = "MULTIFY_OFFICIAL_SAME_DAY|${call.buyEventId}",
+                source = "MULTIFY_OFFICIAL_CLOSE", evidenceDate = call.callDate,
+                eventAtMs = ref.scanAtMs, symbol = call.symbol.uppercase(Locale.US),
+                strategy = ref.strategy, regime = ref.regime, marketRegime = ref.marketRegime,
+                dominantFamily = info.dominantFamily, familyConsensus = info.familyConsensus,
+                momentumFamilyScore = info.momentum, participationFamilyScore = info.participation,
+                structureFamilyScore = info.structure, factorJson = ref.featureJson,
+                voteJson = ref.voteJson, entryPrice = call.entryPrice,
+                targetPct = call.targetPct, maxFavourablePct = mfe,
+                closePct = gain, realizedPct = gain, protectedTrailPct = null,
+                trailArmed = false, targetHit = false,
+                positiveReason = "OFFICIAL_SAME_DAY_BOOK_PROFIT",
+                qualityTier = "EVIDENCE", reconstructionQuality = "ENTRY_FACTORS_OFFICIAL_EXIT",
+                updatedAtMs = System.currentTimeMillis()
+            ))
+            count++
+        }
+        if (count > 0) auditLogger.logAsync("MULTIFY_RESEARCH", "OFFICIAL_SAME_DAY_FACTOR_LEARNING", mapOf(
+            "cases_with_entry_factors" to count, "all_official_positive_closes" to calls.size,
+            "fixed_formula_changed" to false
+        ))
+        return count
+    }
+
     private suspend fun multifyPositiveTransferCases(beforeDate: String): List<MultifyPositiveTransferCase> {
+        // Confirmed same-session Multify BOOK PROFIT only. Hypothetical MFE/trailing
+        // movements stay in a separate research pool and cannot masquerade as a close.
         val positives = learningDao.allCalls().filter {
-            it.action.equals("BUY", true) &&
-                it.callDate < beforeDate &&
-                ForecastUniversalPositiveEvidencePolicy.qualifies(
-                    realizedPct = it.longRealizedPct,
-                    closePct = it.longRealizedPct,
-                    maxFavourablePct = it.multifyMfePct ?: 0.0,
-                    targetHit = false
+            it.callDate < beforeDate &&
+                ForecastMultifyPositiveTransferPolicy.qualifiesVerifiedClose(
+                    it.source, it.action, it.buyEventId, it.sellEventId,
+                    it.buyAtMs, it.sellAtMs, it.longRealizedPct
                 )
         }
         val dates = positives.map { it.callDate }.distinct().sortedDescending().take(30).toSet()
@@ -2254,9 +2323,7 @@ class TradingRepository @Inject constructor(
             val mfe = it.multifyMfePct ?: 0.0
             MultifyPositiveTransferCase(
                 symbol = it.symbol.uppercase(Locale.US),
-                realizedPct = (it.longRealizedPct?.takeIf { pct -> pct > 0.0 }
-                    ?: ForecastUniversalPositiveEvidencePolicy.protectedTrailPct(mfe)
-                    ?: 0.0),
+                realizedPct = it.longRealizedPct ?: 0.0,
                 maxFavourablePct = mfe
             )
         }
@@ -3804,12 +3871,16 @@ class TradingRepository @Inject constructor(
         val combined = (title + "\n" + body).take(2500)
         val signal = ForecastUnivestLearningPolicy.parse(ForecastUnivestLearningPolicy.OFFICIAL_PACKAGE, combined)
         if (signal == null) {
+            forecastSourceNotificationJournal.append(at, received, "UNKNOWN", null,
+                "PARSER_UNMATCHED", title, body)
             auditLogger.logAsync("FORECAST_UNIVEST", "NOTIFICATION_IGNORED", mapOf(
                 "reason" to "NOT_1_TO_3_MONTH_ENTRY_OR_OFFICIAL_EXIT", "source_verified" to true))
             return
         }
         // Don't infer ticker from a company name. The NSE master is the identity authority.
         if (signal.symbol !in nseSymbols.symbols()) {
+            forecastSourceNotificationJournal.append(at, received, signal.type.name, signal.symbol,
+                "NSE_SYMBOL_UNVERIFIED", title, body)
             auditLogger.logAsync("FORECAST_UNIVEST", "SYMBOL_NOT_VERIFIED_NSE", mapOf(
                 "symbol" to signal.symbol, "type" to signal.type.name, "nse_only" to true))
             return
@@ -3822,11 +3893,16 @@ class TradingRepository @Inject constructor(
             forecastUnivestJournal.claimExit(signal.symbol, at, received)
         }
         if (candidate == null) {
+            forecastSourceNotificationJournal.append(at, received, signal.type.name, signal.symbol,
+                "DUPLICATE_OR_NO_SAME_DAY_ENTRY", title, body)
             auditLogger.logAsync("FORECAST_UNIVEST", "PAIRING_SKIPPED", mapOf(
                 "type" to signal.type.name, "symbol" to signal.symbol, "date" to date,
                 "reason" to "DUPLICATE_ENTRY_OR_NO_MATCHING_SAME_DAY_ENTRY", "no_order_path" to true))
             return
         }
+        forecastSourceNotificationJournal.append(at, received, signal.type.name, signal.symbol,
+            if (signal.type == ForecastUnivestLearningPolicy.Type.ENTRY) "ENTRY_CAPTURED" else "SAME_DAY_EXIT_CAPTURED",
+            title, body)
         auditLogger.logAsync("FORECAST_UNIVEST", "OFFICIAL_NOTIFICATION_CAPTURED", mapOf(
             "symbol" to signal.symbol, "type" to signal.type.name,
             "duration_months" to signal.durationMonths, "source_package" to ForecastUnivestLearningPolicy.OFFICIAL_PACKAGE,
@@ -3895,6 +3971,43 @@ class TradingRepository @Inject constructor(
             "within_three_minutes" to (snapshot != null), "research_account" to
                 (if (forecastUsesBeta(token)) "BETA" else "ALPHA_FALLBACK"),
             "entry_features_used_only_after_verified_same_day_exit" to true))
+    }
+
+    private suspend fun recoverUnivestExitPrices(token: String): Int {
+        if (!secretStore.hasBetaCredentials() || !forecastUsesBeta(token)) return 0
+        var count = 0
+        for (record in forecastUnivestJournal.pendingExitPricing()) {
+            val exit = record.exitNotificationAtMs ?: continue
+            val t = Instant.ofEpochMilli(exit).atZone(INDIA)
+            val from = t.minusMinutes(3).toLocalDateTime().format(HIST_FORMAT)
+            val until = t.plusMinutes(4).toLocalDateTime().format(HIST_FORMAT)
+            val history = runCatching {
+                apiFactory.betaGroww.historicalCandles(
+                    bearer(token), growwSymbol = "NSE-${record.symbol}",
+                    startTime = from, endTime = until, candleInterval = "1minute"
+                ).requirePayload("Univest exit market evidence")
+            }.getOrNull() ?: continue
+            val estimate = history.candles.mapNotNull { c ->
+                if (c.size < 5) return@mapNotNull null
+                val ts = researchCandleTimestampMs(c[0]) ?: return@mapNotNull null
+                val closeAt = ts + 60_000L
+                val price = runCatching { c[4].asDouble }.getOrNull()
+                if (closeAt < exit || closeAt - exit > 180_000L ||
+                    price == null || !price.isFinite() || price <= 0.0) null
+                else Pair(closeAt, price)
+            }.minByOrNull { it.first } ?: continue
+            if (forecastUnivestJournal.quoteExit(
+                record.key, estimate.second, estimate.first,
+                "GROWW_BETA_1M_CANDLE_PROXY"
+            ) != null) {
+                count++
+                auditLogger.logAsync("FORECAST_UNIVEST", "EXIT_MARKET_ESTIMATE_NOT_TRAINED", mapOf(
+                    "symbol" to record.symbol, "market_price" to estimate.second,
+                    "training_eligible" to false
+                ))
+            }
+        }
+        return count
     }
 
     private fun univestHistoricalCases(beforeDate: String): List<ForecastUnivestLearningPolicy.ClosedCase> {
@@ -6709,6 +6822,14 @@ class TradingRepository @Inject constructor(
                 }
             }
         }
+        // Complete previously captured Univest exits from contemporaneous Beta candles
+        // only after trading. The candle result is explicitly an estimate, not a fill.
+        if (token != null && !marketCriticalTradeInFlight) {
+            runCatching { recoverUnivestExitPrices(token) }
+                .onFailure { auditLogger.logAsync("FORECAST_UNIVEST", "EXIT_REPLAY_ERROR", mapOf(
+                    "error" to it.javaClass.simpleName
+                )) }
+        }
         val betaUsage = betaResearchGate.snapshot()
         auditLogger.logAsync("FORECAST_RESEARCH", "BACKFILL_RUN_PROFILE", mapOf(
             "batches" to researchBatches, "updated_rows" to researchUpdated,
@@ -6721,6 +6842,11 @@ class TradingRepository @Inject constructor(
         val todayCalibrationUpdated = if (token != null && learningDao.forecastResearchForDate(today).isNotEmpty()) {
             runCatching { backfillForecastResearchOutcomes(today, token) }.getOrDefault(0)
         } else 0
+        // Converts official same-day winners into entry-factor learning only after
+        // the order path and market session are over; no new network requests.
+        runCatching { materializeOfficialMultifyWinnerFeatures() }
+            .onFailure { auditLogger.logAsync("MULTIFY_RESEARCH", "OFFICIAL_FACTOR_REPLAY_ERROR",
+                mapOf("error" to it.javaClass.simpleName)) }
         val universalEvidenceUpdated = if (alphaToken != null) {
             runCatching { refreshUniversalPositiveEvidence(alphaToken) }
                 .onFailure {
@@ -9310,6 +9436,7 @@ class TradingRepository @Inject constructor(
                 add("forecast_positive_evidence.json", positiveEvidence)
                 addText("forecast_news_events.jsonl", forecastNewsJournal.archive())
                 addText("forecast_univest_same_day.jsonl", forecastUnivestJournal.archive())
+                addText("forecast_univest_notification_capture.jsonl", forecastSourceNotificationJournal.archive())
                 add("long_learning.json", calls)
                 add("long_forecasts.json", forecasts)
                 add("long_champions.json", champions)
@@ -9350,6 +9477,7 @@ class TradingRepository @Inject constructor(
                     "forecast_univest_file" to "forecast_univest_same_day.jsonl",
                     "univest_48_factor_cohort" to "official 1-3 month entry + same-day exit + both Groww quote prices; no broker trade assumed",
                     "univest_cohort_stats" to forecastUnivestJournal.summary(),
+            "univest_notification_captures" to forecastSourceNotificationJournal.count(),
                     "news_event_outcome_label" to ">=1% measured within 60m from first observed baseline",
                     "fixed_priority_phase_event" to "FIXED_PRIORITY_PHASE_PROFILE",
                     "fixed_entry_latency_event" to "ENTRY_LATENCY_PROFILE",
@@ -9515,6 +9643,10 @@ class TradingRepository @Inject constructor(
         risk = RiskStatusDto(maxExposure = settings.holdingBudgetRupees.toDouble(), riskMode = if (settings.safetyHalt) "HALTED" else "DISARMED"),
         fixedSnapshot = fixedSnapshotDto(fixedSnapshot),
         forecastReferences = runCatching { forecastReferenceStats() }.getOrDefault(ForecastReferenceStatsDto()),
+        univestResearch = forecastUnivestJournal.recent().map { row ->
+            UnivestResearchDto(row.symbol, row.status, row.entryPrice, row.exitPrice,
+                row.outcomePct, row.observedFactorCount, row.entryPriceSource, row.exitPriceSource)
+        },
         forecastWatchlist = secondaryForecastWatchlist(LocalDate.now(INDIA).toString()),
         fixedWatchlist = emptyList()
     )

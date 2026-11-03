@@ -145,7 +145,7 @@ object ForecastUniversalPositiveEvidencePolicy {
 
         fun sourceWeight(source: String): Double = when (source.uppercase()) {
             "FIXED" -> 1.0
-            "MULTIFY" -> 0.78
+            "MULTIFY", "MULTIFY_OFFICIAL_CLOSE" -> 0.78
             "FORECAST" -> 0.58
             else -> 0.50
         }
