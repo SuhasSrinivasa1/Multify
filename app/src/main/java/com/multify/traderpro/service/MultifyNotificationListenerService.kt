@@ -45,8 +45,9 @@ class MultifyNotificationListenerService : NotificationListenerService() {
     @Inject lateinit var auditLogger: AuditLogger
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    // Critical Multify BUY/Book Profit events remain serialized and are never queued behind research.
-    private val priorityScope = CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(1))
+    // Process distinct Multify alerts concurrently; repository serializes only the broker-safe
+    // BUY lifecycle (cash/ownership/protection), never research ahead of a critical order.
+    private val priorityScope = CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(4))
     private var listenerHeartbeatJob: Job? = null
 
     override fun onCreate() {
