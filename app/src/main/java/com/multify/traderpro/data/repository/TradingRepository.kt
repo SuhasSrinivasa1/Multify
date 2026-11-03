@@ -97,6 +97,7 @@ import com.multify.traderpro.engine.ForecastPositiveEvidenceCase
 import com.multify.traderpro.engine.ForecastPublicationPolicy
 import com.multify.traderpro.engine.FixedAdaptiveLearningMath
 import com.multify.traderpro.engine.FixedForecastPublicationPolicy
+import com.multify.traderpro.engine.FixedEarlyWatchPolicy
 import com.multify.traderpro.engine.FixedFinalContract
 import com.multify.traderpro.engine.RecommendationPriceBandPolicy
 import com.multify.traderpro.engine.ExecutionQuoteLiquidityPolicy
@@ -1995,8 +1996,8 @@ class TradingRepository @Inject constructor(
         for (o in observations.filter { it.scanAtMs == newest &&
                 it.qualityTier == "PRIMARY" && it.publishEligible && it.executionEligible }) {
             val reference = fixedShadowReferences[o.symbol] ?: continue
-            if (reference.quoteCapturedAtMs < o.scanAtMs ||
-                reference.quoteCapturedAtMs - o.scanAtMs > 180_000L) continue
+            if (!FixedEarlyWatchPolicy.quoteMatchesScan(
+                    o.scanAtMs, reference.quoteCapturedAtMs)) continue
             fixedEarlyWatchJournal.observe(date, o, reference.quoteCapturedAtMs,
                 reference.quote, bySymbol[o.symbol.uppercase(Locale.US)])
             captured++
