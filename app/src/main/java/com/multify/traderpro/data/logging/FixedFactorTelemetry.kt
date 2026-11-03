@@ -8,6 +8,8 @@ import com.google.gson.JsonParser
 import com.multify.traderpro.engine.FixedMultifyFactorFamilies
 import com.multify.traderpro.engine.FixedStrategyEvaluation
 import com.multify.traderpro.data.network.QuotePayload
+import com.multify.traderpro.data.network.FixedQuoteTimingRegistry
+import com.multify.traderpro.engine.FixedMarketQualityShadowPolicy
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
 import java.time.Instant
@@ -76,6 +78,9 @@ class FixedFactorTelemetry @Inject constructor(@ApplicationContext context: Cont
         // The factor raw/score values are invariant to market breadth; the market-regime-weighted
         // family consensus from the live ranking is NOT reconstructed or claimed here.
         val model = FixedMultifyFactorFamilies.evaluate(e, "BREADTH_NEUTRAL")
+        val quoteNetwork = FixedQuoteTimingRegistry.closestCompletedQuote(
+            symbol, quoteCapturedAtMs ?: completedAtMs)
+        val quality = FixedMarketQualityShadowPolicy.assess(rawQuote)
         val atr = f.atr14?.takeIf { it.isFinite() && it > 0.0 }
         fun clean(v: Double?): Double? = v?.takeIf { it.isFinite() }
         return mapOf(
@@ -96,6 +101,23 @@ class FixedFactorTelemetry @Inject constructor(@ApplicationContext context: Cont
             "directional_score" to clean(e.directionalScore),
             "quote_age_ms" to null, // The provider has no quote/source timestamp.
             "quote_captured_at_ms" to quoteCapturedAtMs,
+            "quote_client_network_timing" to quoteNetwork?.let {
+                mapOf("request_started_at_ms" to it.requestStartedAtMs,
+                    "http_response_received_at_ms" to it.responseReceivedAtMs,
+                    "http_duration_ms" to it.networkElapsedMs, "http_status" to it.httpStatus,
+                    "attribution" to "MATCHED_CLIENT_RESPONSE_BEST_EFFORT",
+                    "provider_market_data_age_ms" to null)
+            },
+            "market_quality_shadow" to mapOf(
+                "not_a_trading_gate" to true,
+                "book_status" to quality.bookStatus, "bid" to quality.bid, "ask" to quality.ask,
+                "bid_ask_spread_bps" to quality.observedSpreadBps,
+                "day_traded_shares" to quality.dayTradedShares,
+                "estimated_traded_value_rupees_not_reported_turnover" to quality.estimatedTradedValueRupees,
+                "broker_quote_day_high" to quality.quoteDayHigh,
+                "distance_from_broker_quote_high_pct" to quality.distanceFromQuoteDayHighPct,
+                "warning_labels" to quality.warnings
+            ),
             "raw_quote" to FixedQuoteTelemetryPolicy.capture(rawQuote),
             "features" to mapOf(
                 "ltp" to clean(f.ltp), "bid" to clean(f.bid), "ask" to clean(f.ask),
