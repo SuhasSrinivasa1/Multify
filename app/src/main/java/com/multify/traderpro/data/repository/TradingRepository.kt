@@ -161,6 +161,11 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicInteger
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import androidx.core.app.NotificationCompat
+import com.multify.traderpro.R
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
@@ -274,12 +279,15 @@ class TradingRepository @Inject constructor(
     private var lastArmHotAuditArmed: Boolean? = null
     private val closePositionMutexes = ConcurrentHashMap<Long, Mutex>()
     private val appOwnedBuyMutex = Mutex()
+    private val multifyBuyLifecycleMutex = Mutex()
     private val forecastAutoBuySubmissionMutex = Mutex()
     private val fixedAutoBuySubmissionMutex = Mutex()
     private val scanApiCycleMutex = Mutex()
     private val betaForecastCycleMutex = Mutex()
     @Volatile private var fixedApiPriorityRequested = false
-    @Volatile private var marketCriticalTradeInFlight = false
+    private val marketCriticalTradeCount = AtomicInteger(0)
+    private val marketCriticalTradeInFlight: Boolean
+        get() = marketCriticalTradeCount.get() > 0
     @Volatile private var tradingRecoveryReady = false
     private val embeddedHistoricalSeedMutex = Mutex()
     private val bulkMarketDataMutex = Mutex()
@@ -1646,7 +1654,7 @@ class TradingRepository @Inject constructor(
         }
 
         val marketCritical = parsed.type == SignalType.TRADE_RELEASE || parsed.type == SignalType.BOOK_PROFIT
-        if (marketCritical) marketCriticalTradeInFlight = true
+        if (marketCritical) marketCriticalTradeCount.incrementAndGet()
         try {
         val symbol = parsed.symbol
         if (!symbol.isNullOrBlank() && !nseSymbols.isKnown(symbol) && !nseSymbols.isStale()) {
@@ -1676,7 +1684,12 @@ class TradingRepository @Inject constructor(
         when (parsed.type) {
             SignalType.TRADE_RELEASE -> {
                 try {
-                    handleMultifyBuy(eventId, parsed, token, settings, notificationStartedNs)
+                    // Distinct notification coroutines can run concurrently, but broker cash
+                    // admission -> confirmed fill -> local holding -> server GTT is atomic.
+                    // The next Multify BUY waits, rather than being silently discarded.
+                    multifyBuyLifecycleMutex.withLock {
+                        handleMultifyBuy(eventId, parsed, token, settings, notificationStartedNs)
+                    }
                 } finally {
                     // Order path first; learning/snapshot bookkeeping follows.
                     runCatching { recordLiveBuy(eventId, parsed) }
@@ -1689,7 +1702,7 @@ class TradingRepository @Inject constructor(
             else -> Unit
         }
         } finally {
-            if (marketCritical) marketCriticalTradeInFlight = false
+            if (marketCritical) marketCriticalTradeCount.decrementAndGet()
         }
     }
 
