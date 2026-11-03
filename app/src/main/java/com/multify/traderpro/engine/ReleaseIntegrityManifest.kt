@@ -2,12 +2,13 @@ package com.multify.traderpro.engine
 
 /** Human/runtime-visible release invariants. CI still performs the authoritative source hash lock. */
 object ReleaseIntegrityManifest {
-    const val RELEASE_FAMILY = "v7.8.7-fixed-outcomes"
+    const val RELEASE_FAMILY = "v7.9.40-protected-parallel-buys"
     const val FIXED_CONTRACT_ID = "FIXED-V741-20261021-190239-FINAL"
     const val FIXED_SOURCE_COMMIT = "ca0eecaf63d2cc3500e11fd73f8de9bf2d87e39f"
     const val TRAIL_ARM_PCT = 0.55
     const val TRAIL_INITIAL_PROTECTED_GAIN_PCT = 0.50
     const val TRAIL_STEP_PCT = 0.10
+    const val TRAIL_SECOND_TRIGGER_PCT = 0.75
     const val HARD_STOP_LOSS_PCT = 2.0
 
     fun verifyRuntimeConstants(): Boolean =
@@ -16,5 +17,6 @@ object ReleaseIntegrityManifest {
             SteppedTrailingPolicy.ARM_TRIGGER_PCT == TRAIL_ARM_PCT &&
             SteppedTrailingPolicy.INITIAL_STOP_GAIN_PCT == TRAIL_INITIAL_PROTECTED_GAIN_PCT &&
             SteppedTrailingPolicy.STEP_PCT == TRAIL_STEP_PCT &&
+            SteppedTrailingPolicy.SECOND_TRIGGER_PCT == TRAIL_SECOND_TRIGGER_PCT &&
             HardStopLossPolicy.MAX_LOSS_PCT == HARD_STOP_LOSS_PCT
 }
