@@ -24,6 +24,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 data class QuickState(
@@ -44,7 +45,7 @@ class QuickBuyViewModel @Inject constructor(
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), QuickState())
 
     fun saveBroker(apiKey: String, totpSecret: String, staticIp: String) = launchTask {
-        val budget = repository.settings.stateIn(viewModelScope, SharingStarted.Eagerly, AppSettings()).value.holdingBudgetRupees
+        val budget = repository.settings.first().holdingBudgetRupees
         repository.saveBrokerSettings(apiKey, totpSecret, staticIp, "", budget)
         "Broker settings saved. Authenticate Groww to verify IP, DDPI and balance."
     }
