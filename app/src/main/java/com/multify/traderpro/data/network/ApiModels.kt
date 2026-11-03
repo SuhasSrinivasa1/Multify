@@ -90,6 +90,7 @@ data class FixedEarlyWatchDto(
     val observedSpreadBps: Double? = null,
     val quoteBookStatus: String = "UNAVAILABLE",
     val dayTradedShares: Long? = null,
+    val dayChangePct: Double? = null,
     val distanceFromQuoteDayHighPct: Double? = null,
     val warnings: List<String> = emptyList()
 )
