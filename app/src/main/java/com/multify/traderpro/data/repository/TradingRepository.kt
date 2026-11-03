@@ -4912,7 +4912,7 @@ class TradingRepository @Inject constructor(
                 val patternKey = policy.patternKey(catalystKey, policy.capBucket(cap), distinctCatalysts, materiality)
                 val history = stats[patternKey]
                 val evidence = com.multify.traderpro.engine.ForecastNewsOpportunityPolicy.Evidence(history?.observations ?: 0,
-                    history?.distinctDays ?: 0, history?.hitRate ?: 0.0)
+                    history?.distinctDays ?: 0, history?.hitRate ?: 0.0, history?.averageMfe ?: 0.0)
                 val decision = policy.decide(com.multify.traderpro.engine.ForecastNewsOpportunityPolicy.Context(quote.dayChangePct, spreadBps, ltp,
                     amountCrore, cap, distinctCatalysts, catalystKey, ageMs / 60_000L, evidence))
                 val settings = preferences.settings.first()
@@ -4920,14 +4920,19 @@ class TradingRepository @Inject constructor(
                     entryPrice = ltp, targetPct = 1.0, budgetRupees = settings.holdingBudgetRupees,
                     spreadBps = spreadBps, atrPct = null)
                 val qualifies = item.direction == "POSITIVE_POSSIBLE" &&
-                    decision.eligible && !conflicting && economics.profitableAfterCosts
+                    decision.eligible && !conflicting
+                val provisionalWatch = item.direction == "POSITIVE_POSSIBLE" &&
+                    !decision.eligible && decision.reason == "PATTERN_NOT_VALIDATED" &&
+                    !conflicting && RecommendationPriceBandPolicy.eligible(ltp) &&
+                    (quote.dayChangePct ?: 99.0) <= 2.0 &&
+                    spreadBps != null && spreadBps in 0.0..40.0
                 val existing = learningDao.longForecastsForDate(today)
                 val alreadyRecommended = existing.any { it.symbol.equals(item.symbol, true) }
                 val publish = ForecastNewsPublicationGate.mayPublish(ltp, qualifies, alreadyRecommended)
                 val state = when {
                     !RecommendationPriceBandPolicy.eligible(ltp) -> "OUTSIDE_200_5000_EXCLUSIVE_PRICE_BAND"
                     conflicting -> "CONFLICTING_NEWS"
-                    !economics.profitableAfterCosts -> "NET_PROFIT_NOT_POSITIVE"
+                    decision.reason == "AVERAGE_GAIN_NOT_ABOVE_1PCT" -> "AVERAGE_GAIN_NOT_ABOVE_1PCT"
                     alreadyRecommended -> "DUPLICATE_SAME_DAY"
                     else -> decision.reason
                 }
@@ -4946,16 +4951,23 @@ class TradingRepository @Inject constructor(
                     "evidence_one_pct_hit_rate" to evidence.hitRate,
                     "evidence_proven" to evidence.proven, "entry_decision" to state,
                     "news_price_band_eligible" to RecommendationPriceBandPolicy.eligible(ltp),
+                    "average_gain_pct_required_exclusive" to 1.0,
+                    "historical_pattern_average_gain_pct" to evidence.averageMfePct,
+                    "provisional_watch" to provisionalWatch,
                     "no_price_spike_required" to true, "news_features_40" to item.featureJson)
                 forecastNewsJournal.update(item.copy(
                     featureJson = researchGson.toJson(enriched),
-                    status = if (publish) "PUBLISHED" else "RESEARCH_ONLY",
+                    status = if (publish) "PUBLISHED" else if (provisionalWatch) "PROVISIONAL_WATCH" else "RESEARCH_ONLY",
                     rationale = state, baselinePrice = ltp, baselineAtMs = evaluatedAt,
                     lastObservedPrice = ltp, lastObservedAtMs = evaluatedAt))
                 // All signals, including unsuccessful ones, enter the learning denominator.
                 learningDao.insertForecastResearch(ForecastResearchEntity(
                     researchDate = today, scanAtMs = evaluatedAt, symbol = item.symbol,
-                    rank = 0, qualityTier = if (publish) "NEWS_PRIMARY" else "NEWS_RESEARCH",
+                    rank = 0, qualityTier = when {
+                        publish -> "NEWS_PRIMARY"
+                        provisionalWatch -> "NEWS_PROVISIONAL_WATCH"
+                        else -> "NEWS_RESEARCH"
+                    },
                     publishEligible = publish, executionEligible = publish,
                     targetPct = 1.0, entryPrice = ltp, regime = "NEWS_PRE_SPIKE",
                     marketRegime = "NSE_ONLY", strategy = "NEWS_" + item.category,
@@ -4964,8 +4976,8 @@ class TradingRepository @Inject constructor(
                 if (publish) {
                     learningDao.upsertLongForecast(LongForecastEntity(
                         forecastDate = today, rank = (existing.maxOfOrNull { it.rank } ?: 0) + 1,
-                        symbol = item.symbol, entryPrice = ltp, targetPct = 1.0,
-                        targetPrice = ltp * 1.01,
+                        symbol = item.symbol, entryPrice = ltp, targetPct = 1.01,
+                        targetPrice = ltp * 1.0101,
                         confidence = evidence.hitRate.coerceIn(0.0, 0.95),
                         score = evidence.hitRate.coerceIn(0.0, 0.95),
                         strategy = "NEWS_" + item.category, regime = "NEWS_PRE_SPIKE",
@@ -4986,6 +4998,11 @@ class TradingRepository @Inject constructor(
                     "spread_bps" to spreadBps, "conflicting_news" to conflicting,
                     "samples" to evidence.observations, "distinct_days" to evidence.distinctDays,
                     "hit_rate" to evidence.hitRate, "validated" to evidence.proven,
+                    "historical_avg_favourable_gain_pct" to evidence.averageMfePct,
+                    "historical_avg_gain_gt_1pct" to (evidence.averageMfePct > 1.0),
+                    "provisional_watch" to provisionalWatch,
+                    "provisional_cannot_place_orders" to true,
+                    "rupee_profit_requirement" to "NONE",
                     "economics_net_rupees" to economics.netProfitRupees,
                     "result" to state, "published" to publish,
                     "price_band_eligible" to RecommendationPriceBandPolicy.eligible(ltp),
