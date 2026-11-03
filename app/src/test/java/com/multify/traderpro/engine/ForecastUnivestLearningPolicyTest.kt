@@ -10,16 +10,16 @@ class ForecastUnivestLearningPolicyTest {
     private fun india(year: Int, month: Int, day: Int, hour: Int, minute: Int): Long =
         LocalDateTime.of(year, month, day, hour, minute).atZone(ZoneId.of("Asia/Kolkata")).toInstant().toEpochMilli()
 
-    @Test fun capturesOnlyOfficialOneToThreeMonthEquityEntry() {
+    @Test fun capturesOfficialLabelledCashEquityAcrossHoldingHorizons() {
         val msg = "New Advisory Pick\nSTOCK: GRAPHITE\nDuration: 1-3 Months"
         assertEquals(ForecastUnivestLearningPolicy.Type.ENTRY, p.parse("com.univest.capp", msg)?.type)
         assertEquals("GRAPHITE", p.parse("com.univest.capp", msg)?.symbol)
         assertNull(p.parse("com.random.app", msg))
-        assertEquals(p.Type.ENTRY, p.parse("com.univest.capp", msg.replace("1-3", "3-6"))?.type)
-        assertEquals(p.Type.ENTRY, p.parse("com.univest.capp", msg.replace("1-3", "6"))?.type)
+        assertEquals(ForecastUnivestLearningPolicy.Type.ENTRY, p.parse("com.univest.capp", msg.replace("1-3", "3-6"))?.type)
+        assertEquals(ForecastUnivestLearningPolicy.Type.ENTRY, p.parse("com.univest.capp", msg.replace("1-3", "6"))?.type)
         assertNull(p.parse("com.univest.capp", msg.replace("New Advisory Pick", "Options New Advisory Pick")))
-        assertEquals(p.Type.ENTRY, p.parse("com.univest.capp", "New Advisory Pick\nAdvisory Pick: ABC\nDuration: 2 Days")?.type)
-        assertEquals(p.Type.EXIT, p.parse("com.univest.capp", "Position closed\nSTOCK: ABC")?.type)
+        assertEquals(ForecastUnivestLearningPolicy.Type.ENTRY, p.parse("com.univest.capp", "New Advisory Pick\nAdvisory Pick: ABC\nDuration: 2 Days")?.type)
+        assertEquals(ForecastUnivestLearningPolicy.Type.EXIT, p.parse("com.univest.capp", "Position closed\nSTOCK: ABC")?.type)
         assertNull(p.parse("com.univest.capp", "Position closed without any labelled ticker"))
     }
 
