@@ -5,6 +5,7 @@ class ForecastNewsSymbolResolutionPolicyTest {
     private val cat=mapOf("MAN INFRACONSTRUCTION LIMITED" to "MANINFRA",
         "WOCKHARDT LIMITED" to "WOCKPHARMA",
         "MAN INFRA PRIVATE LTD" to "DIFFERENT",
+        "MAN INFRA LTD" to "OTHER",
         "ACME VENTURES LIMITED" to "ACME")
     @Test fun handlesExchangeHeadlineAndCorporateSuffix() {
         assertEquals("WOCKPHARMA",ForecastNewsSymbolResolutionPolicy.resolve(
