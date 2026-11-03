@@ -17,6 +17,7 @@ import okhttp3.Interceptor
 import okhttp3.Response
 import java.util.ArrayDeque
 import java.util.EnumMap
+import java.util.concurrent.atomic.AtomicInteger
 
 internal class GrowwRateLimitInterceptor(
     private val auditLogger: AuditLogger
@@ -38,6 +39,7 @@ internal class GrowwRateLimitInterceptor(
     // did not prevent HTTP 429 at 2 requests/second and 18/minute in the broker logs.
     // This never changes Fixed scoring, SELL stop triggers or order dispatch.
     private val alphaLtpMinute = ArrayDeque<Long>()
+    private val pendingProtectionLtps = AtomicInteger(0)
     private var lastAlphaLtpGrantedAtMs = 0L
     private val lastBlockedAuditMs = EnumMap<GrowwApiUsageLedger.Category, Long>(GrowwApiUsageLedger.Category::class.java)
     private val states = EnumMap<GrowwApiUsageLedger.Category, State>(GrowwApiUsageLedger.Category::class.java).apply {
@@ -135,8 +137,11 @@ internal class GrowwRateLimitInterceptor(
         val protection = category == GrowwApiUsageLedger.Category.LIVE_DATA &&
             MarketDataPriorityAdmissionPolicy.isProtectionHeader(
                 request.header(MarketDataPriorityAdmissionPolicy.HEADER))
+        val protectionLtp = protection && path == "/v1/live-data/ltp"
+        if (protectionLtp) pendingProtectionLtps.incrementAndGet()
         var totalWaitMs = 0L
         var dominantReason = "NONE"
+        try {
         while (true) {
             try { recoveryGate.checkRequestAllowed(category) }
             catch (blocked: GrowwRecoveryGate.LocallyBlocked) {
@@ -168,8 +173,11 @@ internal class GrowwRateLimitInterceptor(
                     now, lastAlphaLtpGrantedAtMs,
                     alphaLtpMinute.peekFirst(), alphaLtpMinute.size
                 ) else 0L
-                val wait = maxOf(cooldownWait, secondWait, minuteWait, ltpWait)
+                val protectionYield = MarketDataPriorityAdmissionPolicy.ltpPriorityYieldMs(
+                    isAlphaLtp, protection, pendingProtectionLtps.get())
+                val wait = maxOf(cooldownWait, secondWait, minuteWait, ltpWait, protectionYield)
                 reason = when {
+                    protectionYield > 0L && wait == protectionYield -> "YIELD_TO_HOLDING_PROTECTION"
                     cooldownWait > 0L && wait == cooldownWait -> "429_COOLDOWN"
                     ltpWait > 0L && wait == ltpWait -> "ALPHA_LTP_ENDPOINT_PACING"
                     minuteWait > 0L && wait == minuteWait -> "APP_PER_MINUTE"
@@ -209,6 +217,9 @@ internal class GrowwRateLimitInterceptor(
             val sleep = waitMs.coerceAtLeast(5L)
             delay(sleep) // Suspending: consumes no OkHttp dispatcher worker.
             totalWaitMs += sleep
+        }
+        } finally {
+            if (protectionLtp) pendingProtectionLtps.decrementAndGet()
         }
     }
 
