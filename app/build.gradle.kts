@@ -27,11 +27,11 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.multify.traderpro.vivoy73final"
+        applicationId = "com.multify.quickbuy"
         minSdk = 26
         targetSdk = 35
-        versionCode = 7940
-        versionName = "7.9.40-protected-parallel-buy-trail"
+        versionCode = 1
+        versionName = "1.0.0-multify-only"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
     }
