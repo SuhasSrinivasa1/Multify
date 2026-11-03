@@ -121,6 +121,7 @@ class FixedFactorTelemetry @Inject constructor(@ApplicationContext context: Cont
                 "day_traded_shares" to quality.dayTradedShares,
                 "estimated_traded_value_rupees_not_reported_turnover" to quality.estimatedTradedValueRupees,
                 "broker_quote_day_high" to quality.quoteDayHigh,
+                "broker_reported_day_change_pct" to quality.brokerReportedDayChangePct,
                 "distance_from_broker_quote_high_pct" to quality.distanceFromQuoteDayHighPct,
                 "warning_labels" to quality.warnings
             ),
