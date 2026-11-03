@@ -1765,7 +1765,7 @@ class TradingRepository @Inject constructor(
                 engine = ENGINE_MULTIFY_HOLDING, symbol = symbol, product = "CNC", side = "LONG", quantity = filled,
                 entryPrice = entry, stopPrice = HardStopLossPolicy.stopPrice(entry),
                 targetPrice = signal.target,
-                strategy = "Multify ARM holding · hard -2% floor · v7 fixed stepped trail 0.55→0.50 then +0.10%",
+                strategy = "Multify ARM holding · hard -2% floor · common trail 0.55→0.50, 0.75→0.60, 0.85→0.70 then +0.10%",
                 regime = "HOLDING_LONG", confidence = 1.0, sourceEventId = eventId,
                 openOrderId = order.growwOrderId, openReferenceId = ref, openedAtMs = System.currentTimeMillis(),
                 lastPrice = entry, maxFavourablePrice = entry, maxAdversePrice = entry, lastEvaluatedAtMs = System.currentTimeMillis(),
@@ -1777,9 +1777,18 @@ class TradingRepository @Inject constructor(
             cncBalance = max(0.0, hot.cncBalance - entry * filled),
             warmedAtMs = System.currentTimeMillis()
         )
+        val protectedPosition = managedDao.openPosition(ENGINE_MULTIFY_HOLDING, symbol)
+        val protectionVerified = protectedPosition?.let {
+            com.multify.traderpro.engine.GttProtectionReadinessPolicy.verified(
+                it.smartOrderMode, it.smartOrderId, it.smartOrderStatus)
+        } == true
         dao.updateForwarding(
-            eventId, "DELIVERED", "CNC_LONG_BOUGHT",
-            "ARM bought $filled $symbol into holdings @ ₹${fmt(entry)}. Fixed trailing arms when gain reaches +0.55%, protecting +0.50%, then ratchets by +0.10% steps.",
+            eventId, "DELIVERED",
+            if (protectionVerified) "CNC_LONG_BOUGHT_PROTECTED" else "CNC_LONG_BOUGHT_UNPROTECTED_CRITICAL",
+            if (protectionVerified)
+                "ARM bought $filled $symbol @ ₹${fmt(entry)}; broker SELL GTT verified. Trail +0.55→+0.50, +0.75→+0.60, +0.85→+0.70, then +0.10."
+            else
+                "ARM bought $filled $symbol @ ₹${fmt(entry)}, BUT protective SELL GTT was NOT VERIFIED. Check Groww immediately; new BUYs blocked.",
             null
         )
         auditLogger.log("HOLDING", "MULTIFY_LONG_OPENED", mapOf(
