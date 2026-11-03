@@ -108,20 +108,8 @@ class MultifyNotificationListenerService : NotificationListenerService() {
         val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString().orEmpty()
         val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString().orEmpty()
         val bigText = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString().ifNullOrBlank(text)
-        // Official Univest research notifications are isolated from Multify's
-        // execution listener/ORDER path and do not rely on the Multify package filter.
-        if (sbn.packageName == ForecastUnivestLearningPolicy.OFFICIAL_PACKAGE) {
-            val lines = extras.getCharSequenceArray(Notification.EXTRA_TEXT_LINES)
-                ?.joinToString("\n").orEmpty()
-            val subText = extras.getCharSequence(Notification.EXTRA_SUB_TEXT)?.toString().orEmpty()
-            val body = listOf(text, bigText, subText, lines).filter { it.isNotBlank() }.distinct().joinToString("\n")
-            scope.launch {
-                runCatching { repository.captureUnivestNotification(title, body, sbn.postTime) }
-                    .onFailure { auditLogger.log("FORECAST_UNIVEST", "NOTIFICATION_CAPTURE_ERROR", mapOf(
-                        "exception" to it.javaClass.simpleName, "message" to (it.message ?: "").take(160))) }
-            }
-            return
-        }
+        // Only approved Multify notifications can enter the execution path.
+        // The existing repository package allowlist and fingerprint dedupe remain mandatory.
         val parsed = parser.parse(title, text, bigText)
         if (parsed.type == SignalType.UNKNOWN) return
 
