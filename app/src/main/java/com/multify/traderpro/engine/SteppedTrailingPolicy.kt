@@ -13,6 +13,7 @@ object SteppedTrailingPolicy {
     const val ARM_TRIGGER_PCT = 0.55
     const val INITIAL_STOP_GAIN_PCT = 0.50
     const val STEP_PCT = 0.10
+    const val SECOND_TRIGGER_PCT = 0.75
     const val TRIGGER_BUFFER_PCT = 0.05
 
     fun gainPct(entryPrice: Double, price: Double): Double {
@@ -23,7 +24,8 @@ object SteppedTrailingPolicy {
     fun stopGainPctForHighWater(entryPrice: Double, highWaterPrice: Double): Double? {
         val gain = gainPct(entryPrice, highWaterPrice)
         if (!gain.isFinite() || gain + 1e-9 < ARM_TRIGGER_PCT) return null
-        val completedSteps = floor(((gain - ARM_TRIGGER_PCT) + 1e-9) / STEP_PCT).toInt().coerceAtLeast(0)
+        val completedSteps = if (gain + 1e-9 < SECOND_TRIGGER_PCT) 0 else
+            (1 + floor(((gain - SECOND_TRIGGER_PCT) + 1e-9) / STEP_PCT).toInt().coerceAtLeast(0))
         return INITIAL_STOP_GAIN_PCT + completedSteps * STEP_PCT
     }
 
@@ -36,7 +38,9 @@ object SteppedTrailingPolicy {
     }
 
     fun nextTriggerGainPct(currentStopGainPct: Double?): Double =
-        if (currentStopGainPct == null) ARM_TRIGGER_PCT else currentStopGainPct + TRIGGER_BUFFER_PCT + STEP_PCT
+        if (currentStopGainPct == null) ARM_TRIGGER_PCT
+        else if (currentStopGainPct < INITIAL_STOP_GAIN_PCT + STEP_PCT - 1e-9) SECOND_TRIGGER_PCT
+        else SECOND_TRIGGER_PCT + ((currentStopGainPct - (INITIAL_STOP_GAIN_PCT + STEP_PCT)) / STEP_PCT + 1.0).toInt() * STEP_PCT
 
     fun state(entryPrice: Double, highWaterPrice: Double, currentStopPrice: Double?): SteppedTrailState {
         val highGain = gainPct(entryPrice, highWaterPrice)
