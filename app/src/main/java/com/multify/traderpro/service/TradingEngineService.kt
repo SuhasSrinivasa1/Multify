@@ -88,38 +88,6 @@ class TradingEngineService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startEngineLoop()
-        if (intent?.action == ACTION_SAMPLE_SIGNAL) {
-            val eventId = intent.getLongExtra(EXTRA_EVENT_ID, -1L)
-            val symbol = intent.getStringExtra(EXTRA_SYMBOL).orEmpty()
-            if (eventId > 0L) {
-                scope.launch {
-                    runCatching { repository.sampleSignal(eventId) }
-                        .onFailure {
-                            if (it !is CancellationException) {
-                                auditLogger.log("MULTIFY_RESEARCH", "POST_SIGNAL_SAMPLE_ERROR", mapOf(
-                                    "event_id" to eventId,
-                                    "symbol" to symbol,
-                                    "message" to (it.message ?: it.javaClass.simpleName)
-                                ))
-                            }
-                        }
-                }
-            }
-            if (eventId > 0L && symbol.isNotBlank()) {
-                scope.launch {
-                    runCatching { repository.captureMultifyResearchSnapshot(eventId, symbol) }
-                        .onFailure {
-                            if (it !is CancellationException) {
-                                auditLogger.log("MULTIFY_RESEARCH", "FEATURE_CAPTURE_ERROR", mapOf(
-                                    "event_id" to eventId,
-                                    "symbol" to symbol,
-                                    "message" to (it.message ?: it.javaClass.simpleName)
-                                ))
-                            }
-                        }
-                }
-            }
-        }
         return START_STICKY
     }
 
@@ -161,175 +129,39 @@ class TradingEngineService : Service() {
         }
     }
 
+    /** QuickBuy runs only the ARM hot path and the original independent SELL monitor. */
     private fun startEngineLoop() {
         startPositionMonitorWorker()
-        startFixedScanWorker()
-        startForecastScanWorker()
-        startForecastNewsWorker()
         if (engineJob?.isActive == true) return
         engineJob = scope.launch {
-            auditLogger.log("RUNTIME", "FOREGROUND_ENGINE_STARTED", mapOf(
-                "position_monitor_independent" to true,
-                "fixed_scan_independent" to true,
-                "forecast_scan_independent" to true,
-                "fixed_not_blocked_by_forecast" to true
+            auditLogger.log("RUNTIME", "MULTIFY_QUICKBUY_ENGINE_STARTED", mapOf(
+                "fixed_scans" to false,
+                "forecast_scans" to false,
+                "forecast_news" to false,
+                "sell_monitor" to true
             ))
-            // Capture the immutable Fixed reference state before adaptive writes.
-            runCatching { repository.ensureFixedEngineSnapshot() }
-                .onFailure { auditLogger.log("RUNTIME", "FIXED_SNAPSHOT_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
-            runCatching { repository.ensureHistoricalSeed() }
-            runCatching { repository.activateForecastEarlyEntryOnce() }
-
-            var lastHeartbeatAtMs = 0L
             while (isActive) {
                 try {
-                    val nowMs = System.currentTimeMillis()
-                    if (nowMs - lastHeartbeatAtMs >= HEARTBEAT_INTERVAL_MS) {
-                        repository.recordServiceHeartbeat()
-                        lastHeartbeatAtMs = nowMs
-                    }
-
+                    repository.recordServiceHeartbeat()
                     runCatching { repository.maintainArmHotPath() }
-                        .onFailure { auditLogger.log("RUNTIME", "ARM_HOT_PATH_MAINTAIN_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
-
-                    val profileNowMs = System.currentTimeMillis()
-                    if (profileNowMs - positionProfileWindowStartedAtMs >= POSITION_PROFILE_INTERVAL_MS) {
-                        val before = positionProfileUsageBaseline
-                        val after = GrowwApiUsageLedger.snapshot()
-                        fun delta(category: GrowwApiUsageLedger.Category, selector: (GrowwApiUsageLedger.CategorySnapshot) -> Long): Long {
-                            if (before == null) return 0L
-                            val b = before.categories.first { it.category == category }
-                            val a = after.categories.first { it.category == category }
-                            return (selector(a) - selector(b)).coerceAtLeast(0L)
-                        }
-                        auditLogger.logAsync("RUNTIME", "TRAILING_MONITOR_PROFILE", mapOf(
-                            "window_ms" to (profileNowMs - positionProfileWindowStartedAtMs),
-                            "passes" to positionProfilePasses,
-                            "failures" to positionProfileFailures,
-                            "average_pass_ms" to if (positionProfilePasses > 0) positionProfileElapsedMs / positionProfilePasses else 0L,
-                            "max_pass_ms" to positionProfileMaxMs,
-                            "last_known_managed_count" to lastKnownManagedCount,
-                            "live_network_requests" to delta(GrowwApiUsageLedger.Category.LIVE_DATA) { it.totalRequests },
-                            "order_network_requests" to delta(GrowwApiUsageLedger.Category.ORDERS) { it.totalRequests },
-                            "non_trading_network_requests" to delta(GrowwApiUsageLedger.Category.NON_TRADING) { it.totalRequests },
-                            "live_429s" to delta(GrowwApiUsageLedger.Category.LIVE_DATA) { it.rateLimitResponses },
-                            "order_429s" to delta(GrowwApiUsageLedger.Category.ORDERS) { it.rateLimitResponses },
-                            "non_trading_429s" to delta(GrowwApiUsageLedger.Category.NON_TRADING) { it.rateLimitResponses },
-                            "governor_wait_ms" to (
-                                delta(GrowwApiUsageLedger.Category.LIVE_DATA) { it.permitWaitMs } +
-                                delta(GrowwApiUsageLedger.Category.ORDERS) { it.permitWaitMs } +
-                                delta(GrowwApiUsageLedger.Category.NON_TRADING) { it.permitWaitMs }
-                            )
-                        ))
-                        positionProfileWindowStartedAtMs = profileNowMs
-                        positionProfilePasses = 0
-                        positionProfileFailures = 0
-                        positionProfileElapsedMs = 0L
-                        positionProfileMaxMs = 0L
-                        positionProfileUsageBaseline = after
-                    }
-
-                    val now = ZonedDateTime.now(INDIA)
-                    val regularSession = now.dayOfWeek.value < 6 &&
-                        now.toLocalTime() >= LocalTime.of(9, 15) &&
-                        now.toLocalTime() < LocalTime.of(15, 30)
-
-                    if (regularSession) {
-                        // Market hours are intentionally clean: recommendation delivery lives behind
-                        // each source's order path (Fixed worker / Forecast worker). This maintenance
-                        // loop never races ahead and notifies before an enabled auto-buy attempt.
-                    } else if (nowMs - lastAfterHoursMaintenanceAtMs >= AFTER_HOURS_MAINTENANCE_INTERVAL_MS) {
-                        lastAfterHoursMaintenanceAtMs = nowMs
-                        runCatching { repository.reconcileForecastAutoBuyOrders(true, "AFTER_HOURS_MAINTENANCE") }
-                            .onFailure { auditLogger.log("RUNTIME", "FORECAST_AUTO_BUY_RECONCILE_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
-                        runCatching { repository.reconcileFixedAutoBuyOrders(true, "AFTER_HOURS_MAINTENANCE") }
-                            .onFailure { auditLogger.log("RUNTIME", "FIXED_AUTO_BUY_RECONCILE_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
-                        lastForecastOutcomeCount = runCatching { repository.monitorForecastOutcomes() }
-                            .onFailure {
-                                if (it !is CancellationException) {
-                                    auditLogger.log("RUNTIME", "FORECAST_OUTCOME_MONITOR_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName)))
-                                }
-                            }.getOrDefault(lastForecastOutcomeCount)
-                    }
-
-                    if (regularSession && nowMs - lastForecastOutcomePollAtMs >= 60_000L &&
-                        repository.forecastBackgroundScanningEnabled()
-                    ) {
-                        lastForecastOutcomePollAtMs = nowMs
-                        lastForecastOutcomeCount = runCatching { repository.monitorForecastOutcomes() }
-                            .onFailure { if (it !is CancellationException) auditLogger.log(
-                                "RUNTIME", "FORECAST_LIVE_OUTCOME_ERROR",
-                                mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
-                            .getOrDefault(lastForecastOutcomeCount)
-                    }
-
-                    if (nowMs - lastFixedOutcomePollAtMs >= 15_000L) {
-                        lastFixedOutcomePollAtMs = nowMs
-                        lastFixedOutcomeCount = runCatching { repository.monitorFixedOutcomes() }
-                            .onFailure {
-                                if (it !is CancellationException) {
-                                    auditLogger.log("RUNTIME", "FIXED_OUTCOME_MONITOR_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName)))
-                                }
-                            }.getOrDefault(lastFixedOutcomeCount)
-                    }
-
-                    if (nowMs - lastApiUsageAuditAtMs >= API_USAGE_AUDIT_INTERVAL_MS) {
-                        lastApiUsageAuditAtMs = nowMs
-                        val usage = GrowwApiUsageLedger.snapshot()
-                        auditLogger.logAsync("API_BUDGET", "ROLLING_USAGE", mapOf(
-                            "summary" to usage.compact(),
-                            "categories" to usage.categories.associate { row ->
-                                row.category.name to mapOf(
-                                    "used_1s" to row.usedLastSecond,
-                                    "used_60s" to row.usedLastMinute,
-                                    "app_limit_1s" to row.appPerSecondLimit,
-                                    "app_limit_60s" to row.appPerMinuteLimit,
-                                    "headroom_60s" to row.minuteHeadroom,
-                                    "utilization_pct" to row.minuteUtilizationPct,
-                                    "429s" to row.rateLimitResponses,
-                                    "last_429_at_ms" to row.lastRateLimitAtMs,
-                                    "governor_wait_count" to row.permitWaitCount,
-                                    "governor_wait_ms_total" to row.permitWaitMs,
-                                    "governor_wait_ms_max" to row.maxPermitWaitMs,
-                                    "network_ms_total" to row.networkMs
-                                )
-                            },
-                            "cache_hits_total" to GrowwApiUsageLedger.cacheHitCount(),
-                            "cache_misses_total" to GrowwApiUsageLedger.cacheMissCount(),
-                            "async_audit_dropped_total" to auditLogger.asyncDroppedCount()
-                        ))
-                    }
-
-                    // Mature completed-date research can catch up before market open and
-                    // on closed days, not only while the app happens to run after 15:35.
-                    // No replay during trading; Alpha orders/Fixed retain all priority.
-                    val replayWindow = !regularSession &&
-                        (now.dayOfWeek.value >= 6 ||
-                            now.toLocalTime() < LocalTime.of(9, 10) ||
-                            now.toLocalTime() >= LocalTime.of(15, 35))
-                    if (replayWindow &&
-                        nowMs - lastAfterHoursResearchAtMs >= AFTER_HOURS_RESEARCH_INTERVAL_MS
-                    ) {
-                        lastAfterHoursResearchAtMs = nowMs
-                        runCatching { repository.runAfterHoursResearch(false) }
-                            .onFailure { auditLogger.log("RUNTIME", "AFTER_HOURS_RESEARCH_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
-                    }
-
+                        .onFailure { auditLogger.logAsync("RUNTIME", "ARM_HOT_PATH_ERROR", mapOf(
+                            "type" to it.javaClass.simpleName
+                        )) }
                     updateForegroundNotification(
                         lastKnownManagedCount,
-                        lastForecastOutcomeCount,
-                        lastFixedOutcomeCount,
+                        0,
+                        0,
                         lastManagedMonitorSucceeded
                     )
-                    delay(MAINTENANCE_LOOP_INTERVAL_MS)
+                    delay(3_000L)
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (t: Throwable) {
-                    auditLogger.log("RUNTIME", "FOREGROUND_ENGINE_LOOP_ERROR", mapOf(
+                    auditLogger.log("RUNTIME", "QUICKBUY_ENGINE_ERROR", mapOf(
                         "type" to t.javaClass.simpleName,
-                        "message" to (t.message ?: t.javaClass.simpleName)
+                        "message" to (t.message ?: "").take(160)
                     ))
-                    delay(ERROR_BACKOFF_MS)
+                    delay(5_000L)
                 }
             }
         }
