@@ -2252,12 +2252,11 @@ class TradingRepository @Inject constructor(
         // Confirmed same-session Multify BOOK PROFIT only. Hypothetical MFE/trailing
         // movements stay in a separate research pool and cannot masquerade as a close.
         val positives = learningDao.allCalls().filter {
-            val sellAt = it.sellAtMs
-            it.source == "LIVE" && it.action.equals("BUY", true) &&
-                it.callDate < beforeDate && it.buyEventId != null && it.sellEventId != null &&
-                it.buyAtMs > 0L && sellAt != null && sellAt > it.buyAtMs &&
-                ForecastUnivestLearningPolicy.sameTradingDay(it.buyAtMs, sellAt) &&
-                it.longRealizedPct?.let { pct -> pct.isFinite() && pct > 0.0 } == true
+            it.callDate < beforeDate &&
+                ForecastMultifyPositiveTransferPolicy.qualifiesVerifiedClose(
+                    it.source, it.action, it.buyEventId, it.sellEventId,
+                    it.buyAtMs, it.sellAtMs, it.longRealizedPct
+                )
         }
         val dates = positives.map { it.callDate }.distinct().sortedDescending().take(30).toSet()
         return positives.filter { it.callDate in dates }.map {
