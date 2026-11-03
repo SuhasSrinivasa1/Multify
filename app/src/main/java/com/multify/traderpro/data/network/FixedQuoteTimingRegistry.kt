@@ -18,7 +18,10 @@ internal object FixedQuoteTimingRegistry {
     private val lock = Any()
     private val latestBySymbol = LinkedHashMap<String, Sample>()
     private const val MAX_SYMBOLS = 512
-    private const val MATCH_WINDOW_MS = 15_000L
+    // Fixed performs historical candle fetch *after* the quote. Correlation may
+    // span the full scan, not just 15 seconds. Require both the matching scan
+    // boundary and a bounded evaluation completion window.
+    private const val MATCH_WINDOW_MS = 180_000L
 
     fun record(
         symbol: String?, requestStartedAtMs: Long, responseReceivedAtMs: Long,
@@ -40,9 +43,12 @@ internal object FixedQuoteTimingRegistry {
         }
     }
 
-    fun closestCompletedQuote(symbol: String, evaluationCompletedAtMs: Long): Sample? = synchronized(lock) {
+    fun closestCompletedQuote(
+        symbol: String, scanStartedAtMs: Long, evaluationCompletedAtMs: Long
+    ): Sample? = synchronized(lock) {
         val sample = latestBySymbol[symbol.uppercase(Locale.US)] ?: return@synchronized null
-        if (sample.httpStatus !in 200..299 ||
+        if (scanStartedAtMs <= 0L || sample.httpStatus !in 200..299 ||
+            sample.requestStartedAtMs < scanStartedAtMs ||
             evaluationCompletedAtMs < sample.responseReceivedAtMs ||
             evaluationCompletedAtMs - sample.responseReceivedAtMs > MATCH_WINDOW_MS) null
         else sample
