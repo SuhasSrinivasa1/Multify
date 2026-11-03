@@ -213,7 +213,7 @@ class AppPreferences @Inject constructor(
     private fun Preferences.toSettings() = AppSettings(
         expectedStaticIp = this[Keys.expectedStaticIp].orEmpty(),
         packageFilter = this[Keys.packageFilter].orEmpty(),
-        holdingBudgetRupees = (this[Keys.holdingBudgetRupees] ?: 200_000L).coerceIn(10_000L, 200_000L),
+        holdingBudgetRupees = (this[Keys.holdingBudgetRupees] ?: 10_000L).coerceIn(10_000L, 200_000L),
         armEnabled = this[Keys.armEnabled] ?: false,
         forecastScannerEnabled = this[Keys.forecastScannerEnabled] ?: false,
         forecastAutoBuyEnabled = this[Keys.forecastAutoBuyEnabled] ?: false,
