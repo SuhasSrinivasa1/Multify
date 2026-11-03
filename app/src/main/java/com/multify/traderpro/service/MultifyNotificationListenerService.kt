@@ -221,6 +221,16 @@ class MultifyNotificationListenerService : NotificationListenerService() {
                 if (parsed.type == SignalType.AUTO_PAUSED) {
                     notifyStatus("ARM disabled", "Multify reported a safety pause. Review broker state before resetting the halt.")
                 }
+                if (parsed.type == SignalType.TRADE_RELEASE && processed.isSuccess && !parsed.symbol.isNullOrBlank()) {
+                    // Research-only entry-time factors. Never delay broker BUY/GTT.
+                    scope.launch {
+                        runCatching { repository.captureMultifyResearchSnapshot(id, parsed.symbol) }
+                            .onFailure { error -> auditLogger.logAsync("MULTIFY_RESEARCH", "FEATURE_CAPTURE_ERROR", mapOf(
+                                "event_id" to id, "symbol" to parsed.symbol,
+                                "error" to error.javaClass.simpleName
+                            )) }
+                    }
+                }
                 if (researchRelevant && processed.isSuccess) {
                     // Do not spend market-hours API capacity on post-signal research. The call and
                     // result are persisted locally; MFE/positive-transfer learning is backfilled
