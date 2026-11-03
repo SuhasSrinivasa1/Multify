@@ -16,6 +16,7 @@ import com.multify.traderpro.data.network.ForecastDto
 import com.multify.traderpro.data.network.GrowwApiUsageLedger
 import com.multify.traderpro.data.network.GrowwRecoveryGate
 import com.multify.traderpro.engine.FixedDataPipelinePolicy
+import com.multify.traderpro.engine.FixedPublicationTimingPolicy
 import com.multify.traderpro.data.repository.TradingRepository
 import com.multify.traderpro.engine.ReleaseIntegrityManifest
 import dagger.hilt.android.AndroidEntryPoint
@@ -755,6 +756,11 @@ class TradingEngineService : Service() {
             "cycle_ready_to_notification_ms" to
                 if (lastFixedCycleCompletedAtMs > 0L) (postedAtMs - lastFixedCycleCompletedAtMs).coerceAtLeast(0L) else null,
             "generated_at_semantics" to "SCAN_START_NOT_PUBLICATION_TIME",
+            // Publication clock is independent of Fixed's frozen scan-start timestamp.
+            // These read-only diagnostics show when a stock actually became actionable.
+            "publication_time_bucket" to FixedPublicationTimingPolicy.bucket(postedAtMs).name,
+            "minutes_to_market_close" to FixedPublicationTimingPolicy.remainingMinutes(postedAtMs),
+            "publication_time_is_actual_notification" to true,
             "posted_after_fixed_priority_cycle" to true,
             "posted_after_auto_buy_attempt" to true,
             "fixed_formula_changed" to false

@@ -11,6 +11,7 @@ object DecisionEvidencePolicy {
     private val exact = setOf(
         "SIGNAL/CAPTURED",
         "FORECAST_NEWS/EARLY_CATALYST_DECISION",
+        "EXECUTION_LATENCY/FIXED_NOTIFICATION_POSTED",
         "FIXED_ENGINE/LONG_SCAN_TIERED",
         "FIXED_OUTCOME/TARGET_HIT",
         "FORECAST/LONG_SCAN_TIERED",
@@ -63,6 +64,10 @@ object DecisionEvidencePolicy {
         "opened_at_ms", "closed_at_ms", "buy_at_ms", "sell_at_ms",
         "entry_at_ms", "exit_at_ms", "capture_at_ms",
         "posted_ms", "received_ms", "same_day_pair", "training_eligible",
+        "recommendation_generated_at_ms", "notification_posted_at_ms",
+        "scan_start_to_notification_ms", "cycle_ready_to_notification_ms",
+        "fixed_cycle_ready_at_ms", "publication_time_bucket",
+        "minutes_to_market_close", "generated_at_semantics",
         "positive_cases", "cases_with_entry_factors", "all_official_positive_closes",
         "published_count", "published", "primary", "secondary",
         "research", "evaluated", "target_hit", "newly_publishable_count",

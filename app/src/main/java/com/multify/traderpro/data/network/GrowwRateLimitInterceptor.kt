@@ -10,11 +10,14 @@ import kotlinx.coroutines.delay
 import okhttp3.Request
 import java.io.IOException
 import com.multify.traderpro.engine.GrowwApiBudgetPolicy
+import com.multify.traderpro.engine.MarketDataPriorityAdmissionPolicy
+import com.multify.traderpro.engine.GrowwRetryAfterPolicy
 import com.multify.traderpro.engine.AlphaLtpPacingPolicy
 import okhttp3.Interceptor
 import okhttp3.Response
 import java.util.ArrayDeque
 import java.util.EnumMap
+import java.util.concurrent.atomic.AtomicInteger
 
 internal class GrowwRateLimitInterceptor(
     private val auditLogger: AuditLogger
@@ -36,6 +39,7 @@ internal class GrowwRateLimitInterceptor(
     // did not prevent HTTP 429 at 2 requests/second and 18/minute in the broker logs.
     // This never changes Fixed scoring, SELL stop triggers or order dispatch.
     private val alphaLtpMinute = ArrayDeque<Long>()
+    private val pendingProtectionLtps = AtomicInteger(0)
     private var lastAlphaLtpGrantedAtMs = 0L
     private val lastBlockedAuditMs = EnumMap<GrowwApiUsageLedger.Category, Long>(GrowwApiUsageLedger.Category::class.java)
     private val states = EnumMap<GrowwApiUsageLedger.Category, State>(GrowwApiUsageLedger.Category::class.java).apply {
@@ -66,12 +70,14 @@ internal class GrowwRateLimitInterceptor(
         }
         GrowwApiUsageLedger.recordRequest(category)
         val started = SystemClock.elapsedRealtime()
-        val response = chain.proceed(request)
+        // Request priority is internal scheduler metadata, never a Groww API header.
+        val response = chain.proceed(request.newBuilder()
+            .removeHeader(MarketDataPriorityAdmissionPolicy.HEADER).build())
         val networkMs = (SystemClock.elapsedRealtime() - started).coerceAtLeast(0L)
         GrowwApiUsageLedger.recordResponse(category, networkMs, response.code)
         if (response.code == 429) {
             val rawRetryAfter = response.header("Retry-After")
-            val retryAfterMs = parseRetryAfterMs(rawRetryAfter)
+            val retryAfterMs = GrowwRetryAfterPolicy.retryAfterMs(rawRetryAfter, System.currentTimeMillis())
             val appliedCooldownMs = recoveryGate.on429(category, retryAfterMs)
             synchronized(lock) {
                 val state = states.getValue(category)
@@ -128,9 +134,14 @@ internal class GrowwRateLimitInterceptor(
     internal suspend fun acquirePermit(request: Request) {
         val path = request.url.encodedPath
         val category = classify(request.method, path)
-        val limits = limits(category)
+        val protection = category == GrowwApiUsageLedger.Category.LIVE_DATA &&
+            MarketDataPriorityAdmissionPolicy.isProtectionHeader(
+                request.header(MarketDataPriorityAdmissionPolicy.HEADER))
+        val protectionLtp = protection && path == "/v1/live-data/ltp"
+        if (protectionLtp) pendingProtectionLtps.incrementAndGet()
         var totalWaitMs = 0L
         var dominantReason = "NONE"
+        try {
         while (true) {
             try { recoveryGate.checkRequestAllowed(category) }
             catch (blocked: GrowwRecoveryGate.LocallyBlocked) {
@@ -141,6 +152,14 @@ internal class GrowwRateLimitInterceptor(
             val waitMs = synchronized(lock) {
                 val now = SystemClock.elapsedRealtime()
                 val state = states.getValue(category)
+                // Centralized quota: protect one live request/second and sixty/minute
+                // for existing holdings. Ordinary Fixed/Forecast research uses only
+                // the residual allowance; protection still obeys Groww's hard budget.
+                val limits = if (category == GrowwApiUsageLedger.Category.LIVE_DATA) {
+                    val admission = MarketDataPriorityAdmissionPolicy.allowedLiveTraffic(
+                        MarketDataPriorityAdmissionPolicy.hasManagedHoldings, protection)
+                    Limits(admission.perSecond, admission.perMinute)
+                } else limits(category)
                 prune(state.second, now - 1_000L)
                 prune(state.minute, now - 60_000L)
                 val cooldownWait = (state.cooldownUntilMs - now).coerceAtLeast(0L)
@@ -154,8 +173,11 @@ internal class GrowwRateLimitInterceptor(
                     now, lastAlphaLtpGrantedAtMs,
                     alphaLtpMinute.peekFirst(), alphaLtpMinute.size
                 ) else 0L
-                val wait = maxOf(cooldownWait, secondWait, minuteWait, ltpWait)
+                val protectionYield = MarketDataPriorityAdmissionPolicy.ltpPriorityYieldMs(
+                    isAlphaLtp, protection, pendingProtectionLtps.get())
+                val wait = maxOf(cooldownWait, secondWait, minuteWait, ltpWait, protectionYield)
                 reason = when {
+                    protectionYield > 0L && wait == protectionYield -> "YIELD_TO_HOLDING_PROTECTION"
                     cooldownWait > 0L && wait == cooldownWait -> "429_COOLDOWN"
                     ltpWait > 0L && wait == ltpWait -> "ALPHA_LTP_ENDPOINT_PACING"
                     minuteWait > 0L && wait == minuteWait -> "APP_PER_MINUTE"
@@ -196,6 +218,9 @@ internal class GrowwRateLimitInterceptor(
             delay(sleep) // Suspending: consumes no OkHttp dispatcher worker.
             totalWaitMs += sleep
         }
+        } finally {
+            if (protectionLtp) pendingProtectionLtps.decrementAndGet()
+        }
     }
 
     private fun prune(queue: ArrayDeque<Long>, cutoff: Long) {
@@ -223,10 +248,6 @@ internal class GrowwRateLimitInterceptor(
         else -> GrowwApiUsageLedger.Category.NON_TRADING
     }
 
-    private fun parseRetryAfterMs(raw: String?): Long {
-        val seconds = raw?.trim()?.toLongOrNull() ?: return 0L
-        return (seconds.coerceIn(0L, 120L) * 1_000L)
-    }
 
     companion object {
         private const val AUDIT_WAIT_THRESHOLD_MS = 500L

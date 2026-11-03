@@ -16,7 +16,10 @@ class FixedHistoricalWindowStoreTest {
         assertNull(store.request("RELIANCE", "2026-10-23 09:15:00", 10_000L))
         store.remember("RELIANCE", "2026-10-23 09:15:00", rows(1_790_000_000L, 60), 10_000L)
         assertNotNull(store.request("RELIANCE", "2026-10-23 09:15:00", 11_000L))
-        assertNull(store.request("RELIANCE", "2026-10-23 09:15:00", 500_000L))
+        // Revisit after 8 minutes: broker delta must STILL be requested.
+        assertNotNull(store.request("RELIANCE", "2026-10-23 09:15:00", 500_000L))
+        // A too-old history cannot silently replace a fresh market candle.
+        assertNull(store.request("RELIANCE", "2026-10-23 09:15:00", 800_000L))
     }
     @Test fun `overlapping broker bars replace old last bars but preserve long lookback`() {
         val store = FixedHistoricalWindowStore()
