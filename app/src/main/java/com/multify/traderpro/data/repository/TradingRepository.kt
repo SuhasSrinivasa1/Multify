@@ -1699,8 +1699,7 @@ class TradingRepository @Inject constructor(
                     // Order path first; learning/snapshot bookkeeping follows.
                     runCatching { recordLiveBuy(eventId, parsed) }
                         .onFailure { auditLogger.log("LEARNING", "LIVE_BUY_RECORD_ERROR", mapOf("event_id" to eventId, "message" to (it.message ?: it.javaClass.simpleName))) }
-                    runCatching { ensureFixedEngineSnapshot() }
-                        .onFailure { auditLogger.log("FIXED", "POST_MULTIFY_SNAPSHOT_ERROR", mapOf("event_id" to eventId, "message" to (it.message ?: it.javaClass.simpleName))) }
+
                 }
             }
             SignalType.BOOK_PROFIT -> handleMultifyExit(eventId, parsed, token, settings, notificationStartedNs)
