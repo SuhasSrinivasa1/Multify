@@ -2259,6 +2259,55 @@ class TradingRepository @Inject constructor(
         return parsed.filter { it.first in dates }.sortedByDescending { it.third }.map { it.second }
     }
 
+    /** Make completed official same-day Multify winners part of cross-symbol
+     * Forecast factor learning. Only previously stored entry-time features qualify.
+     * This is offline/local and never changes Fixed or requests a broker quote.
+     */
+    private suspend fun materializeOfficialMultifyWinnerFeatures(): Int {
+        val calls = learningDao.allCalls().filter {
+            ForecastMultifyPositiveTransferPolicy.qualifiesVerifiedClose(
+                it.source, it.action, it.buyEventId, it.sellEventId,
+                it.buyAtMs, it.sellAtMs, it.longRealizedPct
+            )
+        }
+        if (calls.isEmpty()) return 0
+        val references = learningDao.allForecastResearch()
+            .filter { it.qualityTier == "MULTIFY_REFERENCE" && it.multifyEventId != null }
+            .groupBy { it.multifyEventId }
+        var count = 0
+        for (call in calls) {
+            val ref = references[call.buyEventId]?.filter {
+                it.scanAtMs >= call.buyAtMs && it.scanAtMs <= (call.sellAtMs ?: 0L)
+            }?.minByOrNull { it.scanAtMs } ?: continue
+            if (ref.featureJson.isBlank() || ref.featureJson == "{}") continue
+            val info = evidenceFeatureSummary(ref.featureJson)
+            val gain = call.longRealizedPct ?: continue
+            val mfe = call.multifyMfePct ?: gain
+            learningDao.upsertForecastPositiveEvidence(ForecastPositiveEvidenceEntity(
+                evidenceKey = "MULTIFY_OFFICIAL_SAME_DAY|${call.buyEventId}",
+                source = "MULTIFY_OFFICIAL_CLOSE", evidenceDate = call.callDate,
+                eventAtMs = ref.scanAtMs, symbol = call.symbol.uppercase(Locale.US),
+                strategy = ref.strategy, regime = ref.regime, marketRegime = ref.marketRegime,
+                dominantFamily = info.dominantFamily, familyConsensus = info.familyConsensus,
+                momentumFamilyScore = info.momentum, participationFamilyScore = info.participation,
+                structureFamilyScore = info.structure, factorJson = ref.featureJson,
+                voteJson = ref.voteJson, entryPrice = call.entryPrice,
+                targetPct = call.targetPct, maxFavourablePct = mfe,
+                closePct = gain, realizedPct = gain, protectedTrailPct = null,
+                trailArmed = false, targetHit = false,
+                positiveReason = "OFFICIAL_SAME_DAY_BOOK_PROFIT",
+                qualityTier = "EVIDENCE", reconstructionQuality = "ENTRY_FACTORS_OFFICIAL_EXIT",
+                updatedAtMs = System.currentTimeMillis()
+            ))
+            count++
+        }
+        if (count > 0) auditLogger.logAsync("MULTIFY_RESEARCH", "OFFICIAL_SAME_DAY_FACTOR_LEARNING", mapOf(
+            "cases_with_entry_factors" to count, "all_official_positive_closes" to calls.size,
+            "fixed_formula_changed" to false
+        ))
+        return count
+    }
+
     private suspend fun multifyPositiveTransferCases(beforeDate: String): List<MultifyPositiveTransferCase> {
         // Confirmed same-session Multify BOOK PROFIT only. Hypothetical MFE/trailing
         // movements stay in a separate research pool and cannot masquerade as a close.
@@ -6793,6 +6842,11 @@ class TradingRepository @Inject constructor(
         val todayCalibrationUpdated = if (token != null && learningDao.forecastResearchForDate(today).isNotEmpty()) {
             runCatching { backfillForecastResearchOutcomes(today, token) }.getOrDefault(0)
         } else 0
+        // Converts official same-day winners into entry-factor learning only after
+        // the order path and market session are over; no new network requests.
+        runCatching { materializeOfficialMultifyWinnerFeatures() }
+            .onFailure { auditLogger.logAsync("MULTIFY_RESEARCH", "OFFICIAL_FACTOR_REPLAY_ERROR",
+                mapOf("error" to it.javaClass.simpleName)) }
         val universalEvidenceUpdated = if (alphaToken != null) {
             runCatching { refreshUniversalPositiveEvidence(alphaToken) }
                 .onFailure {
