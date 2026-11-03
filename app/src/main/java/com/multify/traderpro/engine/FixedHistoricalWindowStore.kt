@@ -11,7 +11,7 @@ import java.time.format.DateTimeFormatter
 import java.util.LinkedHashMap
 
 /**
- * Bounded in-memory transport optimization for Fixed 5-minute history.
+ * Bounded in-memory transport optimization for Fixed 15-minute history.
  *
  * Requests ALWAYS go to the broker for the most recent candles: neither the active candle
  * nor the current price is replayed from cache. If the new response cannot be stitched
@@ -120,7 +120,10 @@ class FixedHistoricalWindowStore {
     companion object {
         private val INDIA = ZoneId.of("Asia/Kolkata")
         private const val MAX_STOCKS = 128
-        private const val MAX_REUSE_AGE_MS = 6L * 60_000L
+        // A rotating symbol may not be revisited for several 150-second scan cycles.
+        // Reuse only as the historical prefix: every evaluation still gets a fresh
+        // broker delta, and >=2 overlapping candle timestamps must validate.
+        private const val MAX_REUSE_AGE_MS = 12L * 60_000L
         private const val MIN_BASE_ROWS = 10
     }
 }
