@@ -15,8 +15,8 @@ class ForecastUnivestLearningPolicyTest {
         assertEquals(ForecastUnivestLearningPolicy.Type.ENTRY, p.parse("com.univest.capp", msg)?.type)
         assertEquals("GRAPHITE", p.parse("com.univest.capp", msg)?.symbol)
         assertNull(p.parse("com.random.app", msg))
-        assertNull(p.parse("com.univest.capp", msg.replace("1-3", "3-6")))
-        assertNull(p.parse("com.univest.capp", msg.replace("1-3", "6")))
+        assertEquals(p.Type.ENTRY, p.parse("com.univest.capp", msg.replace("1-3", "3-6"))?.type)
+        assertEquals(p.Type.ENTRY, p.parse("com.univest.capp", msg.replace("1-3", "6"))?.type)
         assertNull(p.parse("com.univest.capp", msg.replace("New Advisory Pick", "Options New Advisory Pick")))
         assertNull(p.parse("com.univest.capp", "Advisory Pick: ABC\nDuration: 2 Days"))
     }
