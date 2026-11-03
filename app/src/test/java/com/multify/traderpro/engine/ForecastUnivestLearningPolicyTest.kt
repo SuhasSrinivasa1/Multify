@@ -18,7 +18,9 @@ class ForecastUnivestLearningPolicyTest {
         assertEquals(p.Type.ENTRY, p.parse("com.univest.capp", msg.replace("1-3", "3-6"))?.type)
         assertEquals(p.Type.ENTRY, p.parse("com.univest.capp", msg.replace("1-3", "6"))?.type)
         assertNull(p.parse("com.univest.capp", msg.replace("New Advisory Pick", "Options New Advisory Pick")))
-        assertNull(p.parse("com.univest.capp", "Advisory Pick: ABC\nDuration: 2 Days"))
+        assertEquals(p.Type.ENTRY, p.parse("com.univest.capp", "New Advisory Pick\nAdvisory Pick: ABC\nDuration: 2 Days")?.type)
+        assertEquals(p.Type.EXIT, p.parse("com.univest.capp", "Position closed\nSTOCK: ABC")?.type)
+        assertNull(p.parse("com.univest.capp", "Position closed without any labelled ticker"))
     }
 
     @Test fun officialProfitOfDayExitMatchesSameDayEntryOnly() {
