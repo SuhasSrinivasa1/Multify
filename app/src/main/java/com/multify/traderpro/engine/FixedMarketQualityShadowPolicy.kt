@@ -11,6 +11,7 @@ data class FixedMarketQualityShadow(
     val dayTradedShares: Long?,
     val estimatedTradedValueRupees: Double?,
     val quoteDayHigh: Double?,
+    val brokerReportedDayChangePct: Double?, 
     val distanceFromQuoteDayHighPct: Double?,
     val appreciationSinceFirstPrimaryPct: Double?,
     val warnings: List<String>
@@ -34,6 +35,7 @@ object FixedMarketQualityShadowPolicy {
         val last = clean(quote?.lastPrice)
         val high = clean(quote?.high)
         val volume = quote?.volume?.takeIf { it >= 0L }
+        val dayMove = quote?.dayChangePct?.takeIf { it.isFinite() }
         val fromHigh = if (last != null && high != null && high >= last)
             ((high - last) / high) * 100.0 else null
         val runup = if (last != null && firstPrimaryPrice != null && firstPrimaryPrice.isFinite() &&
@@ -42,13 +44,15 @@ object FixedMarketQualityShadowPolicy {
             if (book != "VALID_BOOK") add(book)
             if (spread != null && spread > SHADOW_WIDE_SPREAD_BPS) add("WIDE_SPREAD_SHADOW")
             if (volume != null && volume < SHADOW_LOW_ABSOLUTE_VOLUME) add("LOW_ABSOLUTE_VOLUME_SHADOW")
+            if (dayMove != null && dayMove > 5.0) add("ALREADY_UP_OVER_5PCT_SHADOW")
+            if (dayMove != null && dayMove > 20.0) add("EXTREME_DAY_RISE_SHADOW")
             if (runup != null && runup > SHADOW_ENTRY_RUNUP_PCT) add("PRICE_CHASING_SHADOW")
             if (fromHigh != null && fromHigh <= 1.0) add("NEAR_BROKER_QUOTE_DAY_HIGH_SHADOW")
         }
         return FixedMarketQualityShadow(
             book, bid, ask, spread, volume,
             if (last != null && volume != null) last * volume else null,
-            high, fromHigh, runup, warnings
+            high, dayMove, fromHigh, runup, warnings
         )
     }
 }
