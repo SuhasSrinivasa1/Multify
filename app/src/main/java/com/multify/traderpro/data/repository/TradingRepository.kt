@@ -8932,9 +8932,9 @@ class TradingRepository @Inject constructor(
         restoreStage = "Forecast research snapshots"
         entries["forecast_research_snapshots.json"]?.let { json ->
             val imported = gson.fromJson(json, Array<ForecastResearchEntity>::class.java).orEmpty()
-            val existingKeys = learningDao.allForecastResearch().map {
+            val existingByKey = learningDao.allForecastResearch().associateBy {
                 "${it.researchDate}|${it.scanAtMs}|${it.symbol.uppercase(Locale.US)}|${it.rank}"
-            }.toHashSet()
+            }.toMutableMap()
             // A single Room transaction per bounded batch, rather than >4,000 UI-bound inserts.
             // Re-running a partially completed restore only imports rows not yet present.
             val pending = ArrayList<ForecastResearchEntity>(256)
@@ -8943,7 +8943,28 @@ class TradingRepository @Inject constructor(
                     !row.entryPrice.isFinite() || row.entryPrice <= 0.0) return@forEach
                 val symbol = row.symbol.uppercase(Locale.US)
                 val key = "${row.researchDate}|${row.scanAtMs}|$symbol|${row.rank}"
-                if (!existingKeys.add(key)) return@forEach
+                val local = existingByKey[key]
+                if (local != null) {
+                    // ZIP restore must never erase a completed historical outcome.
+                    // It may enrich an unlabeled row or replace an older completed
+                    // outcome with a demonstrably newer measured outcome.
+                    if (row.outcomeUpdatedAtMs != null &&
+                        (local.outcomeUpdatedAtMs == null ||
+                            row.outcomeUpdatedAtMs > local.outcomeUpdatedAtMs)) {
+                        val merged = local.copy(
+                            outcomeMfePct = row.outcomeMfePct ?: local.outcomeMfePct,
+                            outcomeMaePct = row.outcomeMaePct ?: local.outcomeMaePct,
+                            outcomeClosePct = row.outcomeClosePct ?: local.outcomeClosePct,
+                            outcomeTargetHit = row.outcomeTargetHit ?: local.outcomeTargetHit,
+                            outcomeUpdatedAtMs = row.outcomeUpdatedAtMs
+                        )
+                        learningDao.updateForecastResearch(merged)
+                        existingByKey[key] = merged
+                        restoredResearch++
+                    }
+                    return@forEach
+                }
+                existingByKey[key] = row.copy(id = 0, symbol = symbol)
                 pending += row.copy(id = 0, symbol = symbol)
                 if (pending.size >= 256) {
                     restoredResearch += learningDao.insertForecastResearchBatch(pending).count { it > 0L }
