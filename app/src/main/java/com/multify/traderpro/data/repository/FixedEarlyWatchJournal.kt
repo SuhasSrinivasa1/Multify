@@ -31,6 +31,7 @@ internal data class FixedEarlyWatchRecord(
     val observedSpreadBps: Double? = null,
     val quoteBookStatus: String = "UNAVAILABLE",
     val dayTradedShares: Long? = null,
+    val brokerReportedDayChangePct: Double? = null,
     val brokerQuoteHighDistancePct: Double? = null,
     val warnings: List<String> = emptyList()
 ) {
@@ -50,6 +51,7 @@ internal data class FixedEarlyWatchRecord(
         observedSpreadBps = observedSpreadBps,
         quoteBookStatus = quoteBookStatus,
         dayTradedShares = dayTradedShares,
+        dayChangePct = brokerReportedDayChangePct,
         distanceFromQuoteDayHighPct = brokerQuoteHighDistancePct,
         warnings = warnings
     )
@@ -93,6 +95,7 @@ class FixedEarlyWatchJournal @Inject constructor(@ApplicationContext context: Co
             observedSpreadBps = shadow.observedSpreadBps,
             quoteBookStatus = shadow.bookStatus,
             dayTradedShares = shadow.dayTradedShares,
+            brokerReportedDayChangePct = shadow.brokerReportedDayChangePct,
             brokerQuoteHighDistancePct = shadow.distanceFromQuoteDayHighPct,
             warnings = shadow.warnings
         )
