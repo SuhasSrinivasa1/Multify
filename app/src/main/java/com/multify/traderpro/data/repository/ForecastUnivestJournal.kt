@@ -97,6 +97,9 @@ class ForecastUnivestJournal @Inject constructor(@ApplicationContext context: Co
                 ForecastUnivestLearningPolicy.date(row.entryNotificationAtMs) < beforeDate
         }.toList()
     }
+    fun recent(limit: Int = 15): List<ForecastUnivestCampaign> = synchronized(lock) {
+        latest.values.sortedByDescending { it.exitReceivedAtMs ?: it.entryReceivedAtMs }.take(limit)
+    }
     fun summary(): Map<String, Any> = synchronized(lock) {
         mapOf("received_entries" to latest.size,
             "completed_same_day" to latest.values.count { it.status == "CLOSED_SAME_DAY_VERIFIED" },
