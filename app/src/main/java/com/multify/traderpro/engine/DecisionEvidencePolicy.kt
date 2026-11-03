@@ -9,6 +9,8 @@ package com.multify.traderpro.engine
  */
 object DecisionEvidencePolicy {
     private val exact = setOf(
+        "SIGNAL/CAPTURED",
+        "FORECAST_NEWS/EARLY_CATALYST_DECISION",
         "FIXED_ENGINE/LONG_SCAN_TIERED",
         "FIXED_OUTCOME/TARGET_HIT",
         "FORECAST/LONG_SCAN_TIERED",
@@ -48,6 +50,7 @@ object DecisionEvidencePolicy {
         "symbol", "engine", "source", "source_package", "type", "status", "action",
         "reason", "strategy", "regime", "market_regime", "quality_tier",
         "event_id", "buy_event_id", "sell_event_id", "gtt_id", "order_id",
+        "signal_type", "parser_confidence", "processed_ok", "source_package",
         "entry", "entry_price", "entry_price_source", "exit", "exit_price",
         "exit_price_source", "observed_price", "last_price", "price", "ltp",
         "target", "target_price", "target_pct", "stop", "stop_price", "old_trigger",
