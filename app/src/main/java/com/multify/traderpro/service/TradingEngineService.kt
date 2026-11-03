@@ -564,6 +564,15 @@ class TradingEngineService : Service() {
                                 "order_path_completed" to true,
                                 "fixed_model_changed" to false
                             ))
+                            scope.launch(Dispatchers.IO.limitedParallelism(1)) {
+                                runCatching { repository.captureFixedEarlyWatchAfterScan() }
+                                    .onFailure {
+                                        if (it !is CancellationException) auditLogger.logAsync(
+                                            "FIXED_EARLY_WATCH", "RECONCILIATION_ERROR",
+                                            mapOf("reason" to it.javaClass.simpleName,
+                                                "fixed_logic_changed" to false))
+                                    }
+                            }
                             scope.launch {
                                 notifyNewFixedRecommendationsAfterOrderPath()
                             }
