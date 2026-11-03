@@ -1620,12 +1620,16 @@ class TradingRepository @Inject constructor(
             val event = dao.byId(eventId) ?: return
             parser.parse(event.title, event.text, event.bigText)
         }
-        // TRADE_RELEASE is latency critical: keep the broker BUY ahead of nonessential
-        // Fixed-snapshot / learning maintenance. The notification listener still reserves
-        // the event fingerprint first for idempotency so duplicate Android notifications
-        // cannot create duplicate real orders.
-        if (parsed.type != SignalType.TRADE_RELEASE) {
-            runCatching { ensureFixedEngineSnapshot() }
+        // QuickBuy never performs Fixed research or forecasting in the order path.
+        // Multify BOOK PROFIT is informational only: the app-owned GTT / SELL monitor
+        // alone determines exits. Do not fetch a broker quote or send a SELL here.
+        if (parsed.type == SignalType.BOOK_PROFIT) {
+            dao.updateForwarding(eventId, "ANALYZED", "BOOK_PROFIT_IGNORED_FOR_SELL",
+                "Multify Book Profit ignored for execution. Independent protected SELL continues.", null)
+            auditLogger.logAsync("HOLDING", "MULTIFY_BOOK_PROFIT_NOT_AN_EXIT", mapOf(
+                "event_id" to eventId, "symbol" to parsed.symbol
+            ))
+            return
         }
         when (parsed.type) {
             SignalType.AUTO_PAUSED -> {
