@@ -21,6 +21,7 @@ import com.multify.traderpro.data.local.ResearchReportEntity
 import com.multify.traderpro.data.local.SignalEventDao
 import com.multify.traderpro.data.local.SignalEventEntity
 import com.multify.traderpro.data.logging.AuditLogger
+import com.multify.traderpro.data.logging.DecisionEvidenceJournal
 import com.multify.traderpro.data.logging.FixedFactorTelemetry
 import com.multify.traderpro.data.network.BrokerStatusDto
 import com.multify.traderpro.data.network.DashboardDto
@@ -202,6 +203,7 @@ class TradingRepository @Inject constructor(
     private val parser: NotificationParser,
     private val nseSymbols: NseSymbolRepository,
     private val auditLogger: AuditLogger,
+    private val decisionEvidenceJournal: DecisionEvidenceJournal,
     private val fixedFactorTelemetry: FixedFactorTelemetry,
     private val forecastNewsMonitor: ForecastNewsMonitor,
     private val forecastNewsJournal: ForecastNewsJournal,
@@ -9172,6 +9174,13 @@ class TradingRepository @Inject constructor(
         restoreStage = "Univest same-day research journal"
         val restoredUnivest = entries["forecast_univest_same_day.jsonl"]?.let { forecastUnivestJournal.restore(it) } ?: 0
         auditLogger.log("MIGRATION", "FORECAST_UNIVEST_RESTORED", mapOf("records" to restoredUnivest))
+        restoreStage = "Decision evidence journal"
+        val restoredDecisions = entries["decision_evidence.jsonl"]?.let {
+            decisionEvidenceJournal.restoreArchived(it)
+        } ?: 0
+        auditLogger.log("MIGRATION", "DECISION_EVIDENCE_RESTORED", mapOf(
+            "records" to restoredDecisions, "trading_state_restored" to false
+        ))
         restoreStage = "Historical audit events"
         val restoredAudit = entries["system_audit.jsonl"]?.let { auditLogger.restoreArchived(it) } ?: 0
         auditLogger.log("MIGRATION", "FORECAST_NEWS_AND_AUDIT_RESTORED", mapOf(
@@ -9437,6 +9446,7 @@ class TradingRepository @Inject constructor(
                 addText("forecast_news_events.jsonl", forecastNewsJournal.archive())
                 addText("forecast_univest_same_day.jsonl", forecastUnivestJournal.archive())
                 addText("forecast_univest_notification_capture.jsonl", forecastSourceNotificationJournal.archive())
+                addText("decision_evidence.jsonl", decisionEvidenceJournal.archive())
                 add("long_learning.json", calls)
                 add("long_forecasts.json", forecasts)
                 add("long_champions.json", champions)
@@ -9475,6 +9485,9 @@ class TradingRepository @Inject constructor(
                     "positive_evidence_file" to "forecast_positive_evidence.json",
                     "forecast_news_file" to "forecast_news_events.jsonl",
                     "forecast_univest_file" to "forecast_univest_same_day.jsonl",
+                    "decision_evidence_file" to "decision_evidence.jsonl",
+                    "decision_evidence_rows" to decisionEvidenceJournal.lineCount(),
+                    "decision_evidence_trading_effect" to "NONE",
                     "univest_48_factor_cohort" to "official 1-3 month entry + same-day exit + both Groww quote prices; no broker trade assumed",
                     "univest_cohort_stats" to forecastUnivestJournal.summary(),
             "univest_notification_captures" to forecastSourceNotificationJournal.count(),
@@ -9487,7 +9500,7 @@ class TradingRepository @Inject constructor(
                 addText("system_audit.jsonl", auditLogger.readAll())
             }
         } ?: error("Unable to open export destination")
-        return LogExportResult(if (fixedSnapshot != null) 20 else 19, signals.size, trades.size)
+        return LogExportResult(if (fixedSnapshot != null) 21 else 20, signals.size, trades.size)
     }
 
     suspend fun shouldCapturePackage(packageName: String): Boolean {
@@ -9750,6 +9763,7 @@ class TradingRepository @Inject constructor(
             "fixed_factor_snapshots.jsonl",
             "forecast_news_events.jsonl",
             "forecast_univest_same_day.jsonl",
+            "decision_evidence.jsonl",
             "system_audit.jsonl"
         )
         private const val MAX_RESTORE_ENTRY_BYTES = 128L * 1024L * 1024L
