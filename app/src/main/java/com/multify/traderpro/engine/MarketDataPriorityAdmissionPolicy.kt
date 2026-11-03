@@ -31,5 +31,8 @@ object MarketDataPriorityAdmissionPolicy {
         )
     }
 
+    fun ltpPriorityYieldMs(isLtp: Boolean, isProtection: Boolean, pendingProtectionLtps: Int): Long =
+        if (isLtp && !isProtection && pendingProtectionLtps > 0) 125L else 0L
+
     fun isProtectionHeader(value: String?): Boolean = value == PROTECTION
 }
