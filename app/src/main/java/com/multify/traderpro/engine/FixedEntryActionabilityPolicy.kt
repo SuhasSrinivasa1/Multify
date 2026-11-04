@@ -96,6 +96,17 @@ object FixedEntryActionabilityPolicy {
         if (dayStrong && nearHigh && vwapAtr != null && vwapAtr >= 8.0 &&
             ((runup != null && runup >= 0.5) || volumeThin || adverseSpread))
             reasons += "EXTREME_VWAP_ATR_EXTENSION_NEAR_HIGH"
+        // Groww omitted the reported day-high in every Fixed quote of the
+        // 2026-11-04 13:25 diagnostic set. The frozen 15m 'session' high in
+        // fact spans the multi-DAY historical window. Only use it as a distinctly
+        // labeled, corroborating extension proxy, NEVER as today's NSE high.
+        val historicalWindowHighDistance = snapshot?.sessionHighDistancePct
+            ?.takeIf { it.isFinite() }
+        if (dayStrong && extendedSinceFirst &&
+            historicalWindowHighDistance != null &&
+            historicalWindowHighDistance in -0.10..0.35 &&
+            vwapAtr != null && vwapAtr >= 3.0)
+            reasons += "MULTIDAY_15M_WINDOW_HIGH_WITH_EXTENDED_FIRST_PRIMARY_RUNUP"
 
         val cautions = buildList {
             if (dayStrong) add("ALREADY_UP_5PCT")
