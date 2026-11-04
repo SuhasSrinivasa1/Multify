@@ -4,9 +4,9 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 
-/** Transport-only: two LTP responses in flight; original batch order and ranking are preserved. */
+/** Transport-only: up to three LTP responses in flight; original batch order and ranking are preserved. */
 object FixedDiscoveryWindowScheduler {
-    const val WINDOW_SIZE = 2
+    const val WINDOW_SIZE = 3
 
     suspend fun <T, R> fetchOrdered(
         chunks: List<T>, windowStart: Int, loader: suspend (Int, T) -> R
