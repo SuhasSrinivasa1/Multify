@@ -31,13 +31,16 @@ object FixedEntryActionabilityPolicy {
         val status: String,
         val reasons: List<String>,
         val firstPrimaryRunupPct: Double?,
-        val distanceFromQuoteHighPct: Double?
+        val distanceFromQuoteHighPct: Double?,
+        val vwapAtrExtension: Double?,
+        val firstPrimaryRunupBeyondTargetPct: Double?
     )
 
     fun evaluate(
         nowMs: Long, quote: QuotePayload?,
         referencePrice: Double?, fixedTargetPct: Double,
-        priorSessionDuplicate: Boolean = false
+        priorSessionDuplicate: Boolean = false,
+        snapshot: FixedFeatureSnapshot? = null
     ): Verdict {
         val local = Instant.ofEpochMilli(nowMs).atZone(IST)
         val clock = local.toLocalTime()
@@ -51,8 +54,14 @@ object FixedEntryActionabilityPolicy {
         val price = quote?.lastPrice?.takeIf { it.isFinite() && it > 0.0 }
         val high = quote?.high?.takeIf { it.isFinite() && it > 0.0 }
         val dayMove = quote?.dayChangePct?.takeIf { it.isFinite() }
+        // Broker quote day-high can be unavailable; the frozen 15m candle
+        // feature is a valid observational fallback, never a model input here.
         val distance = if (price != null && high != null && high >= price)
-            (high - price) / high * 100.0 else null
+            (high - price) / high * 100.0
+        else snapshot?.sessionHighDistancePct?.takeIf { it.isFinite() && it in -1.0..30.0 }
+        val vwapAtr = if (price != null && snapshot?.vwap != null &&
+            snapshot.atr14 != null && snapshot.atr14.isFinite() && snapshot.atr14 > 0.0)
+            (price - snapshot.vwap) / snapshot.atr14 else null
         val firstPrice = referencePrice?.takeIf { it.isFinite() && it > 0.0 }
         val runup = if (firstPrice != null && price != null)
             (price / firstPrice - 1.0) * 100.0 else null
@@ -74,6 +83,9 @@ object FixedEntryActionabilityPolicy {
         if (dayMove != null && dayMove >= EXTREME_DAY_MOVE_PCT &&
             nearExtremeHigh && (volumeThin || adverseSpread))
             reasons += "EXTREME_DAY_RISE_NEAR_HIGH_WITH_LIQUIDITY_WARNING"
+        if (dayStrong && nearHigh && vwapAtr != null && vwapAtr >= 8.0 &&
+            ((runup != null && runup >= 0.5) || volumeThin || adverseSpread))
+            reasons += "EXTREME_VWAP_ATR_EXTENSION_NEAR_HIGH"
 
         val cautions = buildList {
             if (dayStrong) add("ALREADY_UP_5PCT")
@@ -86,7 +98,11 @@ object FixedEntryActionabilityPolicy {
             status = if (reasons.isNotEmpty()) "RESEARCH_ONLY" else if (cautions.isNotEmpty()) "CAUTION" else "ACTIONABLE",
             reasons = if (reasons.isNotEmpty()) reasons else cautions,
             firstPrimaryRunupPct = runup,
-            distanceFromQuoteHighPct = distance
+            distanceFromQuoteHighPct = distance,
+            vwapAtrExtension = vwapAtr,
+            firstPrimaryRunupBeyondTargetPct =
+                if (runup != null && fixedTargetPct.isFinite())
+                    runup - fixedTargetPct else null
         )
     }
 }
