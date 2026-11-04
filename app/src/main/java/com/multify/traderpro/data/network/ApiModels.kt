@@ -75,6 +75,16 @@ data class UnivestResearchDto(
 )
 
 /** Diagnostic-only first PRIMARY observations; these have NO BUY permission. */
+data class FixedPulseResearchDto(
+    val symbol: String = "",
+    val firstPulseObservedAtMs: Long = 0L,
+    val firstPulsePrice: Double = 0.0,
+    val pulsePct: Double = 0.0,
+    val latestPrice: Double = 0.0,
+    val officialEntryPrice: Double? = null,
+    val publishedAtMs: Long? = null
+)
+
 data class FixedEarlyWatchDto(
     val symbol: String = "",
     val firstPrimaryScanAtMs: Long = 0L,
@@ -95,6 +105,16 @@ data class FixedEarlyWatchDto(
     val warnings: List<String> = emptyList()
 )
 
+data class FixedResearchSafetyDto(
+    val historicalSnapshots: Int = 0,
+    val historicalDates: Int = 0,
+    val historicalObservedTargets: Int = 0,
+    val historicalUnresolved: Int = 0,
+    val liveSampledTargetFirst: Int = 0,
+    val liveSampledStopFirst: Int = 0,
+    val liveSampledUnresolved: Int = 0
+)
+
 data class DashboardDto(
     val serviceStatus: String = "device",
     val armed: Boolean = false,
@@ -109,11 +129,13 @@ data class DashboardDto(
     val forecastLearning: ForecastLearningStatsDto = ForecastLearningStatsDto(),
     val forecastReferences: ForecastReferenceStatsDto = ForecastReferenceStatsDto(),
     val fixedOutcomes: FixedOutcomeStatsDto = FixedOutcomeStatsDto(),
+    val fixedResearchSafety: FixedResearchSafetyDto = FixedResearchSafetyDto(),
     val forecasts: List<ForecastDto> = emptyList(),
     val fixedForecasts: List<ForecastDto> = emptyList(),
     val forecastWatchlist: List<ForecastDto> = emptyList(),
     val fixedWatchlist: List<ForecastDto> = emptyList(),
     val fixedEarlyWatch: List<FixedEarlyWatchDto> = emptyList(),
+    val fixedPulseResearch: List<FixedPulseResearchDto> = emptyList(),
     val forecastChampions: List<ForecastChampionDto> = emptyList(),
     val research: ResearchDto = ResearchDto(),
     val univestResearch: List<UnivestResearchDto> = emptyList(),

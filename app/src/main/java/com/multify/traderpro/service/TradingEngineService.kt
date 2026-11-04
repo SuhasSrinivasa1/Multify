@@ -687,6 +687,14 @@ class TradingEngineService : Service() {
                                             mapOf("reason" to it.javaClass.simpleName,
                                                 "fixed_logic_changed" to false))
                                     }
+                                // No broker requests or early BUYs: read existing full-NSE snapshots.
+                                runCatching { repository.captureFixedMarketPulseAfterScan() }
+                                    .onFailure {
+                                        if (it !is CancellationException) auditLogger.logAsync(
+                                            "FIXED_PULSE_RESEARCH", "POST_SCAN_CAPTURE_ERROR",
+                                            mapOf("error" to it.javaClass.simpleName,
+                                                "fixed_logic_changed" to false))
+                                    }
                             }
                             scope.launch {
                                 notifyNewFixedRecommendationsAfterOrderPath()
