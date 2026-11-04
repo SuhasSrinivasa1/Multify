@@ -9694,6 +9694,25 @@ class TradingRepository @Inject constructor(
         // The Fixed engine and its immutable scorer are never rewritten here. We archive the
         // observed outcomes, never replay active recommendation/order state. Importing the
         // current day's rows is safe ONLY after market close.
+        // Import same-day recommendation identity EVEN DURING an open session.
+        // Never create trading state. This prevents a reinstalled app from
+        // re-notifying or buying a stock recommended by a previous installation.
+        restoreStage = "Fixed same-day duplicate identity"
+        entries["fixed_imported_same_day_dedup.json"]?.let { json ->
+            val imported = fixedImportedSameDayDedupJournal.restore(json)
+            auditLogger.log("MIGRATION", "FIXED_DUPLICATE_IDENTITIES_RESTORED",
+                mapOf("prior_import_keys" to imported, "broker_trading_state_restored" to false))
+        }
+        entries["fixed_recommendations.json"]?.let { json ->
+            val older = runCatching {
+                gson.fromJson(json, Array<FixedRecommendationRecord>::class.java)?.toList().orEmpty()
+            }.getOrDefault(emptyList())
+            val imported = fixedImportedSameDayDedupJournal.markRestoredFromLegacy(
+                older, LocalDate.now(INDIA).toString())
+            auditLogger.log("MIGRATION", "FIXED_CURRENT_DAY_DUPLICATES_BLOCKED",
+                mapOf("restored_prior_publications" to imported,
+                    "auto_buy_allowed" to false, "broker_trading_state_restored" to false))
+        }
         restoreStage = "archived Fixed outcomes"
         entries["fixed_recommendations.json"]?.let { json ->
             val imported = gson.fromJson(json, Array<FixedRecommendationRecord>::class.java).orEmpty()
@@ -9860,6 +9879,7 @@ class TradingRepository @Inject constructor(
                 add("fixed_recommendations.json", fixedRecommendations)
                 fixedHistoricalEvidenceArchive.capture(fixedRecommendations)
                 addText("fixed_historical_research.json", fixedHistoricalEvidenceArchive.archive())
+                addText("fixed_imported_same_day_dedup.json", fixedImportedSameDayDedupJournal.archive())
                 addText("fixed_early_watch.json", fixedEarlyWatchJournal.archive())
                 addText("fixed_market_pulse_research.json", fixedMarketPulseResearchStore.archive())
                 addText("fixed_fast_candidates.json", fixedFastCandidatePriceStore.archive())
@@ -9902,6 +9922,8 @@ class TradingRepository @Inject constructor(
                     "forecast_univest_file" to "forecast_univest_same_day.jsonl",
                     "research_chronology_file" to "research_outcome_chronology.jsonl",
                     "fixed_historical_research_file" to "fixed_historical_research.json",
+                    "fixed_imported_same_day_dedup_file" to "fixed_imported_same_day_dedup.json",
+                    "duplicate_identity_can_trigger_buy" to false,
                     "fixed_market_pulse_research_file" to "fixed_market_pulse_research.json",
                     "fixed_fast_candidate_research_file" to "fixed_fast_candidates.json",
                     "fixed_fast_candidate_trade_effect" to "NONE",
@@ -10190,6 +10212,7 @@ class TradingRepository @Inject constructor(
             "forecast_positive_evidence.json",
             "fixed_recommendations.json",
             "fixed_historical_research.json",
+            "fixed_imported_same_day_dedup.json",
             "fixed_market_pulse_research.json",
             "fixed_fast_candidates.json",
             "fixed_early_watch.json",
