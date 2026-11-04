@@ -102,10 +102,8 @@ object FixedEntryActionabilityPolicy {
         // labeled, corroborating extension proxy, NEVER as today's NSE high.
         val historicalWindowHighDistance = snapshot?.sessionHighDistancePct
             ?.takeIf { it.isFinite() }
-        if (dayStrong && extendedSinceFirst &&
-            historicalWindowHighDistance != null &&
-            historicalWindowHighDistance in -0.10..0.35 &&
-            vwapAtr != null && vwapAtr >= 3.0)
+        if (FixedMultiDayExhaustionProxyPolicy.risky(
+                extendedSinceFirst, dayStrong, historicalWindowHighDistance, vwapAtr))
             reasons += "MULTIDAY_15M_WINDOW_HIGH_WITH_EXTENDED_FIRST_PRIMARY_RUNUP"
 
         val cautions = buildList {
