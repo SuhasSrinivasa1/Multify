@@ -56,6 +56,23 @@ class FixedEntryActionabilityPolicyTest {
         assertTrue(v.reasons.contains("PREVIOUSLY_RECOMMENDED_THIS_SESSION"))
     }
 
+    @Test fun timestampVerifiedCurrentDayHighCanReplaceUnavailableBrokerHigh() {
+        val quote = QuotePayload(lastPrice=472.60, high=null,
+            dayChangePct=8.0, bidPrice=472.2, offerPrice=472.5, volume=28_000L)
+        val v=p.evaluate(timestamp(9,40), quote, 461.75,1.1161043,
+            verifiedSameDayCandleHigh=473.50)
+        assertFalse(v.actionable)
+        assertEquals("TIMESTAMP_VERIFIED_TODAY_15M_CANDLES",v.highEvidenceSource)
+    }
+
+    @Test fun multiDayHighIsNotAcceptedWithoutProofOfToday() {
+        val quote=QuotePayload(lastPrice=472.60,high=null,dayChangePct=8.0,
+            bidPrice=472.2,offerPrice=472.5,volume=28_000L)
+        val v=p.evaluate(timestamp(9,40),quote,461.75,1.1161043)
+        assertTrue(v.actionable)
+        assertEquals("UNAVAILABLE",v.highEvidenceSource)
+    }
+
     @Test fun missingQuoteNeverFabricatesPeakInformation() {
         val v=p.evaluate(timestamp(11,30),null,null,1.1161043)
         assertTrue(v.actionable)
