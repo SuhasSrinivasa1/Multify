@@ -36,6 +36,7 @@ import com.multify.traderpro.data.network.ForecastReferenceStatsDto
 import com.multify.traderpro.data.network.FixedSnapshotDto
 import com.multify.traderpro.data.network.FixedEarlyWatchDto
 import com.multify.traderpro.data.network.FixedOutcomeStatsDto
+import com.multify.traderpro.data.network.FixedResearchSafetyDto
 import com.multify.traderpro.data.network.GttCreateRequest
 import com.multify.traderpro.data.network.GttModifyRequest
 import com.multify.traderpro.data.network.GttOrder
@@ -227,6 +228,7 @@ class TradingRepository @Inject constructor(
     private val fixedRecommendationStore: FixedRecommendationStore,
     private val fixedEarlyWatchJournal: FixedEarlyWatchJournal,
     private val fixedOutcomePerformanceStore: FixedOutcomePerformanceStore,
+    private val fixedHistoricalEvidenceArchive: FixedHistoricalEvidenceArchive,
     private val fixedAutoBuyOrderStore: FixedAutoBuyOrderStore,
     private val fixedMarketDiscoveryStateStore: FixedMarketDiscoveryStateStore,
     @ApplicationContext private val appContext: Context
@@ -1361,6 +1363,19 @@ class TradingRepository @Inject constructor(
         val fixedRecords = fixedRecommendationStore.recommendations(today)
             .filter { RecommendationPriceBandPolicy.eligible(it.entryPrice) }
         fixedOutcomePerformanceStore.record(fixedRecords)
+        fixedHistoricalEvidenceArchive.capture(fixedRecords)
+        val fixedHistoricalSummary = fixedHistoricalEvidenceArchive.summary()
+        val fixedFirstTouches = researchOutcomeChronologyJournal.recent(2500)
+            .filter { it.source == "FIXED" }
+        val fixedResearchSafety = FixedResearchSafetyDto(
+            historicalSnapshots = fixedHistoricalSummary.rows,
+            historicalDates = fixedHistoricalSummary.days,
+            historicalObservedTargets = fixedHistoricalSummary.targetObserved,
+            historicalUnresolved = fixedHistoricalSummary.unresolved,
+            liveSampledTargetFirst = fixedFirstTouches.count { it.firstTouch == "TARGET_OBSERVED_FIRST" },
+            liveSampledStopFirst = fixedFirstTouches.count { it.firstTouch == "STOP_OBSERVED_FIRST" },
+            liveSampledUnresolved = fixedFirstTouches.count { it.firstTouch == "UNRESOLVED" }
+        )
         val fixedRolling = fixedOutcomePerformanceStore.rolling()
         val fixedDaily = fixedOutcomePerformanceStore.today()
         val fixedOutcomes = FixedOutcomeStatsDto(
@@ -1439,6 +1454,7 @@ class TradingRepository @Inject constructor(
             forecastLearning = forecastLearning,
             forecastReferences = forecastReferences,
             fixedOutcomes = fixedOutcomes,
+            fixedResearchSafety = fixedResearchSafety,
             forecasts = forecasts,
             fixedForecasts = fixedForecasts,
             forecastWatchlist = secondaryForecastWatchlist(today),
@@ -6575,6 +6591,7 @@ class TradingRepository @Inject constructor(
         val today = now.toLocalDate().toString()
         val rows = fixedRecommendationStore.recommendations(today)
         fixedOutcomePerformanceStore.record(rows)
+        fixedHistoricalEvidenceArchive.capture(rows)
         if (rows.isEmpty()) return 0
 
         val open = marketSession() == "OPEN"
@@ -6584,6 +6601,7 @@ class TradingRepository @Inject constructor(
                 fixedRecommendationStore.update(row.copy(status = "SESSION_ENDED"))
             }
             fixedOutcomePerformanceStore.record(fixedRecommendationStore.recommendations(today))
+            fixedHistoricalEvidenceArchive.capture(fixedRecommendationStore.recommendations(today))
             return 0
         }
 
@@ -6642,6 +6660,7 @@ class TradingRepository @Inject constructor(
         }
         if (observed > 0) {
             fixedOutcomePerformanceStore.record(fixedRecommendationStore.recommendations(today))
+            fixedHistoricalEvidenceArchive.capture(fixedRecommendationStore.recommendations(today))
             _fixedDeliveryEvents.tryEmit(observedAt) // Repaint Fixed badges and Averages promptly.
         }
         return fixedRecommendationStore.recommendations(today).count { it.status == "ACTIVE" }
@@ -9353,6 +9372,17 @@ class TradingRepository @Inject constructor(
         val restoredNews = entries["forecast_news_events.jsonl"]?.let { forecastNewsJournal.restore(it) } ?: 0
         restoreStage = "Univest same-day research journal"
         val restoredUnivest = entries["forecast_univest_same_day.jsonl"]?.let { forecastUnivestJournal.restore(it) } ?: 0
+        // Older fixed_recommendations.json is imported into research ONLY, never into
+        // FixedRecommendationStore, broker inventory, managed holdings, or order queues.
+        val historicalFixedImported = entries["fixed_historical_research.json"]
+            ?.let { fixedHistoricalEvidenceArchive.restoreHistoricalJson(it) } ?: 0
+        val legacyFixedImported = entries["fixed_recommendations.json"]
+            ?.let { fixedHistoricalEvidenceArchive.restorePriorRecommendations(it) } ?: 0
+        auditLogger.logAsync("MIGRATION", "FIXED_READ_ONLY_HISTORY_IMPORTED", mapOf(
+            "read_only_history_rows" to historicalFixedImported,
+            "legacy_fixed_snapshot_rows" to legacyFixedImported,
+            "trading_state_restored" to false, "auto_buy_eligible" to false,
+            "historical_status_is_not_realized_pnl" to true))
         val restoredResearchChronology = entries["research_outcome_chronology.jsonl"]
             ?.let { researchOutcomeChronologyJournal.restore(it) } ?: 0
         if (restoredResearchChronology > 0) auditLogger.logAsync("FORECAST_RESEARCH",
@@ -9646,6 +9676,8 @@ class TradingRepository @Inject constructor(
                 add("research.json", research)
                 add("forecast_auto_buy_orders.json", forecastAutoBuyOrders)
                 add("fixed_recommendations.json", fixedRecommendations)
+                fixedHistoricalEvidenceArchive.capture(fixedRecommendations)
+                addText("fixed_historical_research.json", fixedHistoricalEvidenceArchive.archive())
                 addText("fixed_early_watch.json", fixedEarlyWatchJournal.archive())
                 add("fixed_5m_shadow_pairs.json", fixedFiveMinuteShadowJournal.all())
                 add("fixed_5m_shadow_comparison_summary.json", mapOf(
@@ -9685,6 +9717,9 @@ class TradingRepository @Inject constructor(
                     "forecast_news_file" to "forecast_news_events.jsonl",
                     "forecast_univest_file" to "forecast_univest_same_day.jsonl",
                     "research_chronology_file" to "research_outcome_chronology.jsonl",
+                    "fixed_historical_research_file" to "fixed_historical_research.json",
+                    "fixed_historical_research_rows" to fixedHistoricalEvidenceArchive.summary().rows,
+                    "fixed_historical_research_not_broker_trades" to true,
                     "research_chronology_scope" to "SAMPLED_PRICE_ONLY_NOT_REALIZED_PNL",
                     "research_chronology_rows" to researchOutcomeChronologyJournal.recent().size,
                     "decision_evidence_file" to "decision_evidence.jsonl",
@@ -9963,6 +9998,7 @@ class TradingRepository @Inject constructor(
             "research.json",
             "forecast_positive_evidence.json",
             "fixed_recommendations.json",
+            "fixed_historical_research.json",
             "fixed_early_watch.json",
             "fixed_engine_snapshot.json",
             "fixed_factor_snapshots.jsonl",
