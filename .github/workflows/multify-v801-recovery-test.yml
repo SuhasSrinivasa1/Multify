@@ -1,7 +1,7 @@
-name: Multify v8.0.3 Fixed Execution Evidence TEST APK
+name: Multify v8.0.4 Fixed Speed & Candidate Watch TEST APK
 on:
   push:
-    branches: [v803-fixed-execution-evidence-test]
+    branches: [v804-fixed-speed-and-candidate-monitor-test]
   workflow_dispatch:
 permissions:
   contents: read
@@ -98,7 +98,23 @@ jobs:
           assert 'candleInterval = "15minute"' in repo
           assert 'candleInterval = "1minute"' in repo
           gradle=Path('app/build.gradle.kts').read_text()
-          assert 'versionCode = 8030' in gradle
+          assert 'versionCode = 8040' in gradle
+          # Transport-only change; do not alter the broker permit or Fixed ranking.
+          pacing=Path('app/src/main/java/com/multify/traderpro/engine/AlphaLtpPacingPolicy.kt').read_text()
+          assert 'MIN_GAP_MS = 1_200L' in pacing
+          assert 'MAX_PER_MINUTE = 40' in pacing
+          window=Path('app/src/main/java/com/multify/traderpro/engine/FixedDiscoveryWindowScheduler.kt').read_text()
+          assert 'WINDOW_SIZE = 3' in window
+          fast=Path('app/src/main/java/com/multify/traderpro/data/repository/FixedFastCandidatePriceStore.kt').read_text()
+          assert 'submitMarketOrder(' not in fast
+          assert 'fixedRecommendationStore.upsert' not in fast
+          assert 'tradingEffect: String = "NONE"' in fast
+          assert 'FixedFastCandidateSelectionPolicy.select(' in repo
+          assert 'FixedFastCandidateSamplingPolicy.candidateOnlyAllowed(' in repo
+          assert 'fixed_fast_candidates.json' in repo
+          assert 'fixedFastCandidatePrices = fixedFastCandidatePriceStore.recent(today)' in repo
+          assert 'MONITORING_REST_NOT_EXCHANGE_TICK' not in repo # historical provenance unchanged
+
           repo=Path('app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt').read_text()
           assert 'FixedExecutionThinLiquidityPolicy.rejectionReason(quote)' in repo
           assert 'fixedHistoricalEvidenceArchive.restorePriorRecommendations(it)' in repo
@@ -128,16 +144,16 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v8.0.3-fixed-15m-api-reliability-debug.apk
+          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v8.0.4-fixed-15m-api-reliability-debug.apk
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/*.apk > dist/APK-SIGNATURE.txt
           "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/*.apk | head -n 2 > dist/PACKAGE.txt
-          grep -q "versionCode='8030'" dist/PACKAGE.txt
+          grep -q "versionCode='8040'" dist/PACKAGE.txt
           sha256sum dist/*.apk > dist/SHA256SUMS.txt
           git rev-parse HEAD > dist/SOURCE-COMMIT.txt
           python - <<'PY'
           from pathlib import Path
           from zipfile import ZipFile, ZIP_DEFLATED
-          with ZipFile('dist/Multify-TraderPro-v8.0.3-exact-source.zip','w',ZIP_DEFLATED) as z:
+          with ZipFile('dist/Multify-TraderPro-v8.0.4-exact-source.zip','w',ZIP_DEFLATED) as z:
             for p in Path('.').rglob('*'):
               if p.is_file() and not any(part in {'.git','.gradle','build','dist'} for part in p.parts):
                 z.write(p,p.as_posix())
@@ -145,6 +161,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: multify-v803-fixed-execution-evidence
+          name: multify-v804-fixed-speed-candidate-watch
           path: dist/
           if-no-files-found: warn
