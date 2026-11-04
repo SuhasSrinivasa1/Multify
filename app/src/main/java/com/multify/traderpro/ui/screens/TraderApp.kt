@@ -944,6 +944,26 @@ private fun FixedScreen(
             }
         }
         item {
+            val evidence = dashboard?.fixedResearchSafety
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                shape = RoundedCornerShape(20.dp)) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                    Text("Fixed evidence · historical & first-touch", fontWeight = FontWeight.SemiBold)
+                    Text("Research observations are NOT executed trades. Target-first and stop-first use spaced price samples; intermediate moves may have been missed. Imported history never reopens a holding.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    KeyValueRow("Archived Fixed observations", (evidence?.historicalSnapshots ?: 0).toString())
+                    KeyValueRow("Archived trading dates", (evidence?.historicalDates ?: 0).toString())
+                    KeyValueRow("Historical target observed", (evidence?.historicalObservedTargets ?: 0).toString())
+                    KeyValueRow("Historical snapshot unresolved", (evidence?.historicalUnresolved ?: 0).toString())
+                    HorizontalDivider()
+                    KeyValueRow("Target first in samples", (evidence?.liveSampledTargetFirst ?: 0).toString())
+                    KeyValueRow("Stop first in samples", (evidence?.liveSampledStopFirst ?: 0).toString())
+                    KeyValueRow("Neither observed", (evidence?.liveSampledUnresolved ?: 0).toString())
+                }
+            }
+        }
+        item {
             val early = dashboard?.fixedEarlyWatch.orEmpty()
             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                 shape = RoundedCornerShape(20.dp)) {
