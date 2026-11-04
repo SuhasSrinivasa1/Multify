@@ -60,7 +60,7 @@ class FixedHistoricalEvidenceArchive @Inject constructor(@ApplicationContext con
     private fun valid(r: FixedHistoricalEvidenceRow): Boolean =
         FixedHistoricalEvidenceValidationPolicy.valid(r)
 
-    private fun key(r: FixedHistoricalEvidenceRow): String = "${r.date}|${r.symbol}"
+    private fun key(r: FixedHistoricalEvidenceRow): String = "${r.date}|${r.symbol}|${r.publishedAtMs}"
 
     private fun list(): List<FixedHistoricalEvidenceRow> =
         runCatching {
