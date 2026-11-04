@@ -14,10 +14,13 @@ object FixedSameDayHighEvidencePolicy {
     private val NSE_OPEN = LocalTime.of(9, 15)
     private val NSE_CLOSE = LocalTime.of(15, 30)
 
-    fun todayHigh(snapshot: FixedFeatureSnapshot?, asOfMs: Long): Double? {
-        if (snapshot == null || asOfMs <= 0L) return null
+    fun todayHigh(snapshot: FixedFeatureSnapshot?, asOfMs: Long): Double? =
+        if (snapshot == null) null else todayHighFromBars(snapshot.candles, asOfMs)
+
+    fun todayHighFromBars(candles: List<FixedCandle>, asOfMs: Long): Double? {
+        if (asOfMs <= 0L) return null
         val now = Instant.ofEpochMilli(asOfMs).atZone(INDIA)
-        val points = snapshot.candles.mapNotNull { bar ->
+        val points = candles.mapNotNull { bar ->
             val timestampMs = when {
                 bar.ts in 1_000_000_000L..9_999_999_999L -> bar.ts * 1_000L
                 bar.ts in 1_000_000_000_000L..9_999_999_999_999L -> bar.ts
