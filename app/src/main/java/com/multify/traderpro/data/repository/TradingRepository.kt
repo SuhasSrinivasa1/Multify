@@ -35,6 +35,7 @@ import com.multify.traderpro.data.network.ForecastLearningStatsDto
 import com.multify.traderpro.data.network.ForecastReferenceStatsDto
 import com.multify.traderpro.data.network.FixedSnapshotDto
 import com.multify.traderpro.data.network.FixedEarlyWatchDto
+import com.multify.traderpro.data.network.FixedPulseResearchDto
 import com.multify.traderpro.data.network.FixedOutcomeStatsDto
 import com.multify.traderpro.data.network.FixedResearchSafetyDto
 import com.multify.traderpro.data.network.GttCreateRequest
@@ -228,6 +229,7 @@ class TradingRepository @Inject constructor(
     private val embeddedHistoricalIntelligenceStore: EmbeddedHistoricalIntelligenceStore,
     private val fixedRecommendationStore: FixedRecommendationStore,
     private val fixedEarlyWatchJournal: FixedEarlyWatchJournal,
+    private val fixedMarketPulseResearchStore: FixedMarketPulseResearchStore,
     private val fixedOutcomePerformanceStore: FixedOutcomePerformanceStore,
     private val fixedHistoricalEvidenceArchive: FixedHistoricalEvidenceArchive,
     private val fixedAutoBuyOrderStore: FixedAutoBuyOrderStore,
@@ -1461,6 +1463,7 @@ class TradingRepository @Inject constructor(
             forecastWatchlist = secondaryForecastWatchlist(today),
             fixedWatchlist = emptyList(),
             fixedEarlyWatch = fixedEarlyWatchJournal.recent(today),
+            fixedPulseResearch = fixedMarketPulseResearchStore.recent(today),
             research = research,
             univestResearch = forecastUnivestJournal.recent().map { row ->
                 UnivestResearchDto(row.symbol, row.status, row.entryPrice, row.exitPrice,
@@ -1613,7 +1616,9 @@ class TradingRepository @Inject constructor(
                 forecastReferences = forecastReferences,
                 forecasts = forecasts, fixedForecasts = fixedForecasts,
                 forecastWatchlist = secondaryForecastWatchlist(today),
-            fixedWatchlist = emptyList(), fixedEarlyWatch = fixedEarlyWatchJournal.recent(today),
+            fixedWatchlist = emptyList(),
+            fixedEarlyWatch = fixedEarlyWatchJournal.recent(today),
+            fixedPulseResearch = fixedMarketPulseResearchStore.recent(today),
             forecastChampions = champions,
                 research = research,
             univestResearch = forecastUnivestJournal.recent().map { row ->
@@ -2045,6 +2050,20 @@ class TradingRepository @Inject constructor(
                 "network_requests_added" to 0, "early_buy_allowed" to false,
                 "frozen_publication_changed" to false))
         return captured
+    }
+
+    /** Research-only market pulse, collected AFTER Fixed order path using saved LTPs. */
+    fun captureFixedMarketPulseAfterScan(): Int {
+        val date = LocalDate.now(INDIA).toString()
+        val snapshot = fixedMarketDiscoveryStateStore.load(date)
+        val published = fixedRecommendationStore.recommendations(date)
+        val newPulses = fixedMarketPulseResearchStore.capture(date, snapshot, published)
+        if (newPulses > 0) auditLogger.logAsync("FIXED_PULSE_RESEARCH", "MARKET_PULSE_CAPTURED",
+            mapOf("date" to date, "new_symbols" to newPulses,
+                "source" to "SUCCESSIVE_FULL_NSE_FIXED_LTP_SWEEPS",
+                "verified_nse_open" to false, "new_network_requests" to 0,
+                "early_trade_allowed" to false, "fixed_strategy_changed" to false))
+        return newPulses
     }
 
     fun fixedRecommendationsForNotification(): List<ForecastDto> {
@@ -9415,6 +9434,12 @@ class TradingRepository @Inject constructor(
         auditLogger.log("MIGRATION", "DECISION_EVIDENCE_RESTORED", mapOf(
             "records" to restoredDecisions, "trading_state_restored" to false
         ))
+        restoreStage = "Fixed market-pulse research journal"
+        entries["fixed_market_pulse_research.json"]?.let { pulseJson ->
+            val imported = fixedMarketPulseResearchStore.restoreArchived(pulseJson)
+            auditLogger.log("MIGRATION", "FIXED_PULSE_RESEARCH_RESTORED", mapOf(
+                "research_rows_imported" to imported, "trading_state_restored" to false))
+        }
         restoreStage = "Fixed first-PRIMARY research journal"
         val restoredEarlyWatch = entries["fixed_early_watch.json"]?.let {
             fixedEarlyWatchJournal.restoreArchived(it)
@@ -9698,6 +9723,7 @@ class TradingRepository @Inject constructor(
                 fixedHistoricalEvidenceArchive.capture(fixedRecommendations)
                 addText("fixed_historical_research.json", fixedHistoricalEvidenceArchive.archive())
                 addText("fixed_early_watch.json", fixedEarlyWatchJournal.archive())
+                addText("fixed_market_pulse_research.json", fixedMarketPulseResearchStore.archive())
                 add("fixed_5m_shadow_pairs.json", fixedFiveMinuteShadowJournal.all())
                 add("fixed_5m_shadow_comparison_summary.json", mapOf(
                     "source" to "READ_ONLY_SAME_ENTRY_SAMPLED_LTP",
@@ -9737,6 +9763,9 @@ class TradingRepository @Inject constructor(
                     "forecast_univest_file" to "forecast_univest_same_day.jsonl",
                     "research_chronology_file" to "research_outcome_chronology.jsonl",
                     "fixed_historical_research_file" to "fixed_historical_research.json",
+                    "fixed_market_pulse_research_file" to "fixed_market_pulse_research.json",
+                    "fixed_market_pulse_new_requests" to 0,
+                    "fixed_market_pulse_trade_effect" to "NONE",
                     "fixed_historical_research_rows" to fixedHistoricalEvidenceArchive.summary().rows,
                     "fixed_historical_research_not_broker_trades" to true,
                     "research_chronology_scope" to "SAMPLED_PRICE_ONLY_NOT_REALIZED_PNL",
@@ -9919,7 +9948,8 @@ class TradingRepository @Inject constructor(
         },
         forecastWatchlist = secondaryForecastWatchlist(LocalDate.now(INDIA).toString()),
         fixedWatchlist = emptyList(),
-        fixedEarlyWatch = fixedEarlyWatchJournal.recent(LocalDate.now(INDIA).toString())
+        fixedEarlyWatch = fixedEarlyWatchJournal.recent(LocalDate.now(INDIA).toString()),
+        fixedPulseResearch = fixedMarketPulseResearchStore.recent(LocalDate.now(INDIA).toString())
     )
 
     private fun marketSession(): String {
@@ -10018,6 +10048,7 @@ class TradingRepository @Inject constructor(
             "forecast_positive_evidence.json",
             "fixed_recommendations.json",
             "fixed_historical_research.json",
+            "fixed_market_pulse_research.json",
             "fixed_early_watch.json",
             "fixed_engine_snapshot.json",
             "fixed_factor_snapshots.jsonl",
