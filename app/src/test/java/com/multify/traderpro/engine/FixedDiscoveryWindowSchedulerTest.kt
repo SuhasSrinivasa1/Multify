@@ -7,7 +7,7 @@ import org.junit.Test
 import java.util.concurrent.atomic.AtomicInteger
 
 class FixedDiscoveryWindowSchedulerTest {
-    @Test fun preservesOriginalBatchOrderEvenIfSecondResponseFinishesFirst() = runBlocking {
+    @Test fun preservesOriginalBatchOrderEvenIfLaterResponsesFinishFirst() = runBlocking {
         val active = AtomicInteger()
         val peak = AtomicInteger()
         val xs = listOf("A", "B", "C", "D")
@@ -22,11 +22,11 @@ class FixedDiscoveryWindowSchedulerTest {
             })
         }
         assertEquals(listOf(0 to "A", 1 to "B", 2 to "C", 3 to "D"), results)
-        assertEquals(2, peak.get())
+        assertEquals(3, peak.get())
     }
 
     @Test fun lastWindowContainsOnlyRemainingBatch() = runBlocking {
-        val values = listOf(10, 20, 30)
-        assertEquals(listOf(2 to 30), FixedDiscoveryWindowScheduler.fetchOrdered(values, 2) { _, n -> n })
+        val values = listOf(10, 20, 30, 40)
+        assertEquals(listOf(3 to 40), FixedDiscoveryWindowScheduler.fetchOrdered(values, 3) { _, n -> n })
     }
 }
