@@ -5369,9 +5369,11 @@ class TradingRepository @Inject constructor(
         if (managedDao.openPosition(ENGINE_FORECAST_HOLDING, row.symbol) != null) {
             return "${row.symbol} already has a Forecast holding; duplicate Forecast BUY blocked"
         }
+        val quoteRequestStartedAtMs = System.currentTimeMillis()
         val quote = withFixedLiveDataSlot {
             apiFactory.groww.quote(bearer(token), tradingSymbol = row.symbol).requirePayload("Quote ${row.symbol}")
         }
+        val quoteRequestElapsedMs = System.currentTimeMillis() - quoteRequestStartedAtMs
         val ltp = quote.lastPrice ?: error("Groww quote has no LTP")
         require(RecommendationPriceBandPolicy.eligible(ltp)) { "Forecast BUY requires fresh price >₹200 and <₹5,000" }
         val forecastLiquidityReject = ExecutionQuoteLiquidityPolicy.rejectionReason(quote)
@@ -5381,6 +5383,15 @@ class TradingRepository @Inject constructor(
                 "source" to "FRESH_EXECUTION_QUOTE", "fixed_forecast_models_changed" to false
             ))
             error("Forecast BUY blocked: broker book not verified ($forecastLiquidityReject)")
+        }
+        val forecastExtensionReject = ExecutionEntryPriceGuardPolicy.rejectionReason(
+            row.entryPrice, ltp, quoteRequestElapsedMs)
+        if (forecastExtensionReject != null) {
+            auditLogger.logAsync("FORECAST_AUTO_BUY", "ENTRY_PRICE_GUARD_REJECTED",
+                mapOf("symbol" to row.symbol, "reason" to forecastExtensionReject,
+                    "quote_network_elapsed_ms" to quoteRequestElapsedMs, "reference" to row.entryPrice,
+                    "fresh_ltp" to ltp, "trading_signal_changed" to false))
+            error("Forecast BUY blocked: entry quote guard ($forecastExtensionReject)")
         }
         require(ltp < row.targetPrice) { "Forecast target already reached; BUY disabled" }
         val margin = apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin")
@@ -5883,9 +5894,11 @@ class TradingRepository @Inject constructor(
             return "${row.symbol} already has a Fixed holding; duplicate Fixed BUY blocked"
         }
 
+        val quoteRequestStartedAtMs = System.currentTimeMillis()
         val quote = withFixedLiveDataSlot {
             apiFactory.groww.quote(bearer(token), tradingSymbol = row.symbol).requirePayload("Quote ${row.symbol}")
         }
+        val quoteRequestElapsedMs = System.currentTimeMillis() - quoteRequestStartedAtMs
         val ltp = quote.lastPrice ?: error("Groww quote has no LTP")
         require(RecommendationPriceBandPolicy.eligible(ltp)) { "Fixed BUY requires fresh price >₹200 and <₹5,000" }
         val fixedLiquidityReject = ExecutionQuoteLiquidityPolicy.rejectionReason(quote)
@@ -5895,6 +5908,15 @@ class TradingRepository @Inject constructor(
                 "source" to "FRESH_EXECUTION_QUOTE", "fixed_scoring_changed" to false
             ))
             error("Fixed BUY blocked: broker book not verified ($fixedLiquidityReject)")
+        }
+        val fixedExtensionReject = ExecutionEntryPriceGuardPolicy.rejectionReason(
+            row.entryPrice, ltp, quoteRequestElapsedMs)
+        if (fixedExtensionReject != null) {
+            auditLogger.logAsync("FIXED_BUY", "ENTRY_PRICE_GUARD_REJECTED",
+                mapOf("symbol" to row.symbol, "reason" to fixedExtensionReject,
+                    "quote_network_elapsed_ms" to quoteRequestElapsedMs, "reference" to row.entryPrice,
+                    "fresh_ltp" to ltp, "fixed_scoring_changed" to false))
+            error("Fixed BUY blocked: entry quote guard ($fixedExtensionReject)")
         }
         if (ltp >= row.targetPrice) {
             fixedRecommendationStore.update(row.copy(
@@ -6059,6 +6081,15 @@ class TradingRepository @Inject constructor(
                     "symbol" to row.symbol, "reason" to liquidityReject,
                     "fresh_quote" to true, "scoring_changed" to false
                 ))
+                continue
+            }
+            val autoExtensionReject = ExecutionEntryPriceGuardPolicy.rejectionReason(
+                row.entryPrice, ltp, quoteElapsedMs)
+            if (autoExtensionReject != null) {
+                auditLogger.logAsync("FIXED_AUTO_BUY", "ENTRY_PRICE_GUARD_REJECTED",
+                    mapOf("symbol" to row.symbol, "reason" to autoExtensionReject,
+                        "reference" to row.entryPrice, "fresh_ltp" to ltp,
+                        "quote_network_elapsed_ms" to quoteElapsedMs, "fixed_scoring_changed" to false))
                 continue
             }
             if (ltp >= row.targetPrice) {
