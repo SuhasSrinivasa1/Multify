@@ -862,6 +862,8 @@ class TradingEngineService : Service() {
     private fun notifyFixed(f: ForecastDto) {
         val manager = getSystemService(NotificationManager::class.java)
         val postedAtMs = System.currentTimeMillis()
+        val clientQuoteReceivedAtMs = repository.fixedQuoteReceivedAtForNotification(
+            f.symbol, f.generatedAtMs)
         val actionable = f.executionEligible
         val message = buildString {
             append(if (actionable) "PRIMARY · entry ₹" else "RESEARCH ONLY · not buyable · observed entry ₹")
@@ -887,6 +889,12 @@ class TradingEngineService : Service() {
             "actionable_at_post_time" to actionable,
             "notification_label" to if (actionable) "FIXED_BUY" else "FIXED_RESEARCH_ONLY",
             "recommendation_generated_at_ms" to f.generatedAtMs,
+            "matched_client_quote_http_response_at_ms" to clientQuoteReceivedAtMs,
+            "matched_client_quote_to_notification_ms" to clientQuoteReceivedAtMs?.let {
+                (postedAtMs - it).coerceAtLeast(0L)
+            },
+            "matched_quote_source" to "HTTP_CLIENT_RESPONSE_NOT_EXCHANGE_TIMESTAMP",
+            "exchange_quote_timestamp_verified" to false,
             "notification_posted_at_ms" to postedAtMs,
             // Compatibility field retains its prior value. It includes the whole scan,
             // because Fixed generatedAtMs was assigned at the start of that scan.
