@@ -1,7 +1,7 @@
-name: Multify v8.0.5 Fixed Peak & Entry Safety TEST APK
+name: Multify v8.0.6 Fixed Independent Requalification TEST APK
 on:
   push:
-    branches: [v805-fixed-entry-quality-peak-guard-test]
+    branches: [v806-fixed-repeat-qualification-test]
   workflow_dispatch:
 permissions:
   contents: read
@@ -62,7 +62,21 @@ jobs:
             ('suspend fun generateFixedForecasts(', 'private fun fixedSnapshotMultifyMfeAverage('),
             ('private suspend fun fixedForecastEvaluation(', '// FIXED_FINAL_LOCK_END:')
           ):
-            assert fixed_slice(old,first,last)==fixed_slice(new,first,last),first+' changed'
+            actual=fixed_slice(new,first,last)
+            expected=fixed_slice(old,first,last)
+            if first == 'suspend fun generateFixedForecasts(':
+              # User explicitly authorized an exception only for requalification
+              # identity, recording observed price and per-event IDs. Reverse
+              # precisely these three substrings and require byte-identical
+              # v7.9.44 Fixed universe, factor maths, ranking, target, gates.
+              for exception, original in (
+                ("        // Explicitly authorized v8.0.6 publication-identity exception to the\n        // frozen v7.4.1 one-symbol-per-day restriction. Rank/score/target untouched.\n        // After a prior event, require a witnessed non-PRIMARY reset followed by\n        // a distinct, fresh confirmed PRIMARY, not a continuing old setup.\n        val allTodayFixedObservations = fixedRecommendationStore.observations(today)\n        val unseen = ranked.filter { item ->\n            FixedRepeatQualificationPolicy.qualifiedForNewEvent(\n                item.symbol, nowMs, existing, allTodayFixedObservations,\n                importedLastEventAtMs = fixedImportedSameDayDedupJournal.latestImportedAtMs(\n                    today, item.symbol))\n        }\n        fun priorPrimaryHits(symbol: String): Int =\n            FixedRepeatQualificationPolicy.primaryHitsSinceReset(\n                symbol,\n                listOfNotNull(\n                    existing.filter { it.symbol.equals(symbol, true) }\n                        .maxOfOrNull { it.generatedAtMs },\n                    fixedImportedSameDayDedupJournal.latestImportedAtMs(today, symbol)\n                ).maxOrNull(),\n                priorTodayResearch + allTodayFixedObservations.filter {\n                    // Reset may predate the 20-minute confirmation window; include\n                    // its reset evidence, but not stale old PRIMARY confirmations.\n                    it.symbol.equals(symbol, true) &&\n                        (it.qualityTier != \"PRIMARY\" || !it.publishEligible || !it.executionEligible)\n                }\n            )", "        val unseen = ranked.filter { it.symbol !in have }\n        fun priorPrimaryHits(symbol: String): Int = priorTodayResearch.asSequence()\n            .filter {\n                it.symbol.equals(symbol, true) &&\n                    it.qualityTier == \"PRIMARY\" &&\n                    it.publishEligible &&\n                    it.executionEligible\n            }\n            .map { it.scanAtMs }\n            .distinct()\n            .count()"),
+                ("                    executionEligible = item.quality.executionEligible,\n                    observedPrice = item.evaluation.features.ltp\n                )\n            }\n        )", "                    executionEligible = item.quality.executionEligible\n                )\n            }\n        )"),
+                ("id = FixedRecommendationStore.fixedEventId(today, item.symbol, nowMs)", "id = FixedRecommendationStore.fixedId(today, item.symbol)"),
+              ):
+                assert actual.count(exception)==1, 'Unexpected Fixed repeat publication mutation'
+                actual=actual.replace(exception,original,1)
+            assert actual==expected, first+' outside explicit repeat-identity exception changed'
           assert 'candleInterval = "15minute"' in new
           assert 'qualifiesVerifiedClose(' in new
           assert 'forecastSourceNotificationJournal.archive()' in new
@@ -98,7 +112,25 @@ jobs:
           assert 'candleInterval = "15minute"' in repo
           assert 'candleInterval = "1minute"' in repo
           gradle=Path('app/build.gradle.kts').read_text()
-          assert 'versionCode = 8050' in gradle
+          assert 'versionCode = 8060' in gradle
+          store=Path('app/src/main/java/com/multify/traderpro/data/repository/FixedRecommendationStore.kt').read_text()
+          assert 'filterNot { it.id == record.id }' in store
+          assert 'fun fixedEventId(' in store
+          assert 'observedPrice: Double? = null' in store
+          assert 'FixedRepeatQualificationPolicy.qualifiedForNewEvent(' in repo
+          assert 'FixedRepeatQualificationPolicy.primaryHitsSinceReset(' in repo
+          assert 'FixedRecommendationStore.fixedEventId(today, item.symbol, nowMs)' in repo
+          service=Path('app/src/main/java/com/multify/traderpro/service/TradingEngineService.kt').read_text()
+          assert 'FixedNotificationEventKeyPolicy.key(' in service
+          imported=Path('app/src/main/java/com/multify/traderpro/data/repository/FixedImportedSameDayDedupJournal.kt').read_text()
+          assert 'it.generatedAtMs == eventAtMs' in imported
+          assert 'latestImportedAtMs(' in imported
+          history=Path('app/src/main/java/com/multify/traderpro/data/repository/FixedHistoricalEvidenceArchive.kt').read_text()
+          assert '${r.date}|${r.symbol}|${r.publishedAtMs}' in history
+          metric=Path('app/src/main/java/com/multify/traderpro/data/repository/FixedOutcomePerformanceStore.kt').read_text()
+          assert '${row.recommendationDate}|${row.symbol.uppercase()}|${row.generatedAtMs}' in metric
+          assert 'candleInterval = "15minute"' in repo
+
           assert 'FixedEntryActionabilityPolicy.evaluate(' in repo
           assert 'fixedImportedSameDayDedupJournal.contains(' in repo
           assert 'fixedEntryVerdict(row, quote)' in repo
@@ -160,7 +192,7 @@ jobs:
           assert 'submitMarketOrder(' not in archive
           assert 'registerBoughtPositionAndProtect(' not in archive
           assert 'MIN_GAP_MS = 1_200L' in Path('app/src/main/java/com/multify/traderpro/engine/AlphaLtpPacingPolicy.kt').read_text()
-          print('Fixed 15m scoring, protected Fixed repository slices, BUY/SELL/GTT policies match v7.9.44')
+          print('Fixed scoring, target, universe and SELL locked; only explicit repeat-event publication identity changed')
           PY
       - name: Backend tests
         shell: bash
@@ -176,16 +208,16 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v8.0.5-fixed-15m-api-reliability-debug.apk
+          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v8.0.6-fixed-15m-api-reliability-debug.apk
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/*.apk > dist/APK-SIGNATURE.txt
           "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/*.apk | head -n 2 > dist/PACKAGE.txt
-          grep -q "versionCode='8050'" dist/PACKAGE.txt
+          grep -q "versionCode='8060'" dist/PACKAGE.txt
           sha256sum dist/*.apk > dist/SHA256SUMS.txt
           git rev-parse HEAD > dist/SOURCE-COMMIT.txt
           python - <<'PY'
           from pathlib import Path
           from zipfile import ZipFile, ZIP_DEFLATED
-          with ZipFile('dist/Multify-TraderPro-v8.0.5-exact-source.zip','w',ZIP_DEFLATED) as z:
+          with ZipFile('dist/Multify-TraderPro-v8.0.6-exact-source.zip','w',ZIP_DEFLATED) as z:
             for p in Path('.').rglob('*'):
               if p.is_file() and not any(part in {'.git','.gradle','build','dist'} for part in p.parts):
                 z.write(p,p.as_posix())
@@ -193,6 +225,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: multify-v805-fixed-peak-entry-safety
+          name: multify-v806-fixed-repeat-qualification
           path: dist/
           if-no-files-found: warn

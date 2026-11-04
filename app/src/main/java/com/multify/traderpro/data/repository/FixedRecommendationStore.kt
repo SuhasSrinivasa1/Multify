@@ -62,7 +62,8 @@ internal data class FixedScanObservation(
     val symbol: String,
     val qualityTier: String,
     val publishEligible: Boolean,
-    val executionEligible: Boolean
+    val executionEligible: Boolean,
+    val observedPrice: Double? = null
 )
 
 private data class FixedRecommendationState(
@@ -125,8 +126,11 @@ class FixedRecommendationStore @Inject constructor(
     @Synchronized
     internal fun upsert(record: FixedRecommendationRecord) {
         val state = load()
+        // Separate, immutable event identity. Multiple genuinely independent
+        // setups can share a symbol/date; an outcome update must touch only its
+        // original event, never delete a newer recommendation.
         val rows = state.recommendations
-            .filterNot { it.recommendationDate == record.recommendationDate && it.symbol.equals(record.symbol, true) }
+            .filterNot { it.id == record.id }
             .toMutableList()
         rows += record
         save(state.copy(recommendations = retainDays(rows)))
@@ -169,6 +173,20 @@ class FixedRecommendationStore @Inject constructor(
         internal fun fixedId(date: String, symbol: String): Long {
             val x = "$date|${symbol.uppercase(Locale.US)}|FIXED-V741".hashCode().toLong()
             return if (x == Long.MIN_VALUE) 1L else kotlin.math.abs(x).coerceAtLeast(1L)
+        }
+
+        /** Event identity includes the unique scan-start, not only date+symbol. */
+        internal fun fixedEventId(date: String, symbol: String, scanAtMs: Long): Long {
+            // Use a stable 63-bit ID. A 32-bit String.hashCode() is too small
+            // for an append-only multi-event archive spanning many sessions.
+            val text = "$date|${symbol.uppercase(Locale.US)}|$scanAtMs|FIXED-V806"
+            val digest = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(text.toByteArray(Charsets.UTF_8))
+            var result = 0L
+            for (i in 0 until 8) {
+                result = (result shl 8) or (digest[i].toLong() and 0xffL)
+            }
+            return (result and Long.MAX_VALUE).coerceAtLeast(1L)
         }
     }
 }
