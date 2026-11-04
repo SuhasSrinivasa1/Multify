@@ -37,6 +37,7 @@ import com.multify.traderpro.data.network.FixedSnapshotDto
 import com.multify.traderpro.data.network.FixedEarlyWatchDto
 import com.multify.traderpro.data.network.FixedPulseResearchDto
 import com.multify.traderpro.data.network.FixedOutcomeStatsDto
+import com.multify.traderpro.data.network.FixedQuoteTimingRegistry
 import com.multify.traderpro.data.network.FixedResearchSafetyDto
 import com.multify.traderpro.data.network.GttCreateRequest
 import com.multify.traderpro.data.network.GttModifyRequest
@@ -105,6 +106,7 @@ import com.multify.traderpro.engine.ResearchCandleFirstTouchPolicy
 import com.multify.traderpro.engine.ForecastPublicationPolicy
 import com.multify.traderpro.engine.FixedAdaptiveLearningMath
 import com.multify.traderpro.engine.FixedForecastPublicationPolicy
+import com.multify.traderpro.engine.FixedEntryActionabilityPolicy
 import com.multify.traderpro.engine.FixedEarlyWatchPolicy
 import com.multify.traderpro.engine.FixedFinalContract
 import com.multify.traderpro.engine.RecommendationPriceBandPolicy
@@ -235,6 +237,7 @@ class TradingRepository @Inject constructor(
     private val fixedFastCandidatePriceStore: FixedFastCandidatePriceStore,
     private val fixedOutcomePerformanceStore: FixedOutcomePerformanceStore,
     private val fixedHistoricalEvidenceArchive: FixedHistoricalEvidenceArchive,
+    private val fixedImportedSameDayDedupJournal: FixedImportedSameDayDedupJournal,
     private val fixedAutoBuyOrderStore: FixedAutoBuyOrderStore,
     private val fixedMarketDiscoveryStateStore: FixedMarketDiscoveryStateStore,
     @ApplicationContext private val appContext: Context
@@ -1401,7 +1404,9 @@ class TradingRepository @Inject constructor(
             fullHitMeanMfePct = fixedRolling.fullHitMeanMfePct,
             p25Pct = fixedRolling.p25Pct, medianPct = fixedRolling.medianPct, p75Pct = fixedRolling.p75Pct
         )
-        val fixedForecasts = fixedRecords.map { it.toDto().copy(observedAfterPublication = it.lastObservedAtMs > it.generatedAtMs) }
+        val fixedForecasts = fixedRecords.map {
+            fixedPresentationDto(it).copy(observedAfterPublication = it.lastObservedAtMs > it.generatedAtMs)
+        }
         val research = learningDao.latestResearchReport()?.let {
             ResearchDto(it.reportDate, it.title, it.summary)
         } ?: ResearchDto()
@@ -1964,6 +1969,8 @@ class TradingRepository @Inject constructor(
                 val recommendationCompletedAtMs = System.currentTimeMillis()
                 val scanned = lastFixedScanAtMs != previousScanAtMs && !fixedScanDeferredBroker
                 if (scanned) {
+                    // Evidence-based execution actionability is outside frozen Fixed scoring.
+                    auditFixedActionabilityAfterScan()
                     // Outside FIXED_FINAL_LOCK: read-only publication diagnostics.
                     // Observations include the original tier and the separate safety verdict.
                     val currentDate = LocalDate.now(INDIA).toString()
@@ -2071,6 +2078,91 @@ class TradingRepository @Inject constructor(
         return newPulses
     }
 
+    private fun fixedFirstPrimaryPrice(date: String, symbol: String): Double? =
+        fixedEarlyWatchJournal.recent(date, 1000)
+            .firstOrNull { it.symbol.equals(symbol, true) }?.firstPrimaryPrice
+
+    private fun fixedEntryVerdict(
+        row: FixedRecommendationRecord, quote: QuotePayload?,
+        nowMs: Long = System.currentTimeMillis()
+    ): FixedEntryActionabilityPolicy.Verdict {
+        // Only use the current scan's existing detailed evaluation for optional
+        // quote-high/VWAP/ATR diagnostics. Never fetch another candle or LTP.
+        val reference = fixedShadowReferences[row.symbol.uppercase(Locale.US)]?.takeIf {
+            it.quoteCapturedAtMs in row.generatedAtMs..nowMs &&
+                nowMs - it.quoteCapturedAtMs <= 5L * 60_000L
+        }
+        val snapshot = reference?.evaluation?.features?.takeIf {
+            quote?.lastPrice != null && quote.lastPrice.isFinite() &&
+                it.ltp > 0.0 && kotlin.math.abs(quote.lastPrice / it.ltp - 1.0) <= 0.01
+        }
+        return FixedEntryActionabilityPolicy.evaluate(
+            nowMs = nowMs, quote = quote,
+            referencePrice = fixedFirstPrimaryPrice(row.recommendationDate, row.symbol),
+            fixedTargetPct = row.targetPct,
+            priorSessionDuplicate = fixedImportedSameDayDedupJournal.contains(
+                row.recommendationDate, row.symbol),
+            snapshot = snapshot,
+            verifiedSameDayCandleHigh =
+                com.multify.traderpro.engine.FixedSameDayHighEvidencePolicy.todayHigh(snapshot, nowMs)
+        )
+    }
+
+    private fun fixedPublishedQuote(row: FixedRecommendationRecord, nowMs: Long): QuotePayload? =
+        fixedShadowReferences[row.symbol.uppercase(Locale.US)]?.takeIf {
+            it.quoteCapturedAtMs >= row.generatedAtMs &&
+                it.quoteCapturedAtMs <= nowMs &&
+                nowMs - it.quoteCapturedAtMs <= 5L * 60_000L
+        }?.quote
+
+    private fun fixedPresentationDto(row: FixedRecommendationRecord,
+        nowMs: Long = System.currentTimeMillis()): ForecastDto {
+        val verdict = fixedEntryVerdict(row, fixedPublishedQuote(row, nowMs), nowMs)
+        val riskPrefix = when (verdict.status) {
+            "RESEARCH_ONLY" -> "FIXED RESEARCH ONLY · BUY BLOCKED: " + verdict.reasons.joinToString(",") + " · "
+            "CAUTION" -> "FIXED ENTRY CAUTION: " + verdict.reasons.joinToString(",") + " · "
+            else -> ""
+        }
+        return row.toDto().copy(
+            reason = riskPrefix + row.reason,
+            executionEligible = row.executionEligible && verdict.actionable
+        )
+    }
+
+    /** Separate from the protected Fixed publication/score. No extra API requests. */
+    fun auditFixedActionabilityAfterScan() {
+        val date = LocalDate.now(INDIA).toString()
+        val nowMs = System.currentTimeMillis()
+        fixedRecommendationStore.recommendations(date).filter {
+            it.generatedAtMs > 0L && nowMs - it.generatedAtMs in 0L..300_000L
+        }.forEach { row ->
+            val verdict = fixedEntryVerdict(row, fixedPublishedQuote(row, nowMs), nowMs)
+            auditLogger.logAsync("FIXED_ENTRY_QUALITY", "PUBLICATION_ACTIONABILITY", mapOf(
+                "symbol" to row.symbol, "scan_started_at_ms" to row.generatedAtMs,
+                "actual_evaluated_at_ms" to nowMs, "status" to verdict.status,
+                "reasons" to verdict.reasons, "first_primary_to_entry_pct" to verdict.firstPrimaryRunupPct,
+                "distance_from_broker_or_15m_candle_high_pct" to verdict.distanceFromQuoteHighPct,
+                "day_high_evidence_source" to verdict.highEvidenceSource,
+                "multi_day_15m_window_high_distance_pct_NOT_day_high" to verdict.multiDayWindowHighDistancePct,
+                "vwap_atr_source" to "FROZEN_MULTI_DAY_15M_WINDOW",
+                "distance_above_vwap_in_atr" to verdict.vwapAtrExtension,
+                "first_primary_runup_minus_target_pct" to verdict.firstPrimaryRunupBeyondTargetPct,
+                "fixed_scoring_changed" to false, "fixed_stored_recommendation_changed" to false,
+                "buy_guard_enabled" to true))
+        }
+    }
+
+    /** Client-side response receipt only, NOT provider exchange-tick timestamp. */
+    fun fixedQuoteReceivedAtForNotification(
+        symbol: String, scanStartedAtMs: Long
+    ): Long? {
+        val reference = fixedShadowReferences[symbol.uppercase(Locale.US)] ?: return null
+        if (reference.quoteCapturedAtMs < scanStartedAtMs) return null
+        return FixedQuoteTimingRegistry.closestCompletedQuote(
+            symbol, scanStartedAtMs, reference.quoteCapturedAtMs
+        )?.responseReceivedAtMs
+    }
+
     fun fixedRecommendationsForNotification(): List<ForecastDto> {
         val today = LocalDate.now(INDIA).toString()
         return fixedRecommendationStore.recommendations(today)
@@ -2078,10 +2170,11 @@ class TradingRepository @Inject constructor(
                 it.status == "ACTIVE" &&
                     it.executionEligible &&
                     it.qualityTier == "PRIMARY" &&
-                    RecommendationPriceBandPolicy.eligible(it.entryPrice)
+                    RecommendationPriceBandPolicy.eligible(it.entryPrice) &&
+                    !fixedImportedSameDayDedupJournal.contains(today, it.symbol)
             }
             .sortedBy { it.generatedAtMs }
-            .map { it.toDto() }
+            .map { fixedPresentationDto(it) }
     }
 
     suspend fun runForecastOpportunisticCycle(postFixedOpportunity: Boolean = false): Boolean {
@@ -5943,6 +6036,9 @@ class TradingRepository @Inject constructor(
         }
 
         require(row.status == "ACTIVE") { "$symbol Fixed recommendation is no longer active" }
+        require(fixedEntryVerdict(row, null).actionable) {
+            "Fixed BUY blocked: late session or imported earlier recommendation"
+        }
         require(RecommendationPriceBandPolicy.eligible(row.entryPrice)) { "Fixed executes only stocks strictly between ₹200 and ₹5,000" }
         require(row.executionEligible && row.qualityTier == "PRIMARY") { "Only PRIMARY Fixed recommendations can place a real BUY" }
         if (managedDao.openPosition(ENGINE_FIXED_HOLDING, row.symbol) != null) {
@@ -5972,6 +6068,15 @@ class TradingRepository @Inject constructor(
                 "daily_turnover_estimate" to (ltp * (quote.volume ?: 0L)),
                 "fixed_scoring_changed" to false))
             error("Fixed BUY blocked: extremely thin reported turnover ($thinLiquidityReject)")
+        }
+        val entryActionability = fixedEntryVerdict(row, quote)
+        if (!entryActionability.actionable) {
+            auditLogger.logAsync("FIXED_BUY", "ENTRY_QUALITY_BLOCKED", mapOf(
+                "symbol" to row.symbol, "reasons" to entryActionability.reasons,
+                "first_primary_to_entry_pct" to entryActionability.firstPrimaryRunupPct,
+                "distance_from_day_high_pct" to entryActionability.distanceFromQuoteHighPct,
+                "fixed_model_unchanged" to true))
+            error("Fixed BUY held for research: " + entryActionability.reasons.joinToString(","))
         }
         val fixedExtensionReject = ExecutionEntryPriceGuardPolicy.rejectionReason(
             row.entryPrice, ltp, quoteRequestElapsedMs)
@@ -6084,6 +6189,13 @@ class TradingRepository @Inject constructor(
             val recommendationAgeAtStartMs = (symbolStartedAtMs - row.generatedAtMs).coerceAtLeast(0L)
             val liveSettings = preferences.settings.first()
             if (!liveSettings.fixedAutoBuyEnabled || liveSettings.safetyHalt || marketSession() != "OPEN") break
+            val preEntryVerdict = fixedEntryVerdict(row, null, symbolStartedAtMs)
+            if (!preEntryVerdict.actionable) {
+                auditLogger.logAsync("FIXED_AUTO_BUY", "ENTRY_QUALITY_BLOCKED_BEFORE_QUOTE",
+                    mapOf("symbol" to row.symbol, "reasons" to preEntryVerdict.reasons,
+                        "fixed_model_unchanged" to true))
+                continue
+            }
             if (!AutoBuyEntrySafetyPolicy.isFreshFixedEntry(row.generatedAtMs, symbolStartedAtMs)) {
                 auditLogger.logAsync("FIXED_AUTO_BUY", "ENTRY_SKIPPED_STALE_RECOMMENDATION", mapOf(
                     "symbol" to row.symbol,
@@ -6154,6 +6266,15 @@ class TradingRepository @Inject constructor(
                     "reported_day_shares" to quote.volume,
                     "daily_turnover_estimate" to (ltp * (quote.volume ?: 0L)),
                     "fixed_scoring_changed" to false))
+                continue
+            }
+            val entryActionability = fixedEntryVerdict(row, quote)
+            if (!entryActionability.actionable) {
+                auditLogger.logAsync("FIXED_AUTO_BUY", "ENTRY_QUALITY_BLOCKED", mapOf(
+                    "symbol" to row.symbol, "reasons" to entryActionability.reasons,
+                    "first_primary_to_entry_pct" to entryActionability.firstPrimaryRunupPct,
+                    "distance_from_day_high_pct" to entryActionability.distanceFromQuoteHighPct,
+                    "fixed_model_unchanged" to true))
                 continue
             }
             val autoExtensionReject = ExecutionEntryPriceGuardPolicy.rejectionReason(
@@ -9604,6 +9725,25 @@ class TradingRepository @Inject constructor(
         // The Fixed engine and its immutable scorer are never rewritten here. We archive the
         // observed outcomes, never replay active recommendation/order state. Importing the
         // current day's rows is safe ONLY after market close.
+        // Import same-day recommendation identity EVEN DURING an open session.
+        // Never create trading state. This prevents a reinstalled app from
+        // re-notifying or buying a stock recommended by a previous installation.
+        restoreStage = "Fixed same-day duplicate identity"
+        entries["fixed_imported_same_day_dedup.json"]?.let { json ->
+            val imported = fixedImportedSameDayDedupJournal.restore(json)
+            auditLogger.log("MIGRATION", "FIXED_DUPLICATE_IDENTITIES_RESTORED",
+                mapOf("prior_import_keys" to imported, "broker_trading_state_restored" to false))
+        }
+        entries["fixed_recommendations.json"]?.let { json ->
+            val older = runCatching {
+                gson.fromJson(json, Array<FixedRecommendationRecord>::class.java)?.toList().orEmpty()
+            }.getOrDefault(emptyList())
+            val imported = fixedImportedSameDayDedupJournal.markRestoredFromLegacy(
+                older, LocalDate.now(INDIA).toString())
+            auditLogger.log("MIGRATION", "FIXED_CURRENT_DAY_DUPLICATES_BLOCKED",
+                mapOf("restored_prior_publications" to imported,
+                    "auto_buy_allowed" to false, "broker_trading_state_restored" to false))
+        }
         restoreStage = "archived Fixed outcomes"
         entries["fixed_recommendations.json"]?.let { json ->
             val imported = gson.fromJson(json, Array<FixedRecommendationRecord>::class.java).orEmpty()
@@ -9770,6 +9910,7 @@ class TradingRepository @Inject constructor(
                 add("fixed_recommendations.json", fixedRecommendations)
                 fixedHistoricalEvidenceArchive.capture(fixedRecommendations)
                 addText("fixed_historical_research.json", fixedHistoricalEvidenceArchive.archive())
+                addText("fixed_imported_same_day_dedup.json", fixedImportedSameDayDedupJournal.archive())
                 addText("fixed_early_watch.json", fixedEarlyWatchJournal.archive())
                 addText("fixed_market_pulse_research.json", fixedMarketPulseResearchStore.archive())
                 addText("fixed_fast_candidates.json", fixedFastCandidatePriceStore.archive())
@@ -9812,6 +9953,8 @@ class TradingRepository @Inject constructor(
                     "forecast_univest_file" to "forecast_univest_same_day.jsonl",
                     "research_chronology_file" to "research_outcome_chronology.jsonl",
                     "fixed_historical_research_file" to "fixed_historical_research.json",
+                    "fixed_imported_same_day_dedup_file" to "fixed_imported_same_day_dedup.json",
+                    "duplicate_identity_can_trigger_buy" to false,
                     "fixed_market_pulse_research_file" to "fixed_market_pulse_research.json",
                     "fixed_fast_candidate_research_file" to "fixed_fast_candidates.json",
                     "fixed_fast_candidate_trade_effect" to "NONE",
@@ -10100,6 +10243,7 @@ class TradingRepository @Inject constructor(
             "forecast_positive_evidence.json",
             "fixed_recommendations.json",
             "fixed_historical_research.json",
+            "fixed_imported_same_day_dedup.json",
             "fixed_market_pulse_research.json",
             "fixed_fast_candidates.json",
             "fixed_early_watch.json",
