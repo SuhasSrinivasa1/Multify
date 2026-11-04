@@ -2101,7 +2101,9 @@ class TradingRepository @Inject constructor(
             fixedTargetPct = row.targetPct,
             priorSessionDuplicate = fixedImportedSameDayDedupJournal.contains(
                 row.recommendationDate, row.symbol),
-            snapshot = snapshot
+            snapshot = snapshot,
+            verifiedSameDayCandleHigh =
+                com.multify.traderpro.engine.FixedSameDayHighEvidencePolicy.todayHigh(snapshot, nowMs)
         )
     }
 
@@ -2139,6 +2141,7 @@ class TradingRepository @Inject constructor(
                 "actual_evaluated_at_ms" to nowMs, "status" to verdict.status,
                 "reasons" to verdict.reasons, "first_primary_to_entry_pct" to verdict.firstPrimaryRunupPct,
                 "distance_from_broker_or_15m_candle_high_pct" to verdict.distanceFromQuoteHighPct,
+                "day_high_evidence_source" to verdict.highEvidenceSource,
                 "distance_above_vwap_in_atr" to verdict.vwapAtrExtension,
                 "first_primary_runup_minus_target_pct" to verdict.firstPrimaryRunupBeyondTargetPct,
                 "fixed_scoring_changed" to false, "fixed_stored_recommendation_changed" to false,
