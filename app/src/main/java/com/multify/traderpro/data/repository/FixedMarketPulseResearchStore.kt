@@ -49,7 +49,7 @@ class FixedMarketPulseResearchStore @Inject constructor(@ApplicationContext cont
         val official = recommendations.associateBy { it.symbol.uppercase() }
         val reconciled = indexed.values.map { prior ->
             val match = if (prior.date == date) official[prior.symbol] else null
-            if (match != null && prior.publishedAtMs == null)
+            if (match != null && prior.publishedAtMs == null && match.generatedAtMs > prior.atMs)
                 prior.copy(publishedAtMs = match.generatedAtMs, officialEntryPrice = match.entryPrice)
             else prior
         }
