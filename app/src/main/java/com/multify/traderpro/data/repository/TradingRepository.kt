@@ -2082,9 +2082,13 @@ class TradingRepository @Inject constructor(
     private fun fixedFirstPrimaryPrice(row: FixedRecommendationRecord): Double? {
         val day = row.recommendationDate
         val allEvents = fixedRecommendationStore.recommendations(day)
-        val previousAt = allEvents.filter {
-            it.symbol.equals(row.symbol, true) && it.generatedAtMs < row.generatedAtMs
-        }.maxOfOrNull { it.generatedAtMs }
+        val previousAt = listOfNotNull(
+            allEvents.filter {
+                it.symbol.equals(row.symbol, true) && it.generatedAtMs < row.generatedAtMs
+            }.maxOfOrNull { it.generatedAtMs },
+            fixedImportedSameDayDedupJournal.latestImportedAtMs(day, row.symbol)
+                ?.takeIf { it < row.generatedAtMs }
+        ).maxOrNull()
         val observations = fixedRecommendationStore.observations(day)
         val boundary = previousAt?.let {
             FixedRepeatQualificationPolicy.resetAt(row.symbol, it, observations)
@@ -3511,13 +3515,18 @@ class TradingRepository @Inject constructor(
         val allTodayFixedObservations = fixedRecommendationStore.observations(today)
         val unseen = ranked.filter { item ->
             FixedRepeatQualificationPolicy.qualifiedForNewEvent(
-                item.symbol, nowMs, existing, allTodayFixedObservations)
+                item.symbol, nowMs, existing, allTodayFixedObservations,
+                importedLastEventAtMs = fixedImportedSameDayDedupJournal.latestImportedAtMs(
+                    today, item.symbol))
         }
         fun priorPrimaryHits(symbol: String): Int =
             FixedRepeatQualificationPolicy.primaryHitsSinceReset(
                 symbol,
-                existing.filter { it.symbol.equals(symbol, true) }
-                    .maxOfOrNull { it.generatedAtMs },
+                listOfNotNull(
+                    existing.filter { it.symbol.equals(symbol, true) }
+                        .maxOfOrNull { it.generatedAtMs },
+                    fixedImportedSameDayDedupJournal.latestImportedAtMs(today, symbol)
+                ).maxOrNull(),
                 priorTodayResearch + allTodayFixedObservations.filter {
                     // Reset may predate the 20-minute confirmation window; include
                     // its reset evidence, but not stale old PRIMARY confirmations.
