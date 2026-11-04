@@ -2,6 +2,11 @@
 
 Based on v8.0.4 Fixed Speed / Candidate Watch. **Engineering TEST**. Not an independently demonstrated improvement in executed profits.
 
+## Important source-verification finding (4 November logs)
+The 13:25 v8.0.0 export contained 1,995 Fixed factor snapshots, **none** with Groww's reported intraday quote-high. The frozen `sessionHighDistancePct` and VWAP indicators span the downloaded multi-day historical candle window. We do NOT pass them off as a verified NSE intraday high/VWAP.
+
+To avoid a nonfunctional peak guard, v8.0.5 applies a second, distinctly named `MULTIDAY_15M_WINDOW_HIGH_WITH_EXTENDED_FIRST_PRIMARY_RUNUP` risk check **only** when first PRIMARY-to-current run-up >= max(1.5%,1.25×target), day change >=5%, multi-day window-high distance is -0.1%..0.35%, and price is >=3 ATR above the multi-day-window VWAP. It uses existing Fixed data only. Comparing today's published factor snapshots, the rule flags SFCTECH, IZMO and the later SGRL call while leaving CNL, LODHA and FAZE3Q outside that rule. This is an **in-sample** small-cohort engineering check and MUST be evaluated on new sessions before claiming a profitable improvement.
+
 ## What is implemented
 1. **Composite price-extension and peak-risk actionability overlay.** A Fixed PRIMARY that has advanced at least 1.5% (or 1.25× its target, whichever is greater) since its first observed PRIMARY, is within 0.50% of the observed session high, **and** is at least 5% up on the day is labeled `RESEARCH_ONLY` and not eligible for a Fixed BUY. An exceptionally large day rise with thin market quality, or extreme VWAP-to-ATR stretch with near-high and corroborating evidence, also triggers a hold. A stock being up >5% or near its day high **alone** is merely cautioned, not blocked. Prices and high observations are from captured broker quotes or a fallback based on timestamp-verified **same-day** 15-minute bars, without extra broker requests. The frozen VWAP/ATR features span the downloaded multi-day history and are labeled as such; they are not claimed to be pure intraday VWAP.
 2. **BUY-only enforcement** for manually requested Fixed entries and automatic Fixed entries: re-evaluate the independent safety overlay against a fresh broker quote, and retain existing bid/ask spread, thin-turnover, +0.40% no-chase, market-price band, broker protection and cash checks.
