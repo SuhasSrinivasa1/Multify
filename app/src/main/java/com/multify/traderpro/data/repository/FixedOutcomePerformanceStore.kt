@@ -33,10 +33,10 @@ class FixedOutcomePerformanceStore @Inject constructor(@ApplicationContext conte
     @Synchronized
     internal fun record(rows: List<FixedRecommendationRecord>) {
         val started = startedAtMs()
-        val existing = load().associateBy { "${it.date}|${it.symbol.uppercase()}" }.toMutableMap()
+        val existing = load().associateBy { "${it.date}|${it.symbol.uppercase()}|${it.publishedAtMs}" }.toMutableMap()
         rows.forEach { row ->
             if (row.generatedAtMs < started || !row.entryPrice.isFinite() || row.entryPrice <= 0.0) return@forEach
-            val key = "${row.recommendationDate}|${row.symbol.uppercase()}"
+            val key = "${row.recommendationDate}|${row.symbol.uppercase()}|${row.generatedAtMs}"
             val previous = existing[key]
             val latestMfe = maxOf(previous?.maxFavourablePct ?: 0.0, row.maxFavourablePct.coerceAtLeast(0.0))
             val observed = previous?.observed == true || row.lastObservedAtMs > row.generatedAtMs
