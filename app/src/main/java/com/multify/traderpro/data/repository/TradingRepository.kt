@@ -106,6 +106,7 @@ import com.multify.traderpro.engine.ResearchCandleFirstTouchPolicy
 import com.multify.traderpro.engine.ForecastPublicationPolicy
 import com.multify.traderpro.engine.FixedAdaptiveLearningMath
 import com.multify.traderpro.engine.FixedForecastPublicationPolicy
+import com.multify.traderpro.engine.FixedRepeatQualificationPolicy
 import com.multify.traderpro.engine.FixedEntryActionabilityPolicy
 import com.multify.traderpro.engine.FixedEarlyWatchPolicy
 import com.multify.traderpro.engine.FixedFinalContract
@@ -2078,9 +2079,29 @@ class TradingRepository @Inject constructor(
         return newPulses
     }
 
-    private fun fixedFirstPrimaryPrice(date: String, symbol: String): Double? =
-        fixedEarlyWatchJournal.recent(date, 1000)
-            .firstOrNull { it.symbol.equals(symbol, true) }?.firstPrimaryPrice
+    private fun fixedFirstPrimaryPrice(row: FixedRecommendationRecord): Double? {
+        val day = row.recommendationDate
+        val allEvents = fixedRecommendationStore.recommendations(day)
+        val previousAt = allEvents.filter {
+            it.symbol.equals(row.symbol, true) && it.generatedAtMs < row.generatedAtMs
+        }.maxOfOrNull { it.generatedAtMs }
+        val observations = fixedRecommendationStore.observations(day)
+        val boundary = previousAt?.let {
+            FixedRepeatQualificationPolicy.resetAt(row.symbol, it, observations)
+        }
+        val firstFresh = observations.asSequence().filter {
+            it.symbol.equals(row.symbol, true) &&
+                it.scanAtMs <= row.generatedAtMs &&
+                (boundary == null && previousAt == null || boundary != null && it.scanAtMs > boundary) &&
+                it.qualityTier == "PRIMARY" && it.publishEligible && it.executionEligible &&
+                it.observedPrice?.isFinite() == true && (it.observedPrice ?: 0.0) > 0.0
+        }.minByOrNull { it.scanAtMs }?.observedPrice
+        // A repeat can never use the first PRIMARY price from a previous setup.
+        return firstFresh ?: if (previousAt == null)
+            fixedEarlyWatchJournal.recent(day, 1000)
+                .firstOrNull { it.symbol.equals(row.symbol, true) }?.firstPrimaryPrice
+        else null
+    }
 
     private fun fixedEntryVerdict(
         row: FixedRecommendationRecord, quote: QuotePayload?,
@@ -2098,10 +2119,10 @@ class TradingRepository @Inject constructor(
         }
         return FixedEntryActionabilityPolicy.evaluate(
             nowMs = nowMs, quote = quote,
-            referencePrice = fixedFirstPrimaryPrice(row.recommendationDate, row.symbol),
+            referencePrice = fixedFirstPrimaryPrice(row),
             fixedTargetPct = row.targetPct,
             priorSessionDuplicate = fixedImportedSameDayDedupJournal.contains(
-                row.recommendationDate, row.symbol),
+                row.recommendationDate, row.symbol, row.generatedAtMs),
             snapshot = snapshot,
             verifiedSameDayCandleHigh =
                 com.multify.traderpro.engine.FixedSameDayHighEvidencePolicy.todayHigh(snapshot, nowMs)
@@ -2171,7 +2192,7 @@ class TradingRepository @Inject constructor(
                     it.executionEligible &&
                     it.qualityTier == "PRIMARY" &&
                     RecommendationPriceBandPolicy.eligible(it.entryPrice) &&
-                    !fixedImportedSameDayDedupJournal.contains(today, it.symbol)
+                    !fixedImportedSameDayDedupJournal.contains(today, it.symbol, it.generatedAtMs)
             }
             .sortedBy { it.generatedAtMs }
             .map { fixedPresentationDto(it) }
@@ -3477,22 +3498,33 @@ class TradingRepository @Inject constructor(
                     symbol = item.symbol,
                     qualityTier = item.quality.tier,
                     publishEligible = item.quality.publishEligible,
-                    executionEligible = item.quality.executionEligible
+                    executionEligible = item.quality.executionEligible,
+                    observedPrice = item.evaluation.features.ltp
                 )
             }
         )
 
-        val unseen = ranked.filter { it.symbol !in have }
-        fun priorPrimaryHits(symbol: String): Int = priorTodayResearch.asSequence()
-            .filter {
-                it.symbol.equals(symbol, true) &&
-                    it.qualityTier == "PRIMARY" &&
-                    it.publishEligible &&
-                    it.executionEligible
-            }
-            .map { it.scanAtMs }
-            .distinct()
-            .count()
+        // Explicitly authorized v8.0.6 publication-identity exception to the
+        // frozen v7.4.1 one-symbol-per-day restriction. Rank/score/target untouched.
+        // After a prior event, require a witnessed non-PRIMARY reset followed by
+        // a distinct, fresh confirmed PRIMARY, not a continuing old setup.
+        val allTodayFixedObservations = fixedRecommendationStore.observations(today)
+        val unseen = ranked.filter { item ->
+            FixedRepeatQualificationPolicy.qualifiedForNewEvent(
+                item.symbol, nowMs, existing, allTodayFixedObservations)
+        }
+        fun priorPrimaryHits(symbol: String): Int =
+            FixedRepeatQualificationPolicy.primaryHitsSinceReset(
+                symbol,
+                existing.filter { it.symbol.equals(symbol, true) }
+                    .maxOfOrNull { it.generatedAtMs },
+                priorTodayResearch + allTodayFixedObservations.filter {
+                    // Reset may predate the 20-minute confirmation window; include
+                    // its reset evidence, but not stale old PRIMARY confirmations.
+                    it.symbol.equals(symbol, true) &&
+                        (it.qualityTier != "PRIMARY" || !it.publishEligible || !it.executionEligible)
+                }
+            )
 
         val publishable = unseen.filter { item ->
             // User-requested Fixed-only overlay. Apply it here, after the full v7.4.1 universe,
@@ -3512,7 +3544,7 @@ class TradingRepository @Inject constructor(
             val price = item.evaluation.features.ltp
             fixedRecommendationStore.upsert(
                 FixedRecommendationRecord(
-                    id = FixedRecommendationStore.fixedId(today, item.symbol),
+                    id = FixedRecommendationStore.fixedEventId(today, item.symbol, nowMs),
                     recommendationDate = today,
                     rank = existing.size + index + 1,
                     symbol = item.symbol,
@@ -6026,8 +6058,12 @@ class TradingRepository @Inject constructor(
         preIndependentExecutionGuard(settings)
         val token = ensureToken() ?: error("Authenticate Groww first")
         val today = now.toLocalDate().toString()
+        // Most recent qualifying event wins for manual entry; older events stay
+        // in research history but can never replace a fresh event for BUY.
         val row = fixedRecommendationStore.recommendations(today)
-            .firstOrNull { it.symbol.equals(symbol, true) } ?: error("No active Fixed recommendation for $symbol")
+            .filter { it.symbol.equals(symbol, true) && it.status == "ACTIVE" }
+            .maxByOrNull { it.generatedAtMs }
+            ?: error("No active Fixed recommendation for $symbol")
 
         // Legacy entry GTTs migrate in the maintenance worker, never on the BUY hot path.
         val pendingLegacy = fixedAutoBuyOrderStore.forSymbol(today, row.symbol)
@@ -6181,6 +6217,8 @@ class TradingRepository @Inject constructor(
                     it.qualityTier == "PRIMARY" &&
                     RecommendationPriceBandPolicy.eligible(it.entryPrice)
             }
+            .groupBy { it.symbol.uppercase(Locale.US) }
+            .values.mapNotNull { events -> events.maxByOrNull { it.generatedAtMs } }
             .sortedBy { it.generatedAtMs }
 
         var submitted = 0
