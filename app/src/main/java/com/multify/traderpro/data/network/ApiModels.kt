@@ -95,6 +95,16 @@ data class FixedEarlyWatchDto(
     val warnings: List<String> = emptyList()
 )
 
+data class FixedResearchSafetyDto(
+    val historicalSnapshots: Int = 0,
+    val historicalDates: Int = 0,
+    val historicalObservedTargets: Int = 0,
+    val historicalUnresolved: Int = 0,
+    val liveSampledTargetFirst: Int = 0,
+    val liveSampledStopFirst: Int = 0,
+    val liveSampledUnresolved: Int = 0
+)
+
 data class DashboardDto(
     val serviceStatus: String = "device",
     val armed: Boolean = false,
@@ -109,6 +119,7 @@ data class DashboardDto(
     val forecastLearning: ForecastLearningStatsDto = ForecastLearningStatsDto(),
     val forecastReferences: ForecastReferenceStatsDto = ForecastReferenceStatsDto(),
     val fixedOutcomes: FixedOutcomeStatsDto = FixedOutcomeStatsDto(),
+    val fixedResearchSafety: FixedResearchSafetyDto = FixedResearchSafetyDto(),
     val forecasts: List<ForecastDto> = emptyList(),
     val fixedForecasts: List<ForecastDto> = emptyList(),
     val forecastWatchlist: List<ForecastDto> = emptyList(),
