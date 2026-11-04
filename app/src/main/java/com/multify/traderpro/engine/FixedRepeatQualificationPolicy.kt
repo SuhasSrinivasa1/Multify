@@ -25,12 +25,15 @@ internal object FixedRepeatQualificationPolicy {
 
     fun qualifiedForNewEvent(symbol: String, nowMs: Long,
                              existing: List<FixedRecommendationRecord>,
-                             observations: List<FixedScanObservation>): Boolean {
-        val previous = existing.filter { it.symbol.equals(symbol, ignoreCase = true) }
-            .maxByOrNull { it.generatedAtMs } ?: return true
-        if (nowMs <= previous.generatedAtMs ||
-            nowMs - previous.generatedAtMs < MIN_EVENT_SEPARATION_MS) return false
-        val reset = resetAt(symbol, previous.generatedAtMs, observations) ?: return false
+                             observations: List<FixedScanObservation>,
+                             importedLastEventAtMs: Long? = null): Boolean {
+        val latestLocal = existing.filter { it.symbol.equals(symbol, ignoreCase = true) }
+            .maxOfOrNull { it.generatedAtMs }
+        val previousAtMs = listOfNotNull(latestLocal, importedLastEventAtMs)
+            .maxOrNull() ?: return true
+        if (nowMs <= previousAtMs ||
+            nowMs - previousAtMs < MIN_EVENT_SEPARATION_MS) return false
+        val reset = resetAt(symbol, previousAtMs, observations) ?: return false
         // At least one *prior* new PRIMARY observation; current PRIMARY is checked
         // by the unchanged FixedForecastPublicationPolicy.isReady.
         return observations.any {
