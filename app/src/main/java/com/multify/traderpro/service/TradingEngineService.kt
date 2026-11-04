@@ -846,16 +846,17 @@ class TradingEngineService : Service() {
                 .orEmpty().toMutableSet()
         } else mutableSetOf()
         val legacySymbols = seen.filter { !it.contains("|") }
-        for (symbol in legacySymbols) {
-            val earliest = rows.filter { it.symbol.equals(symbol, true) }
-                .minByOrNull { it.generatedAtMs }
-            if (earliest != null) seen.add("${earliest.symbol.uppercase(Locale.US)}|${earliest.generatedAtMs}")
-            seen.remove(symbol)
+        if (legacySymbols.isNotEmpty()) {
+            val migrated = com.multify.traderpro.engine.FixedNotificationEventKeyPolicy.migrateLegacy(
+                seen, rows.map { it.symbol to it.generatedAtMs })
+            seen.clear()
+            seen.addAll(migrated)
         }
 
         var changed = storedDate != today || legacySymbols.isNotEmpty()
         rows.forEach { row ->
-            val key = "${row.symbol.uppercase(Locale.US)}|${row.generatedAtMs}"
+            val key = com.multify.traderpro.engine.FixedNotificationEventKeyPolicy.key(
+                row.symbol, row.generatedAtMs)
             if (!seen.add(key)) return@forEach
             changed = true
             notifyFixed(row)
