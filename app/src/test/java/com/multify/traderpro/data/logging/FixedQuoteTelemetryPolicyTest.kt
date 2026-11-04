@@ -43,6 +43,15 @@ class FixedQuoteTelemetryPolicyTest {
         assertTrue((row["bid_ask_spread_bps"] as Double) > 0)
     }
 
+    @Test fun zeroOfferCannotBeReportedAsValidMarketBook() {
+        val invalid = FixedQuoteTelemetryPolicy.capture(
+            QuotePayload(lastPrice = 250.0, bidPrice = 250.0, offerPrice = 0.0))
+        assertEquals("MISSING_BID_OR_ASK", invalid["quote_book_status"])
+        assertNull(invalid["ask_price"])
+        assertNull(invalid["bid_ask_spread_bps"])
+        assertEquals(false, invalid["spread_verified"])
+    }
+
     @Test fun unavailableValuesRemainUnobserved() {
         val row = FixedQuoteTelemetryPolicy.capture(QuotePayload(lastPrice = 210.0))
         assertTrue(row["quote_available"] == true)
