@@ -31,6 +31,15 @@ class ForecastUnivestLearningPolicyTest {
         assertEquals(3.0, parsed!!.durationMonths!!, 0.0001)
     }
 
+    @Test fun recognizesRglOneToThreeMonthAdvisoryAsResearchOnlyEntry() {
+        val alert = "New Advisory Pick posted\nSTOCK: RGL\nDuration: 1-3 Months"
+        val result = p.parse("com.univest.capp", alert)
+        assertEquals(ForecastUnivestLearningPolicy.Type.ENTRY, result?.type)
+        assertEquals("RGL", result?.symbol)
+        assertEquals(3.0, result!!.durationMonths!!, 0.0001)
+        assertNull(p.parse("com.unverified.app", alert))
+    }
+
     @Test fun officialProfitOfDayExitMatchesSameDayEntryOnly() {
         val exit = p.parse("com.univest.capp", "1st Equity Profit of the Day\nAdvisory Pick: GRAPHITE\nDuration: 2 Days")
         assertEquals(ForecastUnivestLearningPolicy.Type.EXIT, exit?.type)
