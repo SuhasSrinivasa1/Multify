@@ -964,6 +964,33 @@ private fun FixedScreen(
             }
         }
         item {
+            val pulse = dashboard?.fixedPulseResearch.orEmpty()
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                shape = RoundedCornerShape(20.dp)) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                    Text("Fixed Market Pulse · earliest observed price momentum", fontWeight = FontWeight.SemiBold)
+                    Text("Read-only comparison of successive full-NSE price sweeps. Not a 9:15 exchange baseline, not an approved PRIMARY signal, and cannot BUY. No additional Groww requests.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (pulse.isEmpty()) Text("Two completed market-wide snapshots are required.",
+                        style = MaterialTheme.typography.bodySmall)
+                    pulse.take(12).forEach { item ->
+                        HorizontalDivider()
+                        Text(item.symbol + if (item.publishedAtMs != null)
+                            " · later Fixed recommendation" else " · research observation only",
+                            fontWeight = FontWeight.Medium)
+                        Text("First pulse ₹" + String.format(Locale.US, "%.2f", item.firstPulsePrice) +
+                            " · sweep-to-sweep +" + String.format(Locale.US, "%.2f%%", item.pulsePct) +
+                            " · latest ₹" + String.format(Locale.US, "%.2f", item.latestPrice) +
+                            (item.officialEntryPrice?.let {
+                                " · published at ₹" + String.format(Locale.US, "%.2f", it)
+                            } ?: ""),
+                            style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
+        }
+        item {
             val early = dashboard?.fixedEarlyWatch.orEmpty()
             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                 shape = RoundedCornerShape(20.dp)) {
