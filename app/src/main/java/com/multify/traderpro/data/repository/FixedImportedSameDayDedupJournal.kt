@@ -43,7 +43,7 @@ class FixedImportedSameDayDedupJournal @Inject constructor(@ApplicationContext c
         read().any { it.date == date && it.symbol.equals(symbol, true) }
     }
 
-    fun markRestoredFromLegacy(rows: List<FixedRecommendationRecord>, nowDate: String): Int = synchronized(lock) {
+    internal fun markRestoredFromLegacy(rows: List<FixedRecommendationRecord>, nowDate: String): Int = synchronized(lock) {
         val old = read()
         val indexed = old.associateBy { "${it.date}|${it.symbol}" }.toMutableMap()
         var added = 0
