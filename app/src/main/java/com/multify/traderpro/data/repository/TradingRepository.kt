@@ -108,6 +108,7 @@ import com.multify.traderpro.engine.FixedEarlyWatchPolicy
 import com.multify.traderpro.engine.FixedFinalContract
 import com.multify.traderpro.engine.RecommendationPriceBandPolicy
 import com.multify.traderpro.engine.ExecutionQuoteLiquidityPolicy
+import com.multify.traderpro.engine.FixedExecutionThinLiquidityPolicy
 import com.multify.traderpro.engine.FixedShadowSamplingPolicy
 import com.multify.traderpro.engine.FixedForecastQualityDecision
 import com.multify.traderpro.engine.FixedForecastQualityPolicy
@@ -5939,6 +5940,15 @@ class TradingRepository @Inject constructor(
             ))
             error("Fixed BUY blocked: broker book not verified ($fixedLiquidityReject)")
         }
+        val thinLiquidityReject = FixedExecutionThinLiquidityPolicy.rejectionReason(quote)
+        if (thinLiquidityReject != null) {
+            auditLogger.logAsync("FIXED_BUY", "ENTRY_MICRO_LIQUIDITY_REJECTED", mapOf(
+                "symbol" to row.symbol, "reason" to thinLiquidityReject,
+                "reported_day_shares" to quote.volume,
+                "daily_turnover_estimate" to (ltp * (quote.volume ?: 0L)),
+                "fixed_scoring_changed" to false))
+            error("Fixed BUY blocked: extremely thin reported turnover ($thinLiquidityReject)")
+        }
         val fixedExtensionReject = ExecutionEntryPriceGuardPolicy.rejectionReason(
             row.entryPrice, ltp, quoteRequestElapsedMs)
         if (fixedExtensionReject != null) {
@@ -6111,6 +6121,15 @@ class TradingRepository @Inject constructor(
                     "symbol" to row.symbol, "reason" to liquidityReject,
                     "fresh_quote" to true, "scoring_changed" to false
                 ))
+                continue
+            }
+            val thinLiquidityReject = FixedExecutionThinLiquidityPolicy.rejectionReason(quote)
+            if (thinLiquidityReject != null) {
+                auditLogger.logAsync("FIXED_AUTO_BUY", "ENTRY_MICRO_LIQUIDITY_REJECTED", mapOf(
+                    "symbol" to row.symbol, "reason" to thinLiquidityReject,
+                    "reported_day_shares" to quote.volume,
+                    "daily_turnover_estimate" to (ltp * (quote.volume ?: 0L)),
+                    "fixed_scoring_changed" to false))
                 continue
             }
             val autoExtensionReject = ExecutionEntryPriceGuardPolicy.rejectionReason(
