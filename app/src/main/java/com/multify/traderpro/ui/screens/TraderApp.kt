@@ -964,6 +964,30 @@ private fun FixedScreen(
             }
         }
         item {
+            val prices = dashboard?.fixedFastCandidatePrices.orEmpty()
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                shape = RoundedCornerShape(20.dp)) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                    Text("Fixed Fast Watch · spare-capacity price refresh", fontWeight = FontWeight.SemiBold)
+                    Text("Read-only LTP observations between official Fixed scans. These do not confirm PRIMARY, change the ranking, authorize BUY, or prove exchange-tick freshness.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (prices.isEmpty()) Text("Awaiting an eligible Fixed PRIMARY or market-pulse candidate and spare broker capacity.",
+                        style = MaterialTheme.typography.bodySmall)
+                    prices.take(12).forEach { item ->
+                        HorizontalDivider()
+                        Text(item.symbol + " · " + item.origin.replace("_", " "),
+                            fontWeight = FontWeight.Medium)
+                        Text("Baseline ₹" + String.format(Locale.US, "%.2f", item.baselinePrice) +
+                            " · latest ₹" + String.format(Locale.US, "%.2f", item.latestPrice) +
+                            " · change " + String.format(Locale.US, "%+.2f%%", item.moveSinceFirstPct) +
+                            " · samples " + item.observationCount,
+                            style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
+        }
+        item {
             val pulse = dashboard?.fixedPulseResearch.orEmpty()
             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                 shape = RoundedCornerShape(20.dp)) {

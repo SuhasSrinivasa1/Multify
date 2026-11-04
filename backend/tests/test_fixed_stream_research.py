@@ -1,4 +1,4 @@
-from backend.app.fixed_stream_research import select_subscription, parse_ltp_frame, MAX_SUBSCRIPTION
+from backend.app.fixed_stream_research import select_subscription, parse_ltp_frame, research_feed_coverage, MAX_SUBSCRIPTION
 
 def test_subscription_is_explicitly_capped_and_cash_only():
     rows = [{"exchange":"NSE","segment":"CASH","exchange_token":str(i)}
@@ -25,3 +25,16 @@ def test_source_timestamp_is_required_and_stale_updates_are_excluded():
 def test_stream_cannot_guess_unlabelled_symbols():
     raw = {"ltp":{"NSE":{"CASH":{"10":{"ltp":123,"tsInMillis":1000}}}}}
     assert parse_ltp_frame(raw, {}, 1200) == []
+
+def test_research_stream_coverage_never_promotes_unverified_feed_to_live_fixed():
+    now = 1_760_000_000_000
+    raw = {"ltp":{"NSE":{"CASH":{"11":{"ltp":100,"tsInMillis":now-500},
+                                   "12":{"ltp":200,"tsInMillis":now-900},
+                                   "13":{"ltp":300,"tsInMillis":now-20_000}}}}}
+    frames = parse_ltp_frame(raw,{"11":"A","12":"B","13":"C"},now)
+    coverage = research_feed_coverage(frames,{"A","B","C"},now)
+    assert coverage["fresh_symbols"] == 2
+    assert coverage["coverage_ratio"] < 0.85
+    assert coverage["passes_fixed_85pct_baseline"] is False
+    assert coverage["usable_for_production_fixed"] is False
+    assert coverage["trade_eligible"] is False
