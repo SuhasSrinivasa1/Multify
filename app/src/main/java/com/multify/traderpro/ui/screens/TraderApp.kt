@@ -1152,7 +1152,9 @@ private fun SettingsScreen(
             listenerHealthClockMs = System.currentTimeMillis()
         }
     }
-    val listenerPrefs = context.getSharedPreferences("notification_listener_state_v801", Context.MODE_PRIVATE)
+    val listenerPrefs = remember(listenerHealthClockMs) {
+        context.getSharedPreferences("notification_listener_state_v801", Context.MODE_PRIVATE)
+    }
     val listenerConnected = listenerPrefs.getBoolean("connected", false)
     val lastListenerAt = listenerPrefs.getLong("last_connected_ms", 0L)
     val lastOfficialUnivestAt = listenerPrefs.getLong("last_official_univest_seen_ms", 0L)
