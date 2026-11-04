@@ -14,6 +14,7 @@ import javax.inject.Singleton
  */
 internal data class FixedImportedRecommendationKey(
     val date: String, val symbol: String,
+    val generatedAtMs: Long = 0L,
     val origin: String = "PREVIOUS_INSTALL_LEGACY_FIXED_EXPORT",
     val allowedToTrade: Boolean = false
 )
@@ -31,29 +32,33 @@ class FixedImportedSameDayDedupJournal @Inject constructor(@ApplicationContext c
 
     private fun valid(row: FixedImportedRecommendationKey): Boolean =
         runCatching { LocalDate.parse(row.date) }.isSuccess &&
-        row.symbol.matches(Regex("[A-Z0-9&._-]{1,32}")) && !row.allowedToTrade
+        row.symbol.matches(Regex("[A-Z0-9&._-]{1,32}")) &&
+        row.generatedAtMs > 0L && !row.allowedToTrade
 
     private fun write(keys: Collection<FixedImportedRecommendationKey>) {
         val dates = keys.map { it.date }.distinct().sortedDescending().take(5).toSet()
         prefs.edit().putString("keys", gson.toJson(keys.filter { it.date in dates }
-            .distinctBy { "${it.date}|${it.symbol}" }.take(1200))).commit()
+            .distinctBy { "${it.date}|${it.symbol}|${it.generatedAtMs}" }.take(1200))).commit()
     }
 
-    fun contains(date: String, symbol: String): Boolean = synchronized(lock) {
-        read().any { it.date == date && it.symbol.equals(symbol, true) }
+    fun contains(date: String, symbol: String, eventAtMs: Long): Boolean = synchronized(lock) {
+        // An archived prior event is not evidence that a later independent
+        // PRIMARY event must be blocked.
+        read().any { it.date == date && it.symbol.equals(symbol, true) &&
+            it.generatedAtMs == eventAtMs }
     }
 
     internal fun markRestoredFromLegacy(rows: List<FixedRecommendationRecord>, nowDate: String): Int = synchronized(lock) {
         val old = read()
-        val indexed = old.associateBy { "${it.date}|${it.symbol}" }.toMutableMap()
+        val indexed = old.associateBy { "${it.date}|${it.symbol}|${it.generatedAtMs}" }.toMutableMap()
         var added = 0
         for (r in rows.take(2500)) {
             val key = FixedImportedRecommendationKey(r.recommendationDate,
-                r.symbol.uppercase(Locale.US))
+                r.symbol.uppercase(Locale.US), generatedAtMs = r.generatedAtMs)
             if (key.date != nowDate || !valid(key) ||
                 !r.entryPrice.isFinite() || r.entryPrice <= 0.0 ||
                 r.generatedAtMs <= 0L) continue
-            val id = "${key.date}|${key.symbol}"
+            val id = "${key.date}|${key.symbol}|${key.generatedAtMs}"
             if (id !in indexed) { indexed[id] = key; added++ }
         }
         if (added > 0) write(indexed.values)
@@ -67,10 +72,10 @@ class FixedImportedSameDayDedupJournal @Inject constructor(@ApplicationContext c
         val incoming = runCatching {
             gson.fromJson(json, Array<FixedImportedRecommendationKey>::class.java)?.toList().orEmpty()
         }.getOrDefault(emptyList()).take(1200)
-        val existing = read().associateBy { "${it.date}|${it.symbol}" }.toMutableMap()
+        val existing = read().associateBy { "${it.date}|${it.symbol}|${it.generatedAtMs}" }.toMutableMap()
         var added = 0
         for (r in incoming.filter(::valid)) {
-            val key = "${r.date}|${r.symbol}"
+            val key = "${r.date}|${r.symbol}|${r.generatedAtMs}"
             if (key !in existing) { existing[key] = r; added++ }
         }
         if (added > 0) write(existing.values)
