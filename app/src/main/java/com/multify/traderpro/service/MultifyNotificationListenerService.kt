@@ -128,6 +128,9 @@ class MultifyNotificationListenerService : NotificationListenerService() {
         // Official Univest research notifications are isolated from Multify's
         // execution listener/ORDER path and do not rely on the Multify package filter.
         if (sbn.packageName == ForecastUnivestLearningPolicy.OFFICIAL_PACKAGE) {
+            getSharedPreferences("notification_listener_state_v801", MODE_PRIVATE).edit()
+                .putLong("last_official_univest_seen_ms", receivedAtMs)
+                .putString("last_official_univest_package", sbn.packageName).apply()
             val lines = extras.getCharSequenceArray(Notification.EXTRA_TEXT_LINES)
                 ?.joinToString("\n").orEmpty()
             val subText = extras.getCharSequence(Notification.EXTRA_SUB_TEXT)?.toString().orEmpty()

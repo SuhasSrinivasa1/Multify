@@ -12,6 +12,7 @@ import okhttp3.Request
 import org.xmlpull.v1.XmlPullParser
 import org.xmlpull.v1.XmlPullParserFactory
 import java.io.StringReader
+import java.io.Reader
 import java.security.MessageDigest
 import java.time.Duration
 import java.time.Instant
@@ -59,8 +60,7 @@ class ForecastNewsMonitor @Inject constructor(
         var oldestPublishedAtMs = Long.MAX_VALUE
         for (feed in RSS_FEEDS) {
             try {
-                val xml = fetch(feed.second)
-                val entries = parseRss(xml)
+                val entries = fetchRss(feed.second)
                 examined += entries.size
                 for (entry in entries) {
                     val published = parseDate(entry.published)
@@ -193,45 +193,100 @@ class ForecastNewsMonitor @Inject constructor(
     internal fun parseDate(s: String): Long? = ForecastNewsDatePolicy.parse(s)
 
     internal data class RssItem(val title: String, val summary: String, val published: String, val url: String, val guid: String)
-    internal fun parseRss(xml: String): List<RssItem> {
-        val parser = XmlPullParserFactory.newInstance().newPullParser().apply { setInput(StringReader(xml)) }
+    /** Streaming parsing and bounded text prevent a malformed NSE feed from exhausting memory.
+     * Completed items are retained if malformed XML appears later in the response. */
+    internal fun parseRss(xml: String): List<RssItem> = parseRss(StringReader(xml))
+
+    internal fun parseRss(reader: Reader): List<RssItem> {
+        val parser = XmlPullParserFactory.newInstance().newPullParser().apply { setInput(reader) }
         val results = ArrayList<RssItem>()
         var inside = false; var title = ""; var desc = ""; var date = ""; var link = ""; var guid = ""
         var tag = ""
-        while (parser.eventType != XmlPullParser.END_DOCUMENT) {
-            when (parser.eventType) {
-                XmlPullParser.START_TAG -> {
-                    tag = parser.name.lowercase(Locale.ROOT)
-                    if (tag == "item") { inside = true; title = ""; desc = ""; date = ""; link = ""; guid = "" }
-                }
-                XmlPullParser.TEXT -> if (inside) when (tag) {
-                    "title" -> title += parser.text
-                    "description" -> desc += parser.text
-                    "pubdate", "published" -> date += parser.text
-                    "link" -> link += parser.text
-                    "guid" -> guid += parser.text
-                }
-                XmlPullParser.END_TAG -> {
-                    if (parser.name.equals("item", true) && inside) {
-                        if (title.isNotBlank()) results += RssItem(title.trim(), desc.trim(), date.trim(), link.trim(), guid.trim())
-                        inside = false
+        fun cap(original: String, incoming: String?, limit: Int): String =
+            if (original.length >= limit) original else original +
+                incoming.orEmpty().take(limit - original.length)
+        try {
+            while (parser.eventType != XmlPullParser.END_DOCUMENT && results.size < 1_000) {
+                when (parser.eventType) {
+                    XmlPullParser.START_TAG -> {
+                        tag = parser.name.lowercase(Locale.ROOT)
+                        if (tag == "item") {
+                            inside = true; title = ""; desc = ""; date = ""; link = ""; guid = ""
+                        }
                     }
-                    tag = ""
+                    XmlPullParser.TEXT -> if (inside) when (tag) {
+                        "title" -> title = cap(title, parser.text, 400)
+                        "description" -> desc = cap(desc, parser.text, 2_000)
+                        "pubdate", "published" -> date = cap(date, parser.text, 100)
+                        "link" -> link = cap(link, parser.text, 500)
+                        "guid" -> guid = cap(guid, parser.text, 500)
+                    }
+                    XmlPullParser.END_TAG -> {
+                        if (parser.name.equals("item", true) && inside) {
+                            if (title.isNotBlank())
+                                results += RssItem(title.trim(), desc.trim(), date.trim(), link.trim(), guid.trim())
+                            inside = false
+                        }
+                        tag = ""
+                    }
                 }
+                parser.next()
             }
-            parser.next()
+        } catch (problem: Exception) {
+            if (results.isEmpty()) throw problem
+            audit.logAsync("FORECAST_NEWS", "PARTIAL_RSS_RECOVERED", mapOf(
+                "completed_items_retained" to results.size,
+                "failure_type" to problem.javaClass.simpleName,
+                "research_only" to true))
         }
         return results
     }
 
+    /** Never load a multi-megabyte RSS response into a single String. */
+    private fun fetchRss(url: String): List<RssItem> =
+        http.newCall(Request.Builder().url(url)
+            .header("User-Agent", "Mozilla/5.0 MultifyForecastNews/1.0")
+            .header("Accept", "application/rss+xml,application/xml,text/xml,*/*")
+            .build()).execute().use { response ->
+            if (!response.isSuccessful) error("Source returned HTTP ${response.code}")
+            val body = response.body ?: error("Missing RSS body")
+            require(body.contentLength() <= 3_000_000L || body.contentLength() < 0L) {
+                "RSS feed exceeds three megabytes"
+            }
+            body.charStream().use { parseRss(LimitedNewsReader(it, 3_000_000L)) }
+        }
+
+    /** Reader-level limit also protects chunked HTTP bodies with unknown Content-Length. */
+    private class LimitedNewsReader(private val input: Reader, private val maxChars: Long) : Reader() {
+        private var seen = 0L
+        override fun read(cbuf: CharArray, off: Int, len: Int): Int {
+            if (len == 0) return 0
+            if (seen >= maxChars) throw IllegalStateException("RSS char limit reached")
+            val got = input.read(cbuf, off, minOf(len.toLong(), maxChars - seen).toInt())
+            if (got > 0) seen += got
+            return got
+        }
+        override fun close() = input.close()
+    }
+
     private fun fetch(url: String): String = http.newCall(Request.Builder().url(url)
         .header("User-Agent", "Mozilla/5.0 MultifyForecastNews/1.0")
-        .header("Accept", "application/rss+xml,application/xml,text/xml,text/csv,*/*")
-        .build()).execute().use { r ->
-        if (!r.isSuccessful) error("Source returned HTTP ${r.code}")
-        val body = r.body?.string().orEmpty()
-        require(body.isNotBlank() && body.length < 5_000_000) { "Empty or overlarge feed" }
-        body
+        .header("Accept", "text/csv,*/*")
+        .build()).execute().use { response ->
+        if (!response.isSuccessful) error("Source returned HTTP ${response.code}")
+        val body = response.body ?: error("Missing NSE catalog response")
+        val result = StringBuilder()
+        body.charStream().use { reader ->
+            val limited = LimitedNewsReader(reader, 3_000_000L)
+            val chunk = CharArray(8192)
+            while (true) {
+                val count = limited.read(chunk, 0, chunk.size)
+                if (count <= 0) break
+                result.append(chunk, 0, count)
+            }
+        }
+        require(result.isNotEmpty()) { "Empty NSE catalog" }
+        result.toString()
     }
 
     private fun parseCsv(text: String): List<String> {

@@ -21,12 +21,13 @@ object MobileEngineHealthPolicy {
         marketOpen: Boolean, fixedWorkerRunning: Boolean,
         positionWorkerRunning: Boolean, networkValidated: Boolean,
         nowMs: Long, fixedProgressAtMs: Long, positionPassAtMs: Long,
-        appOwnedHoldings: Int
+        appOwnedHoldings: Int,
+        brokerCooldownActive: Boolean = false
     ): Snapshot {
         val fixedAge = if (fixedProgressAtMs in 1..nowMs) nowMs - fixedProgressAtMs else null
         val monitorAge = if (positionPassAtMs in 1..nowMs) nowMs - positionPassAtMs else null
         val fixedStall = marketOpen && fixedWorkerRunning &&
-            fixedAge != null && fixedAge > FIXED_PROGRESS_WARN_MS
+            !brokerCooldownActive && fixedAge != null && fixedAge > FIXED_PROGRESS_WARN_MS
         val monitorStall = appOwnedHoldings > 0 && positionWorkerRunning &&
             (monitorAge == null || monitorAge > HOLDING_MONITOR_WARN_MS)
         val status = when {
@@ -34,6 +35,7 @@ object MobileEngineHealthPolicy {
             monitorStall -> "PROTECTION_MONITOR_STALE"
             !networkValidated -> "NETWORK_UNVALIDATED"
             marketOpen && !fixedWorkerRunning -> "FIXED_WORKER_DOWN"
+            marketOpen && brokerCooldownActive -> "BROKER_API_COOLDOWN"
             fixedStall -> "FIXED_SCAN_PROGRESS_STALE"
             marketOpen && fixedAge == null -> "FIXED_WARMING"
             else -> "RUNNING"

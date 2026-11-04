@@ -12,6 +12,14 @@ class MobileEngineHealthPolicyTest {
         assertTrue(x.fixedScanStalled)
         assertTrue(x.fixedWorkerRunning)
     }
+    @Test fun brokerCooldownIsNotAnEngineStall() {
+        val snapshot = MobileEngineHealthPolicy.assess(true, true, true, true,
+            1_000_000L, 400_000L, 999_000L, 0, brokerCooldownActive = true)
+        assertEquals("BROKER_API_COOLDOWN", snapshot.status)
+        assertFalse(snapshot.fixedScanStalled)
+        assertTrue(snapshot.fixedWorkerRunning)
+    }
+
     @Test fun portfolioProtectionIsMoreImportantThanResearch() {
         val p = MobileEngineHealthPolicy
         val x = p.assess(true, true, true, false, 1_000_000L,
