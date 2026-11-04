@@ -370,11 +370,17 @@ class TradingEngineService : Service() {
                         manager.getNetworkCapabilities(manager.activeNetwork)
                             ?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true
                     }.getOrDefault(false)
+                    val brokerCooldown = recoveryGate.status(nowMs).categoryCooldownUntilMs
+                        .filterKeys { it in setOf(
+                            GrowwApiUsageLedger.Category.LIVE_DATA,
+                            GrowwApiUsageLedger.Category.HISTORICAL,
+                            GrowwApiUsageLedger.Category.NON_TRADING) }
+                        .values.any { it > nowMs }
                     val snapshot = MobileEngineHealthPolicy.assess(
                         marketOpen, fixedScanJob?.isActive == true,
                         positionMonitorJob?.isActive == true, connected,
                         nowMs, lastFixedCycleCompletedAtMs, lastPositionPassSucceededAtMs,
-                        lastKnownManagedCount
+                        lastKnownManagedCount, brokerCooldownActive = brokerCooldown
                     )
                     val listenerGranted = NotificationManagerCompat
                         .getEnabledListenerPackages(this@TradingEngineService).contains(packageName)
@@ -396,6 +402,7 @@ class TradingEngineService : Service() {
                             "fixed_worker_running" to snapshot.fixedWorkerRunning,
                             "position_worker_running" to snapshot.positionWorkerRunning,
                             "fixed_stalled_only_diagnostic" to snapshot.fixedScanStalled,
+                            "broker_cooldown_active" to brokerCooldown,
                             "holding_monitor_stale" to snapshot.protectionMonitorStalled,
                             "cpu_wake_lock_held" to (positionMonitoringWakeLock?.isHeld == true),
                             "screen_interactive" to
