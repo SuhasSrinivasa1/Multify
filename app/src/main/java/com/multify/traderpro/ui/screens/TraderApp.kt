@@ -1119,7 +1119,11 @@ private fun ForecastTable(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             } else {
+                val newestFixedEvent = rows.groupBy { it.symbol.uppercase(Locale.US) }
+                    .mapValues { (_, events) -> events.maxOf { it.generatedAtMs } }
                 rows.forEachIndexed { index, f ->
+                    val oldFixedEvent = fixed &&
+                        f.generatedAtMs < (newestFixedEvent[f.symbol.uppercase(Locale.US)] ?: f.generatedAtMs)
                     Row(Modifier.fillMaxWidth().padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                         Text(f.rank.toString(), Modifier.weight(.28f), style = MaterialTheme.typography.bodySmall)
                         Text(f.symbol, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
@@ -1147,7 +1151,7 @@ private fun ForecastTable(
                     )
                     Button(
                         onClick = { onBuy(f.symbol) },
-                        enabled = if (fixed) FixedBuyAvailabilityPolicy.canBuy(
+                        enabled = if (fixed) !oldFixedEvent && FixedBuyAvailabilityPolicy.canBuy(
                             fixedClockMsForTable, executionReady, f.status, f.executionEligible
                         ) else ForecastBuyAvailabilityPolicy.canBuy(
                             fixedClockMsForTable, executionReady, f.status, f.executionEligible
@@ -1156,6 +1160,7 @@ private fun ForecastTable(
                     ) {
                         Text(
                             when {
+                                oldFixedEvent -> "Earlier Fixed setup · BUY latest instead"
                                 fixed && f.status == "TARGET_HIT" -> "TARGET HIT · BUY disabled"
                                 fixed && f.status != "ACTIVE" -> "Session ended · BUY disabled"
                                 !fixed && f.status == "TARGET_HIT" -> "TARGET HIT · BUY disabled"
@@ -1172,7 +1177,8 @@ private fun ForecastTable(
                     }
                     if (fixed) {
                         Text(
-                            "Fixed status: ${f.status.replace('_', ' ')} · observed high " +
+                            "Event scan " + SimpleDateFormat("HH:mm:ss", Locale.US)
+                                .format(Date(f.generatedAtMs)) + " IST · Fixed status: ${f.status.replace('_', ' ')} · observed high " +
                                 (if (f.observedAfterPublication) "+${String.format(Locale.US, "%.2f", f.maxFavourablePct)}%" else "—"),
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
