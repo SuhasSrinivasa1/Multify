@@ -33,6 +33,7 @@ object FixedEntryActionabilityPolicy {
         val firstPrimaryRunupPct: Double?,
         val distanceFromQuoteHighPct: Double?,
         val highEvidenceSource: String,
+        val multiDayWindowHighDistancePct: Double?,
         val vwapAtrExtension: Double?,
         val firstPrimaryRunupBeyondTargetPct: Double?
     )
@@ -119,6 +120,7 @@ object FixedEntryActionabilityPolicy {
             firstPrimaryRunupPct = runup,
             distanceFromQuoteHighPct = distance,
             highEvidenceSource = highSource,
+            multiDayWindowHighDistancePct = historicalWindowHighDistance,
             vwapAtrExtension = vwapAtr,
             firstPrimaryRunupBeyondTargetPct =
                 if (runup != null && fixedTargetPct.isFinite())
