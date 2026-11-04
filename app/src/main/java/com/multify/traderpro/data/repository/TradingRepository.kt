@@ -37,6 +37,7 @@ import com.multify.traderpro.data.network.FixedSnapshotDto
 import com.multify.traderpro.data.network.FixedEarlyWatchDto
 import com.multify.traderpro.data.network.FixedPulseResearchDto
 import com.multify.traderpro.data.network.FixedOutcomeStatsDto
+import com.multify.traderpro.data.network.FixedQuoteTimingRegistry
 import com.multify.traderpro.data.network.FixedResearchSafetyDto
 import com.multify.traderpro.data.network.GttCreateRequest
 import com.multify.traderpro.data.network.GttModifyRequest
@@ -2147,6 +2148,17 @@ class TradingRepository @Inject constructor(
                 "fixed_scoring_changed" to false, "fixed_stored_recommendation_changed" to false,
                 "buy_guard_enabled" to true))
         }
+    }
+
+    /** Client-side response receipt only, NOT provider exchange-tick timestamp. */
+    fun fixedQuoteReceivedAtForNotification(
+        symbol: String, scanStartedAtMs: Long
+    ): Long? {
+        val reference = fixedShadowReferences[symbol.uppercase(Locale.US)] ?: return null
+        if (reference.quoteCapturedAtMs < scanStartedAtMs) return null
+        return FixedQuoteTimingRegistry.closestCompletedQuote(
+            symbol, scanStartedAtMs, reference.quoteCapturedAtMs
+        )?.responseReceivedAtMs
     }
 
     fun fixedRecommendationsForNotification(): List<ForecastDto> {
