@@ -95,6 +95,10 @@ import com.multify.traderpro.engine.ForecastTargetExpansionPolicy
 import com.multify.traderpro.engine.ForecastUniversalPositiveEvidencePolicy
 import com.multify.traderpro.engine.ForecastPositiveEvidenceCase
 import com.multify.traderpro.engine.ForecastConfirmationPriorityPolicy
+import com.multify.traderpro.engine.ForecastDeterministicDeferralPolicy
+import com.multify.traderpro.engine.ExecutionEntryPriceGuardPolicy
+import com.multify.traderpro.engine.ResearchRateLimitQuietPolicy
+import com.multify.traderpro.engine.ReadOnlyFiveMinuteResearchPolicy
 import com.multify.traderpro.engine.ForecastPublicationPolicy
 import com.multify.traderpro.engine.FixedAdaptiveLearningMath
 import com.multify.traderpro.engine.FixedForecastPublicationPolicy
@@ -214,6 +218,7 @@ class TradingRepository @Inject constructor(
     private val nseMarketCapResearch: NseMarketCapResearch,
     private val forecastUnivestJournal: ForecastUnivestJournal,
     private val forecastSourceNotificationJournal: ForecastSourceNotificationJournal,
+    private val researchOutcomeChronologyJournal: ResearchOutcomeChronologyJournal,
     private val marketDiscoveryStateStore: MarketDiscoveryStateStore,
     private val forecastAutoBuyOrderStore: ForecastAutoBuyOrderStore,
     private val fixedEngineSnapshotStore: FixedEngineSnapshotStore,
@@ -2176,6 +2181,11 @@ class TradingRepository @Inject constructor(
         val live = row(GrowwApiUsageLedger.Category.LIVE_DATA)
         val historical = row(GrowwApiUsageLedger.Category.HISTORICAL)
         val nonTrading = row(GrowwApiUsageLedger.Category.NON_TRADING)
+        // Discretionary Alpha research remains quiet for five minutes after any
+        // Alpha 429. Protection, BUY/SELL and frozen Fixed are unaffected.
+        val latestAlpha429 = maxOf(live.lastRateLimitAtMs,
+            historical.lastRateLimitAtMs, nonTrading.lastRateLimitAtMs)
+        if (!ResearchRateLimitQuietPolicy.canRun(System.currentTimeMillis(), latestAlpha429)) return false
         val fixedDueInMs = millisUntilNextFixedScan()
         val isBoost = forecastBoostActive() && ForecastResearchWindowPolicy.noRecent429(
             System.currentTimeMillis(),
@@ -2542,6 +2552,9 @@ class TradingRepository @Inject constructor(
         val evaluated = mutableListOf<Pair<String, StrategyEvaluation>>()
         val detailedEvaluationStartedElapsedMs = SystemClock.elapsedRealtime()
         var processed = 0
+        // Reuse a fresh Fixed NSE sweep to avoid expensive repeated historical
+        // requests for stocks far outside the allowed Forecast price band.
+        val priceSnapshot = fixedMarketDiscoveryStateStore.load(today)
         for (symbol in tranche) {
             if (marketCriticalTradeInFlight ||
                 (fixedApiPriorityRequested && !secretStore.hasBetaCredentials()) ||
@@ -2556,6 +2569,18 @@ class TradingRepository @Inject constructor(
             }
             // Advance only after attempting the symbol. A failed API request is revisited
             // in the next complete evaluation cycle; it cannot poison today's remaining queue.
+            val knownPrice = priceSnapshot?.previousLtps?.get(symbol.uppercase(Locale.US))
+            if (ForecastDeterministicDeferralPolicy.defer(
+                    knownPrice, priceSnapshot?.updatedAtMs ?: 0L, System.currentTimeMillis())) {
+                forecastDetailCursor++
+                processed++
+                auditLogger.logAsync("FORECAST_RESEARCH", "KNOWN_PRICE_BAND_DEFERRED", mapOf(
+                    "symbol" to symbol, "cached_price" to knownPrice, "snapshot_age_ms" to
+                        (System.currentTimeMillis() - (priceSnapshot?.updatedAtMs ?: 0L)),
+                    "fresh_quote_on_borderline_or_stale" to true,
+                    "fixed_model_changed" to false))
+                continue
+            }
             val evaluationResult = runCatching { forecastEvaluation(symbol, token) }
             // A Fixed-priority yield is not a failed stock evaluation: retain this queue
             // position and retry when spare broker capacity returns.
@@ -2568,9 +2593,12 @@ class TradingRepository @Inject constructor(
                 break
             }
             val evaluation = evaluationResult.onFailure {
-                auditLogger.log("FORECAST_RESEARCH", "EVALUATION_ERROR", mapOf(
-                    "symbol" to symbol, "message" to (it.message ?: it.javaClass.simpleName)
-                ))
+                val deterministic = it is IllegalArgumentException &&
+                    it.message == "FORECAST_PRICE_BAND_OUTSIDE"
+                auditLogger.log("FORECAST_RESEARCH",
+                    if (deterministic) "EVALUATION_FILTERED_PRICE_BAND" else "EVALUATION_ERROR", mapOf(
+                    "symbol" to symbol, "message" to (it.message ?: it.javaClass.simpleName),
+                    "broker_error" to !deterministic))
             }.getOrNull()
             forecastDetailCursor++
             processed++
@@ -5032,6 +5060,16 @@ class TradingRepository @Inject constructor(
             "extra_broker_requests" to 0
         ))
         val features = LocalStrategyEngine.buildFeatures(quote, historical, 1)
+        // Use only already downloaded 1m candles; research-only, zero extra API calls.
+        val five = ReadOnlyFiveMinuteResearchPolicy.evaluate(features.candles, System.currentTimeMillis())
+        if (five.completeBars >= 3) auditLogger.logAsync("FORECAST_5M_RESEARCH", "ENTRY_CONTEXT", mapOf(
+            "symbol" to symbol, "complete_five_minute_bars" to five.completeBars,
+            "close" to five.lastFiveMinuteClose, "ema9" to five.ema9,
+            "ema20" to five.ema20, "vwap" to five.vwap,
+            "relative_volume" to five.relativeVolume, "bullish_candle" to five.bullishCandle,
+            "above_vwap" to five.aboveVwap, "ema_bullish" to five.emaBullish,
+            "three_bar_breakout" to five.threeBarBreakout,
+            "no_extra_broker_requests" to true, "trading_effect" to "NONE"))
         val signal = ParsedSignal(SignalType.TRADE_RELEASE, symbol = symbol, rawText = "forecast", confidence = 1.0)
         return LocalStrategyEngine.evaluateLong(signal, features, includeEventPrior = false)
     }
@@ -6449,6 +6487,8 @@ class TradingRepository @Inject constructor(
 
         for (row in rows) {
             val ltp = ltps[row.symbol.uppercase(Locale.US)] ?: continue
+            researchOutcomeChronologyJournal.observe("FORECAST", row.symbol.uppercase(Locale.US),
+                row.generatedAtMs, row.entryPrice, row.targetPrice, ltp, nowMs, "BULK_LIVE_LTP")
             val movePct = (ltp / row.entryPrice - 1.0) * 100.0
             val adversePct = max(0.0, (row.entryPrice - ltp) / row.entryPrice * 100.0)
             val hitNow = ltp >= row.targetPrice
@@ -6566,6 +6606,8 @@ class TradingRepository @Inject constructor(
         row: FixedRecommendationRecord, price: Double, atMs: Long, source: String
     ) {
         if (atMs <= row.lastObservedAtMs || atMs <= row.generatedAtMs) return
+        researchOutcomeChronologyJournal.observe("FIXED", row.symbol.uppercase(Locale.US),
+            row.generatedAtMs, row.entryPrice, row.targetPrice, price, atMs, source)
         val move = maxOf(0.0, (price / row.entryPrice - 1.0) * 100.0)
         val maxMfe = maxOf(row.maxFavourablePct, move)
         val targetHit = row.status == "TARGET_HIT" || price >= row.targetPrice ||
@@ -9252,6 +9294,11 @@ class TradingRepository @Inject constructor(
         val restoredNews = entries["forecast_news_events.jsonl"]?.let { forecastNewsJournal.restore(it) } ?: 0
         restoreStage = "Univest same-day research journal"
         val restoredUnivest = entries["forecast_univest_same_day.jsonl"]?.let { forecastUnivestJournal.restore(it) } ?: 0
+        val restoredResearchChronology = entries["research_outcome_chronology.jsonl"]
+            ?.let { researchOutcomeChronologyJournal.restore(it) } ?: 0
+        if (restoredResearchChronology > 0) auditLogger.logAsync("FORECAST_RESEARCH",
+            "CHRONOLOGY_RESTORED", mapOf("rows" to restoredResearchChronology,
+                "broker_order_state_changed" to false))
         auditLogger.log("MIGRATION", "FORECAST_UNIVEST_RESTORED", mapOf("records" to restoredUnivest))
         restoreStage = "Decision evidence journal"
         val restoredDecisions = entries["decision_evidence.jsonl"]?.let {
@@ -9531,6 +9578,7 @@ class TradingRepository @Inject constructor(
                 add("forecast_positive_evidence.json", positiveEvidence)
                 addText("forecast_news_events.jsonl", forecastNewsJournal.archive())
                 addText("forecast_univest_same_day.jsonl", forecastUnivestJournal.archive())
+                addText("research_outcome_chronology.jsonl", researchOutcomeChronologyJournal.archive())
                 addText("forecast_univest_notification_capture.jsonl", forecastSourceNotificationJournal.archive())
                 addText("decision_evidence.jsonl", decisionEvidenceJournal.archive())
                 add("long_learning.json", calls)
@@ -9577,6 +9625,9 @@ class TradingRepository @Inject constructor(
                     "positive_evidence_file" to "forecast_positive_evidence.json",
                     "forecast_news_file" to "forecast_news_events.jsonl",
                     "forecast_univest_file" to "forecast_univest_same_day.jsonl",
+                    "research_chronology_file" to "research_outcome_chronology.jsonl",
+                    "research_chronology_scope" to "SAMPLED_PRICE_ONLY_NOT_REALIZED_PNL",
+                    "research_chronology_rows" to researchOutcomeChronologyJournal.recent().size,
                     "decision_evidence_file" to "decision_evidence.jsonl",
                     "decision_evidence_rows" to decisionEvidenceJournal.lineCount(),
                     "decision_evidence_write_failures" to decisionEvidenceJournal.failedWriteCount(),
@@ -9858,6 +9909,7 @@ class TradingRepository @Inject constructor(
             "fixed_factor_snapshots.jsonl",
             "forecast_news_events.jsonl",
             "forecast_univest_same_day.jsonl",
+            "research_outcome_chronology.jsonl",
             "decision_evidence.jsonl",
             "system_audit.jsonl"
         )
