@@ -1144,6 +1144,23 @@ private fun SettingsScreen(
     var budget by remember(state.settings.holdingBudgetRupees) { mutableStateOf(state.settings.holdingBudgetRupees.toFloat()) }
     var manualSymbol by remember { mutableStateOf("") }
     var manualPrice by remember { mutableStateOf("") }
+    // Capture health is independent of the foreground trading-engine process.
+    var listenerHealthClockMs by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(15_000L)
+            listenerHealthClockMs = System.currentTimeMillis()
+        }
+    }
+    val listenerPrefs = context.getSharedPreferences("notification_listener_state_v801", Context.MODE_PRIVATE)
+    val listenerConnected = listenerPrefs.getBoolean("connected", false)
+    val lastListenerAt = listenerPrefs.getLong("last_connected_ms", 0L)
+    val lastOfficialUnivestAt = listenerPrefs.getLong("last_official_univest_seen_ms", 0L)
+    val lastParsedAt = listenerPrefs.getLong("last_univest_parsed_at_ms", 0L)
+    val lastParsedSymbol = listenerPrefs.getString("last_univest_parsed_symbol", "").orEmpty()
+    val lastParsedStatus = listenerPrefs.getString("last_univest_parse_status", "NOT_CAPTURED").orEmpty()
+    fun captureTime(ms: Long): String = if (ms <= 0L) "Never"
+        else SimpleDateFormat("dd MMM HH:mm:ss", Locale.US).format(Date(ms))
     val notificationAccess = notificationAccessEnabled(context)
     val batteryUnrestricted = batteryOptimizationIgnored(context)
     val armed = state.settings.armEffective
@@ -1355,6 +1372,22 @@ private fun SettingsScreen(
             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface), shape = RoundedCornerShape(20.dp)) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     KeyValueRow("Notification access", if (notificationAccess) "Enabled" else "Required")
+                    KeyValueRow("Notification listener", when {
+                        !notificationAccess -> "PERMISSION DISABLED"
+                        listenerConnected -> "Connected"
+                        else -> "Disconnected / awaiting Android"
+                    })
+                    KeyValueRow("Listener last connected", captureTime(lastListenerAt))
+                    KeyValueRow("Latest official Univest alert", captureTime(lastOfficialUnivestAt))
+                    KeyValueRow("Latest Univest parse", captureTime(lastParsedAt))
+                    KeyValueRow("Univest parse result",
+                        if (lastParsedSymbol.isBlank()) lastParsedStatus
+                        else "$lastParsedSymbol · $lastParsedStatus")
+                    Text(
+                        "Univest is research-only. A running trading engine does not prove the Android notification listener is connected. Only an Android-delivered verified notification can be captured automatically.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                     KeyValueRow("Background battery", if (batteryUnrestricted) "Unrestricted" else "Optimized")
                     OutlinedButton(onClick = { openNotificationAccessSettings(context) }, modifier = Modifier.fillMaxWidth()) { Text("Notification access") }
                     Button(onClick = { requestUnrestrictedBattery(context) }, modifier = Modifier.fillMaxWidth()) { Text("Allow unrestricted background") }
