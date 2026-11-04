@@ -9,6 +9,10 @@ package com.multify.traderpro.engine
  * an out-of-sample-validated predictive alpha rule.
  */
 object FixedMultiDayExhaustionProxyPolicy {
+    /** Explicitly MULTI-DAY: do not pass this value off as NSE's current-day high. */
+    fun distanceFromMultiDayWindowHigh(snapshot: FixedFeatureSnapshot?): Double? =
+        snapshot?.sessionHighDistancePct?.takeIf { it.isFinite() }
+
     const val MAX_DISTANCE_FROM_WINDOW_HIGH_PCT = 0.35
     const val MIN_WINDOW_VWAP_EXTENSION_ATR = 3.0
 
