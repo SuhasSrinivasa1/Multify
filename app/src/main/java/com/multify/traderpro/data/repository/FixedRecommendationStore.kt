@@ -62,7 +62,8 @@ internal data class FixedScanObservation(
     val symbol: String,
     val qualityTier: String,
     val publishEligible: Boolean,
-    val executionEligible: Boolean
+    val executionEligible: Boolean,
+    val observedPrice: Double? = null
 )
 
 private data class FixedRecommendationState(
@@ -125,8 +126,11 @@ class FixedRecommendationStore @Inject constructor(
     @Synchronized
     internal fun upsert(record: FixedRecommendationRecord) {
         val state = load()
+        // Separate, immutable event identity. Multiple genuinely independent
+        // setups can share a symbol/date; an outcome update must touch only its
+        // original event, never delete a newer recommendation.
         val rows = state.recommendations
-            .filterNot { it.recommendationDate == record.recommendationDate && it.symbol.equals(record.symbol, true) }
+            .filterNot { it.id == record.id }
             .toMutableList()
         rows += record
         save(state.copy(recommendations = retainDays(rows)))
@@ -168,6 +172,12 @@ class FixedRecommendationStore @Inject constructor(
         private const val KEY_STATE = "state"
         internal fun fixedId(date: String, symbol: String): Long {
             val x = "$date|${symbol.uppercase(Locale.US)}|FIXED-V741".hashCode().toLong()
+            return if (x == Long.MIN_VALUE) 1L else kotlin.math.abs(x).coerceAtLeast(1L)
+        }
+
+        /** Event identity includes the unique scan-start, not only date+symbol. */
+        internal fun fixedEventId(date: String, symbol: String, scanAtMs: Long): Long {
+            val x = "$date|${symbol.uppercase(Locale.US)}|$scanAtMs|FIXED-V806".hashCode().toLong()
             return if (x == Long.MIN_VALUE) 1L else kotlin.math.abs(x).coerceAtLeast(1L)
         }
     }
