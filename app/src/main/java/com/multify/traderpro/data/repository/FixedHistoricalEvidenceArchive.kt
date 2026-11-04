@@ -2,7 +2,6 @@ package com.multify.traderpro.data.repository
 
 import android.content.Context
 import com.google.gson.GsonBuilder
-import com.google.gson.JsonParser
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.time.LocalDate
 import java.util.Locale
@@ -95,12 +94,12 @@ class FixedHistoricalEvidenceArchive @Inject constructor(@ApplicationContext con
         )
 
     /** Snapshot current Fixed-only recommendation research without changing any trading state. */
-    fun capture(rows: List<FixedRecommendationRecord>): Int = synchronized(lock) {
+    internal fun capture(rows: List<FixedRecommendationRecord>): Int = synchronized(lock) {
         if (rows.isEmpty()) return@synchronized 0
         val all = list().associateBy(::key).toMutableMap()
         var changed = 0
         for (record in rows) {
-            val new = fromRecommendation(record)
+            val new = runCatching { fromRecommendation(record) }.getOrNull() ?: continue
             if (!valid(new)) continue
             val old = all[key(new)]
             if (old == null || new.lastObservedAtMs > old.lastObservedAtMs ||
@@ -140,7 +139,7 @@ class FixedHistoricalEvidenceArchive @Inject constructor(@ApplicationContext con
         changed
     }
 
-    fun summary(): FixedHistoricalEvidenceSummary = synchronized(lock) {
+    internal fun summary(): FixedHistoricalEvidenceSummary = synchronized(lock) {
         val all = list()
         FixedHistoricalEvidenceSummary(
             all.size, all.map { it.date }.distinct().size,
