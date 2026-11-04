@@ -73,6 +73,27 @@ def parse_ltp_frame(raw: dict, token_to_symbol: dict[str, str],
         points.append(FeedPoint(symbol, str(token), price, source_at_ms, received_at_ms))
     return points
 
+def research_feed_coverage(points: list[FeedPoint], expected_nse_symbols: set[str],
+                           now_ms: int) -> dict:
+    """Fail closed for snapshot equivalence: sparse asynchronous ticks are not a
+    complete full-NSE snapshot, and cannot replace Android's official REST scan."""
+    expected = set(expected_nse_symbols)
+    fresh = {
+        point.symbol for point in points
+        if point.symbol in expected and point.exchange_timestamp_ms > 0
+        and -MAX_FUTURE_SKEW_MS <= now_ms - point.exchange_timestamp_ms <= MAX_AGE_MS
+    }
+    coverage = len(fresh) / len(expected) if expected else 0.0
+    return {
+        "expected_symbols": len(expected),
+        "fresh_symbols": len(fresh),
+        "coverage_ratio": coverage,
+        "passes_fixed_85pct_baseline": len(expected) > 0 and coverage >= 0.85,
+        "usable_for_production_fixed": False,
+        "reason": "ANDROID_TRADING_FEED_BRIDGE_NOT_VERIFIED",
+        "trade_eligible": False,
+    }
+
 def run_opt_in_probe(access_token: str, instruments: list[dict],
                      token_to_symbol: dict[str, str], sink):
     """Blocking RESEARCH-ONLY SDK listener; caller must provide explicit credentials.
