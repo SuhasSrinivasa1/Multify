@@ -855,8 +855,9 @@ class TradingEngineService : Service() {
 
         var changed = storedDate != today || legacySymbols.isNotEmpty()
         rows.forEach { row ->
+            val normalizedSymbol = row.symbol.uppercase(Locale.US)
             val key = com.multify.traderpro.engine.FixedNotificationEventKeyPolicy.key(
-                row.symbol, row.generatedAtMs)
+                normalizedSymbol, row.generatedAtMs)
             if (!seen.add(key)) return@forEach
             changed = true
             notifyFixed(row)
