@@ -23,6 +23,14 @@ class ForecastUnivestLearningPolicyTest {
         assertNull(p.parse("com.univest.capp", "Position closed without any labelled ticker"))
     }
 
+    @Test fun recognizesRealYatharthAdvisoryWithoutTreatingPotentialAsProfit() {
+        val message = "New Advisory Pick posted\nSTOCK: YATHARTH\nDuration: 1-3 Months\nPotential: 5.00% 📈"
+        val parsed = p.parse("com.univest.capp", message)
+        assertEquals(ForecastUnivestLearningPolicy.Type.ENTRY, parsed?.type)
+        assertEquals("YATHARTH", parsed?.symbol)
+        assertEquals(3.0, parsed!!.durationMonths!!, 0.0001)
+    }
+
     @Test fun officialProfitOfDayExitMatchesSameDayEntryOnly() {
         val exit = p.parse("com.univest.capp", "1st Equity Profit of the Day\nAdvisory Pick: GRAPHITE\nDuration: 2 Days")
         assertEquals(ForecastUnivestLearningPolicy.Type.EXIT, exit?.type)
