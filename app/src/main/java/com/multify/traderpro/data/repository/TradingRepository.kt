@@ -94,6 +94,7 @@ import com.multify.traderpro.engine.ForecastQualityPolicy
 import com.multify.traderpro.engine.ForecastTargetExpansionPolicy
 import com.multify.traderpro.engine.ForecastUniversalPositiveEvidencePolicy
 import com.multify.traderpro.engine.ForecastPositiveEvidenceCase
+import com.multify.traderpro.engine.ForecastConfirmationPriorityPolicy
 import com.multify.traderpro.engine.ForecastPublicationPolicy
 import com.multify.traderpro.engine.FixedAdaptiveLearningMath
 import com.multify.traderpro.engine.FixedForecastPublicationPolicy
@@ -2511,7 +2512,21 @@ class TradingRepository @Inject constructor(
                 master[Math.floorMod(seed + i * 131, master.size)]
             }
         }
-        val universe = (discoveredSymbols + dnaSymbols + recentSymbols + rotating)
+        // Re-evaluate recent PRIMARY stocks while their 20-minute confirmation
+        // window is still open. No trading/quality gate is relaxed.
+        val publishedSymbols = existing.map { it.symbol.uppercase(Locale.US) }.toSet()
+        val confirmationFollowups = learningDao.forecastResearchForDate(today)
+            .asSequence()
+            .filter {
+                it.scanAtMs < nowMs && nowMs - it.scanAtMs in 0L..PRIMARY_CONFIRMATION_WINDOW_MS &&
+                    it.qualityTier == "PRIMARY" && it.publishEligible && it.executionEligible &&
+                    it.symbol.uppercase(Locale.US) !in publishedSymbols &&
+                    it.symbol.uppercase(Locale.US) !in discoveredSymbols
+            }
+            .sortedByDescending { it.scanAtMs }
+            .map { it.symbol.uppercase(Locale.US) }
+            .distinct().take(8).toList()
+        val universe = (discoveredSymbols + confirmationFollowups + dnaSymbols + recentSymbols + rotating)
             .distinct()
             .take(DETAILED_FORECAST_UNIVERSE_LIMIT)
         // v7.9.4: partial Forecast work must not be thrown away whenever Fixed starts.
@@ -2523,7 +2538,7 @@ class TradingRepository @Inject constructor(
         )
         // Keep concurrent Beta work small so Fixed retains CPU and Alpha API priority.
         val trancheSize = if (betaConcurrentWithFixed) normalTrancheSize.coerceAtMost(2) else normalTrancheSize
-        val tranche = forecastNextEvaluationTranche(today, universe).take(trancheSize)
+        val tranche = forecastNextEvaluationTranche(today, universe, confirmationFollowups).take(trancheSize)
         val evaluated = mutableListOf<Pair<String, StrategyEvaluation>>()
         val detailedEvaluationStartedElapsedMs = SystemClock.elapsedRealtime()
         var processed = 0
@@ -3754,13 +3769,22 @@ class TradingRepository @Inject constructor(
 
 
     /** Forecast-only deterministic checkpoint. The Fixed universe/ranking is not touched. */
-    private fun forecastNextEvaluationTranche(date: String, candidates: List<String>): List<String> {
+    private fun forecastNextEvaluationTranche(
+        date: String, candidates: List<String>, confirmationFollowups: List<String>
+    ): List<String> {
         if (forecastDetailDate != date || forecastDetailQueue.isEmpty()) {
             forecastDetailDate = date
             forecastDetailQueue = candidates
             forecastDetailCursor = 0
             forecastDetailRetryAttempts.clear()
         }
+        // Preserve processed cursor entries and all pending names; reorder only
+        // the unprocessed tranche. Follow-ups receive a fresh broker evaluation.
+        val prefix = forecastDetailQueue.take(forecastDetailCursor)
+        val pending = ForecastConfirmationPriorityPolicy.prioritize(
+            forecastDetailQueue.drop(forecastDetailCursor), confirmationFollowups, candidates
+        )
+        forecastDetailQueue = prefix + pending
         return forecastDetailQueue.drop(forecastDetailCursor).take(FORECAST_EVALUATION_TRANCHE_SIZE)
     }
 
