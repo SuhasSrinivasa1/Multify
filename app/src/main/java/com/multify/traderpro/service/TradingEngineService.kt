@@ -4,14 +4,17 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.IBinder
 import android.os.PowerManager
+import android.service.notification.NotificationListenerService
 import androidx.core.content.ContextCompat
 import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
 import com.multify.traderpro.R
 import com.multify.traderpro.data.logging.AuditLogger
 import com.multify.traderpro.data.network.ForecastDto
@@ -72,6 +75,7 @@ class TradingEngineService : Service() {
     @Volatile private var lastFixedCycleCompletedAtMs = 0L
     @Volatile private var lastPositionPassSucceededAtMs = 0L
     @Volatile private var mobileHealthStatus = "INITIALIZING"
+    private var lastListenerRebindAtMs = 0L
 
     override fun onCreate() {
         super.onCreate()
@@ -372,8 +376,16 @@ class TradingEngineService : Service() {
                         nowMs, lastFixedCycleCompletedAtMs, lastPositionPassSucceededAtMs,
                         lastKnownManagedCount
                     )
-                    mobileHealthStatus = snapshot.status
-                    if (snapshot.status != previousStatus ||
+                    val listenerGranted = NotificationManagerCompat
+                        .getEnabledListenerPackages(this@TradingEngineService).contains(packageName)
+                    val listenerPrefs = getSharedPreferences("notification_listener_state_v801", MODE_PRIVATE)
+                    val listenerConnected = listenerPrefs.getBoolean("connected", false)
+                    mobileHealthStatus = when {
+                        !listenerGranted -> snapshot.status + " / NOTIFICATION_ACCESS_OFF"
+                        !listenerConnected -> snapshot.status + " / LISTENER_DISCONNECTED"
+                        else -> snapshot.status
+                    }
+                    if (mobileHealthStatus != previousStatus ||
                         nowMs - lastAuditedAtMs >= MOBILE_HEALTH_AUDIT_INTERVAL_MS) {
                         auditLogger.logAsync("MOBILE_HEALTH", "ENGINE_WATCHDOG", mapOf(
                             "status" to snapshot.status,
@@ -388,10 +400,30 @@ class TradingEngineService : Service() {
                             "cpu_wake_lock_held" to (positionMonitoringWakeLock?.isHeld == true),
                             "screen_interactive" to
                                 (getSystemService(Context.POWER_SERVICE) as PowerManager).isInteractive,
+                            "notification_access_granted" to listenerGranted,
+                            "notification_listener_connected" to listenerConnected,
+                            "listener_last_connected_ms" to listenerPrefs.getLong("last_connected_ms", 0L),
+                            "listener_last_notification_ms" to listenerPrefs.getLong("last_notification_ms", 0L),
+                            "notification_rebind_requires_user_permission" to true,
                             "fixed_formula_changed" to false
                         ))
-                        previousStatus = snapshot.status
+                        previousStatus = mobileHealthStatus
                         lastAuditedAtMs = nowMs
+                    }
+                    // Android controls notification access. Never claim successful
+                    // signal capture when permission is missing. Rebind only when
+                    // access exists and a previous connection is absent.
+                    if (listenerGranted && !listenerConnected &&
+                        nowMs - lastListenerRebindAtMs >= 5L * 60_000L) {
+                        lastListenerRebindAtMs = nowMs
+                        runCatching {
+                            NotificationListenerService.requestRebind(ComponentName(
+                                this@TradingEngineService,
+                                MultifyNotificationListenerService::class.java))
+                        }.onFailure {
+                            auditLogger.logAsync("MOBILE_HEALTH", "LISTENER_REBIND_ERROR",
+                                mapOf("error" to it.javaClass.simpleName))
+                        }
                     }
                     // Only exited jobs are restarted. Active scans/SELLs may be
                     // broker-blocked and MUST NOT be cancelled or duplicated.
