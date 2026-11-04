@@ -32,6 +32,7 @@ object FixedEntryActionabilityPolicy {
         val reasons: List<String>,
         val firstPrimaryRunupPct: Double?,
         val distanceFromQuoteHighPct: Double?,
+        val highEvidenceSource: String,
         val vwapAtrExtension: Double?,
         val firstPrimaryRunupBeyondTargetPct: Double?
     )
@@ -40,7 +41,8 @@ object FixedEntryActionabilityPolicy {
         nowMs: Long, quote: QuotePayload?,
         referencePrice: Double?, fixedTargetPct: Double,
         priorSessionDuplicate: Boolean = false,
-        snapshot: FixedFeatureSnapshot? = null
+        snapshot: FixedFeatureSnapshot? = null,
+        verifiedSameDayCandleHigh: Double? = null
     ): Verdict {
         val local = Instant.ofEpochMilli(nowMs).atZone(IST)
         val clock = local.toLocalTime()
@@ -54,11 +56,19 @@ object FixedEntryActionabilityPolicy {
         val price = quote?.lastPrice?.takeIf { it.isFinite() && it > 0.0 }
         val high = quote?.high?.takeIf { it.isFinite() && it > 0.0 }
         val dayMove = quote?.dayChangePct?.takeIf { it.isFinite() }
-        // Broker quote day-high can be unavailable; the frozen 15m candle
-        // feature is a valid observational fallback, never a model input here.
-        val distance = if (price != null && high != null && high >= price)
-            (high - price) / high * 100.0
-        else snapshot?.sessionHighDistancePct?.takeIf { it.isFinite() && it in -1.0..30.0 }
+        // The frozen 15-minute sessionHighDistancePct covers a MULTI-DAY history
+        // window, not necessarily today's session. Never use it as today's high.
+        val fallbackHigh = verifiedSameDayCandleHigh
+            ?.takeIf { it.isFinite() && it > 0.0 }
+        val usedHigh = if (price != null && high != null && high >= price)
+            high else fallbackHigh
+        val highSource = when {
+            usedHigh == null -> "UNAVAILABLE"
+            usedHigh == high -> "BROKER_REPORTED_DAY_HIGH"
+            else -> "TIMESTAMP_VERIFIED_TODAY_15M_CANDLES"
+        }
+        val distance = if (price != null && usedHigh != null && usedHigh > 0.0)
+            (usedHigh - price) / usedHigh * 100.0 else null
         val vwapAtr = if (price != null && snapshot?.vwap != null &&
             snapshot.atr14 != null && snapshot.atr14.isFinite() && snapshot.atr14 > 0.0)
             (price - snapshot.vwap) / snapshot.atr14 else null
@@ -99,6 +109,7 @@ object FixedEntryActionabilityPolicy {
             reasons = if (reasons.isNotEmpty()) reasons else cautions,
             firstPrimaryRunupPct = runup,
             distanceFromQuoteHighPct = distance,
+            highEvidenceSource = highSource,
             vwapAtrExtension = vwapAtr,
             firstPrimaryRunupBeyondTargetPct =
                 if (runup != null && fixedTargetPct.isFinite())
