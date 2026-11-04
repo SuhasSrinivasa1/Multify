@@ -2115,13 +2115,13 @@ class TradingRepository @Inject constructor(
     private fun fixedPresentationDto(row: FixedRecommendationRecord,
         nowMs: Long = System.currentTimeMillis()): ForecastDto {
         val verdict = fixedEntryVerdict(row, fixedPublishedQuote(row, nowMs), nowMs)
-        val suffix = when (verdict.status) {
-            "RESEARCH_ONLY" -> " · FIXED RESEARCH ONLY, BUY blocked: " + verdict.reasons.joinToString(",")
-            "CAUTION" -> " · Fixed entry caution: " + verdict.reasons.joinToString(",")
+        val riskPrefix = when (verdict.status) {
+            "RESEARCH_ONLY" -> "FIXED RESEARCH ONLY · BUY BLOCKED: " + verdict.reasons.joinToString(",") + " · "
+            "CAUTION" -> "FIXED ENTRY CAUTION: " + verdict.reasons.joinToString(",") + " · "
             else -> ""
         }
         return row.toDto().copy(
-            reason = row.reason + suffix,
+            reason = riskPrefix + row.reason,
             executionEligible = row.executionEligible && verdict.actionable
         )
     }
