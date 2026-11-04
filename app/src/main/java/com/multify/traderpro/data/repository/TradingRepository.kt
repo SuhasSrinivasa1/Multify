@@ -99,6 +99,7 @@ import com.multify.traderpro.engine.ForecastDeterministicDeferralPolicy
 import com.multify.traderpro.engine.ExecutionEntryPriceGuardPolicy
 import com.multify.traderpro.engine.ResearchRateLimitQuietPolicy
 import com.multify.traderpro.engine.ReadOnlyFiveMinuteResearchPolicy
+import com.multify.traderpro.engine.ResearchCandleFirstTouchPolicy
 import com.multify.traderpro.engine.ForecastPublicationPolicy
 import com.multify.traderpro.engine.FixedAdaptiveLearningMath
 import com.multify.traderpro.engine.FixedForecastPublicationPolicy
@@ -6907,9 +6908,21 @@ class TradingRepository @Inject constructor(
                         bar.atMs, bar.open, bar.high, bar.low, bar.close, bar.volume
                     ) }
                 )
+                val chronological = ResearchCandleFirstTouchPolicy.evaluate(
+                    row.scanAtMs, row.entryPrice,
+                    row.entryPrice * (1.0 + row.targetPct / 100.0),
+                    decoded.bars, sessionEndMs
+                )
                 val enriched = runCatching { JsonParser.parseString(row.featureJson).asJsonObject }
                     .getOrElse { com.google.gson.JsonObject() }
                 enriched.add("entry_timing_v1", researchGson.toJsonTree(study))
+                enriched.add("v802_chronological_first_touch", researchGson.toJsonTree(chronological))
+                auditLogger.logAsync("FORECAST_RESEARCH", "CHRONOLOGICAL_OUTCOME_REPLAY",
+                    mapOf("symbol" to symbol, "date" to date,
+                        "first_touch" to chronological.firstTouch,
+                        "first_touch_at_ms" to chronological.firstTouchAtMs,
+                        "complete_sequence" to chronological.completeSequence,
+                        "research_only_not_realized_pnl" to true))
                 enriched.addProperty("entry_timing_model_applied_live", false)
                 learningDao.updateForecastResearch(
                     row.copy(
@@ -6917,7 +6930,9 @@ class TradingRepository @Inject constructor(
                         outcomeMfePct = mfe,
                         outcomeMaePct = mae,
                         outcomeClosePct = closePct,
-                        outcomeTargetHit = high + 1e-9 >= row.entryPrice * (1.0 + row.targetPct / 100.0),
+                        // Do not label a historical Forecast success when the -2% research stop
+                        // was observed first or the one-minute sequence is ambiguous.
+                        outcomeTargetHit = chronological.firstTouch == "TARGET_FIRST_1M",
                         outcomeUpdatedAtMs = System.currentTimeMillis()
                     )
                 )
