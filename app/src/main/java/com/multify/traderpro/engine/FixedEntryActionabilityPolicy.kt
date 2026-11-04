@@ -101,8 +101,8 @@ object FixedEntryActionabilityPolicy {
         // 2026-11-04 13:25 diagnostic set. The frozen 15m 'session' high in
         // fact spans the multi-DAY historical window. Only use it as a distinctly
         // labeled, corroborating extension proxy, NEVER as today's NSE high.
-        val historicalWindowHighDistance = snapshot?.sessionHighDistancePct
-            ?.takeIf { it.isFinite() }
+        val historicalWindowHighDistance =
+            FixedMultiDayExhaustionProxyPolicy.distanceFromMultiDayWindowHigh(snapshot)
         if (FixedMultiDayExhaustionProxyPolicy.risky(
                 extendedSinceFirst, dayStrong, historicalWindowHighDistance, vwapAtr))
             reasons += "MULTIDAY_15M_WINDOW_HIGH_WITH_EXTENDED_FIRST_PRIMARY_RUNUP"
