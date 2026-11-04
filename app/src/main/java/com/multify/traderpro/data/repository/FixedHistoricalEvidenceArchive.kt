@@ -36,13 +36,9 @@ internal data class FixedHistoricalEvidenceSummary(
     val rows: Int, val days: Int, val targetObserved: Int, val unresolved: Int
 )
 
-@Singleton
-class FixedHistoricalEvidenceArchive @Inject constructor(@ApplicationContext context: Context) {
-    private val prefs = context.getSharedPreferences("fixed_historical_research_v803", Context.MODE_PRIVATE)
-    private val gson = GsonBuilder().serializeNulls().disableHtmlEscaping().create()
-    private val lock = Any()
-
-    private fun valid(r: FixedHistoricalEvidenceRow): Boolean =
+/** No broker data is trusted as a real trade without explicit executed-order evidence. */
+internal object FixedHistoricalEvidenceValidationPolicy {
+    fun valid(r: FixedHistoricalEvidenceRow): Boolean =
         r.date.length == 10 && runCatching { LocalDate.parse(r.date) }.isSuccess &&
             r.symbol.matches(Regex("[A-Z0-9&._-]{1,32}")) &&
             r.publishedAtMs > 0L && r.entryPrice.isFinite() && r.entryPrice > 0.0 &&
@@ -53,6 +49,16 @@ class FixedHistoricalEvidenceArchive @Inject constructor(@ApplicationContext con
             r.maximumFavourablePct.isFinite() && r.maximumFavourablePct in 0.0..200.0 &&
             r.maximumAdversePct.isFinite() && r.maximumAdversePct in 0.0..200.0 &&
             !r.isRealizedTrade
+}
+
+@Singleton
+class FixedHistoricalEvidenceArchive @Inject constructor(@ApplicationContext context: Context) {
+    private val prefs = context.getSharedPreferences("fixed_historical_research_v803", Context.MODE_PRIVATE)
+    private val gson = GsonBuilder().serializeNulls().disableHtmlEscaping().create()
+    private val lock = Any()
+
+    private fun valid(r: FixedHistoricalEvidenceRow): Boolean =
+        FixedHistoricalEvidenceValidationPolicy.valid(r)
 
     private fun key(r: FixedHistoricalEvidenceRow): String = "${r.date}|${r.symbol}"
 
