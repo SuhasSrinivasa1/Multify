@@ -3971,8 +3971,16 @@ class TradingRepository @Inject constructor(
         val at = postedAtMs.takeIf { it > 0L } ?: System.currentTimeMillis()
         val received = System.currentTimeMillis()
         val combined = (title + "\n" + body).take(2500)
+        val capturePrefs = appContext.getSharedPreferences(
+            "notification_listener_state_v801", Context.MODE_PRIVATE)
+        fun captureState(status: String, symbol: String? = null) {
+            capturePrefs.edit().putLong("last_univest_parsed_at_ms", received)
+                .putString("last_univest_parse_status", status)
+                .putString("last_univest_parsed_symbol", symbol.orEmpty()).apply()
+        }
         val signal = ForecastUnivestLearningPolicy.parse(ForecastUnivestLearningPolicy.OFFICIAL_PACKAGE, combined)
         if (signal == null) {
+            captureState("PARSER_UNMATCHED")
             forecastSourceNotificationJournal.append(at, received, "UNKNOWN", null,
                 "PARSER_UNMATCHED", title, body)
             auditLogger.logAsync("FORECAST_UNIVEST", "NOTIFICATION_IGNORED", mapOf(
@@ -3981,6 +3989,7 @@ class TradingRepository @Inject constructor(
         }
         // Don't infer ticker from a company name. The NSE master is the identity authority.
         if (signal.symbol !in nseSymbols.symbols()) {
+            captureState("NSE_SYMBOL_UNVERIFIED", signal.symbol)
             forecastSourceNotificationJournal.append(at, received, signal.type.name, signal.symbol,
                 "NSE_SYMBOL_UNVERIFIED", title, body)
             auditLogger.logAsync("FORECAST_UNIVEST", "SYMBOL_NOT_VERIFIED_NSE", mapOf(
@@ -3995,6 +4004,7 @@ class TradingRepository @Inject constructor(
             forecastUnivestJournal.claimExit(signal.symbol, at, received)
         }
         if (candidate == null) {
+            captureState("DUPLICATE_OR_NO_SAME_DAY_ENTRY", signal.symbol)
             forecastSourceNotificationJournal.append(at, received, signal.type.name, signal.symbol,
                 "DUPLICATE_OR_NO_SAME_DAY_ENTRY", title, body)
             auditLogger.logAsync("FORECAST_UNIVEST", "PAIRING_SKIPPED", mapOf(
@@ -4002,6 +4012,9 @@ class TradingRepository @Inject constructor(
                 "reason" to "DUPLICATE_ENTRY_OR_NO_MATCHING_SAME_DAY_ENTRY", "no_order_path" to true))
             return
         }
+        captureState(
+            if (signal.type == ForecastUnivestLearningPolicy.Type.ENTRY) "ENTRY_CAPTURED" else "SAME_DAY_EXIT_CAPTURED",
+            signal.symbol)
         forecastSourceNotificationJournal.append(at, received, signal.type.name, signal.symbol,
             if (signal.type == ForecastUnivestLearningPolicy.Type.ENTRY) "ENTRY_CAPTURED" else "SAME_DAY_EXIT_CAPTURED",
             title, body)
