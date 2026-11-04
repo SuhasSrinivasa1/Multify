@@ -66,6 +66,20 @@ class FixedRepeatQualificationPolicyTest {
             "ABC",t0+4_300_000,previous,observations))
     }
 
+    @Test fun importedPriorSignalDoesNotBlockFreshIndependentSetup() {
+        val importedLastAtMs = t0
+        val resetAndConfirmation = listOf(
+            scan(t0+1_900_000L,false),
+            scan(t0+1_990_000L,true)
+        )
+        assertFalse(FixedRepeatQualificationPolicy.qualifiedForNewEvent(
+            "ABC",t0+2_100_000L,emptyList(),emptyList(),
+            importedLastEventAtMs=importedLastAtMs))
+        assertTrue(FixedRepeatQualificationPolicy.qualifiedForNewEvent(
+            "ABC",t0+2_100_000L,emptyList(),resetAndConfirmation,
+            importedLastEventAtMs=importedLastAtMs))
+    }
+
     @Test fun noAssumedResetFromMissingResearch() {
         assertFalse(FixedRepeatQualificationPolicy.qualifiedForNewEvent(
             "ABC",t0+10_000_000,listOf(record(t0)),emptyList()))
