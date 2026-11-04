@@ -105,7 +105,6 @@ jobs:
           assert 'FIXED RESEARCH ONLY' in repo
           assert 'fixed_imported_same_day_dedup.json' in repo
           assert 'fixed_scoring_changed' in repo
-          assert 'source_tag' not in repo or True # no data-source substitution
           fixedNotif=Path('app/src/main/java/com/multify/traderpro/service/TradingEngineService.kt').read_text()
           assert 'Fixed WATCH' in fixedNotif
           assert 'row.symbol.uppercase(Locale.US)' in fixedNotif
@@ -114,6 +113,11 @@ jobs:
           assert 'LESS_THAN_15_MINUTES_TO_CLOSE' in riskPolicy
           assert 'EXTENDED_SINCE_FIRST_PRIMARY_AND_NEAR_DAY_HIGH' in riskPolicy
           assert 'EXTREME_VWAP_ATR_EXTENSION_NEAR_HIGH' in riskPolicy
+          sameDay=Path('app/src/main/java/com/multify/traderpro/engine/FixedSameDayHighEvidencePolicy.kt').read_text()
+          assert 'todayHighFromBars' in sameDay
+          assert 'local.toLocalDate() != now.toLocalDate()' in sameDay
+          assert 'snapshot?.sessionHighDistancePct' not in riskPolicy
+          assert 'verifiedSameDayCandleHigh' in riskPolicy
           dedup=Path('app/src/main/java/com/multify/traderpro/data/repository/FixedImportedSameDayDedupJournal.kt').read_text()
           assert 'submitMarketOrder(' not in dedup and 'registerBoughtPositionAndProtect(' not in dedup
           assert 'allowedToTrade: Boolean = false' in dedup
