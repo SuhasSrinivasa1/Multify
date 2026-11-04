@@ -837,15 +837,16 @@ class TradingEngineService : Service() {
         val prefs = getSharedPreferences(FIXED_NOTIFICATION_PREFS, Context.MODE_PRIVATE)
         val today = ZonedDateTime.now(INDIA).toLocalDate().toString()
         val storedDate = prefs.getString(FIXED_NOTIFICATION_DATE_KEY, "").orEmpty()
+        // Stable per-session identity survives repeated scan starts; migrate old
+        // "SYMBOL|scanStarted" keys without re-alerting the same symbol.
         val seen = if (storedDate == today) {
-            prefs.getStringSet(FIXED_NOTIFICATION_KEYS_KEY, emptySet())?.toMutableSet() ?: mutableSetOf()
-        } else {
-            mutableSetOf()
-        }
+            prefs.getStringSet(FIXED_NOTIFICATION_KEYS_KEY, emptySet())
+                .orEmpty().map { it.substringBefore("|") }.toMutableSet()
+        } else mutableSetOf()
 
         var changed = storedDate != today
         rows.forEach { row ->
-            val key = "${row.symbol.uppercase(Locale.US)}|${row.generatedAtMs}"
+            val key = row.symbol.uppercase(Locale.US)
             if (!seen.add(key)) return@forEach
             changed = true
             notifyFixed(row)
@@ -861,18 +862,20 @@ class TradingEngineService : Service() {
     private fun notifyFixed(f: ForecastDto) {
         val manager = getSystemService(NotificationManager::class.java)
         val postedAtMs = System.currentTimeMillis()
+        val actionable = f.executionEligible
         val message = buildString {
-            append("PRIMARY · entry ₹")
+            append(if (actionable) "PRIMARY · entry ₹" else "RESEARCH ONLY · not buyable · observed entry ₹")
             append(String.format(Locale.US, "%.2f", f.entryPrice))
             append(" · target +")
             append(String.format(Locale.US, "%.2f", f.targetPct))
             append("% · ")
             append(String.format(Locale.US, "%.0f%% confidence", f.confidence * 100.0))
-            append(" · auto-buy path processed first")
+            append(if (actionable) " · auto-buy path processed first"
+                else " · execution held for entry quality or session timing")
         }
         val notification = NotificationCompat.Builder(this, FIXED_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_trader)
-            .setContentTitle("Fixed BUY · " + f.symbol)
+            .setContentTitle((if (actionable) "Fixed BUY · " else "Fixed WATCH · ") + f.symbol)
             .setContentText(message)
             .setStyle(NotificationCompat.BigTextStyle().bigText(message + "\n" + f.reason))
             .setAutoCancel(true)
@@ -881,6 +884,8 @@ class TradingEngineService : Service() {
         manager.notify((f.symbol.hashCode() xor f.generatedAtMs.toInt() xor FIXED_NOTIFICATION_ID_SALT).and(Int.MAX_VALUE), notification)
         auditLogger.logAsync("EXECUTION_LATENCY", "FIXED_NOTIFICATION_POSTED", mapOf(
             "symbol" to f.symbol,
+            "actionable_at_post_time" to actionable,
+            "notification_label" to if (actionable) "FIXED_BUY" else "FIXED_RESEARCH_ONLY",
             "recommendation_generated_at_ms" to f.generatedAtMs,
             "notification_posted_at_ms" to postedAtMs,
             // Compatibility field retains its prior value. It includes the whole scan,
