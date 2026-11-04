@@ -65,6 +65,9 @@ class MultifyNotificationListenerService : NotificationListenerService() {
     }
 
     override fun onListenerConnected() {
+        getSharedPreferences("notification_listener_state_v801", MODE_PRIVATE).edit()
+            .putBoolean("connected", true)
+            .putLong("last_connected_ms", System.currentTimeMillis()).apply()
         super.onListenerConnected()
         val now = System.currentTimeMillis()
         if (claimThrottle(LAST_CONNECTED_AUDIT_MS, now, LISTENER_AUDIT_THROTTLE_MS)) {
@@ -82,6 +85,9 @@ class MultifyNotificationListenerService : NotificationListenerService() {
     }
 
     override fun onListenerDisconnected() {
+        getSharedPreferences("notification_listener_state_v801", MODE_PRIVATE).edit()
+            .putBoolean("connected", false)
+            .putLong("last_disconnected_ms", System.currentTimeMillis()).apply()
         super.onListenerDisconnected()
         listenerHeartbeatJob?.cancel()
         listenerHeartbeatJob = null
@@ -101,6 +107,8 @@ class MultifyNotificationListenerService : NotificationListenerService() {
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
         if (sbn == null || sbn.packageName == packageName) return
         val notification = sbn.notification ?: return
+        getSharedPreferences("notification_listener_state_v801", MODE_PRIVATE).edit()
+            .putLong("last_notification_ms", System.currentTimeMillis()).apply()
         val notificationStartedNs = SystemClock.elapsedRealtimeNanos()
         val receivedAtMs = System.currentTimeMillis()
 
@@ -108,6 +116,15 @@ class MultifyNotificationListenerService : NotificationListenerService() {
         val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString().orEmpty()
         val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString().orEmpty()
         val bigText = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString().ifNullOrBlank(text)
+        // A renamed vendor package should be visible in diagnostics, not silently
+        // promoted to a trusted research source or into an order path.
+        if (title.contains("advisory pick", ignoreCase = true) &&
+            sbn.packageName != ForecastUnivestLearningPolicy.OFFICIAL_PACKAGE) {
+            auditLogger.logAsync("FORECAST_UNIVEST", "POSSIBLE_PACKAGE_MISMATCH",
+                mapOf("observed_package" to sbn.packageName,
+                    "official_package" to ForecastUnivestLearningPolicy.OFFICIAL_PACKAGE,
+                    "trusted_for_learning" to false))
+        }
         // Official Univest research notifications are isolated from Multify's
         // execution listener/ORDER path and do not rely on the Multify package filter.
         if (sbn.packageName == ForecastUnivestLearningPolicy.OFFICIAL_PACKAGE) {

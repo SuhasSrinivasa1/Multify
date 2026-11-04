@@ -9,7 +9,7 @@ import com.multify.traderpro.data.network.QuotePayload
 internal object FixedQuoteTelemetryPolicy {
     fun capture(q: QuotePayload?): Map<String, Any?> {
         if (q == null) return mapOf("quote_available" to false)
-        fun clean(v: Double?): Double? = v?.takeIf { it.isFinite() }
+        fun clean(v: Double?): Double? = v?.takeIf { it.isFinite() && it > 0.0 }
         val bid = clean(q.bidPrice) ?: q.depth?.buy.orEmpty().mapNotNull { clean(it.price) }.maxOrNull()
         val ask = clean(q.offerPrice) ?: q.depth?.sell.orEmpty().mapNotNull { clean(it.price) }.minOrNull()
         fun levels(buy: Boolean): List<Map<String, Double?>> =
