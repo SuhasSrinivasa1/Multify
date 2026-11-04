@@ -2143,6 +2143,8 @@ class TradingRepository @Inject constructor(
                 "reasons" to verdict.reasons, "first_primary_to_entry_pct" to verdict.firstPrimaryRunupPct,
                 "distance_from_broker_or_15m_candle_high_pct" to verdict.distanceFromQuoteHighPct,
                 "day_high_evidence_source" to verdict.highEvidenceSource,
+                "multi_day_15m_window_high_distance_pct_NOT_day_high" to verdict.multiDayWindowHighDistancePct,
+                "vwap_atr_source" to "FROZEN_MULTI_DAY_15M_WINDOW",
                 "distance_above_vwap_in_atr" to verdict.vwapAtrExtension,
                 "first_primary_runup_minus_target_pct" to verdict.firstPrimaryRunupBeyondTargetPct,
                 "fixed_scoring_changed" to false, "fixed_stored_recommendation_changed" to false,
