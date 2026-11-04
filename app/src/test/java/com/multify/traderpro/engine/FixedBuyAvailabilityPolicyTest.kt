@@ -10,7 +10,10 @@ class FixedBuyAvailabilityPolicyTest {
         .atZone(ZoneId.of("Asia/Kolkata")).toInstant().toEpochMilli()
 
     @Test fun endOfSessionDisablesButtonEvenWhenCachedStatusIsActive() {
-        assertTrue(FixedBuyAvailabilityPolicy.canBuy(t("2026-10-26T15:29:59"), true, "ACTIVE", true))
+        assertTrue(FixedBuyAvailabilityPolicy.canBuy(t("2026-10-26T15:14:59"), true, "ACTIVE", true))
+        assertFalse(FixedBuyAvailabilityPolicy.canBuy(t("2026-10-26T15:15:00"), true, "ACTIVE", true))
+        assertFalse(FixedBuyAvailabilityPolicy.canBuy(t("2026-10-26T15:29:59"), true, "ACTIVE", true))
+        assertTrue(FixedBuyAvailabilityPolicy.nseRegularSession(t("2026-10-26T15:29:59")))
         assertFalse(FixedBuyAvailabilityPolicy.canBuy(t("2026-10-26T15:30:00"), true, "ACTIVE", true))
         assertFalse(FixedBuyAvailabilityPolicy.canBuy(t("2026-10-26T16:00:00"), true, "ACTIVE", true))
     }
