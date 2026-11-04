@@ -27,7 +27,7 @@ object ResearchCandleFirstTouchPolicy {
         if (valid.isEmpty()) return Result("INCOMPLETE", null, 0, false)
         val stop = entryPrice * 0.98
         var previous: ForecastReplayCandleDecoder.Bar? = null
-        var missingInterval = false
+        var missingInterval = valid.first().atMs - entryAtMs > 120_000L
         for (bar in valid) {
             if (previous != null && bar.atMs - previous.atMs > 90_000L) missingInterval = true
             val target = bar.high >= targetPrice
