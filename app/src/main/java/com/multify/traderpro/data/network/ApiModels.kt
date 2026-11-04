@@ -75,6 +75,16 @@ data class UnivestResearchDto(
 )
 
 /** Diagnostic-only first PRIMARY observations; these have NO BUY permission. */
+data class FixedPulseResearchDto(
+    val symbol: String = "",
+    val firstPulseObservedAtMs: Long = 0L,
+    val firstPulsePrice: Double = 0.0,
+    val pulsePct: Double = 0.0,
+    val latestPrice: Double = 0.0,
+    val officialEntryPrice: Double? = null,
+    val publishedAtMs: Long? = null
+)
+
 data class FixedEarlyWatchDto(
     val symbol: String = "",
     val firstPrimaryScanAtMs: Long = 0L,
@@ -125,6 +135,7 @@ data class DashboardDto(
     val forecastWatchlist: List<ForecastDto> = emptyList(),
     val fixedWatchlist: List<ForecastDto> = emptyList(),
     val fixedEarlyWatch: List<FixedEarlyWatchDto> = emptyList(),
+    val fixedPulseResearch: List<FixedPulseResearchDto> = emptyList(),
     val forecastChampions: List<ForecastChampionDto> = emptyList(),
     val research: ResearchDto = ResearchDto(),
     val univestResearch: List<UnivestResearchDto> = emptyList(),
