@@ -41,6 +41,13 @@ class FixedImportedSameDayDedupJournal @Inject constructor(@ApplicationContext c
             .distinctBy { "${it.date}|${it.symbol}|${it.generatedAtMs}" }.take(1200))).commit()
     }
 
+    /** A prior reinstall's event participates in repeat eligibility until an
+     * independently witnessed reset and fresh confirmation establish a new one. */
+    fun latestImportedAtMs(date: String, symbol: String): Long? = synchronized(lock) {
+        read().filter { it.date == date && it.symbol.equals(symbol, true) }
+            .maxOfOrNull { it.generatedAtMs }
+    }
+
     fun contains(date: String, symbol: String, eventAtMs: Long): Boolean = synchronized(lock) {
         // An archived prior event is not evidence that a later independent
         // PRIMARY event must be blocked.
