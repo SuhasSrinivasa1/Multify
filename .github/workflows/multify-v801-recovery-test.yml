@@ -1,7 +1,7 @@
-name: Multify v8.0.2 Reliability & Early Intelligence TEST APK
+name: Multify v8.0.3 Fixed Execution Evidence TEST APK
 on:
   push:
-    branches: [v802-reliability-early-intelligence-test]
+    branches: [v803-fixed-execution-evidence-test]
   workflow_dispatch:
 permissions:
   contents: read
@@ -98,7 +98,20 @@ jobs:
           assert 'candleInterval = "15minute"' in repo
           assert 'candleInterval = "1minute"' in repo
           gradle=Path('app/build.gradle.kts').read_text()
-          assert 'versionCode = 8020' in gradle
+          assert 'versionCode = 8030' in gradle
+          repo=Path('app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt').read_text()
+          assert 'FixedExecutionThinLiquidityPolicy.rejectionReason(quote)' in repo
+          assert 'fixedHistoricalEvidenceArchive.restorePriorRecommendations(it)' in repo
+          assert 'fixedMarketPulseResearchStore.capture(date, snapshot, published)' in repo
+          assert 'fixed_historical_research.json' in repo
+          assert 'fixed_market_pulse_research.json' in repo
+          service=Path('app/src/main/java/com/multify/traderpro/service/TradingEngineService.kt').read_text()
+          assert 'captureFixedMarketPulseAfterScan()' in service
+          archive=Path('app/src/main/java/com/multify/traderpro/data/repository/FixedHistoricalEvidenceArchive.kt').read_text()
+          assert 'fixedRecommendationStore.upsert' not in archive
+          assert 'submitMarketOrder(' not in archive
+          assert 'registerBoughtPositionAndProtect(' not in archive
+          assert 'MIN_GAP_MS = 1_200L' in Path('app/src/main/java/com/multify/traderpro/engine/AlphaLtpPacingPolicy.kt').read_text()
           print('Fixed 15m scoring, protected Fixed repository slices, BUY/SELL/GTT policies match v7.9.44')
           PY
       - name: Backend tests
@@ -115,16 +128,16 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v8.0.2-fixed-15m-api-reliability-debug.apk
+          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v8.0.3-fixed-15m-api-reliability-debug.apk
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/*.apk > dist/APK-SIGNATURE.txt
           "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/*.apk | head -n 2 > dist/PACKAGE.txt
-          grep -q "versionCode='8020'" dist/PACKAGE.txt
+          grep -q "versionCode='8030'" dist/PACKAGE.txt
           sha256sum dist/*.apk > dist/SHA256SUMS.txt
           git rev-parse HEAD > dist/SOURCE-COMMIT.txt
           python - <<'PY'
           from pathlib import Path
           from zipfile import ZipFile, ZIP_DEFLATED
-          with ZipFile('dist/Multify-TraderPro-v8.0.2-exact-source.zip','w',ZIP_DEFLATED) as z:
+          with ZipFile('dist/Multify-TraderPro-v8.0.3-exact-source.zip','w',ZIP_DEFLATED) as z:
             for p in Path('.').rglob('*'):
               if p.is_file() and not any(part in {'.git','.gradle','build','dist'} for part in p.parts):
                 z.write(p,p.as_posix())
@@ -132,6 +145,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: multify-v802-reliability-early-intelligence
+          name: multify-v803-fixed-execution-evidence
           path: dist/
           if-no-files-found: warn
