@@ -837,16 +837,25 @@ class TradingEngineService : Service() {
         val prefs = getSharedPreferences(FIXED_NOTIFICATION_PREFS, Context.MODE_PRIVATE)
         val today = ZonedDateTime.now(INDIA).toLocalDate().toString()
         val storedDate = prefs.getString(FIXED_NOTIFICATION_DATE_KEY, "").orEmpty()
-        // Stable per-session identity survives repeated scan starts; migrate old
-        // "SYMBOL|scanStarted" keys without re-alerting the same symbol.
+        // Event identity is SYMBOL|scanStartedAt, not SYMBOL|date. This permits
+        // a genuinely distinct, freshly confirmed PRIMARY for the same stock.
+        // Migrate v8.0.5 bare-symbol keys to the oldest locally known event,
+        // allowing a newer event to notify independently.
         val seen = if (storedDate == today) {
             prefs.getStringSet(FIXED_NOTIFICATION_KEYS_KEY, emptySet())
-                .orEmpty().map { it.substringBefore("|") }.toMutableSet()
+                .orEmpty().toMutableSet()
         } else mutableSetOf()
+        val legacySymbols = seen.filter { !it.contains("|") }
+        for (symbol in legacySymbols) {
+            val earliest = rows.filter { it.symbol.equals(symbol, true) }
+                .minByOrNull { it.generatedAtMs }
+            if (earliest != null) seen.add("${earliest.symbol.uppercase(Locale.US)}|${earliest.generatedAtMs}")
+            seen.remove(symbol)
+        }
 
-        var changed = storedDate != today
+        var changed = storedDate != today || legacySymbols.isNotEmpty()
         rows.forEach { row ->
-            val key = row.symbol.uppercase(Locale.US)
+            val key = "${row.symbol.uppercase(Locale.US)}|${row.generatedAtMs}"
             if (!seen.add(key)) return@forEach
             changed = true
             notifyFixed(row)
