@@ -109,7 +109,9 @@ class FixedHistoricalEvidenceArchive @Inject constructor(@ApplicationContext con
             if (!valid(new)) continue
             val old = all[key(new)]
             if (old == null || new.lastObservedAtMs > old.lastObservedAtMs ||
-                (new.observedTargetHit && !old.observedTargetHit)) {
+                (new.observedTargetHit && !old.observedTargetHit) ||
+                (old.snapshotOutcome == "UNRESOLVED_AT_SNAPSHOT" &&
+                    new.snapshotOutcome != "UNRESOLVED_AT_SNAPSHOT")) {
                 all[key(new)] = new
                 changed++
             }
