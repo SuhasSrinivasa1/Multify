@@ -1,7 +1,7 @@
-name: Multify v8.0.1 Forecast Univest Recovery TEST APK
+name: Multify v8.0.2 Reliability & Early Intelligence TEST APK
 on:
   push:
-    branches: [v801-diagnostics-forecast-univest-recovery]
+    branches: [v802-reliability-early-intelligence-test]
   workflow_dispatch:
 permissions:
   contents: read
@@ -98,7 +98,7 @@ jobs:
           assert 'candleInterval = "15minute"' in repo
           assert 'candleInterval = "1minute"' in repo
           gradle=Path('app/build.gradle.kts').read_text()
-          assert 'versionCode = 8010' in gradle
+          assert 'versionCode = 8020' in gradle
           print('Fixed 15m scoring, protected Fixed repository slices, BUY/SELL/GTT policies match v7.9.44')
           PY
       - name: Backend tests
@@ -115,16 +115,16 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v8.0.1-fixed-15m-api-reliability-debug.apk
+          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v8.0.2-fixed-15m-api-reliability-debug.apk
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/*.apk > dist/APK-SIGNATURE.txt
           "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/*.apk | head -n 2 > dist/PACKAGE.txt
-          grep -q "versionCode='8010'" dist/PACKAGE.txt
+          grep -q "versionCode='8020'" dist/PACKAGE.txt
           sha256sum dist/*.apk > dist/SHA256SUMS.txt
           git rev-parse HEAD > dist/SOURCE-COMMIT.txt
           python - <<'PY'
           from pathlib import Path
           from zipfile import ZipFile, ZIP_DEFLATED
-          with ZipFile('dist/Multify-TraderPro-v8.0.1-exact-source.zip','w',ZIP_DEFLATED) as z:
+          with ZipFile('dist/Multify-TraderPro-v8.0.2-exact-source.zip','w',ZIP_DEFLATED) as z:
             for p in Path('.').rglob('*'):
               if p.is_file() and not any(part in {'.git','.gradle','build','dist'} for part in p.parts):
                 z.write(p,p.as_posix())
@@ -132,6 +132,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: multify-v801-forecast-univest-recovery
+          name: multify-v802-reliability-early-intelligence
           path: dist/
           if-no-files-found: warn
