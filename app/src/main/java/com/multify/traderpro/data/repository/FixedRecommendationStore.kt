@@ -177,8 +177,16 @@ class FixedRecommendationStore @Inject constructor(
 
         /** Event identity includes the unique scan-start, not only date+symbol. */
         internal fun fixedEventId(date: String, symbol: String, scanAtMs: Long): Long {
-            val x = "$date|${symbol.uppercase(Locale.US)}|$scanAtMs|FIXED-V806".hashCode().toLong()
-            return if (x == Long.MIN_VALUE) 1L else kotlin.math.abs(x).coerceAtLeast(1L)
+            // Use a stable 63-bit ID. A 32-bit String.hashCode() is too small
+            // for an append-only multi-event archive spanning many sessions.
+            val text = "$date|${symbol.uppercase(Locale.US)}|$scanAtMs|FIXED-V806"
+            val digest = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(text.toByteArray(Charsets.UTF_8))
+            var result = 0L
+            for (i in 0 until 8) {
+                result = (result shl 8) or (digest[i].toLong() and 0xffL)
+            }
+            return (result and Long.MAX_VALUE).coerceAtLeast(1L)
         }
     }
 }
