@@ -105,6 +105,7 @@ import com.multify.traderpro.engine.ResearchCandleFirstTouchPolicy
 import com.multify.traderpro.engine.ForecastPublicationPolicy
 import com.multify.traderpro.engine.FixedAdaptiveLearningMath
 import com.multify.traderpro.engine.FixedForecastPublicationPolicy
+import com.multify.traderpro.engine.FixedEntryActionabilityPolicy
 import com.multify.traderpro.engine.FixedEarlyWatchPolicy
 import com.multify.traderpro.engine.FixedFinalContract
 import com.multify.traderpro.engine.RecommendationPriceBandPolicy
@@ -235,6 +236,7 @@ class TradingRepository @Inject constructor(
     private val fixedFastCandidatePriceStore: FixedFastCandidatePriceStore,
     private val fixedOutcomePerformanceStore: FixedOutcomePerformanceStore,
     private val fixedHistoricalEvidenceArchive: FixedHistoricalEvidenceArchive,
+    private val fixedImportedSameDayDedupJournal: FixedImportedSameDayDedupJournal,
     private val fixedAutoBuyOrderStore: FixedAutoBuyOrderStore,
     private val fixedMarketDiscoveryStateStore: FixedMarketDiscoveryStateStore,
     @ApplicationContext private val appContext: Context
@@ -1401,7 +1403,9 @@ class TradingRepository @Inject constructor(
             fullHitMeanMfePct = fixedRolling.fullHitMeanMfePct,
             p25Pct = fixedRolling.p25Pct, medianPct = fixedRolling.medianPct, p75Pct = fixedRolling.p75Pct
         )
-        val fixedForecasts = fixedRecords.map { it.toDto().copy(observedAfterPublication = it.lastObservedAtMs > it.generatedAtMs) }
+        val fixedForecasts = fixedRecords.map {
+            fixedPresentationDto(it).copy(observedAfterPublication = it.lastObservedAtMs > it.generatedAtMs)
+        }
         val research = learningDao.latestResearchReport()?.let {
             ResearchDto(it.reportDate, it.title, it.summary)
         } ?: ResearchDto()
@@ -1964,6 +1968,8 @@ class TradingRepository @Inject constructor(
                 val recommendationCompletedAtMs = System.currentTimeMillis()
                 val scanned = lastFixedScanAtMs != previousScanAtMs && !fixedScanDeferredBroker
                 if (scanned) {
+                    // Evidence-based execution actionability is outside frozen Fixed scoring.
+                    auditFixedActionabilityAfterScan()
                     // Outside FIXED_FINAL_LOCK: read-only publication diagnostics.
                     // Observations include the original tier and the separate safety verdict.
                     val currentDate = LocalDate.now(INDIA).toString()
@@ -2071,6 +2077,61 @@ class TradingRepository @Inject constructor(
         return newPulses
     }
 
+    private fun fixedFirstPrimaryPrice(date: String, symbol: String): Double? =
+        fixedEarlyWatchJournal.recent(date, 1000)
+            .firstOrNull { it.symbol.equals(symbol, true) }?.firstPrimaryPrice
+
+    private fun fixedEntryVerdict(
+        row: FixedRecommendationRecord, quote: QuotePayload?,
+        nowMs: Long = System.currentTimeMillis()
+    ): FixedEntryActionabilityPolicy.Verdict =
+        FixedEntryActionabilityPolicy.evaluate(
+            nowMs = nowMs, quote = quote,
+            referencePrice = fixedFirstPrimaryPrice(row.recommendationDate, row.symbol),
+            fixedTargetPct = row.targetPct,
+            priorSessionDuplicate = fixedImportedSameDayDedupJournal.contains(
+                row.recommendationDate, row.symbol)
+        )
+
+    private fun fixedPublishedQuote(row: FixedRecommendationRecord, nowMs: Long): QuotePayload? =
+        fixedShadowReferences[row.symbol.uppercase(Locale.US)]?.takeIf {
+            it.quoteCapturedAtMs >= row.generatedAtMs &&
+                it.quoteCapturedAtMs <= nowMs &&
+                nowMs - it.quoteCapturedAtMs <= 5L * 60_000L
+        }?.quote
+
+    private fun fixedPresentationDto(row: FixedRecommendationRecord,
+        nowMs: Long = System.currentTimeMillis()): ForecastDto {
+        val verdict = fixedEntryVerdict(row, fixedPublishedQuote(row, nowMs), nowMs)
+        val suffix = when (verdict.status) {
+            "RESEARCH_ONLY" -> " · FIXED RESEARCH ONLY, BUY blocked: " + verdict.reasons.joinToString(",")
+            "CAUTION" -> " · Fixed entry caution: " + verdict.reasons.joinToString(",")
+            else -> ""
+        }
+        return row.toDto().copy(
+            reason = row.reason + suffix,
+            executionEligible = row.executionEligible && verdict.actionable
+        )
+    }
+
+    /** Separate from the protected Fixed publication/score. No extra API requests. */
+    fun auditFixedActionabilityAfterScan() {
+        val date = LocalDate.now(INDIA).toString()
+        val nowMs = System.currentTimeMillis()
+        fixedRecommendationStore.recommendations(date).filter {
+            it.generatedAtMs > 0L && nowMs - it.generatedAtMs in 0L..300_000L
+        }.forEach { row ->
+            val verdict = fixedEntryVerdict(row, fixedPublishedQuote(row, nowMs), nowMs)
+            auditLogger.logAsync("FIXED_ENTRY_QUALITY", "PUBLICATION_ACTIONABILITY", mapOf(
+                "symbol" to row.symbol, "scan_started_at_ms" to row.generatedAtMs,
+                "actual_evaluated_at_ms" to nowMs, "status" to verdict.status,
+                "reasons" to verdict.reasons, "first_primary_to_entry_pct" to verdict.firstPrimaryRunupPct,
+                "distance_from_broker_day_high_pct" to verdict.distanceFromQuoteHighPct,
+                "fixed_scoring_changed" to false, "fixed_stored_recommendation_changed" to false,
+                "buy_guard_enabled" to true))
+        }
+    }
+
     fun fixedRecommendationsForNotification(): List<ForecastDto> {
         val today = LocalDate.now(INDIA).toString()
         return fixedRecommendationStore.recommendations(today)
@@ -2078,10 +2139,11 @@ class TradingRepository @Inject constructor(
                 it.status == "ACTIVE" &&
                     it.executionEligible &&
                     it.qualityTier == "PRIMARY" &&
-                    RecommendationPriceBandPolicy.eligible(it.entryPrice)
+                    RecommendationPriceBandPolicy.eligible(it.entryPrice) &&
+                    !fixedImportedSameDayDedupJournal.contains(today, it.symbol)
             }
             .sortedBy { it.generatedAtMs }
-            .map { it.toDto() }
+            .map { fixedPresentationDto(it) }
     }
 
     suspend fun runForecastOpportunisticCycle(postFixedOpportunity: Boolean = false): Boolean {
@@ -5943,6 +6005,9 @@ class TradingRepository @Inject constructor(
         }
 
         require(row.status == "ACTIVE") { "$symbol Fixed recommendation is no longer active" }
+        require(fixedEntryVerdict(row, null).actionable) {
+            "Fixed BUY blocked: late session or imported earlier recommendation"
+        }
         require(RecommendationPriceBandPolicy.eligible(row.entryPrice)) { "Fixed executes only stocks strictly between ₹200 and ₹5,000" }
         require(row.executionEligible && row.qualityTier == "PRIMARY") { "Only PRIMARY Fixed recommendations can place a real BUY" }
         if (managedDao.openPosition(ENGINE_FIXED_HOLDING, row.symbol) != null) {
@@ -5972,6 +6037,15 @@ class TradingRepository @Inject constructor(
                 "daily_turnover_estimate" to (ltp * (quote.volume ?: 0L)),
                 "fixed_scoring_changed" to false))
             error("Fixed BUY blocked: extremely thin reported turnover ($thinLiquidityReject)")
+        }
+        val entryActionability = fixedEntryVerdict(row, quote)
+        if (!entryActionability.actionable) {
+            auditLogger.logAsync("FIXED_BUY", "ENTRY_QUALITY_BLOCKED", mapOf(
+                "symbol" to row.symbol, "reasons" to entryActionability.reasons,
+                "first_primary_to_entry_pct" to entryActionability.firstPrimaryRunupPct,
+                "distance_from_day_high_pct" to entryActionability.distanceFromQuoteHighPct,
+                "fixed_model_unchanged" to true))
+            error("Fixed BUY held for research: " + entryActionability.reasons.joinToString(","))
         }
         val fixedExtensionReject = ExecutionEntryPriceGuardPolicy.rejectionReason(
             row.entryPrice, ltp, quoteRequestElapsedMs)
@@ -6084,6 +6158,13 @@ class TradingRepository @Inject constructor(
             val recommendationAgeAtStartMs = (symbolStartedAtMs - row.generatedAtMs).coerceAtLeast(0L)
             val liveSettings = preferences.settings.first()
             if (!liveSettings.fixedAutoBuyEnabled || liveSettings.safetyHalt || marketSession() != "OPEN") break
+            val preEntryVerdict = fixedEntryVerdict(row, null, symbolStartedAtMs)
+            if (!preEntryVerdict.actionable) {
+                auditLogger.logAsync("FIXED_AUTO_BUY", "ENTRY_QUALITY_BLOCKED_BEFORE_QUOTE",
+                    mapOf("symbol" to row.symbol, "reasons" to preEntryVerdict.reasons,
+                        "fixed_model_unchanged" to true))
+                continue
+            }
             if (!AutoBuyEntrySafetyPolicy.isFreshFixedEntry(row.generatedAtMs, symbolStartedAtMs)) {
                 auditLogger.logAsync("FIXED_AUTO_BUY", "ENTRY_SKIPPED_STALE_RECOMMENDATION", mapOf(
                     "symbol" to row.symbol,
@@ -6154,6 +6235,15 @@ class TradingRepository @Inject constructor(
                     "reported_day_shares" to quote.volume,
                     "daily_turnover_estimate" to (ltp * (quote.volume ?: 0L)),
                     "fixed_scoring_changed" to false))
+                continue
+            }
+            val entryActionability = fixedEntryVerdict(row, quote)
+            if (!entryActionability.actionable) {
+                auditLogger.logAsync("FIXED_AUTO_BUY", "ENTRY_QUALITY_BLOCKED", mapOf(
+                    "symbol" to row.symbol, "reasons" to entryActionability.reasons,
+                    "first_primary_to_entry_pct" to entryActionability.firstPrimaryRunupPct,
+                    "distance_from_day_high_pct" to entryActionability.distanceFromQuoteHighPct,
+                    "fixed_model_unchanged" to true))
                 continue
             }
             val autoExtensionReject = ExecutionEntryPriceGuardPolicy.rejectionReason(
