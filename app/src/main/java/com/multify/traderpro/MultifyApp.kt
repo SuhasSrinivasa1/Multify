@@ -11,6 +11,7 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import com.multify.traderpro.worker.NseSymbolSyncWorker
+import com.multify.traderpro.worker.TradingSessionStartScheduler
 import com.multify.traderpro.worker.ForecastNewsSyncWorker
 import com.multify.traderpro.data.network.GrowwRateLimitInterceptor
 import com.multify.traderpro.data.network.GrowwRecoveryGate
@@ -46,6 +47,10 @@ class MultifyApp : Application(), Configuration.Provider {
         GrowwRateLimitInterceptor.installRecovery(recoveryGate, preferences)
         val network = Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()
         val wm = WorkManager.getInstance(this)
+        // Schedule one OS-managed 09:00 IST weekday start or the one-off
+        // November 8 14:00 IST Muhurat warmup. The existing sticky foreground
+        // service remains primary; WorkManager start time is not exact.
+        TradingSessionStartScheduler.scheduleNext(this)
         wm.enqueueUniqueWork(
             "nse-symbol-master-initial",
             ExistingWorkPolicy.KEEP,

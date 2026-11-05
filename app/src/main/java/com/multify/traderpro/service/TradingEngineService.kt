@@ -36,6 +36,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import java.time.LocalTime
 import java.time.ZoneId
 import java.time.ZonedDateTime
@@ -504,6 +505,34 @@ class TradingEngineService : Service() {
                                         "message" to (it.message ?: it.javaClass.simpleName)
                                     ))
                                 }
+                            }
+                    }
+                    if (com.multify.traderpro.engine.NseEquitySessionCalendar.isPreOpenAuctionWindow(now)) {
+                        // Auction research is strictly read-only. Groww LTP is not a verified
+                        // NSE indicative equilibrium price; official Fixed confirmation
+                        // begins only with live continuous-trading data at 09:15/14:20.
+                        // Hard-stop pre-open network I/O before continuous trading starts
+                        // so the trusted 40-factor market scan retains priority.
+                        val auctionClose = if (com.multify.traderpro.engine.NseEquitySessionCalendar.isSpecialMuhurat2026(now))
+                            LocalTime.of(14, 20) else LocalTime.of(9, 15)
+                        val remaining = java.time.Duration.between(now.toLocalTime(), auctionClose)
+                            .toMillis() - 45_000L
+                        if (remaining > 60_000L) runCatching {
+                            withTimeoutOrNull(remaining) { repository.captureFixedPreOpenResearchOnly() }
+                        }.onFailure {
+                            if (it !is CancellationException) auditLogger.logAsync(
+                                "FIXED_PREOPEN", "RESEARCH_WORKER_ERROR",
+                                mapOf("error" to (it.message ?: it.javaClass.simpleName))
+                            )
+                        }
+                    }
+                    if (com.multify.traderpro.engine.NseEquitySessionCalendar.isMuhuratResearchTail(now)) {
+                        runCatching { repository.captureMuhuratClosingResearchOnly() }
+                            .onFailure { error ->
+                                if (error !is CancellationException) auditLogger.logAsync(
+                                    "FIXED_MUHURAT", "TAIL_WORKER_ERROR",
+                                    mapOf("error" to (error.message ?: error.javaClass.simpleName))
+                                )
                             }
                     }
                     if (com.multify.traderpro.engine.NseEquitySessionCalendar.isFixedScanWindow(now)) {

@@ -1177,6 +1177,211 @@ class TradingRepository @Inject constructor(
         auditLogger.log("SETTINGS", if (enabled) "ARM_ENABLED" else "ARM_DISABLED")
     }
 
+    /**
+     * Strictly observational pre-open pass. The regular NSE auction provides
+     * indicative equilibrium prices, but Groww's LTP/quote endpoint does NOT
+     * document an IEP field or exchange timestamp. These values may be yesterday's
+     * closing trade. Never promote this snapshot into official Fixed discovery,
+     * prior PRIMARY confirmation, recommendations, notifications or orders.
+     *
+     * One full read-only LTP sample + up to six frozen 15m model evaluations per
+     * date is bounded; actual Fixed publication waits for continuous trading.
+     */
+    /**
+     * Pre-open model: identical frozen 15-minute factor functions, isolated
+     * broker I/O and NO changes to primary-observation caches, first-PRIMARY
+     * references, historical rolling store, recommendation state or GTTs.
+     */
+    private suspend fun fixedPreOpenEvaluationReadOnly(symbol: String, alphaToken: String): FixedStrategyEvaluation {
+        val betaToken = fixedBetaMarketTokenOrNull()?.takeIf {
+            com.multify.traderpro.engine.FixedDualAccountPolicy.betaDetailedEvaluation(symbol, true)
+        }
+        val useBeta = betaToken != null
+        val quote = if (useBeta) {
+            betaMarketRead(betaToken!!, BetaResearchGate.Type.LIVE,
+                alphaCall = { error("Pre-open Beta quote cannot borrow Alpha") },
+                betaCall = { apiFactory.betaGroww.quote(bearer(betaToken), tradingSymbol = symbol)
+                    .requirePayload("Preopen quote $symbol") })
+        } else withFixedLiveDataSlot {
+            apiFactory.groww.quote(bearer(alphaToken), tradingSymbol = symbol)
+                .requirePayload("Preopen quote $symbol")
+        }
+        require(RecommendationPriceBandPolicy.eligible(quote.lastPrice)) { "FIXED_PRICE_BAND_OUTSIDE" }
+        val now = ZonedDateTime.now(INDIA)
+        val start = now.minusDays(4).toLocalDate().atTime(9, 15).format(HIST_FORMAT)
+        val end = now.toLocalDateTime().format(HIST_FORMAT)
+        val historical = if (useBeta) {
+            betaMarketRead(betaToken!!, BetaResearchGate.Type.HISTORICAL,
+                alphaCall = { error("Pre-open Beta historical cannot borrow Alpha") },
+                betaCall = { apiFactory.betaGroww.historicalCandles(
+                    bearer(betaToken), growwSymbol = "NSE-$symbol", startTime = start,
+                    endTime = end, candleInterval = "15minute"
+                ).requirePayload("Preopen 15m candles $symbol") })
+        } else withFixedHistoricalDataSlot {
+            apiFactory.groww.historicalCandles(
+                bearer(alphaToken), growwSymbol = "NSE-$symbol", startTime = start,
+                endTime = end, candleInterval = "15minute"
+            ).requirePayload("Preopen 15m candles $symbol")
+        }
+        require(historical.candles.size >= 5) { "PREOPEN_INSUFFICIENT_HISTORICAL_15M_CANDLES" }
+        return withContext(fixedCpuDispatcher) {
+            val features = FixedLocalStrategyEngine.buildFeatures(quote, historical, 15)
+            val signal = ParsedSignal(SignalType.TRADE_RELEASE,
+                symbol = symbol, rawText = "fixed-preopen-research-only", confidence = 1.0)
+            FixedLocalStrategyEngine.evaluateLong(signal, features, includeEventPrior = false)
+        }
+    }
+
+    suspend fun captureFixedPreOpenResearchOnly(): Boolean {
+        val now = ZonedDateTime.now(INDIA)
+        val sessionCalendar = com.multify.traderpro.engine.NseEquitySessionCalendar
+        if (!sessionCalendar.isPreOpenAuctionWindow(now) ||
+            !sessionCalendar.isPreOpenAuctionWindow(now.plusMinutes(5))) return false
+        val token = ensureToken() ?: return false
+        val master = nseSymbols.symbols().distinct()
+        if (master.isEmpty()) return false
+        val date = now.toLocalDate().toString()
+        val prefs = appContext.getSharedPreferences("fixed_preopen_research_v832", Context.MODE_PRIVATE)
+        // Mark attempt before broker calls: a process restart must not multiply
+        // pre-open sweeps or compete with the real 09:15/14:20 production scan.
+        if (prefs.getString("attempt_date", null) == date ||
+            !prefs.edit().putString("attempt_date", date).commit()) return false
+        val scanStarted = SystemClock.elapsedRealtime()
+        auditLogger.logAsync("FIXED_PREOPEN", "RESEARCH_STARTED", mapOf(
+            "date" to date, "phase" to "AUCTION_RESEARCH_ONLY",
+            "reference" to "GROWW_LTP_NOT_VERIFIED_NSE_IEP",
+            "contains_official_recommendations" to false,
+            "real_fixed_formula_changed" to false,
+            "special_muhurat" to sessionCalendar.isSpecialMuhurat2026(now)
+        ))
+        return try {
+            val snapshot = ensureFixedEngineSnapshot()
+            // The same 53-batch 50-stock full-market data transport is used,
+            // but this result is never cached as a valid 09:15/14:20 snapshot.
+            val sweep = collectFixedWideLtp(token, master, preparing = false)
+            auditLogger.logAsync("FIXED_PREOPEN", "MARKET_SNAPSHOT_RESEARCH_ONLY", mapOf(
+                "date" to date,
+                "universe_count" to master.size, "price_count" to sweep.prices.size,
+                "account_data_batches" to sweep.requestCount,
+                "coverage_pct" to if (master.isNotEmpty()) sweep.prices.size * 100.0 / master.size else 0.0,
+                "prices_are_exchange_iep" to false,
+                "prices_may_be_previous_session_ltp" to true,
+                "usable_for_official_primary_confirmation" to false,
+                "usable_for_buy" to false
+            ))
+            // CPU model uses the exact same original 15m feature and signal
+            // implementation, with no effect on the official ranked universe.
+            val watch = snapshot.payload.learningCalls
+                .asSequence().filter { it.action.equals("BUY", true) }
+                .sortedByDescending { it.callDate }
+                .map { it.symbol }.filter { it in master }
+                .distinct().take(6).toList()
+            val targetPct = FixedForecastQualityPolicy.adaptiveTargetPct(
+                fixedSnapshotMultifyMfeAverage(snapshot), emptyList()
+            )
+            val observations = mutableListOf<Map<String, Any?>>()
+            for (symbol in watch) {
+                if (!sessionCalendar.isPreOpenAuctionWindow(ZonedDateTime.now(INDIA))) break
+                try {
+                    val evaluation = fixedPreOpenEvaluationReadOnly(symbol, token)
+                    val quality = FixedForecastQualityPolicy.evaluate(
+                        evaluation, targetPct, "BREADTH_NEUTRAL"
+                    )
+                    observations += mapOf(
+                        "symbol" to symbol,
+                        "broker_last_price_unverified_auction" to evaluation.features.ltp,
+                        "confidence" to evaluation.confidence,
+                        "quality_tier_provisional" to quality.tier,
+                        "strategy" to evaluation.strategy,
+                        "candle_interval_minutes" to 15,
+                        "valid_iep_verified" to false,
+                        "eligible_to_publish_or_order" to false
+                    )
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (failed: Throwable) {
+                    observations += mapOf(
+                        "symbol" to symbol,
+                        "sample_error" to (failed.message ?: failed.javaClass.simpleName).take(140),
+                        "eligible_to_publish_or_order" to false
+                    )
+                }
+            }
+            auditLogger.logAsync("FIXED_PREOPEN", "ORIGINAL_FIXED_FORMULA_RESEARCH_SAMPLE", mapOf(
+                "date" to date,
+                "selected_watch_count" to watch.size,
+                "observations" to observations,
+                "elapsed_ms" to (SystemClock.elapsedRealtime() - scanStarted),
+                "full_market_ranking_calculated" to false,
+                "data_quality" to "UNVERIFIED_AUCTION_PRICE_AND_PREVIOUS_COMPLETED_15M_CANDLES",
+                "production_score_and_target_changed" to false,
+                "recommendations_published" to 0,
+                "orders_submitted" to 0
+            ))
+            true
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failed: Throwable) {
+            auditLogger.logAsync("FIXED_PREOPEN", "RESEARCH_FAILED_NO_TRADE", mapOf(
+                "reason" to (failed.message ?: failed.javaClass.simpleName).take(160),
+                "orders_submitted" to 0
+            ))
+            false
+        }
+    }
+
+    /**
+     * November 8 15:15–15:30: NSE non-CAS stocks may still trade, while
+     * CAS equities have entered their closing-auction sequence. Without a
+     * verified instrument CAS flag, no new recommendation or BUY is allowed.
+     * Retain a small, low-frequency read-only quote sample for diagnostics.
+     */
+    suspend fun captureMuhuratClosingResearchOnly(): Boolean {
+        val now = ZonedDateTime.now(INDIA)
+        val calendar = com.multify.traderpro.engine.NseEquitySessionCalendar
+        if (!calendar.isMuhuratResearchTail(now)) return false
+        val prefs = appContext.getSharedPreferences("muhurat_20261108_tail_research", Context.MODE_PRIVATE)
+        val bucket = "${now.toLocalDate()}-${now.minute / 2}"
+        if (prefs.getString("last_bucket", null) == bucket) return false
+        val token = ensureToken() ?: return false
+        if (!prefs.edit().putString("last_bucket", bucket).commit()) return false
+        val watch = ensureFixedEngineSnapshot().payload.learningCalls.asSequence()
+            .filter { it.action.equals("BUY", true) }
+            .sortedByDescending { it.callDate }
+            .map { it.symbol }.distinct()
+            .filter { nseSymbols.isKnown(it) }
+            .take(8).toList()
+        if (watch.isEmpty()) return false
+        return try {
+            val betaToken = fixedBetaMarketTokenOrNull()
+            val quotes = if (betaToken != null) {
+                fixedBetaLtp(betaToken, watch)
+            } else {
+                fetchFixedDiscoveryLtpBatch(token, watch, 0)
+            }
+            auditLogger.logAsync("FIXED_MUHURAT", "NONCAS_TAIL_READONLY", mapOf(
+                "date" to now.toLocalDate().toString(),
+                "sampled_symbols" to watch,
+                "sample_size" to watch.size,
+                "raw_quote_symbols" to (quotes?.size ?: 0),
+                "cas_membership_verified" to false,
+                "nse_cas_closed_at" to "15:15_IST",
+                "nse_noncas_closes_at" to "15:30_IST",
+                "prices_may_be_stale_for_cas" to true,
+                "recommendations_published" to 0,
+                "orders_submitted" to 0
+            ))
+            true
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failed: Throwable) {
+            auditLogger.logAsync("FIXED_MUHURAT", "TAIL_READONLY_FAILED", mapOf(
+                "error" to (failed.message ?: failed.javaClass.simpleName).take(140)
+            ))
+            false
+        }
+    }
+
     suspend fun prepareFixedPreMarketWarmup(): Boolean {
         val now = ZonedDateTime.now(INDIA)
         val t = now.toLocalTime()
