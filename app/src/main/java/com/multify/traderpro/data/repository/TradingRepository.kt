@@ -2254,7 +2254,7 @@ class TradingRepository @Inject constructor(
         return id
     }
 
-    // Only broker availability preflight. Never delays the frozen 150s Fixed cadence
+    // Only broker availability preflight. Never delays the configured 90s Fixed cadence
     // or bypasses trading controls. A deferred attempt is NOT a completed Fixed scan.
     private fun marketDataAvailableForFixed(): Boolean = runCatching {
         recoveryGate.checkRequestAllowed(GrowwApiUsageLedger.Category.LIVE_DATA)
@@ -10865,7 +10865,7 @@ class TradingRepository @Inject constructor(
         private const val FORECAST_AUTO_BUY_CANCEL_RECHECK_MS = 300L
         private const val FIXED_MIN_STOCK_PRICE_RUPEES = 200.0
         private const val FIXED_PREMARKET_WARMUP_INTERVAL_MS = 5L * 60L * 1000L
-        private const val FIXED_V741_FORECAST_SCAN_INTERVAL_MS = 150_000L
+        private const val FIXED_V741_FORECAST_SCAN_INTERVAL_MS = 90_000L
         private const val FIXED_V741_FORECAST_SYMBOL_PACING_MS = 25L
         private const val FIXED_V741_PRIMARY_CONFIRMATION_WINDOW_MS = 20L * 60L * 1000L
         private const val FIXED_V741_DETAILED_FORECAST_UNIVERSE_LIMIT = 48
