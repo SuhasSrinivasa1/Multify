@@ -10,7 +10,7 @@ import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 import javax.inject.Singleton
 
-/** Independent, non-blocking governor for Beta's read-only Forecast research traffic. */
+/** Independent, non-blocking governor for Beta's read-only Fixed market-data traffic. */
 @Singleton
 class BetaResearchGate @Inject constructor() {
     enum class Type { LIVE, HISTORICAL }
@@ -24,17 +24,19 @@ class BetaResearchGate @Inject constructor() {
         val second: ArrayDeque<Long> = ArrayDeque(),
         val minute: ArrayDeque<Long> = ArrayDeque(),
         var cooldownUntil: Long = 0L
+        var lastGrantedAt: Long = 0L
     )
     private val lock = Mutex()
     private val historicalInFlight = Mutex()
     private val windows = Type.values().associateWith { Window() }
-    private val liveSec = 9
-    private val liveMinute = 285
+    // Deliberately far below Groww's published shared LIVE category ceiling.
+    // 429 telemetry has shown tighter effective limits on individual endpoints.
+    private val liveSec = 1
+    private val liveMinute = com.multify.traderpro.engine.FixedDualAccountPolicy.BETA_LIVE_PER_MINUTE
     private val histSec = 1
-    // The 18:24 day-end log still recorded three Beta historical HTTP 429s at 12/min.
-    // Reduce request bursts while the cross-date after-hours replay catches up;
-    // Alpha's fast Multify BUY and all SELL paths are independent and unchanged.
-    private val histMinute = 8
+    private val histMinute = com.multify.traderpro.engine.FixedDualAccountPolicy.BETA_HISTORICAL_PER_MINUTE
+    private val liveGapMs = com.multify.traderpro.engine.FixedDualAccountPolicy.BETA_LTP_MIN_GAP_MS
+
     private val liveRequests = AtomicLong()
     private val historicalRequests = AtomicLong()
     private val liveFailures = AtomicLong()
@@ -56,12 +58,20 @@ class BetaResearchGate @Inject constructor() {
                 while (w.minute.isNotEmpty() && w.minute.first() <= now - 60_000L) w.minute.removeFirst()
                 val perSecond = if (type == Type.LIVE) liveSec else histSec
                 val perMinute = if (type == Type.LIVE) liveMinute else histMinute
+                val spacingWait = if (w.lastGrantedAt > 0L)
+                    (w.lastGrantedAt + (if (type == Type.LIVE) liveGapMs else 1_500L) - now)
+                        .coerceAtLeast(0L) else 0L
                 val wait = maxOf(
+                    spacingWait,
                     (w.cooldownUntil - now).coerceAtLeast(0L),
                     if (w.second.size >= perSecond) (w.second.first() + 1_000L - now).coerceAtLeast(1L) else 0L,
                     if (w.minute.size >= perMinute) (w.minute.first() + 60_000L - now).coerceAtLeast(1L) else 0L
                 )
-                if (wait == 0L) { w.second.addLast(now); w.minute.addLast(now) }
+                if (wait == 0L) {
+                    w.second.addLast(now)
+                    w.minute.addLast(now)
+                    w.lastGrantedAt = now
+                }
                 wait
             }
             if (waitMs <= 0L) break
@@ -86,6 +96,11 @@ class BetaResearchGate @Inject constructor() {
         } finally {
             lastLatencyMs.set((SystemClock.elapsedRealtime() - requestStarted).coerceAtLeast(0L))
         }
+    }
+
+    /** A 429 on Beta cannot borrow Alpha's trading quota to bypass cooldown. */
+    suspend fun healthyForFixed(type: Type): Boolean = lock.withLock {
+        windows.getValue(type).cooldownUntil <= SystemClock.elapsedRealtime()
     }
 
     fun snapshot() = UsageSnapshot(
