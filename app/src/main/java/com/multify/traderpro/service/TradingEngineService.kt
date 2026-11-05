@@ -506,6 +506,18 @@ class TradingEngineService : Service() {
                                 }
                             }
                     }
+                    if (com.multify.traderpro.engine.NseEquitySessionCalendar.isPreOpenAuctionWindow(now)) {
+                        // Auction research is strictly read-only. Groww LTP is not a verified
+                        // NSE indicative equilibrium price; official Fixed confirmation
+                        // begins only with live continuous-trading data at 09:15/14:20.
+                        runCatching { repository.captureFixedPreOpenResearchOnly() }
+                            .onFailure {
+                                if (it !is CancellationException) auditLogger.logAsync(
+                                    "FIXED_PREOPEN", "RESEARCH_WORKER_ERROR",
+                                    mapOf("error" to (it.message ?: it.javaClass.simpleName))
+                                )
+                            }
+                    }
                     if (com.multify.traderpro.engine.NseEquitySessionCalendar.isFixedScanWindow(now)) {
                         // Speculative historical prewarming is intentionally disabled. The
                         // 22-second verified cache remains unchanged; the old prewarm calls
