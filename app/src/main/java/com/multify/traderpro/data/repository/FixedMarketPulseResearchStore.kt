@@ -18,7 +18,7 @@ internal data class FixedPulseEvidence(
     val source: String = "FIRST_APP_PULSE_NOT_VERIFIED_NSE_OPEN"
 ) {
     fun dto() = FixedPulseResearchDto(symbol, atMs, firstPulsePrice, pulsePct,
-        latestPrice, officialEntryPrice, publishedAtMs)
+        latestPrice, officialEntryPrice, publishedAtMs, latestAtMs)
 }
 
 @Singleton
