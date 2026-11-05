@@ -8,7 +8,7 @@ object FixedMarketPulsePolicy {
     const val MIN_PULSE_PCT = 0.30
     const val MAX_PULSE_PCT = 4.00
     const val MAX_SCAN_GAP_MS = 15L * 60_000L
-    const val MAX_ROWS_PER_SCAN = 12
+    const val MAX_ROWS_PER_SCAN = 20
 
     data class Pulse(val symbol: String, val firstPrice: Double, val latestPrice: Double,
                      val increasePct: Double)
