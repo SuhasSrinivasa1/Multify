@@ -485,6 +485,7 @@ class TradingEngineService : Service() {
         fixedScanJob = scope.launch {
             var previousFixedPause: FixedDataPipelinePolicy.Readiness? = null
             var lastFixedPauseAuditMs = 0L
+            var lastSuccessfulFixedScanStartedAtMs = 0L
             auditLogger.log("FIXED_DATA_PIPELINE", "SPECULATIVE_HISTORICAL_PREWARM_DISABLED", mapOf(
                 "reason" to "0 useful cache hits in v7.8.2; protect broker historical-candle quota",
                 "fixed_algorithm_changed" to false,
@@ -594,7 +595,11 @@ class TradingEngineService : Service() {
                                 }
                             }.getOrDefault(false)
                         val elapsed = System.currentTimeMillis() - startedAt
+                        // Diagnostic-only measured start-to-start cadence.
+                        val actualStartSpacingMs = if (scanned && lastSuccessfulFixedScanStartedAtMs > 0L)
+                            (startedAt - lastSuccessfulFixedScanStartedAtMs).coerceAtLeast(0L) else null
                         if (scanned) {
+                            lastSuccessfulFixedScanStartedAtMs = startedAt
                             val usageAfter = GrowwApiUsageLedger.snapshot()
                             fun requestDelta(category: GrowwApiUsageLedger.Category): Long {
                                 val before = usageBefore.categories.first { it.category == category }.totalRequests
@@ -604,6 +609,15 @@ class TradingEngineService : Service() {
                             val historicalAfter = repository.fixedHistoricalRequestCounters()
                             auditLogger.logAsync("RUNTIME", "FIXED_SCAN_PROFILE", mapOf(
                                 "elapsed_ms" to elapsed,
+                                "scan_started_at_ms" to startedAt,
+                                "scan_completed_at_ms" to (startedAt + elapsed),
+                                "target_scan_start_spacing_ms" to 90_000L,
+                                "actual_completed_scan_start_spacing_ms" to actualStartSpacingMs,
+                                "spacing_above_target_ms" to actualStartSpacingMs?.let {
+                                    (it - 90_000L).coerceAtLeast(0L)
+                                },
+                                "previous_successful_scan_age_unknown_after_service_restart" to
+                                    (actualStartSpacingMs == null),
                                 "live_network_requests" to requestDelta(GrowwApiUsageLedger.Category.LIVE_DATA),
                                 "historical_network_requests" to requestDelta(GrowwApiUsageLedger.Category.HISTORICAL),
                                 "non_trading_network_requests" to requestDelta(GrowwApiUsageLedger.Category.NON_TRADING),
