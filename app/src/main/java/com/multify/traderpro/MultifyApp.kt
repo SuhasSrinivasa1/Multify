@@ -46,13 +46,8 @@ class MultifyApp : Application(), Configuration.Provider {
             ExistingWorkPolicy.KEEP,
             OneTimeWorkRequestBuilder<NseSymbolSyncWorker>().setConstraints(network).build()
         )
-        // Android WorkManager cannot run 60-second jobs; this only recovers news
-        // monitoring if the foreground service was stopped by the OS.
-        wm.enqueueUniquePeriodicWork(
-            "forecast-news-fallback-15m", ExistingPeriodicWorkPolicy.UPDATE,
-            PeriodicWorkRequestBuilder<ForecastNewsSyncWorker>(15, TimeUnit.MINUTES)
-                .setConstraints(network).build()
-        )
+        // Cancel previously scheduled Forecast news jobs, including pending runs.
+        wm.cancelUniqueWork("forecast-news-fallback-15m")
         wm.enqueueUniquePeriodicWork(
             "nse-symbol-master-monthly",
             ExistingPeriodicWorkPolicy.UPDATE,
