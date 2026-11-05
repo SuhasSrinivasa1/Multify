@@ -1207,7 +1207,8 @@ class TradingRepository @Inject constructor(
     }
 
     suspend fun setForecastScannerEnabled(enabled: Boolean) {
-        preferences.setForecastScannerEnabled(enabled)
+        require(!enabled) { "Forecast scanning is frozen in v8.3; Beta is reserved for Fixed." }
+        preferences.setForecastScannerEnabled(false)
         if (!enabled) {
             preferences.setForecastAutoBuy(false)
             runCatching {
