@@ -198,8 +198,8 @@ jobs:
           assert 'submitMarketOrder(' not in fast
           assert 'fixedRecommendationStore.upsert' not in fast
           assert 'tradingEffect: String = "NONE"' in fast
-          assert 'FixedFastCandidateSelectionPolicy.select(' in repo
-          assert 'FixedFastCandidateSamplingPolicy.candidateOnlyAllowed(' in repo
+          assert 'FixedFastCandidateSelectionPolicy.select(' not in repo
+          assert 'FixedFastCandidateSamplingPolicy.candidateOnlyAllowed(' not in repo
           assert 'fixed_fast_candidates.json' in repo
           assert 'fixedFastCandidatePrices = fixedFastCandidatePriceStore.recent(today)' in repo
           assert 'MONITORING_REST_NOT_EXCHANGE_TICK' not in repo # historical provenance unchanged
@@ -211,7 +211,7 @@ jobs:
           assert 'fixed_historical_research.json' in repo
           assert 'fixed_market_pulse_research.json' in repo
           service=Path('app/src/main/java/com/multify/traderpro/service/TradingEngineService.kt').read_text()
-          assert 'captureFixedMarketPulseAfterScan()' in service
+          assert 'captureFixedMarketPulseAfterScan()' not in service
           archive=Path('app/src/main/java/com/multify/traderpro/data/repository/FixedHistoricalEvidenceArchive.kt').read_text()
           assert 'fixedRecommendationStore.upsert' not in archive
           assert 'submitMarketOrder(' not in archive
