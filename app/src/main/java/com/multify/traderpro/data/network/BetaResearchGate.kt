@@ -23,7 +23,7 @@ class BetaResearchGate @Inject constructor() {
     private data class Window(
         val second: ArrayDeque<Long> = ArrayDeque(),
         val minute: ArrayDeque<Long> = ArrayDeque(),
-        var cooldownUntil: Long = 0L
+        var cooldownUntil: Long = 0L,
         var lastGrantedAt: Long = 0L
     )
     private val lock = Mutex()
