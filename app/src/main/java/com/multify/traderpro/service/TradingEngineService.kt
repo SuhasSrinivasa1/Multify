@@ -682,41 +682,23 @@ class TradingEngineService : Service() {
                                 "groww_ltp_app_max_per_minute" to com.multify.traderpro.engine.AlphaLtpPacingPolicy.MAX_PER_MINUTE,
                                 "fixed_model_changed" to false
                             ))
-                            scope.launch(Dispatchers.IO.limitedParallelism(1)) {
-                                runCatching { repository.captureFixedEarlyWatchAfterScan() }
-                                    .onFailure {
-                                        if (it !is CancellationException) auditLogger.logAsync(
-                                            "FIXED_EARLY_WATCH", "RECONCILIATION_ERROR",
-                                            mapOf("reason" to it.javaClass.simpleName,
-                                                "fixed_logic_changed" to false))
-                                    }
-                                // No broker requests or early BUYs: read existing full-NSE snapshots.
-                                runCatching { repository.captureFixedMarketPulseAfterScan() }
-                                    .onFailure {
-                                        if (it !is CancellationException) auditLogger.logAsync(
-                                            "FIXED_PULSE_RESEARCH", "POST_SCAN_CAPTURE_ERROR",
-                                            mapOf("error" to it.javaClass.simpleName,
-                                                "fixed_logic_changed" to false))
+                            // No Early Watch/Pulse/Fast Watch background research.
+                            // Prepare NEXT official NSE sweep, using no more full-market
+                            // LTP batches per successful cycle than original v8.
+                            scope.launch(Dispatchers.IO) {
+                                runCatching { repository.prepareNextFixedDiscoverySweep() }
+                                    .onFailure { error ->
+                                        if (error !is CancellationException) auditLogger.logAsync(
+                                            "FIXED_PERFORMANCE", "NEXT_FULL_SWEEP_WORKER_ERROR",
+                                            mapOf("error" to (error.message ?: error.javaClass.simpleName))
+                                        )
                                     }
                             }
                             scope.launch {
                                 notifyNewFixedRecommendationsAfterOrderPath()
                             }
-                            // Fixed production uses only 15-minute candles. The optional read-only
-                            // Fixed 5-minute comparison was retired to eliminate even potential
-                            // additional Alpha historical requests. Keep Forecast scheduling separate.
-                            // Give Forecast a bounded, broker-budget-aware chance immediately
-                            // after Fixed releases the shared scan mutex. It cannot block the
-                            // Fixed notification path or the portfolio protection monitor.
-                            scope.launch {
-                                if (repository.forecastBackgroundScanningEnabled()) {
-                                    val clock = ZonedDateTime.now(INDIA)
-                                    if (clock.dayOfWeek.value < 6 && clock.toLocalTime() <= LocalTime.of(15, 0)) {
-                                        runCatching { repository.runForecastOpportunisticCycle(postFixedOpportunity = true) }
-                                            .onFailure { err -> auditLogger.logAsync("FORECAST_SCHEDULER", "POST_FIXED_OPPORTUNITY_ERROR", mapOf("message" to (err.message ?: err.javaClass.simpleName))) }
-                                    }
-                                }
-                            }
+                            // Discretionary Forecast research is not launched immediately
+                            // after Fixed: broker capacity is reserved for the next sweep.
                         }
                     }
                     delay(SCAN_WORKER_POLL_MS)
