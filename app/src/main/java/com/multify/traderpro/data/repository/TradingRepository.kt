@@ -308,6 +308,8 @@ class TradingRepository @Inject constructor(
     private val closePositionMutexes = ConcurrentHashMap<Long, Mutex>()
     private val appOwnedBuyMutex = Mutex()
     private val protectiveGttCreationMutex = Mutex()
+    // One symbol's confirmed fill/protection lifecycle cannot race trailing management.
+    private val positionLifecycleMutexes = ConcurrentHashMap<String, Mutex>()
     private val multifyBuyLifecycleMutex = Mutex()
     private val forecastAutoBuySubmissionMutex = Mutex()
     private val fixedAutoBuySubmissionMutex = Mutex()
@@ -1808,11 +1810,47 @@ class TradingRepository @Inject constructor(
             val margin = apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin")
             (margin.equity?.cncBalanceAvailable ?: margin.clearCash).coerceAtLeast(0.0)
         }
-        val referencePrice = signalReference ?: run {
-            val quote = apiFactory.groww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Quote $symbol")
-            preferences.recordMarketData()
-            quote.lastPrice ?: error("Groww quote does not contain LTP")
+        val quoteStartedAtMs = SystemClock.elapsedRealtime()
+        val entryQuote = apiFactory.groww.quote(
+            bearer(token), tradingSymbol = symbol
+        ).requirePayload("Multify entry quote $symbol")
+        preferences.recordMarketData()
+        val quoteElapsedMs = (SystemClock.elapsedRealtime() - quoteStartedAtMs).coerceAtLeast(0L)
+        val livePrice = entryQuote.lastPrice?.takeIf { it.isFinite() && it > 0.0 }
+            ?: error("Groww quote does not contain a valid LTP for $symbol")
+        val referencePrice = signalReference ?: livePrice
+        val bandReference = signal.entryHigh ?: signal.entryLow
+        if (bandReference != null) {
+            val rejection = ExecutionEntryPriceGuardPolicy.rejectionReason(
+                bandReference, livePrice, quoteElapsedMs
+            )
+            if (rejection != null) {
+                auditLogger.log("EXECUTION", "MULTIFY_ENTRY_PRICE_GUARD_REJECTED", mapOf(
+                    "symbol" to symbol,
+                    "entry_low" to signal.entryLow,
+                    "entry_high" to signal.entryHigh,
+                    "guard_reference" to bandReference,
+                    "fresh_quote" to livePrice,
+                    "extension_pct" to ((livePrice / bandReference - 1.0) * 100.0),
+                    "maximum_extension_pct" to ExecutionEntryPriceGuardPolicy.MAX_EXTENSION_PCT,
+                    "quote_elapsed_ms" to quoteElapsedMs,
+                    "reason" to rejection,
+                    "buy_submitted" to false
+                ))
+                error("Multify BUY blocked: entry price moved beyond the allowed 0.40% band ($rejection)")
+            }
         }
+        auditLogger.log("EXECUTION", "MULTIFY_ENTRY_PRICE_CHECK_PASSED", mapOf(
+            "symbol" to symbol,
+            "entry_low" to signal.entryLow,
+            "entry_high" to signal.entryHigh,
+            "reference_price" to referencePrice,
+            "fresh_quote" to livePrice,
+            "extension_pct" to if (bandReference != null) ((livePrice / bandReference - 1.0) * 100.0) else null,
+            "maximum_extension_pct" to ExecutionEntryPriceGuardPolicy.MAX_EXTENSION_PCT,
+            "quote_elapsed_ms" to quoteElapsedMs,
+            "market_order_fill_can_slip_after_quote" to true
+        ))
         val sizing = CashAwareCncSizing.sizeStrictBudget(settings.holdingBudgetRupees.toDouble(), available, referencePrice)
         val capital = sizing.deployableCash
         val qty = sizing.quantity
@@ -1823,10 +1861,22 @@ class TradingRepository @Inject constructor(
         auditLogger.log("EXECUTION", "CNC_BUY_SIZED", mapOf(
             "symbol" to symbol, "available_cnc" to available, "configured_budget" to settings.holdingBudgetRupees,
             "cash_reserve" to sizing.cashReserve, "reference_price" to referencePrice,
-            "buffered_price" to sizing.bufferedPrice, "deployable_cash" to capital, "quantity" to qty
+            "buffered_price" to sizing.bufferedPrice, "deployable_cash" to capital, "quantity" to qty,
+            "fresh_quote" to livePrice, "quote_elapsed_ms" to quoteElapsedMs,
+            "entry_band_low" to signal.entryLow, "entry_band_high" to signal.entryHigh
         ))
         val filled = order.filledQuantity?.takeIf { it > 0 } ?: qty
         val entry = order.averageFillPrice?.takeIf { it > 0.0 } ?: referencePrice
+        val fillDeviationPct = signal.entryHigh?.takeIf { it > 0.0 }
+            ?.let { (entry / it - 1.0) * 100.0 }
+        auditLogger.log("EXECUTION", "MULTIFY_ENTRY_FILL_PRICE_DEVIATION", mapOf(
+            "symbol" to symbol, "quantity" to filled, "signal_entry_high" to signal.entryHigh,
+            "fresh_pre_order_quote" to livePrice, "actual_average_fill" to entry,
+            "fill_deviation_from_entry_high_pct" to fillDeviationPct,
+            "within_0_40_pct_reference_band" to (fillDeviationPct == null ||
+                fillDeviationPct <= ExecutionEntryPriceGuardPolicy.MAX_EXTENSION_PCT),
+            "market_order_slippage_cannot_be_capped_after_fill" to true
+        ))
         val investedAmount = entry * filled
         val trailArmPct = SteppedTrailingPolicy.ARM_TRIGGER_PCT
         registerBoughtPositionAndProtect(
@@ -7718,7 +7768,8 @@ class TradingRepository @Inject constructor(
     private suspend fun safeAppSellScope(
         token: String, position: ManagedPositionEntity,
         inventory: BrokerInventorySnapshot? = null,
-        forceGttRefresh: Boolean = false
+        forceGttRefresh: Boolean = false,
+        knownActiveGtts: Map<String, List<SmartOrderPayload>>? = null
     ): Boolean {
         if (!appOwned(position)) return false
         val openSameSymbol = managedDao.openPositions().filter { it.symbol.equals(position.symbol, true) }
@@ -7728,7 +7779,8 @@ class TradingRepository @Inject constructor(
         val demat = broker.holdings[key]?.quantity ?: 0
         val cnc = broker.positions[key]?.quantity ?: 0
         if (!AppPositionOwnershipPolicy.exclusiveBrokerQuantity(position.quantity, demat, cnc)) return false
-        val otherActiveGtt = activeGttsBySymbol(token, force = forceGttRefresh).getOrDefault(key, emptyList())
+        val activeGtts = knownActiveGtts ?: activeGttsBySymbol(token, force = forceGttRefresh)
+        val otherActiveGtt = activeGtts.getOrDefault(key, emptyList())
             .any { it.smartOrderId != position.smartOrderId }
         return !otherActiveGtt
     }
@@ -7818,8 +7870,50 @@ class TradingRepository @Inject constructor(
         if (activeGttsResult.isSuccess) {
             val activeGtts = activeGttsResult.getOrThrow()
             val open = managedDao.openPositions()
-            for (position in open) {
+            for (observedPosition in open) {
+                var position = observedPosition
                 val symbol = position.symbol.uppercase(Locale.US)
+
+                // A prior app GTT may be active even if an older monitor snapshot lost its ID.
+                // Recover its exact app reference before treating it as an external/manual conflict.
+                if (position.smartOrderId.isNullOrBlank()) {
+                    val recovered = com.multify.traderpro.engine.AppProtectionGttRecoveryPolicy.recover(
+                        position.id, position.symbol, position.openedAtMs, position.quantity,
+                        activeGtts[symbol].orEmpty()
+                    )
+                    if (recovered != null) {
+                        val recoveredMode = recovered.mode
+                        val recoveredAtMs = System.currentTimeMillis()
+                        position = position.copy(
+                            smartOrderId = recovered.payload.smartOrderId,
+                            smartOrderMode = recoveredMode,
+                            smartOrderTriggerPrice = recovered.triggerPrice,
+                            smartOrderDirection = recovered.direction,
+                            smartOrderStatus = recovered.payload.status.ifBlank { "ACTIVE" },
+                            smartOrderUpdatedAtMs = recoveredAtMs,
+                            stopPrice = if (recoveredMode in setOf(
+                                HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT,
+                                HoldingSmartOrderPolicy.MODE_TRAILING_GTT
+                            )) recovered.triggerPrice else position.stopPrice,
+                            targetPrice = if (recoveredMode == HoldingSmartOrderPolicy.MODE_RECOVERY_GTT)
+                                recovered.triggerPrice else position.targetPrice,
+                            lastEvaluatedAtMs = recoveredAtMs
+                        )
+                        managedDao.updatePosition(position)
+                        auditLogger.log("GTT", "APP_PROTECTION_GTT_RECOVERED_DURING_MONITOR", mapOf(
+                            "symbol" to symbol,
+                            "position_id" to position.id,
+                            "gtt_id" to recovered.payload.smartOrderId,
+                            "reference_id" to recovered.payload.referenceId,
+                            "mode" to recoveredMode,
+                            "trigger" to recovered.triggerPrice,
+                            "direction" to recovered.direction,
+                            "status" to position.smartOrderStatus,
+                            "duplicate_creation_blocked" to true
+                        ))
+                    }
+                }
+
                 val brokerQty = max(
                     inventory.holdings[symbol]?.quantity ?: 0,
                     inventory.positions[symbol]?.quantity ?: 0
@@ -7844,7 +7938,7 @@ class TradingRepository @Inject constructor(
                     continue
                 }
                 val conflict = activeGtts[symbol].orEmpty().any { it.smartOrderId != position.smartOrderId }
-                val exclusive = safeAppSellScope(token, position, inventory)
+                val exclusive = safeAppSellScope(token, position, inventory, knownActiveGtts = activeGtts)
                 if (conflict || !exclusive) {
                     blockedSymbols += symbol
                     logPortfolioConflict(symbol, "Sell protection BLOCKED: not exclusively app-owned or another broker GTT exists", mapOf(
@@ -7921,13 +8015,14 @@ class TradingRepository @Inject constructor(
             logPortfolioConflict(symbol, "Fresh LTP unavailable; this pass will not create or adjust sell orders using a stale price.")
         }
 
-        val marked = reconciled.map { position ->
-            val ltp = marks[position.symbol.uppercase(Locale.US)]
-            if (ltp != null && ltp.isFinite() && ltp > 0.0 && abs(ltp - position.lastPrice) > 1e-9) {
-                position.copy(lastPrice = ltp, lastEvaluatedAtMs = System.currentTimeMillis()).also {
-                    managedDao.updatePosition(it)
-                }
-            } else position
+        val marked = reconciled.map { observed ->
+            val ltp = marks[observed.symbol.uppercase(Locale.US)]
+            if (ltp != null && ltp.isFinite() && ltp > 0.0 && abs(ltp - observed.lastPrice) > 1e-9) {
+                val markAtMs = System.currentTimeMillis()
+                // Update only price/time columns; never clobber a newer GTT ID or status.
+                managedDao.updatePriceObservation(observed.id, ltp, markAtMs)
+            }
+            managedDao.openPositionById(observed.id) ?: observed
         }
 
         if (!marketOpen) {
@@ -8053,6 +8148,8 @@ class TradingRepository @Inject constructor(
      * An unverified GTT is retained for reconciliation, never duplicated.
      */
     private suspend fun registerBoughtPositionAndProtect(position: ManagedPositionEntity): Long {
+        val lifecycleMutex = positionLifecycleMutexes.computeIfAbsent(position.symbol.uppercase(Locale.US)) { Mutex() }
+        return lifecycleMutex.withLock {
         val id = managedDao.insertPosition(position)
         brokerInventorySnapshot = null
         activeGttSnapshot = null
@@ -8065,12 +8162,12 @@ class TradingRepository @Inject constructor(
         val token = runCatching { ensureToken() }.getOrNull()
         if (token == null) {
             reportCriticalUnprotected(position, id, "AUTH_UNAVAILABLE_AFTER_CONFIRMED_BUY")
-            return id
+            return@withLock id
         }
         var lastFailure = "BROKER_PROTECTION_NOT_VERIFIED"
         for (attempt in 1..3) {
             try {
-                val current = managedDao.openPositionById(id) ?: return id
+                val current = managedDao.openPositionById(id) ?: return@withLock id
                 val protected = if (!current.smartOrderId.isNullOrBlank()) {
                     refreshKnownSmartOrderStatus(token, current, force = true)
                 } else {
@@ -8088,7 +8185,7 @@ class TradingRepository @Inject constructor(
                         "status" to protected.smartOrderStatus,
                         "attempt" to attempt
                     ))
-                    return id
+                    return@withLock id
                 }
                 lastFailure = "UNVERIFIED_GTT_STATUS_${protected.smartOrderStatus}"
             } catch (cancel: CancellationException) {
@@ -8104,7 +8201,8 @@ class TradingRepository @Inject constructor(
             if (attempt < 3) delay(700L * attempt)
         }
         reportCriticalUnprotected(position, id, lastFailure)
-        return id
+        id
+        }
     }
 
     private fun reportCriticalUnprotected(position: ManagedPositionEntity, id: Long, reason: String) {
@@ -8172,7 +8270,15 @@ class TradingRepository @Inject constructor(
         return createPositionGtt(token, working, hardStop, "DOWN", HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT)
     }
 
-    private suspend fun monitorLongHolding(position: ManagedPositionEntity, token: String, ltp: Double) {
+    private suspend fun monitorLongHolding(observedPosition: ManagedPositionEntity, token: String, ltp: Double) {
+        val lifecycleMutex = positionLifecycleMutexes.computeIfAbsent(observedPosition.symbol.uppercase(Locale.US)) { Mutex() }
+        lifecycleMutex.withLock {
+            val current = managedDao.openPositionById(observedPosition.id) ?: return@withLock
+            monitorLongHoldingLocked(current, token, ltp)
+        }
+    }
+
+    private suspend fun monitorLongHoldingLocked(position: ManagedPositionEntity, token: String, ltp: Double) {
         // Common sell protection for every managed CNC LONG, regardless of source:
         // 1) hard -2% loss floor from the actual holding cost basis;
         // 2) once +0.55% high-water is reached, the existing stepped profitable trail takes over;
@@ -8401,18 +8507,64 @@ class TradingRepository @Inject constructor(
         direction: String,
         mode: String
     ): ManagedPositionEntity = protectiveGttCreationMutex.withLock {
-        // The position monitor and post-fill protection may race.
-        val persisted = managedDao.openPositionById(position.id)
-        if (persisted != null && !persisted.smartOrderId.isNullOrBlank()) return@withLock persisted
-        require(position.side == "LONG" && position.product == "CNC") { "GTT protection is only for tracked CNC LONG holdings" }
-        require(safeAppSellScope(token, position, forceGttRefresh = true)) { "GTT SELL blocked: ${position.symbol} is not exclusively app-bought" }
+        // Always use the latest Room row; callers may hold an older portfolio snapshot.
+        val current = managedDao.openPositionById(position.id)
+            ?: error("Managed position ${position.id} disappeared before GTT protection")
+        if (!current.smartOrderId.isNullOrBlank()) return@withLock current
+        require(current.side == "LONG" && current.product == "CNC") { "GTT protection is only for tracked CNC LONG holdings" }
+
+        // Recover only an exact, active app-generated SELL GTT for this exact position event.
+        // Symbol/quantity similarity alone is deliberately insufficient.
+        val active = activeGttsBySymbol(token, force = true)
+        val recovered = com.multify.traderpro.engine.AppProtectionGttRecoveryPolicy.recover(
+            current.id, current.symbol, current.openedAtMs, current.quantity,
+            active.getOrDefault(current.symbol.uppercase(Locale.US), emptyList())
+        )
+        if (recovered != null) {
+            val now = System.currentTimeMillis()
+            val recoveredMode = recovered.mode
+            val updated = current.copy(
+                smartOrderId = recovered.payload.smartOrderId,
+                smartOrderMode = recoveredMode,
+                smartOrderTriggerPrice = recovered.triggerPrice,
+                smartOrderDirection = recovered.direction,
+                smartOrderStatus = recovered.payload.status.ifBlank { "ACTIVE" },
+                smartOrderUpdatedAtMs = now,
+                stopPrice = if (recoveredMode in setOf(
+                    HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT,
+                    HoldingSmartOrderPolicy.MODE_TRAILING_GTT
+                )) recovered.triggerPrice else current.stopPrice,
+                targetPrice = if (recoveredMode == HoldingSmartOrderPolicy.MODE_RECOVERY_GTT)
+                    recovered.triggerPrice else current.targetPrice,
+                lastEvaluatedAtMs = now
+            )
+            managedDao.updatePosition(updated)
+            auditLogger.log("GTT", "APP_PROTECTION_GTT_RECOVERED", mapOf(
+                "symbol" to current.symbol,
+                "position_id" to current.id,
+                "gtt_id" to recovered.payload.smartOrderId,
+                "reference_id" to recovered.payload.referenceId,
+                "mode" to recoveredMode,
+                "trigger" to recovered.triggerPrice,
+                "direction" to recovered.direction,
+                "status" to updated.smartOrderStatus,
+                "duplicate_creation_blocked" to true,
+                "other_active_gtt_count" to active.getOrDefault(current.symbol.uppercase(Locale.US), emptyList())
+                    .count { it.smartOrderId != recovered.payload.smartOrderId }
+            ))
+            return@withLock updated
+        }
+
+        require(safeAppSellScope(
+            token, current, forceGttRefresh = false, knownActiveGtts = active
+        )) { "GTT SELL blocked: ${current.symbol} is not exclusively app-bought or another GTT exists" }
         require(direction in setOf("UP", "DOWN"))
         require(mode in setOf(
             HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT,
             HoldingSmartOrderPolicy.MODE_TRAILING_GTT,
             HoldingSmartOrderPolicy.MODE_RECOVERY_GTT
         ))
-        require(position.smartOrderId.isNullOrBlank()) { "Refusing to create a second GTT for ${position.symbol}" }
+        require(current.smartOrderId.isNullOrBlank()) { "Refusing to create a second GTT for ${current.symbol}" }
         val gttBlockedUntil = brokerRetryGuard.gttBlockedUntil(position.symbol)
         if (gttBlockedUntil > System.currentTimeMillis()) {
             throw BrokerExecutionRetryGuard.Deferred("GTT on ${position.symbol} is on broker-rejection cooldown")
@@ -8423,7 +8575,7 @@ class TradingRepository @Inject constructor(
             HoldingSmartOrderPolicy.MODE_TRAILING_GTT -> "MTG"
             else -> "MTR"
         }
-        val reference = stableRef(referencePrefix, "${position.id}-${position.symbol}-${position.openedAtMs}")
+        val reference = stableRef(referencePrefix, "${current.id}-${current.symbol}-${current.openedAtMs}")
         val postTriggerOrder = if (mode == HoldingSmartOrderPolicy.MODE_RECOVERY_GTT)
             GttOrder(orderType = "LIMIT", price = smartPrice(roundedTrigger), transactionType = "SELL")
         else
@@ -8433,28 +8585,28 @@ class TradingRepository @Inject constructor(
                 bearer(token),
                 GttCreateRequest(
                     referenceId = reference,
-                    tradingSymbol = position.symbol,
-                    quantity = position.quantity,
+                    tradingSymbol = current.symbol,
+                    quantity = current.quantity,
                     triggerPrice = smartPrice(roundedTrigger),
                     triggerDirection = direction,
                     order = postTriggerOrder
                 )
-            ).requirePayload("Create GTT ${position.symbol}")
+            ).requirePayload("Create GTT ${current.symbol}")
         } catch (t: Throwable) {
             val rejected = t.message.orEmpty().contains("HTTP 400") ||
                 BrokerExecutionSafetyPolicy.isInsufficientShares(t.message.orEmpty())
-            val until = brokerRetryGuard.blockGtt(position.symbol, rejected)
+            val until = brokerRetryGuard.blockGtt(current.symbol, rejected)
             auditLogger.log("GTT", "GTT_CREATE_COOLDOWN_APPLIED", mapOf(
-                "symbol" to position.symbol, "until_ms" to until,
+                "symbol" to current.symbol, "until_ms" to until,
                 "reason" to (t.message ?: t.javaClass.simpleName)
             ))
             throw t
         }
-        brokerRetryGuard.clearGtt(position.symbol)
-        require(payload.smartOrderId.isNotBlank()) { "Groww did not return a GTT id for ${position.symbol}" }
+        brokerRetryGuard.clearGtt(current.symbol)
+        require(payload.smartOrderId.isNotBlank()) { "Groww did not return a GTT id for ${current.symbol}" }
         activeGttSnapshot = null
         val now = System.currentTimeMillis()
-        val updated = position.copy(
+        val updated = current.copy(
             smartOrderId = payload.smartOrderId,
             smartOrderMode = mode,
             smartOrderTriggerPrice = roundedTrigger,
@@ -8462,7 +8614,7 @@ class TradingRepository @Inject constructor(
             smartOrderStatus = payload.status.ifBlank { "ACTIVE" },
             smartOrderUpdatedAtMs = now,
             stopPrice = if (mode in setOf(HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT, HoldingSmartOrderPolicy.MODE_TRAILING_GTT)) roundedTrigger else null,
-            targetPrice = if (mode == HoldingSmartOrderPolicy.MODE_RECOVERY_GTT) roundedTrigger else position.targetPrice,
+            targetPrice = if (mode == HoldingSmartOrderPolicy.MODE_RECOVERY_GTT) roundedTrigger else current.targetPrice,
             lastEvaluatedAtMs = now
         )
         managedDao.updatePosition(updated)
@@ -8472,10 +8624,10 @@ class TradingRepository @Inject constructor(
             else -> "RECOVERY_GTT_CREATED"
         }
         auditLogger.log("GTT", createdEvent, mapOf(
-            "symbol" to position.symbol,
+            "symbol" to current.symbol,
             "gtt_id" to payload.smartOrderId,
             "reference_id" to reference,
-            "quantity" to position.quantity,
+            "quantity" to current.quantity,
             "trigger" to roundedTrigger,
             "direction" to direction,
             "transaction" to "SELL",

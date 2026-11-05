@@ -884,29 +884,14 @@ private fun FixedScreen(
                 shape = RoundedCornerShape(20.dp)
             ) {
                 Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                    Text("Fixed engine · IMMUTABLE", fontWeight = FontWeight.SemiBold)
-                    KeyValueRow("Snapshot", snapshot.snapshotId.ifBlank { "Capturing…" })
-                    KeyValueRow("Source", snapshot.sourceVersion.ifBlank { "v7.4.1" })
-                    KeyValueRow(
-                        "Snapshot SHA",
-                        snapshot.sha256.takeIf { it.isNotBlank() }?.take(12)?.plus("…") ?: "Pending"
-                    )
-                    KeyValueRow("Frozen Multify calibration calls", snapshot.learningCalls.toString())
-                    KeyValueRow("Prior Forecast feedback rows", snapshot.historicalForecasts.toString())
-                    KeyValueRow("Prior research-feedback rows", snapshot.researchSnapshots.toString())
-                    KeyValueRow("Prior champion bonuses", snapshot.champions.toString())
-                    Text(
-                        "The 0 feedback rows are intentional, not missing phone history. The accepted v7.4.1 reference session did not use prior Forecast/champion/research feedback; keeping them empty prevents post-hoc learning.",
+                    Text("Fixed engine · FROZEN", fontWeight = FontWeight.SemiBold)
+                    Text("v7.4.1 · 40 factors · 15-minute candles · original selection and SELL rules preserved.",
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Text(
-                        if (state.settings.fixedAutoBuyEnabled)
-                            "Fixed Auto-buy is ON independently. Every new Fixed PRIMARY recommendation is sent as its own direct CNC MARKET BUY before presentation."
-                        else
-                            "Fixed scanning continues with auto-buy OFF. Recommendations remain manual; Multify ARM is separate.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        if (state.settings.fixedAutoBuyEnabled) "Fixed Auto Buy · ON" else "Fixed Auto Buy · OFF",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium
                     )
                 }
             }
@@ -921,9 +906,6 @@ private fun FixedScreen(
             )
         }
         item {
-            val ageText = if (health.discoveryBaselineAgeMs == Long.MAX_VALUE) "—"
-                else if (health.discoveryBaselineAgeMs < 60_000L) "<1 min"
-                else "${health.discoveryBaselineAgeMs / 60_000L} min"
             Card(
                 colors = CardDefaults.cardColors(
                     containerColor = when (health.discovery) {
@@ -935,128 +917,79 @@ private fun FixedScreen(
                 shape = RoundedCornerShape(20.dp)
             ) {
                 Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                    Text("Fixed discovery · ${health.discovery}", fontWeight = FontWeight.SemiBold)
-                    KeyValueRow("NSE coverage", String.format(Locale.US, "%.1f%%", health.discoveryCoveragePct))
-                    KeyValueRow("Baseline", if (health.discoveryBaselineReady) "Ready" else "Warming")
-                    KeyValueRow("Baseline age", ageText)
-                    KeyValueRow("Failed batches", health.discoveryBatchErrors.toString())
+                    Text("Market discovery · ${health.discovery}", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "${String.format(Locale.US, "%.1f%%", health.discoveryCoveragePct)} NSE coverage · baseline " +
+                            if (health.discoveryBaselineReady) "ready" else "warming",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+        item {
+            val positions = dashboard?.positions.orEmpty()
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                shape = RoundedCornerShape(20.dp)
+            ) {
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                    Text("Open holdings & broker protection", fontWeight = FontWeight.SemiBold)
+                    if (positions.isEmpty()) {
+                        Text("No app-managed holdings currently open.", style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    } else {
+                        positions.forEach { p ->
+                            val activeProtection = p.smartOrderMode in setOf("HARD_STOP_GTT", "TRAILING_GTT", "RECOVERY_GTT") &&
+                                !p.smartOrderId.isNullOrBlank() &&
+                                (p.smartOrderStatus?.uppercase(Locale.US)?.let { it in setOf("ACTIVE", "OPEN") } == true)
+                            val triggered = p.smartOrderStatus?.uppercase(Locale.US)?.let { it in setOf("TRIGGERED", "COMPLETED") } == true
+                            HorizontalDivider()
+                            Text("${p.symbol} · ${p.quantity} shares", fontWeight = FontWeight.Medium)
+                            Text(
+                                when {
+                                    activeProtection -> "BROKER GTT ACTIVE · ${p.smartOrderMode.replace("_", " ")}"
+                                    triggered -> "BROKER GTT TRIGGERED · RECONCILING"
+                                    else -> "PROTECTION NEEDS REVIEW · CHECK GROWW"
+                                },
+                                style = MaterialTheme.typography.labelMedium,
+                                color = if (activeProtection) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+                            )
+                            Text(
+                                "Entry ₹${String.format(Locale.US, "%.2f", p.averagePrice)} · LTP ₹${String.format(Locale.US, "%.2f", p.ltp ?: p.averagePrice)} · P&L ₹${String.format(Locale.US, "%.2f", p.pnl)}",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                            Text(
+                                "App broker GTT trigger ₹${String.format(Locale.US, "%.2f", p.smartOrderTriggerPrice ?: p.stopPrice ?: 0.0)} · Target " +
+                                    (p.targetPrice?.let { "₹${String.format(Locale.US, "%.2f", it)}" } ?: "—"),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
                 }
             }
         }
         item {
             val evidence = dashboard?.fixedResearchSafety
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                shape = RoundedCornerShape(20.dp)) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
-                    Text("Fixed evidence · historical & first-touch", fontWeight = FontWeight.SemiBold)
-                    Text("Research observations are NOT executed trades. Target-first and stop-first use spaced price samples; intermediate moves may have been missed. Imported history never reopens a holding.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    KeyValueRow("Archived Fixed observations", (evidence?.historicalSnapshots ?: 0).toString())
-                    KeyValueRow("Archived trading dates", (evidence?.historicalDates ?: 0).toString())
-                    KeyValueRow("Historical target observed", (evidence?.historicalObservedTargets ?: 0).toString())
-                    KeyValueRow("Historical snapshot unresolved", (evidence?.historicalUnresolved ?: 0).toString())
-                    HorizontalDivider()
-                    KeyValueRow("Target first in samples", (evidence?.liveSampledTargetFirst ?: 0).toString())
-                    KeyValueRow("Stop first in samples", (evidence?.liveSampledStopFirst ?: 0).toString())
-                    KeyValueRow("Neither observed", (evidence?.liveSampledUnresolved ?: 0).toString())
-                }
-            }
-        }
-        item {
             val prices = dashboard?.fixedFastCandidatePrices.orEmpty()
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                shape = RoundedCornerShape(20.dp)) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
-                    Text("Fixed Fast Watch · spare-capacity price refresh", fontWeight = FontWeight.SemiBold)
-                    Text("Read-only LTP observations between official Fixed scans. These do not confirm PRIMARY, change the ranking, authorize BUY, or prove exchange-tick freshness.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    if (prices.isEmpty()) Text("Awaiting an eligible Fixed PRIMARY or market-pulse candidate and spare broker capacity.",
-                        style = MaterialTheme.typography.bodySmall)
-                    prices.take(12).forEach { item ->
-                        HorizontalDivider()
-                        Text(item.symbol + " · " + item.origin.replace("_", " "),
-                            fontWeight = FontWeight.Medium)
-                        Text("Baseline ₹" + String.format(Locale.US, "%.2f", item.baselinePrice) +
-                            " · latest ₹" + String.format(Locale.US, "%.2f", item.latestPrice) +
-                            " · change " + String.format(Locale.US, "%+.2f%%", item.moveSinceFirstPct) +
-                            " · samples " + item.observationCount,
-                            style = MaterialTheme.typography.bodySmall)
-                    }
-                }
-            }
-        }
-        item {
             val pulse = dashboard?.fixedPulseResearch.orEmpty()
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                shape = RoundedCornerShape(20.dp)) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
-                    Text("Fixed Market Pulse · earliest observed price momentum", fontWeight = FontWeight.SemiBold)
-                    Text("Read-only comparison of successive full-NSE price sweeps. Not a 9:15 exchange baseline, not an approved PRIMARY signal, and cannot BUY. No additional Groww requests.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    if (pulse.isEmpty()) Text("Two completed market-wide snapshots are required.",
-                        style = MaterialTheme.typography.bodySmall)
-                    pulse.take(12).forEach { item ->
-                        HorizontalDivider()
-                        Text(item.symbol + if (item.publishedAtMs != null)
-                            " · later Fixed recommendation" else " · research observation only",
-                            fontWeight = FontWeight.Medium)
-                        Text("First pulse ₹" + String.format(Locale.US, "%.2f", item.firstPulsePrice) +
-                            " · sweep-to-sweep +" + String.format(Locale.US, "%.2f%%", item.pulsePct) +
-                            " · latest ₹" + String.format(Locale.US, "%.2f", item.latestPrice) +
-                            (item.officialEntryPrice?.let {
-                                " · published at ₹" + String.format(Locale.US, "%.2f", it)
-                            } ?: ""),
-                            style = MaterialTheme.typography.bodySmall)
-                    }
-                }
-            }
-        }
-        item {
             val early = dashboard?.fixedEarlyWatch.orEmpty()
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                shape = RoundedCornerShape(20.dp)) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
-                    Text("Fixed Early Watch · research only", fontWeight = FontWeight.SemiBold)
-                    Text("First valid PRIMARY observations are saved BEFORE repeated confirmation. These are not official Fixed calls and cannot BUY. Prices, bid–ask spread and absolute volume are observational; no live filters have changed.",
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                shape = RoundedCornerShape(20.dp)
+            ) {
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                    Text("Research runs in background", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "Early Watch ${early.size} · Fast Watch ${prices.size} · Market Pulse ${pulse.size} · Archived observations ${evidence?.historicalSnapshots ?: 0}",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Text(
+                        "Factor breakdowns, candidate rejections, API timings, cache details and worker traces are saved in Export Logs, not displayed here.",
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    if (early.isEmpty()) {
-                        Text("Awaiting the first complete Fixed PRIMARY evaluation.",
-                            style = MaterialTheme.typography.bodySmall)
-                    } else {
-                        early.take(12).forEach { watch ->
-                            HorizontalDivider()
-                            Text(watch.symbol + " · " +
-                                if (watch.officialPublished) "Official Fixed published" else "Awaiting original confirmation",
-                                fontWeight = FontWeight.Medium)
-                            Text("First PRIMARY ₹" +
-                                String.format(Locale.US, "%.2f", watch.firstPrimaryPrice) +
-                                " · latest ₹" + String.format(Locale.US, "%.2f", watch.latestPrice) +
-                                " · move " + String.format(Locale.US, "%+.2f%%", watch.runupPct) +
-                                " · primary scans " + watch.confirmationObservations,
-                                style = MaterialTheme.typography.bodySmall)
-                            Text("Observed spread: " +
-                                (watch.observedSpreadBps?.let { String.format(Locale.US, "%.0f bps", it) }
-                                    ?: watch.quoteBookStatus) +
-                                " · day shares: " + (watch.dayTradedShares?.toString() ?: "not reported") +
-                                " · day move: " + (watch.dayChangePct?.let {
-                                    String.format(Locale.US, "%+.1f%%", it) } ?: "unknown") +
-                                " · distance from quote high: " +
-                                (watch.distanceFromQuoteDayHighPct?.let {
-                                    String.format(Locale.US, "%.2f%%", it)
-                                } ?: "unknown"),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            if (watch.warnings.isNotEmpty()) {
-                                Text("Shadow warnings: " + watch.warnings.joinToString(", "),
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                        }
-                    }
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
         }
