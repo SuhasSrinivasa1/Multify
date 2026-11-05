@@ -48,9 +48,9 @@ object FixedEntryActionabilityPolicy {
         val local = Instant.ofEpochMilli(nowMs).atZone(IST)
         val clock = local.toLocalTime()
         val reasons = mutableListOf<String>()
-        if (local.dayOfWeek.value > 5 || clock < START || clock >= END)
+        if (!NseEquitySessionCalendar.isFixedScanWindow(local))
             reasons += "OUTSIDE_NSE_CASH_SESSION"
-        else if (clock >= LATE)
+        else if (!NseEquitySessionCalendar.isFixedNewEntryWindow(local))
             reasons += "LESS_THAN_15_MINUTES_TO_CLOSE"
         if (priorSessionDuplicate) reasons += "PREVIOUSLY_RECOMMENDED_THIS_SESSION"
 
