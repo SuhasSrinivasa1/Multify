@@ -53,7 +53,7 @@ object EarlyConvictionPolicy {
             val pulse = byPulse[symbol]?.takeIf {
                 it.firstPulsePrice.isFinite() && it.firstPulsePrice > 0.0 &&
                     it.pulsePct in 0.30..4.00 &&
-                    it.firstPulseObservedAtMs <= watch.latestEvaluatedAtMs &&
+                    it.firstPulseObservedAtMs <= watch.latestEvaluatedAtMs + 120_000L &&
                     it.latestPrice.isFinite() &&
                     abs(it.latestPrice / watch.latestPrice - 1.0) <= 0.025
             }
@@ -77,8 +77,11 @@ object EarlyConvictionPolicy {
                     it.contains("LOW_ABSOLUTE_VOLUME", true)
             } || (watch.dayChangePct ?: 0.0) >= 12.0 ||
                 movedPct > MAX_FIRST_PRIMARY_RUNUP_PCT
+            // A pulse has already compared two full-market snapshots, so it is an
+            // independent corroborating observation without waiting for an
+            // optional Fast Watch API request. Never infer exchange tick timing.
             val corroborated = watch.confirmationObservations >= 2 ||
-                (pulse != null && sample != null)
+                pulse != null || (sample != null && sample.observationCount >= 2)
             var score = 55
             if (validSpread) score += if (watch.observedSpreadBps!! <= 15.0) 12 else 6
             if (liquid) score += if ((watch.dayTradedShares ?: 0L) >= 100_000L) 10 else 6
