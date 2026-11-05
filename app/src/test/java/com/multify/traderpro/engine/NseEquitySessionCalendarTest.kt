@@ -12,6 +12,34 @@ class NseEquitySessionCalendarTest {
     private fun ist(date: String, time: String) =
         LocalDate.parse(date).atTime(LocalTime.parse(time)).atZone(india)
 
+    @Test fun startClockRunsNineAmOnWeekdaysButNotOtherSundays() {
+        val friday = ist("2026-11-06", "08:59")
+        assertTrue(NseEquitySessionCalendar.nextStartupAfter(friday) ==
+            ist("2026-11-06", "09:00"))
+        assertTrue(NseEquitySessionCalendar.nextStartupAfter(ist("2026-11-06", "09:00")) ==
+            ist("2026-11-08", "14:00"))
+        assertTrue(NseEquitySessionCalendar.nextStartupAfter(ist("2026-11-08", "14:00")) ==
+            ist("2026-11-09", "09:00"))
+        assertTrue(NseEquitySessionCalendar.startupAt(LocalDate.parse("2026-11-15")) == null)
+        assertTrue(NseEquitySessionCalendar.startupAt(LocalDate.parse("2026-11-07")) == null)
+        assertTrue(NseEquitySessionCalendar.startupAt(LocalDate.parse("2026-11-08")) ==
+            ist("2026-11-08", "14:00"))
+    }
+
+    @Test fun preopenIsObservationOnlyAndStartsAtCorrectExchangeTime() {
+        assertTrue(NseEquitySessionCalendar.isWarmupWindow(ist("2026-11-08", "14:00")))
+        assertFalse(NseEquitySessionCalendar.isPreOpenAuctionWindow(ist("2026-11-08", "14:00")))
+        assertFalse(NseEquitySessionCalendar.isPreOpenAuctionWindow(ist("2026-11-08", "14:04")))
+        assertTrue(NseEquitySessionCalendar.isPreOpenAuctionWindow(ist("2026-11-08", "14:05")))
+        assertTrue(NseEquitySessionCalendar.isPreOpenAuctionWindow(ist("2026-11-08", "14:19")))
+        assertFalse(NseEquitySessionCalendar.isPreOpenAuctionWindow(ist("2026-11-08", "14:20")))
+        assertTrue(NseEquitySessionCalendar.isPreOpenAuctionWindow(ist("2026-11-09", "09:00")))
+        assertTrue(NseEquitySessionCalendar.isPreOpenAuctionWindow(ist("2026-11-09", "09:14")))
+        assertFalse(NseEquitySessionCalendar.isPreOpenAuctionWindow(ist("2026-11-09", "09:15")))
+        assertFalse(NseEquitySessionCalendar.isFixedScanWindow(ist("2026-11-09", "09:00")))
+        assertFalse(NseEquitySessionCalendar.isFixedScanWindow(ist("2026-11-08", "14:05")))
+    }
+
     @Test fun muhuratSundayWarmsUpBeforeContinuousTrading() {
         assertFalse(NseEquitySessionCalendar.isFixedScanWindow(ist("2026-11-08", "14:19")))
         assertTrue(NseEquitySessionCalendar.isWarmupWindow(ist("2026-11-08", "14:05")))
