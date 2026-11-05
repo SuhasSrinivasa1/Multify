@@ -7870,8 +7870,50 @@ class TradingRepository @Inject constructor(
         if (activeGttsResult.isSuccess) {
             val activeGtts = activeGttsResult.getOrThrow()
             val open = managedDao.openPositions()
-            for (position in open) {
+            for (observedPosition in open) {
+                var position = observedPosition
                 val symbol = position.symbol.uppercase(Locale.US)
+
+                // A prior app GTT may be active even if an older monitor snapshot lost its ID.
+                // Recover its exact app reference before treating it as an external/manual conflict.
+                if (position.smartOrderId.isNullOrBlank()) {
+                    val recovered = com.multify.traderpro.engine.AppProtectionGttRecoveryPolicy.recover(
+                        position.id, position.symbol, position.openedAtMs, position.quantity,
+                        activeGtts[symbol].orEmpty()
+                    )
+                    if (recovered != null) {
+                        val recoveredMode = recovered.mode
+                        val recoveredAtMs = System.currentTimeMillis()
+                        position = position.copy(
+                            smartOrderId = recovered.payload.smartOrderId,
+                            smartOrderMode = recoveredMode,
+                            smartOrderTriggerPrice = recovered.triggerPrice,
+                            smartOrderDirection = recovered.direction,
+                            smartOrderStatus = recovered.payload.status.ifBlank { "ACTIVE" },
+                            smartOrderUpdatedAtMs = recoveredAtMs,
+                            stopPrice = if (recoveredMode in setOf(
+                                HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT,
+                                HoldingSmartOrderPolicy.MODE_TRAILING_GTT
+                            )) recovered.triggerPrice else position.stopPrice,
+                            targetPrice = if (recoveredMode == HoldingSmartOrderPolicy.MODE_RECOVERY_GTT)
+                                recovered.triggerPrice else position.targetPrice,
+                            lastEvaluatedAtMs = recoveredAtMs
+                        )
+                        managedDao.updatePosition(position)
+                        auditLogger.log("GTT", "APP_PROTECTION_GTT_RECOVERED_DURING_MONITOR", mapOf(
+                            "symbol" to symbol,
+                            "position_id" to position.id,
+                            "gtt_id" to recovered.payload.smartOrderId,
+                            "reference_id" to recovered.payload.referenceId,
+                            "mode" to recoveredMode,
+                            "trigger" to recovered.triggerPrice,
+                            "direction" to recovered.direction,
+                            "status" to position.smartOrderStatus,
+                            "duplicate_creation_blocked" to true
+                        ))
+                    }
+                }
+
                 val brokerQty = max(
                     inventory.holdings[symbol]?.quantity ?: 0,
                     inventory.positions[symbol]?.quantity ?: 0
@@ -7896,7 +7938,7 @@ class TradingRepository @Inject constructor(
                     continue
                 }
                 val conflict = activeGtts[symbol].orEmpty().any { it.smartOrderId != position.smartOrderId }
-                val exclusive = safeAppSellScope(token, position, inventory)
+                val exclusive = safeAppSellScope(token, position, inventory, knownActiveGtts = activeGtts)
                 if (conflict || !exclusive) {
                     blockedSymbols += symbol
                     logPortfolioConflict(symbol, "Sell protection BLOCKED: not exclusively app-owned or another broker GTT exists", mapOf(

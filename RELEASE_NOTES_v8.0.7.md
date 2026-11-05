@@ -38,3 +38,9 @@ Debug signing certificates can differ between builds. Do not uninstall or replac
 - The v8.0.7 CI workflow now requires the documented stable signing secrets and verifies the expected certificate SHA-256 before uploading an APK.
 - The CI source archive explicitly excludes the temporary keystore file.
 - This certificate is different from the v8.0.6 TEST APK's Android Debug certificate. Android will not permit an in-place update from v8.0.6; do not uninstall the old app while any managed holding, active GTT or unexported local history remains.
+
+
+## Follow-up hardening
+- The portfolio monitor now attempts exact-reference recovery before classifying an active GTT as an unrelated broker-order conflict. This allows an existing app GTT to be re-associated on restart even when the local ID was previously lost.
+- The holdings card labels the trigger explicitly as the app's broker GTT trigger; it does not misrepresent that value as Multify's original notification stop.
+- When stable signing secrets are absent, CI still produces a debug TEST APK but records that it cannot update a differently signed installation. The v8.0.6 debug signer cannot be recovered from its APK.

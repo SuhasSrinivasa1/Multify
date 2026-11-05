@@ -960,7 +960,7 @@ private fun FixedScreen(
                                 style = MaterialTheme.typography.bodySmall
                             )
                             Text(
-                                "Stop ₹${String.format(Locale.US, "%.2f", p.smartOrderTriggerPrice ?: p.stopPrice ?: 0.0)} · Target " +
+                                "App broker GTT trigger ₹${String.format(Locale.US, "%.2f", p.smartOrderTriggerPrice ?: p.stopPrice ?: 0.0)} · Target " +
                                     (p.targetPrice?.let { "₹${String.format(Locale.US, "%.2f", it)}" } ?: "—"),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant

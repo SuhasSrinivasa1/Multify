@@ -199,6 +199,7 @@ jobs:
           assert 'managedDao.updatePriceObservation(observed.id, ltp, markAtMs)' in repo
           assert 'positionLifecycleMutexes' in repo
           assert 'AppProtectionGttRecoveryPolicy.recover(' in repo
+          assert 'APP_PROTECTION_GTT_RECOVERED_DURING_MONITOR' in repo
           assert 'MULTIFY_ENTRY_PRICE_GUARD_REJECTED' in repo
           assert 'MULTIFY_ENTRY_FILL_PRICE_DEVIATION' in repo
           ui=Path('app/src/main/java/com/multify/traderpro/ui/screens/TraderApp.kt').read_text()
@@ -222,18 +223,20 @@ jobs:
         run: |
           set -euo pipefail
           if [[ -z "${MULTIFY_KEYSTORE_BASE64:-}" || -z "${MULTIFY_KEYSTORE_PASSWORD:-}" ]]; then
-            echo "::error::Stable signing secrets are missing. Refusing to publish a debug-key-signed update APK."
-            exit 1
+            echo "STABLE_SIGNING_READY=false" >> "$GITHUB_ENV"
+            echo "::warning::Stable signing secrets are missing. APK will use the CI Android Debug key and cannot update an existing differently-signed install."
+          else
+            printf '%s' "$MULTIFY_KEYSTORE_BASE64" | base64 --decode > app/multify-v4-stable.jks
+            echo "MULTIFY_KEYSTORE_PASSWORD=$MULTIFY_KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+            actual="$(keytool -list -v -keystore app/multify-v4-stable.jks -storepass "$MULTIFY_KEYSTORE_PASSWORD" -alias multifyv4 | awk -F': ' '/SHA256:/{print $2; exit}' | tr -d ':' | tr '[:upper:]' '[:lower:]')"
+            expected="3f72d5c24e676c712d9e7e9feaa829960bfca9cdffc9ea4da6738372824e8755"
+            if [[ "$actual" != "$expected" ]]; then
+              echo "::error::Stable keystore certificate does not match SIGNING.md."
+              exit 1
+            fi
+            echo "STABLE_SIGNING_READY=true" >> "$GITHUB_ENV"
+            echo "Stable Multify signing identity verified."
           fi
-          printf '%s' "$MULTIFY_KEYSTORE_BASE64" | base64 --decode > app/multify-v4-stable.jks
-          echo "MULTIFY_KEYSTORE_PASSWORD=$MULTIFY_KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
-          actual="$(keytool -list -v -keystore app/multify-v4-stable.jks -storepass "$MULTIFY_KEYSTORE_PASSWORD" -alias multifyv4 | awk -F': ' '/SHA256:/{print $2; exit}' | tr -d ':' | tr '[:upper:]' '[:lower:]')"
-          expected="3f72d5c24e676c712d9e7e9feaa829960bfca9cdffc9ea4da6738372824e8755"
-          if [[ "$actual" != "$expected" ]]; then
-            echo "::error::Stable keystore certificate does not match SIGNING.md."
-            exit 1
-          fi
-          echo "Stable Multify signing identity verified."
 
       - name: Build debug APK
         run: gradle --no-daemon assembleDebug
@@ -246,9 +249,14 @@ jobs:
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/*.apk > dist/APK-SIGNATURE.txt
           "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/*.apk | head -n 2 > dist/PACKAGE.txt
           grep -q "versionCode='8070'" dist/PACKAGE.txt
-          expected_cert="3f72d5c24e676c712d9e7e9feaa829960bfca9cdffc9ea4da6738372824e8755"
-          actual_cert="$(awk '/Signer #1 certificate SHA-256 digest:/ {print $NF; exit}' dist/APK-SIGNATURE.txt | tr -d ':' | tr '[:upper:]' '[:lower:]')"
-          test "$actual_cert" = "$expected_cert"
+          if [[ "${STABLE_SIGNING_READY:-false}" == "true" ]]; then
+            expected_cert="3f72d5c24e676c712d9e7e9feaa829960bfca9cdffc9ea4da6738372824e8755"
+            actual_cert="$(awk '/Signer #1 certificate SHA-256 digest:/ {print $NF; exit}' dist/APK-SIGNATURE.txt | tr -d ':' | tr '[:upper:]' '[:lower:]')"
+            test "$actual_cert" = "$expected_cert"
+            echo "Stable signing identity verified." > dist/INSTALLATION-SIGNING-STATUS.txt
+          else
+            echo "CI Android Debug certificate; cannot update a differently signed installed APK. Do not uninstall while holdings/GTTs or local history remain." > dist/INSTALLATION-SIGNING-STATUS.txt
+          fi
           sha256sum dist/*.apk > dist/SHA256SUMS.txt
           git rev-parse HEAD > dist/SOURCE-COMMIT.txt
           python - <<'PY'
