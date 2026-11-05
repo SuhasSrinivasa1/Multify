@@ -32,3 +32,9 @@ CI must pass protected Fixed/SELL source checks, backend tests, Android unit tes
 
 ## Installation caution
 Debug signing certificates can differ between builds. Do not uninstall or replace an app while holdings, GTTs or unexported learning history exist. Verify open broker positions and active GTTs directly in Groww before any reinstall. If Android refuses an in-place update due to signer mismatch, do not uninstall until the existing holding and GTT have been safely reconciled.
+
+
+## Stable signing
+- The v8.0.7 CI workflow now requires the documented stable signing secrets and verifies the expected certificate SHA-256 before uploading an APK.
+- The CI source archive explicitly excludes the temporary keystore file.
+- This certificate is different from the v8.0.6 TEST APK's Android Debug certificate. Android will not permit an in-place update from v8.0.6; do not uninstall the old app while any managed holding, active GTT or unexported local history remains.
