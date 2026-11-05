@@ -33,7 +33,7 @@ class FixedMarketPulseResearchStore @Inject constructor(@ApplicationContext cont
             prefs.getLong("price_snapshot_at", 0L) else 0L
         val old = if (oldAt > 0L) FixedMarketDiscoveryStateCodec.decode(
             prefs.getString("price_snapshot_values", "").orEmpty()) else emptyMap()
-        val pulses = FixedMarketPulsePolicy.rank(old, snapshot.previousLtps, oldAt, snapshot.updatedAtMs)
+        val pulses = FixedMarketPulsePolicy.rank(old, snapshot.previousLtps, oldAt, snapshot.updatedAtMs, limit = 12)
         val indexed = load().associateBy { "${it.date}|${it.symbol}" }.toMutableMap()
         var created = 0
         for (p in pulses) {
