@@ -1843,6 +1843,17 @@ class TradingRepository @Inject constructor(
             )
             return
         }
+        val signalAt = ZonedDateTime.now(INDIA)
+        if (com.multify.traderpro.engine.NseEquitySessionCalendar.isSpecialMuhurat2026(signalAt) &&
+            !com.multify.traderpro.engine.NseEquitySessionCalendar.isFixedNewEntryWindow(signalAt)) {
+            dao.updateForwarding(eventId, "ANALYZED", "MUHURAT_ENTRY_WINDOW_CLOSED",
+                "Special-session BUY safely blocked outside 14:20–15:00 IST; Multify recommendation still recorded.", null)
+            auditLogger.logAsync("EXECUTION", "MUHURAT_MULTIFY_BUY_BLOCKED", mapOf(
+                "symbol" to symbol, "at_ist" to signalAt.toString(),
+                "new_order_submitted" to false, "sell_monitor_unaffected" to true
+            ))
+            return
+        }
         preArmGuard(settings)
         if (managedDao.openPositionForSymbol(symbol) != null) {
             dao.updateForwarding(eventId, "ANALYZED", "HOLDING_ALREADY_OPEN", "$symbol is already app-owned; duplicate BUY blocked.", null)
@@ -6484,7 +6495,9 @@ class TradingRepository @Inject constructor(
         val sizing = CashAwareCncSizing.sizeFixedAvailable(settings.holdingBudgetRupees.toDouble(), available, ltp)
         require(sizing.quantity > 0) { "Fixed BUY skipped: remaining CNC cash cannot fund one buffered share of ${row.symbol}" }
 
-        require(marketSession() == "OPEN") { "Fixed BUY disabled: NSE closed at 15:30 IST" }
+        require(com.multify.traderpro.engine.NseEquitySessionCalendar.isFixedNewEntryWindow(ZonedDateTime.now(INDIA)) && marketSession() == "OPEN") {
+            "Fixed BUY disabled: NSE special-session/regular entry cutoff reached"
+        }
         require(fixedRecommendationStore.recommendations(today).firstOrNull { it.id == row.id }?.status == "ACTIVE") {
             "Fixed BUY disabled: recommendation is no longer active"
         }
@@ -6721,7 +6734,9 @@ class TradingRepository @Inject constructor(
             }
 
             val executionSettings = preferences.settings.first()
-            if (!executionSettings.fixedAutoBuyEnabled || executionSettings.safetyHalt || marketSession() != "OPEN") break
+            if (!executionSettings.fixedAutoBuyEnabled || executionSettings.safetyHalt ||
+                !com.multify.traderpro.engine.NseEquitySessionCalendar.isFixedNewEntryWindow(ZonedDateTime.now(INDIA)) ||
+                marketSession() != "OPEN") break
             if (!AutoBuyEntrySafetyPolicy.isFreshFixedEntry(row.generatedAtMs, System.currentTimeMillis())) {
                 auditLogger.logAsync("FIXED_AUTO_BUY", "ENTRY_SKIPPED_EXPIRED_DURING_PREP", mapOf("symbol" to row.symbol))
                 continue
