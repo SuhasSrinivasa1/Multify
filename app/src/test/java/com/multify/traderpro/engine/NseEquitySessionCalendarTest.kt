@@ -47,4 +47,18 @@ class NseEquitySessionCalendarTest {
         assertFalse(NseEquitySessionCalendar.isFixedNewEntryWindow(ist("2026-11-09", "15:15")))
         assertFalse(NseEquitySessionCalendar.isFixedScanWindow(ist("2026-11-09", "15:30")))
     }
+    @Test fun fixedActionabilityDoesNotMistakeSpecialSundayForClosedWeekend() {
+        val duringSession = FixedEntryActionabilityPolicy.evaluate(
+            ist("2026-11-08", "14:30").toInstant().toEpochMilli(),
+            quote = null, referencePrice = null, fixedTargetPct = 1.1161043
+        )
+        assertFalse(duringSession.reasons.contains("OUTSIDE_NSE_CASH_SESSION"))
+        val afterEntryCutoff = FixedEntryActionabilityPolicy.evaluate(
+            ist("2026-11-08", "15:00").toInstant().toEpochMilli(),
+            quote = null, referencePrice = null, fixedTargetPct = 1.1161043
+        )
+        assertTrue(afterEntryCutoff.reasons.contains("LESS_THAN_15_MINUTES_TO_CLOSE"))
+    }
+
+
 }
