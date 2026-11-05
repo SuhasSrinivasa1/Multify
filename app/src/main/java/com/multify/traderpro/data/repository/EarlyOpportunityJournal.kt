@@ -35,7 +35,7 @@ class EarlyOpportunityJournal @Inject constructor(@ApplicationContext context: C
     private val prefs = context.getSharedPreferences("early_opportunity_ledger_v810", Context.MODE_PRIVATE)
     private val gson = GsonBuilder().serializeNulls().create()
 
-    @Synchronized fun observe(
+    @Synchronized internal fun observe(
         date: String,
         ideas: List<EarlyOpportunityDto>,
         official: List<FixedRecommendationRecord>
