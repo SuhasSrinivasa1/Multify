@@ -53,6 +53,15 @@ object NseEquitySessionCalendar {
         else isWeekday(now) && inWindow(now.toLocalTime(), normalOpen, normalClose)
     }
 
+    /** Auction window; no claim Groww LTP is NSE's indicative equilibrium price. */
+    fun isPreOpenAuctionWindow(at: ZonedDateTime): Boolean {
+        val now = local(at)
+        return if (isSpecialMuhurat2026(now))
+            inWindow(now.toLocalTime(), muhuratPreOpen, muhuratOpen)
+        else isWeekday(now) &&
+            inWindow(now.toLocalTime(), LocalTime.of(9, 0), normalOpen)
+    }
+
     fun isWarmupWindow(at: ZonedDateTime): Boolean {
         val now = local(at)
         return if (isSpecialMuhurat2026(now))
