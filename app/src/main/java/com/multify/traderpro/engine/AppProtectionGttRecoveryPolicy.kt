@@ -49,10 +49,12 @@ object AppProtectionGttRecoveryPolicy {
                 order.productType.equals("CNC", ignoreCase = true) &&
                 order.status.uppercase(Locale.US) in setOf("ACTIVE", "OPEN") &&
                 order.order?.transactionType.equals("SELL", ignoreCase = true) &&
+                order.referenceId != null &&
                 order.referenceId in expected.keys
         }
         val order = matches.singleOrNull() ?: return null
-        val mode = expected[order.referenceId] ?: return null
+        val reference = order.referenceId ?: return null
+        val mode = expected[reference] ?: return null
         val trigger = order.triggerPrice?.toDoubleOrNull()?.takeIf { it.isFinite() && it > 0.0 } ?: return null
         val direction = order.triggerDirection?.uppercase(Locale.US)?.takeIf { it == "UP" || it == "DOWN" } ?: return null
         if (mode != HoldingSmartOrderPolicy.MODE_RECOVERY_GTT && direction != "DOWN") return null

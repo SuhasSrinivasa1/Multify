@@ -1,3 +1,839 @@
+package com.multify.traderpro.ui.screens
+
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.os.PowerManager
+import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Analytics
+import androidx.compose.material.icons.filled.Dashboard
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Science
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CenterAlignedTopAppBar
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import kotlinx.coroutines.delay
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.multify.traderpro.BuildConfig
+import com.multify.traderpro.engine.FixedBuyAvailabilityPolicy
+import com.multify.traderpro.data.network.DashboardDto
+import com.multify.traderpro.data.network.ExecutionAverageDto
+import com.multify.traderpro.engine.FixedFinalContract
+import com.multify.traderpro.engine.FixedForecastQualityPolicy
+import com.multify.traderpro.engine.ForecastBuyAvailabilityPolicy
+import com.multify.traderpro.data.network.ForecastDto
+import com.multify.traderpro.data.network.PositionDto
+import com.multify.traderpro.engine.MultifyReverseEngineering
+import com.multify.traderpro.ui.components.KeyValueRow
+import com.multify.traderpro.ui.components.MetricCard
+import com.multify.traderpro.ui.components.SectionTitle
+import com.multify.traderpro.ui.components.StatusPill
+import com.multify.traderpro.ui.components.StatusTone
+import java.text.NumberFormat
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
+private enum class Destination(val label: String, val subtitle: String, val icon: ImageVector) {
+    Execution("Execution", "ARM status and app-owned CNC holdings", Icons.Default.Dashboard),
+    Averages("Averages", "30-day LONG averages", Icons.Default.Analytics),
+    Forecast("Forecast", "Early-entry LONG recommendations · ≥1% target", Icons.Default.Science),
+    Fixed("Fixed", "Frozen v7.4.1 recommendation engine", Icons.Default.Shield),
+    Settings("Settings", "Broker, ARM, holding budget and device controls", Icons.Default.Settings)
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun TraderApp(viewModel: TraderViewModel = hiltViewModel()) {
+    val state by viewModel.uiState.collectAsStateWithLifecycle()
+    var selected by rememberSaveable { mutableIntStateOf(0) }
+    val snackbar = remember { SnackbarHostState() }
+    var showArmConfirm by remember { mutableStateOf(false) }
+    var showResetConfirm by remember { mutableStateOf(false) }
+    val exportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/zip")
+    ) { uri -> if (uri != null) viewModel.exportLogs(uri) }
+
+    val restoreLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri -> if (uri != null) viewModel.restoreLearning(uri) }
+
+    LaunchedEffect(state.message, state.error) {
+        val text = state.error ?: state.message
+        if (!text.isNullOrBlank()) {
+            snackbar.showSnackbar(text)
+            viewModel.clearBanner()
+        }
+    }
+
+    Scaffold(
+        contentWindowInsets = WindowInsets.statusBars,
+        containerColor = MaterialTheme.colorScheme.background,
+        snackbarHost = { SnackbarHost(snackbar) },
+        topBar = {
+            Column {
+                CenterAlignedTopAppBar(
+                    title = {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(Destination.entries[selected].label, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                Destination.entries[selected].subtitle,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    },
+                    actions = {
+                        IconButton(onClick = { viewModel.refresh() }) {
+                            Icon(Icons.Default.Refresh, contentDescription = "Refresh")
+                        }
+                    }
+                )
+                val alphaLabel = when {
+                    state.settings.brokerAuthenticated && state.settings.staticIpMatched -> "ALPHA · AUTH OK · IP OK"
+                    state.settings.brokerAuthenticated -> "ALPHA · AUTH OK · IP CHECK"
+                    state.credentialsConfigured -> "ALPHA · AUTH REQUIRED"
+                    else -> "ALPHA · NOT CONFIGURED"
+                }
+                val alphaTone = when {
+                    state.settings.brokerAuthenticated && state.settings.staticIpMatched -> StatusTone.Positive
+                    state.settings.brokerAuthenticated || state.credentialsConfigured -> StatusTone.Warning
+                    else -> StatusTone.Negative
+                }
+                val betaLabel = when {
+                    state.betaAuthenticated -> "BETA · AUTH OK · READ-ONLY"
+                    state.betaConfigured -> "BETA · AUTH REQUIRED"
+                    else -> "BETA · NOT CONFIGURED"
+                }
+                val betaTone = when {
+                    state.betaAuthenticated -> StatusTone.Positive
+                    state.betaConfigured -> StatusTone.Warning
+                    else -> StatusTone.Neutral
+                }
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    StatusPill(alphaLabel, alphaTone, Modifier.weight(1f))
+                    StatusPill(betaLabel, betaTone, Modifier.weight(1f))
+                }
+            }
+        },
+        bottomBar = {
+            NavigationBar(windowInsets = WindowInsets.navigationBars) {
+                Destination.entries.forEachIndexed { index, destination ->
+                    NavigationBarItem(
+                        selected = selected == index,
+                        onClick = { selected = index },
+                        icon = { Icon(destination.icon, contentDescription = destination.label) },
+                        label = { Text(destination.label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                        colors = NavigationBarItemDefaults.colors(indicatorColor = MaterialTheme.colorScheme.primaryContainer)
+                    )
+                }
+            }
+        }
+    ) { padding ->
+        Box(Modifier.fillMaxSize().padding(padding)) {
+            when (Destination.entries[selected]) {
+                Destination.Execution -> ExecutionScreen(
+                    state = state,
+                    onRefresh = viewModel::refresh,
+                    onArmRequested = {
+                        if (state.settings.armEffective) viewModel.setArm(false) else showArmConfirm = true
+                    },
+                    onResetHalt = { showResetConfirm = true }
+                )
+                Destination.Averages -> LongAveragesScreen(state)
+                Destination.Forecast -> ForecastScreen(
+                    state = state,
+                    onGenerate = viewModel::generateForecasts,
+                    onResearch = viewModel::runAfterHoursResearch,
+                    onBuy = viewModel::executeForecast
+                )
+                Destination.Fixed -> FixedScreen(
+                    state = state,
+                    onGenerate = viewModel::generateFixed,
+                    onBuy = viewModel::executeFixed
+                )
+                Destination.Settings -> SettingsScreen(
+                    state = state,
+                    onSave = viewModel::saveBrokerSettings,
+                    onSaveBeta = viewModel::saveBetaSettings,
+                    onAuthenticateBeta = viewModel::authenticateBeta,
+                    onAuthenticate = viewModel::authenticate,
+                    onArmRequested = {
+                        if (state.settings.armEffective) viewModel.setArm(false) else showArmConfirm = true
+                    },
+                    onBudgetChanged = viewModel::setHoldingBudget,
+                    onForecastAutoBuyChanged = viewModel::setForecastAutoBuy,
+                    onForecastScannerChanged = viewModel::setForecastScannerEnabled,
+                    onFixedAutoBuyChanged = viewModel::setFixedAutoBuy,
+                    onSubmitManualSignal = viewModel::submitManualSignal,
+                    onResetHalt = { showResetConfirm = true },
+                    onExportLogs = { exportLauncher.launch(defaultLogFileName()) },
+                    onRestoreLearning = { restoreLauncher.launch(arrayOf("application/zip", "application/octet-stream")) }
+                )
+            }
+            if (state.loading) LinearProgressIndicator(Modifier.fillMaxWidth().align(Alignment.TopCenter))
+        }
+    }
+
+    if (showArmConfirm) {
+        AlertDialog(
+            onDismissRequest = { showArmConfirm = false },
+            icon = { Icon(Icons.Default.Shield, contentDescription = null) },
+            title = { Text("ARM Multify LONG holdings?") },
+            text = {
+                Text(
+                    "When ARM is on, a valid Multify NSE CASH call can place a real Groww CNC BUY using up to " +
+                        "${money(state.settings.holdingBudgetRupees.toDouble())} for that call. Positions remain holdings; " +
+                        "there is no end-of-day flatten. DDPI and static-IP verification are required so the app can later sell only its own holding."
+                )
+            },
+            confirmButton = {
+                Button(onClick = {
+                    showArmConfirm = false
+                    viewModel.setArm(true)
+                }) { Text("ARM for today") }
+            },
+            dismissButton = { TextButton(onClick = { showArmConfirm = false }) { Text("Cancel") } }
+        )
+    }
+
+    if (showResetConfirm) {
+        AlertDialog(
+            onDismissRequest = { showResetConfirm = false },
+            title = { Text("Reset safety halt?") },
+            text = { Text("Resetting the halt does not ARM trading. Review Groww first, then ARM separately.") },
+            confirmButton = {
+                Button(onClick = {
+                    showResetConfirm = false
+                    viewModel.resetHalt()
+                }) { Text("Reset halt") }
+            },
+            dismissButton = { TextButton(onClick = { showResetConfirm = false }) { Text("Cancel") } }
+        )
+    }
+}
+
+@Composable
+private fun ExecutionScreen(
+    state: TraderUiState,
+    onRefresh: () -> Unit,
+    onArmRequested: () -> Unit,
+    onResetHalt: () -> Unit
+) {
+    val dashboard = state.dashboard
+    val learning = dashboard?.learning ?: com.multify.traderpro.data.network.LearningStatsDto()
+    val fixedRows = dashboard?.fixedForecasts.orEmpty()
+    val fixedSnapshot = dashboard?.fixedSnapshot ?: com.multify.traderpro.data.network.FixedSnapshotDto(
+        frozenMultifyMfeAveragePct = FixedFinalContract.CANONICAL_MULTIFY_MFE_AVG_PCT,
+        targetFloorPct = FixedForecastQualityPolicy.MIN_TARGET_PCT,
+        fixedTargetPct = maxOf(
+            FixedForecastQualityPolicy.MIN_TARGET_PCT,
+            FixedFinalContract.CANONICAL_MULTIFY_MFE_AVG_PCT
+        )
+    )
+    val fixedDailyAverage = dashboard?.fixedOutcomes?.todayTargetAveragePct
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp, 14.dp, 16.dp, 32.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        item {
+            SectionTitle(
+                "Production averages",
+                "Local-only display. Opening this page does not request Groww live prices, margin, holdings or positions."
+            )
+        }
+        item {
+            MetricCard(
+                label = "Multify 30-day Avg",
+                value = String.format(Locale.US, "%.2f%%", learning.longAveragePct),
+                supporting = "${learning.rollingCalls} MFE-observed calls across ${learning.rollingTradingDays} trading days",
+                modifier = Modifier.fillMaxWidth(),
+                accent = MaterialTheme.colorScheme.primary
+            )
+        }
+        item {
+            MetricCard(
+                label = "Fixed Observed Avg / Stock · Today",
+                value = dashboard?.fixedOutcomes?.todayObservedAveragePct?.let {
+                    String.format(Locale.US, "%.2f%%", it)
+                } ?: "Learning",
+                supporting = "${dashboard?.fixedOutcomes?.todayObserved ?: 0}/${dashboard?.fixedOutcomes?.todayPublished ?: 0} Fixed stocks sampled after publication (MFE)",
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+        item {
+            MetricCard(
+                label = "Fixed Target Avg / Stock · Today",
+                value = fixedDailyAverage?.let { String.format(Locale.US, "%.2f%%", it) } ?: "—",
+                supporting = if (fixedDailyAverage != null)
+                    "${fixedRows.size} Fixed recommendation(s) today · frozen target calibration ${String.format(Locale.US, "%.2f%%", fixedSnapshot.fixedTargetPct)}"
+                else
+                    "Waiting for today’s Fixed recommendation · frozen target calibration ${String.format(Locale.US, "%.2f%%", fixedSnapshot.fixedTargetPct)}",
+                modifier = Modifier.fillMaxWidth(),
+                accent = MaterialTheme.colorScheme.secondary
+            )
+        }
+    }
+}
+
+@Composable
+private fun ArmStatusCard(
+    dashboard: DashboardDto?,
+    armed: Boolean,
+    budget: Double,
+    ddpi: Boolean,
+    staticIp: Boolean,
+    onArmRequested: () -> Unit,
+    onResetHalt: () -> Unit
+) {
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = if (armed) MaterialTheme.colorScheme.primaryContainer.copy(alpha = .45f)
+            else MaterialTheme.colorScheme.surface
+        ),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = .25f)),
+        shape = RoundedCornerShape(22.dp)
+    ) {
+        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Multify ARM", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        if (armed) "Ready to BUY LONG CNC holdings from Multify calls"
+                        else "Disarmed · calls are captured but no real BUY is sent",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(checked = armed, onCheckedChange = { onArmRequested() })
+            }
+            KeyValueRow("Per-call budget", money(budget))
+            KeyValueRow("Product", "CNC · holdings")
+            KeyValueRow("DDPI", if (ddpi) "Enabled" else "Required")
+            KeyValueRow("Static IP", if (staticIp) "Verified" else "Required")
+            if (dashboard?.halted == true) {
+                Button(
+                    onClick = onResetHalt,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                ) { Text("Reset safety halt") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun HoldingCard(p: PositionDto) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha=.22f)),
+        shape = RoundedCornerShape(18.dp)
+    ) {
+        Column(Modifier.padding(15.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text(p.symbol, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                StatusPill("LONG · CNC", StatusTone.Positive)
+            }
+            KeyValueRow("Quantity", p.quantity.toString())
+            KeyValueRow("Average", money(p.averagePrice))
+            KeyValueRow("LTP", p.ltp?.let(::money) ?: "—")
+            KeyValueRow("Unrealised", money(p.pnl), pnlColor(p.pnl))
+            KeyValueRow("Sell protection", "hard -2.00% · then +0.55% arm → +0.50% protect · +0.10% steps")
+            KeyValueRow(
+                "Arm trigger",
+                p.trailArmPct?.let { "+${String.format(Locale.US, "%.2f", it)}%" } ?: "+0.55%"
+            )
+            p.targetPrice?.let { target ->
+                KeyValueRow(
+                    "Target / reference",
+                    if (p.averagePrice > 0.0) {
+                        val pct = (target / p.averagePrice - 1.0) * 100.0
+                        "+${String.format(Locale.US, "%.2f", pct)}% · ${money(target)}"
+                    } else money(target)
+                )
+            }
+            when (p.smartOrderMode) {
+                "RECOVERY_GTT" -> {
+                    KeyValueRow("Exit mode", "₹100-net recovery GTT")
+                    KeyValueRow("GTT trigger", p.smartOrderTriggerPrice?.let(::money) ?: "Pending")
+                    KeyValueRow("GTT direction", p.smartOrderDirection ?: "—")
+                    KeyValueRow("GTT status", p.smartOrderStatus ?: "Pending")
+                    KeyValueRow("Downside sell", "Disabled")
+                }
+                else -> if (p.trailArmed) {
+                    KeyValueRow("Exit mode", if (p.smartOrderId != null) "Server GTT mirrored trail" else "Local trailing fallback")
+                    KeyValueRow("High water", p.highWaterPrice?.let(::money) ?: "—")
+                    KeyValueRow("Current trail stop", p.stopPrice?.let(::money) ?: "—")
+                    val protectedPct = p.stopPrice?.takeIf { p.averagePrice > 0.0 }?.let { (it / p.averagePrice - 1.0) * 100.0 }
+                    KeyValueRow("Protected gain", protectedPct?.let { "+${String.format(Locale.US, "%.2f", it)}%" } ?: "—")
+                    KeyValueRow("Trail gap", p.trailDistance?.let(::money) ?: "—")
+                    KeyValueRow("Last ratchet trigger", p.trailingLastRatchetPrice?.let(::money) ?: "—")
+                    KeyValueRow("GTT status", p.smartOrderStatus ?: if (p.smartOrderId != null) "ACTIVE" else "Local fallback")
+                } else {
+                    KeyValueRow("Exit mode", "Waiting for +0.55% arm")
+                    KeyValueRow("Downside sell", "Disabled · hold through declines")
+                }
+            }
+            if (!p.strategy.isNullOrBlank()) {
+                Text(p.strategy, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
+}
+
+@Composable
+private fun LongAveragesScreen(state: TraderUiState) {
+    val learning = state.dashboard?.learning ?: com.multify.traderpro.data.network.LearningStatsDto()
+    val fixed = state.dashboard?.fixedOutcomes ?: com.multify.traderpro.data.network.FixedOutcomeStatsDto()
+    val rows = state.dashboard?.fixedForecasts.orEmpty()
+    fun percent(v: Double?): String = v?.let { String.format(Locale.US, "%.2f%%", it) } ?: "Learning"
+    fun hitPercent(v: Double?): String = v?.let { String.format(Locale.US, "%.1f%%", it) } ?: "Learning"
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp, 14.dp, 16.dp, 32.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        item {
+            SectionTitle(
+                "Multify benchmark · unchanged",
+                "Rolling 30 recommendation trading days: observed maximum price from Multify entry to its Book Profit/close. Fixed averages below are entirely separate."
+            )
+        }
+        item {
+            MetricCard(
+                label = "Multify MFE Avg Upside %",
+                value = String.format(Locale.US, "%.2f%%", learning.longAveragePct),
+                supporting = "${learning.rollingCalls} Multify calls across ${learning.rollingTradingDays} days",
+                modifier = Modifier.fillMaxWidth(),
+                accent = MaterialTheme.colorScheme.primary
+            )
+        }
+        item {
+            SectionTitle(
+                "Fixed recommendation averages · NEW BASELINE",
+                "Fresh Fixed-only measurement since this release. One observation per stock recommendation, never per scan. Rolling last 30 Fixed trading days. Averages use the highest sampled post-publication upside, not the frozen target benchmark."
+            )
+        }
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                MetricCard(
+                    label = "Today's Avg Fixed Target / Stock",
+                    value = percent(fixed.todayTargetAveragePct),
+                    supporting = "${fixed.todayPublished} distinct Fixed stock calls today",
+                    modifier = Modifier.weight(1f)
+                )
+                MetricCard(
+                    label = "Today's Observed Fixed Avg / Stock",
+                    value = percent(fixed.todayObservedAveragePct),
+                    supporting = "${fixed.todayObserved}/${fixed.todayPublished} sampled after publication",
+                    modifier = Modifier.weight(1f),
+                    accent = MaterialTheme.colorScheme.primary
+                )
+            }
+        }
+        item {
+            MetricCard(
+                label = "Fixed Rolling Observed Avg / Stock",
+                value = percent(fixed.rollingObservedAveragePct),
+                supporting = "${fixed.observed}/${fixed.published} observed Fixed recommendations · fresh baseline only",
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                MetricCard(
+                    label = "Reached +0.55% · Fixed",
+                    value = hitPercent(fixed.armHitRatePct),
+                    supporting = "${fixed.armHits}/${fixed.observed} · avg achieved ${percent(fixed.armHitMeanMfePct)}",
+                    modifier = Modifier.weight(1f)
+                )
+                MetricCard(
+                    label = "Reached +1.00% · Fixed",
+                    value = hitPercent(fixed.onePctHitRatePct),
+                    supporting = "${fixed.onePctHits}/${fixed.observed} · avg achieved ${percent(fixed.onePctHitMeanMfePct)}",
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        }
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                MetricCard(
+                    label = "Full Fixed Target Hit",
+                    value = hitPercent(fixed.fullTargetHitRatePct),
+                    supporting = "${fixed.fullTargetHits}/${fixed.observed} · avg achieved ${percent(fixed.fullHitMeanMfePct)} · individual published target",
+                    modifier = Modifier.weight(1f),
+                    accent = MaterialTheme.colorScheme.primary
+                )
+                MetricCard(
+                    label = "Fixed Observed MFE Distribution",
+                    value = fixed.medianPct?.let { "${percent(it)} median" } ?: "Learning",
+                    supporting = "P25 ${percent(fixed.p25Pct)} · P75 ${percent(fixed.p75Pct)}",
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        }
+        item {
+            SectionTitle("Today's Fixed calls · per-stock evidence",
+                "Fixed recommendation entry and highest observed price after publication. '—' means a price has not yet been observed; missing evidence is not counted as a missed target.")
+        }
+        item {
+            Card(shape = RoundedCornerShape(20.dp)) {
+                Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                    if (rows.isEmpty()) {
+                        Text("No Fixed calls recorded today", style = MaterialTheme.typography.bodySmall)
+                    } else rows.forEach { f ->
+                        val sampled = f.observedAfterPublication
+                        KeyValueRow(
+                            f.symbol,
+                            "Target ${percent(f.targetPct)} · MFE " +
+                                (if (sampled) percent(f.maxFavourablePct) else "—") +
+                                " · ${f.status.replace('_', ' ')}"
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ForecastScreen(
+    state: TraderUiState,
+    onGenerate: () -> Unit,
+    onResearch: () -> Unit,
+    onBuy: (String) -> Unit
+) {
+    val dashboard = state.dashboard
+    val productionRows = dashboard?.forecasts.orEmpty().sortedBy { it.rank }
+    val researchPrimary = productionRows.asSequence()
+        .filter { it.qualityTier == "PRIMARY" && !it.executionEligible }
+        .maxByOrNull { it.confidence.coerceIn(0.0, 1.0) * it.score.coerceAtLeast(0.0) }
+    val provisional = if (productionRows.isEmpty()) {
+        dashboard?.forecastWatchlist.orEmpty()
+            .filter {
+                it.qualityTier == "SECONDARY" && it.status == "WATCH_ONLY" &&
+                    it.entryPrice > 0.0 && it.targetPct >= 1.0 && it.score > 0.0
+            }
+            .maxByOrNull { it.confidence.coerceIn(0.0, 1.0) * it.score.coerceAtLeast(0.0) }
+    } else null
+    val rows = if (productionRows.isNotEmpty()) productionRows else provisional?.let {
+        listOf(it.copy(
+            rank = 1,
+            qualityTier = "PROVISIONAL · SECONDARY",
+            status = "WATCH_ONLY",
+            executionEligible = false,
+            reason = "OBSERVATION ONLY · no PRIMARY has passed every production gate. BUY is disabled. " + it.reason
+        ))
+    }.orEmpty()
+    val learning = dashboard?.learning ?: com.multify.traderpro.data.network.LearningStatsDto()
+    val forecastLearning = dashboard?.forecastLearning ?: com.multify.traderpro.data.network.ForecastLearningStatsDto()
+    val report = dashboard?.research ?: com.multify.traderpro.data.network.ResearchDto()
+    var forecastClockMs by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(2_000L)
+            forecastClockMs = System.currentTimeMillis()
+        }
+    }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp, 14.dp, 16.dp, 32.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        item {
+            SectionTitle(
+                "LONG holding forecast",
+                "EARLY ENTRY · NSE market scanning, NSE news intelligence, Multify positive-pattern research, Fixed outcome transfer, and official Univest cash-equity calls closed the same day. Univest is research-only, capturing 48 entry-time factors and learning only after verified entry/exit quotes; it never places Univest orders."
+            )
+        }
+        item {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha=.18f)),
+                shape = RoundedCornerShape(20.dp)
+            ) {
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("Forecast engine · AUTOMATIC DISCOVERY", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        if (state.settings.forecastAutoBuyEnabled)
+                            "Forecast screens the entire NSE universe but uses only spare API capacity after SELL, Multify and Fixed. Automatic CNC BUY remains subject to broker readiness, fresh PRIMARY quality and existing safety rules. Research sessions are tracked for learning, not an activation mandate."
+                        else
+                            "Forecast can publish early-entry and news-confirmed PRIMARY calls without a five-session gate. Auto Buy is OFF until you enable it; research-only candidates never BUY. Broker and safety checks still apply.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+        item {
+            val health = dashboard?.health ?: com.multify.traderpro.data.network.EngineHealthDto()
+            val ageText = if (health.discoveryBaselineAgeMs == Long.MAX_VALUE) "—"
+                else if (health.discoveryBaselineAgeMs < 60_000L) "<1 min"
+                else "${health.discoveryBaselineAgeMs / 60_000L} min"
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = when (health.discovery) {
+                        "HEALTHY" -> MaterialTheme.colorScheme.primaryContainer.copy(alpha=.18f)
+                        "WARMING", "WAITING" -> MaterialTheme.colorScheme.secondaryContainer.copy(alpha=.22f)
+                        else -> MaterialTheme.colorScheme.errorContainer.copy(alpha=.22f)
+                    }
+                ),
+                shape = RoundedCornerShape(20.dp)
+            ) {
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                    Text("Discovery health · ${health.discovery}", fontWeight = FontWeight.SemiBold)
+                    KeyValueRow("NSE coverage", String.format(Locale.US, "%.1f%%", health.discoveryCoveragePct))
+                    KeyValueRow("Baseline", if (health.discoveryBaselineReady) "Ready" else "Warming")
+                    KeyValueRow("Baseline age", ageText)
+                    KeyValueRow("Failed batches", health.discoveryBatchErrors.toString())
+                    Text(
+                        if (health.discoveryBaselineReady)
+                            "Production publication can use the persisted broad-market baseline."
+                        else
+                            "Research continues, but production recommendations are suppressed until broad-market discovery is healthy.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+        item {
+            MetricCard(
+                label = "Today's Forecast Avg Upside",
+                value = if (forecastLearning.todayTargetAveragePct > 0.0)
+                    String.format(Locale.US, "%.2f%%", forecastLearning.todayTargetAveragePct)
+                else "≥1.00%",
+                supporting = "hard ≥1% target · Multify MFE benchmark ${String.format(Locale.US, "%.2f%%", learning.longAveragePct)} · live calibration ${forecastLearning.researchSessionsCaptured}/${forecastLearning.researchSessionGoal}",
+                modifier = Modifier.fillMaxWidth(),
+                accent = MaterialTheme.colorScheme.primary
+            )
+        }
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                Button(
+                    onClick = onGenerate,
+                    modifier = Modifier.weight(1f)
+                ) { Text("Refresh scanner") }
+                OutlinedButton(onClick = onResearch, modifier = Modifier.weight(1f)) { Text("Run research") }
+            }
+        }
+        if (researchPrimary != null) {
+            item {
+                Card(colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = .22f)),
+                    shape = RoundedCornerShape(18.dp)) {
+                    Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("Strongest PRIMARY research · BUY locked", fontWeight = FontWeight.SemiBold)
+                        Text(researchPrimary.symbol + " · " +
+                            String.format(Locale.US, "%.0f%% confidence", researchPrimary.confidence * 100.0) +
+                            " · target " + String.format(Locale.US, "%.2f%%", researchPrimary.targetPct),
+                            fontWeight = FontWeight.Medium)
+                        Text("Quality-qualified research, NOT a live BUY. Five completed, outcome-validated sessions are required before trading. The historical replay runs outside market hours.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
+        }
+        if (productionRows.isEmpty() && provisional != null) {
+            item {
+                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = .22f)),
+                    shape = RoundedCornerShape(18.dp)) {
+                    Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("Provisional Forecast · observation only", fontWeight = FontWeight.SemiBold)
+                        Text("No candidate has passed all PRIMARY production gates. The table shows the strongest recent SECONDARY setup for monitoring; it is not a live BUY recommendation and its BUY control is disabled.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
+        }
+        item { ForecastTable(rows, onBuy, state.settings.brokerAuthenticated && state.settings.staticIpMatched && state.settings.brokerDdpiEnabled && !state.settings.safetyHalt, fixedClockMsForTable = forecastClockMs) }
+        item {
+            val official = dashboard?.univestResearch.orEmpty()
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                shape = RoundedCornerShape(20.dp)) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                    Text("Univest · official alerts / same-day closes", fontWeight = FontWeight.SemiBold)
+                    Text("Research only · no Univest orders. Entry-time factors and matched exit evidence are shown below. A market-price estimate is not a verified provider exit.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (official.isEmpty()) {
+                        Text("No official Univest entry captured yet on this installation.",
+                            style = MaterialTheme.typography.bodySmall)
+                    } else {
+                        official.take(12).forEach { row ->
+                            HorizontalDivider()
+                            Text(row.symbol + " · " + row.status, fontWeight = FontWeight.Medium)
+                            Text("Entry: " + (row.entryPrice?.let { String.format(Locale.US, "₹%.2f", it) } ?: "missing") +
+                                " · Exit: " + (row.exitPrice?.let { String.format(Locale.US, "₹%.2f", it) } ?: "pending") +
+                                " · Factors: " + row.observedFactorCount + "/48",
+                                style = MaterialTheme.typography.bodySmall)
+                            Text("Price evidence: " + row.entryPriceSource + " / " + row.exitPriceSource +
+                                (row.outcomePct?.let { " · market move " + String.format(Locale.US, "%+.2f%%", it) } ?: ""),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
+            }
+        }
+
+        item {
+            val watchlist = dashboard?.forecastWatchlist.orEmpty()
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                shape = RoundedCornerShape(20.dp)) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Early-entry research · PRIMARY pending / SECONDARY / RESEARCH", fontWeight = FontWeight.SemiBold)
+                    Text("These watchlist rows cannot place an order. " +
+                        "A stock can form several peaks: after a completed target and pullback, " +
+                        "a new independently qualified PRIMARY setup may trigger another opportunity.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (watchlist.isEmpty()) {
+                        Text("No recent research candidates; research continues.",
+                            style = MaterialTheme.typography.bodySmall)
+                    } else {
+                        watchlist.forEach { candidate ->
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = .12f))
+                            Text(candidate.symbol + " · " +
+                                (when (candidate.qualityTier) {
+                                    "PRIMARY" -> "PRIMARY awaiting confirmation"
+                                    "SECONDARY" -> "SECONDARY watch"
+                                    else -> "RESEARCH only · NOT A BUY"
+                                }) + " · " +
+                                String.format(Locale.US, "%.0f%% confidence", candidate.confidence * 100.0),
+                                fontWeight = FontWeight.Medium)
+                            Text(candidate.reason.ifBlank { "Awaiting a fresh qualifying setup" },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 3)
+                        }
+                    }
+                }
+            }
+        }
+        item {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                shape = RoundedCornerShape(20.dp)
+            ) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                    Text("Multify reference · cumulative", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    KeyValueRow("Reference total", state.dashboard?.forecastReferences?.totalCalls?.toString() ?: "107")
+                    KeyValueRow("Frozen historical baseline", state.dashboard?.forecastReferences?.frozenCases?.toString() ?: "107")
+                    KeyValueRow("New Multify BUY calls", state.dashboard?.forecastReferences?.appendedCalls?.toString() ?: "—")
+                    KeyValueRow("New calls with Book Profit", state.dashboard?.forecastReferences?.liveCompleted?.toString() ?: "—")
+                    KeyValueRow("New calls with measured MFE", state.dashboard?.forecastReferences?.liveMfeMeasured?.toString() ?: "—")
+                    KeyValueRow("New calls awaiting exit", state.dashboard?.forecastReferences?.livePendingOutcome?.toString() ?: "—")
+                    Text(
+                        "Each new verified Multify BUY notification adds one reference event; Book Profit and after-market high-price evidence enrich the same event. Fixed stays frozen at 107. These cases help Forecast ranking context, not pre-spike proof or a restriction on NSE coverage.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    HorizontalDivider()
+                    Text("Multify DNA", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "Forecast keeps the 40 observable factors and three families. Prior positive Fixed outcomes are the main one-way transfer signal; positive Multify outcomes may add a smaller assistance bonus. Negative/flat Fixed or Multify outcomes never subtract from ranking. Fixed never reads Forecast feedback.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    KeyValueRow("Factor families", "3")
+                    KeyValueRow("Observable factors", "40")
+                    KeyValueRow("Fundamental example cases", MultifyReverseEngineering.positiveCases.size.toString())
+                }
+            }
+        }
+        item {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha=.20f)),
+                shape = RoundedCornerShape(20.dp)
+            ) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                    Text("After-market LONG research", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    Text(report.title, fontWeight = FontWeight.Medium)
+                    Text(
+                        report.summary.ifBlank { "The first report is generated after market close or when you tap Run research." },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun FixedScreen(
     state: TraderUiState,
     onGenerate: () -> Unit,
@@ -171,6 +1007,21 @@ private fun FixedScreen(
             state.settings.brokerAuthenticated && state.settings.staticIpMatched && state.settings.brokerDdpiEnabled && !state.settings.safetyHalt,
             fixed = true, fixedMarketOpen = fixedMarketOpen, fixedClockMsForTable = fixedClockMs
         ) }
+        item {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                shape = RoundedCornerShape(20.dp)
+            ) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                    Text("What is frozen", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "The complete v7.4.1 selection pipeline used by the accepted reference session is frozen: strategy implementation, 40-factor model, factor-family rules, quality gates, publication rules, Multify reference cases and target calibration. Prior Forecast/research/champion feedback is intentionally empty in the final reference state. Fixed outcome tracking is diagnostic only and never feeds future Fixed ranking.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
     }
 }
 

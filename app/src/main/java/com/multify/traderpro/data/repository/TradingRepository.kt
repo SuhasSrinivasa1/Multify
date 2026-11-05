@@ -8522,7 +8522,7 @@ class TradingRepository @Inject constructor(
             HoldingSmartOrderPolicy.MODE_TRAILING_GTT,
             HoldingSmartOrderPolicy.MODE_RECOVERY_GTT
         ))
-        require(position.smartOrderId.isNullOrBlank()) { "Refusing to create a second GTT for ${position.symbol}" }
+        require(current.smartOrderId.isNullOrBlank()) { "Refusing to create a second GTT for ${current.symbol}" }
         val gttBlockedUntil = brokerRetryGuard.gttBlockedUntil(position.symbol)
         if (gttBlockedUntil > System.currentTimeMillis()) {
             throw BrokerExecutionRetryGuard.Deferred("GTT on ${position.symbol} is on broker-rejection cooldown")
