@@ -6900,7 +6900,7 @@ class TradingRepository @Inject constructor(
         val fastCandidates = FixedFastCandidateSelectionPolicy.select(
             fixedEarlyWatchJournal.recent(today, 48),
             fixedMarketPulseResearchStore.recent(today, 48),
-            rows.map { it.symbol }, nowMs
+            rows.map { it.symbol }, nowMs, limit = 12
         )
         if (rows.isEmpty() && fastCandidates.isEmpty()) return 0
 
