@@ -1177,6 +1177,114 @@ class TradingRepository @Inject constructor(
         auditLogger.log("SETTINGS", if (enabled) "ARM_ENABLED" else "ARM_DISABLED")
     }
 
+    /**
+     * Strictly observational pre-open pass. The regular NSE auction provides
+     * indicative equilibrium prices, but Groww's LTP/quote endpoint does NOT
+     * document an IEP field or exchange timestamp. These values may be yesterday's
+     * closing trade. Never promote this snapshot into official Fixed discovery,
+     * prior PRIMARY confirmation, recommendations, notifications or orders.
+     *
+     * One full read-only LTP sample + up to six frozen 15m model evaluations per
+     * date is bounded; actual Fixed publication waits for continuous trading.
+     */
+    suspend fun captureFixedPreOpenResearchOnly(): Boolean {
+        val now = ZonedDateTime.now(INDIA)
+        val sessionCalendar = com.multify.traderpro.engine.NseEquitySessionCalendar
+        if (!sessionCalendar.isPreOpenAuctionWindow(now) ||
+            !sessionCalendar.isPreOpenAuctionWindow(now.plusMinutes(5))) return false
+        val token = ensureToken() ?: return false
+        val master = nseSymbols.symbols().distinct()
+        if (master.isEmpty()) return false
+        val date = now.toLocalDate().toString()
+        val prefs = appContext.getSharedPreferences("fixed_preopen_research_v832", Context.MODE_PRIVATE)
+        // Mark attempt before broker calls: a process restart must not multiply
+        // pre-open sweeps or compete with the real 09:15/14:20 production scan.
+        if (prefs.getString("attempt_date", null) == date ||
+            !prefs.edit().putString("attempt_date", date).commit()) return false
+        val scanStarted = SystemClock.elapsedRealtime()
+        auditLogger.logAsync("FIXED_PREOPEN", "RESEARCH_STARTED", mapOf(
+            "date" to date, "phase" to "AUCTION_RESEARCH_ONLY",
+            "reference" to "GROWW_LTP_NOT_VERIFIED_NSE_IEP",
+            "contains_official_recommendations" to false,
+            "real_fixed_formula_changed" to false,
+            "special_muhurat" to sessionCalendar.isSpecialMuhurat2026(now)
+        ))
+        return try {
+            val snapshot = ensureFixedEngineSnapshot()
+            // The same 53-batch 50-stock full-market data transport is used,
+            // but this result is never cached as a valid 09:15/14:20 snapshot.
+            val sweep = collectFixedWideLtp(token, master, preparing = false)
+            auditLogger.logAsync("FIXED_PREOPEN", "MARKET_SNAPSHOT_RESEARCH_ONLY", mapOf(
+                "date" to date,
+                "universe_count" to master.size, "price_count" to sweep.prices.size,
+                "account_data_batches" to sweep.requestCount,
+                "coverage_pct" to if (master.isNotEmpty()) sweep.prices.size * 100.0 / master.size else 0.0,
+                "prices_are_exchange_iep" to false,
+                "prices_may_be_previous_session_ltp" to true,
+                "usable_for_official_primary_confirmation" to false,
+                "usable_for_buy" to false
+            ))
+            // CPU model uses the exact same original 15m feature and signal
+            // implementation, with no effect on the official ranked universe.
+            val watch = snapshot.payload.learningCalls
+                .asSequence().filter { it.action.equals("BUY", true) }
+                .sortedByDescending { it.callDate }
+                .map { it.symbol }.filter { it in master }
+                .distinct().take(6).toList()
+            val targetPct = FixedForecastQualityPolicy.adaptiveTargetPct(
+                fixedSnapshotMultifyMfeAverage(snapshot), emptyList()
+            )
+            val observations = mutableListOf<Map<String, Any?>>()
+            for (symbol in watch) {
+                if (!sessionCalendar.isPreOpenAuctionWindow(ZonedDateTime.now(INDIA))) break
+                try {
+                    val evaluation = fixedForecastEvaluation(symbol, token)
+                    val quality = FixedForecastQualityPolicy.evaluate(
+                        evaluation, targetPct, "BREADTH_NEUTRAL"
+                    )
+                    observations += mapOf(
+                        "symbol" to symbol,
+                        "broker_last_price_unverified_auction" to evaluation.features.ltp,
+                        "confidence" to evaluation.confidence,
+                        "quality_tier_provisional" to quality.tier,
+                        "strategy" to evaluation.strategy,
+                        "candle_interval_minutes" to 15,
+                        "valid_iep_verified" to false,
+                        "eligible_to_publish_or_order" to false
+                    )
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (failed: Throwable) {
+                    observations += mapOf(
+                        "symbol" to symbol,
+                        "sample_error" to (failed.message ?: failed.javaClass.simpleName).take(140),
+                        "eligible_to_publish_or_order" to false
+                    )
+                }
+            }
+            auditLogger.logAsync("FIXED_PREOPEN", "ORIGINAL_FIXED_FORMULA_RESEARCH_SAMPLE", mapOf(
+                "date" to date,
+                "selected_watch_count" to watch.size,
+                "observations" to observations,
+                "elapsed_ms" to (SystemClock.elapsedRealtime() - scanStarted),
+                "full_market_ranking_calculated" to false,
+                "data_quality" to "UNVERIFIED_AUCTION_PRICE_AND_PREVIOUS_COMPLETED_15M_CANDLES",
+                "production_score_and_target_changed" to false,
+                "recommendations_published" to 0,
+                "orders_submitted" to 0
+            ))
+            true
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failed: Throwable) {
+            auditLogger.logAsync("FIXED_PREOPEN", "RESEARCH_FAILED_NO_TRADE", mapOf(
+                "reason" to (failed.message ?: failed.javaClass.simpleName).take(160),
+                "orders_submitted" to 0
+            ))
+            false
+        }
+    }
+
     suspend fun prepareFixedPreMarketWarmup(): Boolean {
         val now = ZonedDateTime.now(INDIA)
         val t = now.toLocalTime()
