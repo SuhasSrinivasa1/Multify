@@ -1180,7 +1180,7 @@ class TradingRepository @Inject constructor(
     suspend fun prepareFixedPreMarketWarmup(): Boolean {
         val now = ZonedDateTime.now(INDIA)
         val t = now.toLocalTime()
-        if (now.dayOfWeek.value >= 6 || t < LocalTime.of(9, 0) || t >= LocalTime.of(9, 15)) return false
+        if (!com.multify.traderpro.engine.NseEquitySessionCalendar.isWarmupWindow(now)) return false
         val nowMs = System.currentTimeMillis()
         if (nowMs - lastFixedPreMarketWarmupAtMs < FIXED_PREMARKET_WARMUP_INTERVAL_MS) return true
         lastFixedPreMarketWarmupAtMs = nowMs
@@ -2088,7 +2088,32 @@ class TradingRepository @Inject constructor(
                             }
                         },
                         "published_count" to fixedRecommendationStore.recommendations(currentDate).size,
-                        "explanatory_detail" to "read-only counts from frozen Fixed scan observations",
+                        "primary_candidate_diagnostics" to tierPrimary.map { item ->
+                            val previous = prior.filter { old ->
+                                old.symbol.equals(item.symbol, true) &&
+                                    latestScanTime != null && old.scanAtMs < latestScanTime &&
+                                    latestScanTime - old.scanAtMs <= FIXED_V741_PRIMARY_CONFIRMATION_WINDOW_MS
+                            }
+                            val priorConfirmed = previous.filter {
+                                it.qualityTier == "PRIMARY" && it.publishEligible && it.executionEligible
+                            }.map { it.scanAtMs }.distinct().size
+                            mapOf(
+                                "symbol" to item.symbol,
+                                "price" to item.observedPrice,
+                                "current_primary" to (item.qualityTier == "PRIMARY"),
+                                "publish_eligible" to item.publishEligible,
+                                "execution_eligible" to item.executionEligible,
+                                "prior_primary_scans_in_20m" to priorConfirmed,
+                                "had_prior_nonprimary_observation" to prior.any { old ->
+                                    old.symbol.equals(item.symbol, true) &&
+                                        (old.qualityTier != "PRIMARY" ||
+                                            !old.publishEligible || !old.executionEligible)
+                                },
+                                "previously_published" to fixedRecommendationStore.recommendations(currentDate)
+                                    .any { it.symbol.equals(item.symbol, true) }
+                            )
+                        },
+                        "explanatory_detail" to "read-only counts and per-symbol confirmation evidence; original gates unchanged",
                         "pre_spike_discovery_slots" to 0, // original v7.9.17 has no pre-spike bucket,
                         "scoring_or_publication_changed" to false
                     ))
@@ -3422,7 +3447,7 @@ class TradingRepository @Inject constructor(
         val today = now.toLocalDate().toString()
         val existing = fixedRecommendationStore.recommendations(today)
             .filter { RecommendationPriceBandPolicy.eligible(it.entryPrice) }
-        if (now.dayOfWeek.value >= 6 || now.toLocalTime() < LocalTime.of(9, 15) || now.toLocalTime() >= LocalTime.of(15, 30)) {
+        if (!com.multify.traderpro.engine.NseEquitySessionCalendar.isFixedScanWindow(now)) {
             return existing.map { it.toDto() }
         }
         val nowMs = System.currentTimeMillis()
@@ -3733,9 +3758,19 @@ class TradingRepository @Inject constructor(
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failed: Throwable) {
+                // A correctly enforced Fixed price-band veto is not a Beta transport outage.
+                // Returning to Alpha here repeats a known-invalid quote and wastes requests.
+                if (failed is IllegalArgumentException && failed.message == "FIXED_PRICE_BAND_OUTSIDE") {
+                    auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "BETA_DETAIL_PRICE_BAND_SKIPPED", mapOf(
+                        "symbol" to symbol, "reason" to "FIXED_PRICE_BAND_OUTSIDE",
+                        "alpha_fallback_attempted" to false, "fixed_scoring_changed" to false
+                    ))
+                    throw failed
+                }
                 auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "BETA_DETAIL_FALLBACK_ALPHA", mapOf(
                     "symbol" to symbol,
                     "error" to failed.javaClass.simpleName,
+                    "reason" to (failed.message ?: "UNSPECIFIED").take(180),
                     "fixed_scoring_changed" to false,
                     "broker_execution_account" to "ALPHA"
                 ))
@@ -3850,8 +3885,7 @@ class TradingRepository @Inject constructor(
      */
     suspend fun prepareNextFixedDiscoverySweep(): Boolean {
         val clock = ZonedDateTime.now(INDIA)
-        if (clock.dayOfWeek.value >= 6 || clock.toLocalTime() < LocalTime.of(9, 16) ||
-            clock.toLocalTime() >= LocalTime.of(15, 17) || lastFixedScanAtMs <= 0L ||
+        if (!com.multify.traderpro.engine.NseEquitySessionCalendar.mayPrepareNextFixedSweep(clock) || lastFixedScanAtMs <= 0L ||
             marketCriticalTradeInFlight || !marketDataAvailableForFixed()) return false
         val nowMs = System.currentTimeMillis()
         val dueAtMs = lastFixedScanAtMs + FIXED_V741_FORECAST_SCAN_INTERVAL_MS
@@ -3958,7 +3992,7 @@ class TradingRepository @Inject constructor(
         val alphaSuccess = AtomicInteger(0)
         for (windowStart in chunks.indices step FixedDiscoveryWindowScheduler.WINDOW_SIZE) {
             if (preparing && (marketCriticalTradeInFlight || !marketDataAvailableForFixed() ||
-                ZonedDateTime.now(INDIA).toLocalTime() >= LocalTime.of(15, 25))) {
+                !com.multify.traderpro.engine.NseEquitySessionCalendar.mayContinuePreparedFixedSweep(ZonedDateTime.now(INDIA)))) {
                 aborted = true
                 break
             }
@@ -6365,7 +6399,7 @@ class TradingRepository @Inject constructor(
 
     suspend fun executeFixed(symbol: String): String {
         val now = ZonedDateTime.now(INDIA)
-        require(now.dayOfWeek.value < 6 && marketSession() == "OPEN") { "Fixed BUY is available only during the NSE regular session" }
+        require(com.multify.traderpro.engine.NseEquitySessionCalendar.isFixedNewEntryWindow(now) && marketSession() == "OPEN") { "Fixed BUY is unavailable outside the NSE entry window" }
         val settings = preferences.settings.first()
         preIndependentExecutionGuard(settings)
         val token = ensureToken() ?: error("Authenticate Groww first")
@@ -6506,7 +6540,7 @@ class TradingRepository @Inject constructor(
     private suspend fun autoBuyFixedRecommendationsLocked(): Int {
         ensureFixedEngineSnapshot()
         val now = ZonedDateTime.now(INDIA)
-        if (now.dayOfWeek.value >= 6 || marketSession() != "OPEN") return 0
+        if (!com.multify.traderpro.engine.NseEquitySessionCalendar.isFixedNewEntryWindow(now) || marketSession() != "OPEN") return 0
         val settings = preferences.settings.first()
         if (!settings.fixedAutoBuyEnabled || settings.safetyHalt) return 0
         val preflightCooldown = buyApiCooldownOrNull()
@@ -10566,9 +10600,7 @@ class TradingRepository @Inject constructor(
 
     private fun marketSession(): String {
         val now = ZonedDateTime.now(INDIA)
-        if (now.dayOfWeek.value >= 6) return "CLOSED"
-        val t = now.toLocalTime()
-        return if (!t.isBefore(LocalTime.of(9, 15)) && t.isBefore(LocalTime.of(15, 30))) "OPEN" else "CLOSED"
+        return if (com.multify.traderpro.engine.NseEquitySessionCalendar.isOpen(now)) "OPEN" else "CLOSED"
     }
 
     private fun growwAuthError(e: HttpException): String {
