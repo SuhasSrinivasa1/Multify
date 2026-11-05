@@ -1,0 +1,357 @@
+name: Multify v8.3.0 Fixed Alpha Beta Dual-Data TEST APK
+on:
+  push:
+    branches: [v830-fixed-dual-data-beta-alpha-test]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verified-test-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Install Android SDK 35
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
+      - name: Assert protected Fixed strategy and SELL rules byte-for-byte unchanged
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin v7944-fixed-api-protection-latency
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+          ref='origin/v7944-fixed-api-protection-latency'
+          paths=[
+            'app/src/main/java/com/multify/traderpro/engine/FixedLocalStrategyEngine.kt',
+            'app/src/main/java/com/multify/traderpro/engine/FixedForecastQualityPolicy.kt',
+            'app/src/main/java/com/multify/traderpro/engine/FixedForecastPublicationPolicy.kt',
+            'app/src/main/java/com/multify/traderpro/engine/FixedMarketDiscoveryPolicy.kt',
+            'app/src/main/java/com/multify/traderpro/engine/FixedFinalContract.kt',
+            'app/src/main/java/com/multify/traderpro/engine/HardStopLossPolicy.kt',
+            'app/src/main/java/com/multify/traderpro/engine/SteppedTrailingPolicy.kt',
+            'app/src/main/java/com/multify/traderpro/engine/NetGainTrailingPolicy.kt',
+            'app/src/main/java/com/multify/traderpro/engine/HoldingSmartOrderPolicy.kt',
+          ]
+          for p in paths:
+            baseline=subprocess.check_output(['git','show',f'{ref}:{p}'])
+            actual=Path(p).read_bytes()
+            assert actual==baseline,f'PROTECTED CODE CHANGED: {p}'
+          # Compare Fixed-only repository regions byte-for-byte against v7.9.44.
+          p='app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt'
+          old=subprocess.check_output(['git','show',f'{ref}:{p}']).decode()
+          new=Path(p).read_text()
+          def fixed_slice(t,start,end):
+            i=t.index(start); j=t.index(end,i)
+            return t[i:j]
+          for first,last in (
+            ('suspend fun generateFixedForecasts(', 'private fun fixedSnapshotMultifyMfeAverage('),
+          ):
+            actual=fixed_slice(new,first,last)
+            expected=fixed_slice(old,first,last)
+            if first == 'suspend fun generateFixedForecasts(':
+              # User explicitly authorized an exception only for requalification
+              # identity, recording observed price and per-event IDs. Reverse
+              # precisely these three substrings and require byte-identical
+              # v7.9.44 Fixed universe, factor maths, ranking, target, gates.
+              for exception, original in (
+                ("        // Explicitly authorized v8.0.6 publication-identity exception to the\n        // frozen v7.4.1 one-symbol-per-day restriction. Rank/score/target untouched.\n        // After a prior event, require a witnessed non-PRIMARY reset followed by\n        // a distinct, fresh confirmed PRIMARY, not a continuing old setup.\n        val allTodayFixedObservations = fixedRecommendationStore.observations(today)\n        val unseen = ranked.filter { item ->\n            FixedRepeatQualificationPolicy.qualifiedForNewEvent(\n                item.symbol, nowMs, existing, allTodayFixedObservations,\n                importedLastEventAtMs = fixedImportedSameDayDedupJournal.latestImportedAtMs(\n                    today, item.symbol))\n        }\n        fun priorPrimaryHits(symbol: String): Int =\n            FixedRepeatQualificationPolicy.primaryHitsSinceReset(\n                symbol,\n                listOfNotNull(\n                    existing.filter { it.symbol.equals(symbol, true) }\n                        .maxOfOrNull { it.generatedAtMs },\n                    fixedImportedSameDayDedupJournal.latestImportedAtMs(today, symbol)\n                ).maxOrNull(),\n                priorTodayResearch + allTodayFixedObservations.filter {\n                    // Reset may predate the 20-minute confirmation window; include\n                    // its reset evidence, but not stale old PRIMARY confirmations.\n                    it.symbol.equals(symbol, true) &&\n                        (it.qualityTier != \"PRIMARY\" || !it.publishEligible || !it.executionEligible)\n                }\n            )", "        val unseen = ranked.filter { it.symbol !in have }\n        fun priorPrimaryHits(symbol: String): Int = priorTodayResearch.asSequence()\n            .filter {\n                it.symbol.equals(symbol, true) &&\n                    it.qualityTier == \"PRIMARY\" &&\n                    it.publishEligible &&\n                    it.executionEligible\n            }\n            .map { it.scanAtMs }\n            .distinct()\n            .count()"),
+                ("                    executionEligible = item.quality.executionEligible,\n                    observedPrice = item.evaluation.features.ltp\n                )\n            }\n        )", "                    executionEligible = item.quality.executionEligible\n                )\n            }\n        )"),
+                ("id = FixedRecommendationStore.fixedEventId(today, item.symbol, nowMs)", "id = FixedRecommendationStore.fixedId(today, item.symbol)"),
+              ):
+                assert actual.count(exception)==1, 'Unexpected Fixed repeat publication mutation'
+                actual=actual.replace(exception,original,1)
+            assert actual==expected, first+' outside explicit repeat-identity exception changed'
+          # Allow ONLY transport-stage changes after the frozen 15m evaluator.
+          # Compare the exact evaluation body and full REST fetch/error handling
+          # against the accepted frozen v7.9.44 baseline.
+          # Alpha/Beta may change read-only quote/candle transport ONLY.
+          # Lock the arithmetic and publication inputs to accepted v7.9.44.
+          old_eval=fixed_slice(old,
+              'private suspend fun fixedForecastEvaluation(',
+              'private suspend fun discoverFixedMarketWideCandidates(')
+          new_eval=fixed_slice(new,
+              'private suspend fun fixedForecastEvaluationUsingAccount(',
+              'suspend fun prepareNextFixedDiscoverySweep(')
+          old_score=fixed_slice(old_eval,
+              '        val evaluation = withContext(fixedCpuDispatcher) {',
+              '        return evaluation')
+          new_score=fixed_slice(new_eval,
+              '        val evaluation = withContext(fixedCpuDispatcher) {',
+              '        return evaluation')
+          assert new_score == old_score, 'Frozen Fixed factor calculations changed'
+          for locked in (
+              'FixedLocalStrategyEngine.buildFeatures(quote, historical, 15)',
+              'FixedLocalStrategyEngine.evaluateLong(signal, features, includeEventPrior = false)',
+              'RecommendationPriceBandPolicy.eligible(quote.lastPrice)',
+              'fixedHistoricalWindowStore.stitch(historyKey, start, raw, SystemClock.elapsedRealtime())',
+              'fixedHistoricalWindowStore.remember(historyKey, start, historical, SystemClock.elapsedRealtime())',
+              'fixedFactorTelemetry.tryRecord(symbol, evaluation, lastFixedScanAtMs, quote, referenceAt)'
+          ):
+              assert locked in old_eval and locked in new_eval, 'Frozen evaluator invariant changed: '+locked
+          assert fixed_slice(new,
+              'private suspend fun fetchFixedDiscoveryLtpBatch(',
+              '// FIXED_FINAL_LOCK_END:') == fixed_slice(old,
+              'private suspend fun fetchFixedDiscoveryLtpBatch(',
+              '// FIXED_FINAL_LOCK_END:')
+          assert 'PREFETCHED_SWEEP_CONSUMED' in new
+          assert 'NEXT_FULL_NSE_SWEEP_PREPARED' in new
+          assert 'takeNextFixedDiscoverySweep(token, distinctMaster, today)' in new
+          assert 'val candidateOnly = rows.isEmpty()' not in new
+          assert 'fastPriceObservations' not in new
+          policy=Path('app/src/main/java/com/multify/traderpro/engine/FixedSweepPrefetchPolicy.kt').read_text()
+          assert 'MAX_ACCEPTED_AGE_MS = 45_000L' in policy
+          assert 'MIN_COVERAGE = 0.85' in policy
+          assert 'candleInterval = "15minute"' in new
+          assert 'qualifiesVerifiedClose(' in new
+          assert 'forecastSourceNotificationJournal.archive()' in new
+          assert 'decisionEvidenceJournal.archive()' in new
+          assert 'decisionEvidenceJournal.restoreArchived(it)' in new
+          assert 'MarketDataPriorityAdmissionPolicy.updateManagedHoldings(' in new
+          assert 'DecisionEvidenceJournal' in Path('app/src/main/java/com/multify/traderpro/data/logging/AuditLogger.kt').read_text()
+          policy=Path('app/src/main/java/com/multify/traderpro/engine/DecisionEvidencePolicy.kt').read_text()
+          assert 'FIXED_ENGINE/LONG_SCAN_TIERED' in policy
+          assert 'FORECAST_UNIVEST/SAME_DAY_EXIT_OUTCOME' in policy
+          service=Path('app/src/main/java/com/multify/traderpro/service/TradingEngineService.kt').read_text()
+          assert 'repository.sampleFixedFiveMinuteShadow(' not in service
+          assert 'repository.updateFixedFiveMinuteShadowOutcomes(' not in service
+          assert 'FixedPublicationTimingPolicy.bucket(' in service
+          assert 'startMobileHealthWorker()' in service
+          assert 'captureFixedEarlyWatchAfterScan()' not in service
+          assert 'captureFixedMarketPulseAfterScan()' not in service
+          assert 'prepareNextFixedDiscoverySweep()' in service
+          assert 'notifyNewFixedRecommendationsAfterOrderPath()' in service
+          assert 'notifyNewFixedRecommendationsAfterOrderPath()' in service
+          assert 'fixedEarlyWatchJournal.observe(' in new
+          assert 'fixedEarlyWatchJournal.archive()' in new
+          assert 'fixedEarlyWatchJournal.restoreArchived(it)' in new
+          quote=Path('app/src/main/java/com/multify/traderpro/data/logging/FixedFactorTelemetry.kt').read_text()
+          assert '"market_quality_shadow"' in quote
+          assert '"quote_client_network_timing"' in quote
+          bridge=Path('backend/app/fixed_stream_research.py').read_text()
+          assert 'MAX_SUBSCRIPTION = 1000' in bridge
+          assert 'trade_eligible": False' in bridge
+          priority=Path('app/src/main/java/com/multify/traderpro/data/network/GrowwRateLimitInterceptor.kt').read_text()
+          assert 'MarketDataPriorityAdmissionPolicy.allowedLiveTraffic(' in priority
+          assert 'GrowwRetryAfterPolicy.retryAfterMs(' in priority
+          window=Path('app/src/main/java/com/multify/traderpro/engine/FixedHistoricalWindowStore.kt').read_text()
+          assert 'MAX_REUSE_AGE_MS = 12L * 60_000L' in window
+          repo=Path('app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt').read_text()
+          assert 'candleInterval = "15minute"' in repo
+          assert 'candleInterval = "1minute"' in repo
+          gradle=Path('app/build.gradle.kts').read_text()
+          assert 'versionCode = 8300' in gradle
+          store=Path('app/src/main/java/com/multify/traderpro/data/repository/FixedRecommendationStore.kt').read_text()
+          assert 'filterNot { it.id == record.id }' in store
+          assert 'fun fixedEventId(' in store
+          assert 'observedPrice: Double? = null' in store
+          assert 'FixedRepeatQualificationPolicy.qualifiedForNewEvent(' in repo
+          assert 'FixedRepeatQualificationPolicy.primaryHitsSinceReset(' in repo
+          assert 'FixedRecommendationStore.fixedEventId(today, item.symbol, nowMs)' in repo
+          service=Path('app/src/main/java/com/multify/traderpro/service/TradingEngineService.kt').read_text()
+          assert 'FixedNotificationEventKeyPolicy.key(' in service
+          imported=Path('app/src/main/java/com/multify/traderpro/data/repository/FixedImportedSameDayDedupJournal.kt').read_text()
+          assert 'it.generatedAtMs == eventAtMs' in imported
+          assert 'latestImportedAtMs(' in imported
+          history=Path('app/src/main/java/com/multify/traderpro/data/repository/FixedHistoricalEvidenceArchive.kt').read_text()
+          assert '${r.date}|${r.symbol}|${r.publishedAtMs}' in history
+          metric=Path('app/src/main/java/com/multify/traderpro/data/repository/FixedOutcomePerformanceStore.kt').read_text()
+          assert '${row.recommendationDate}|${row.symbol.uppercase()}|${row.generatedAtMs}' in metric
+          assert 'candleInterval = "15minute"' in repo
+
+          assert 'FixedEntryActionabilityPolicy.evaluate(' in repo
+          assert 'fixedImportedSameDayDedupJournal.contains(' in repo
+          assert 'fixedEntryVerdict(row, quote)' in repo
+          assert 'FIXED RESEARCH ONLY' in repo
+          assert 'fixed_imported_same_day_dedup.json' in repo
+          assert 'fixed_scoring_changed' in repo
+          fixedNotif=Path('app/src/main/java/com/multify/traderpro/service/TradingEngineService.kt').read_text()
+          assert 'Fixed WATCH' in fixedNotif
+          assert 'row.symbol.uppercase(Locale.US)' in fixedNotif
+          assert 'actionable_at_post_time' in fixedNotif
+          riskPolicy=Path('app/src/main/java/com/multify/traderpro/engine/FixedEntryActionabilityPolicy.kt').read_text()
+          assert 'LESS_THAN_15_MINUTES_TO_CLOSE' in riskPolicy
+          assert 'EXTENDED_SINCE_FIRST_PRIMARY_AND_NEAR_DAY_HIGH' in riskPolicy
+          assert 'EXTREME_VWAP_ATR_EXTENSION_NEAR_HIGH' in riskPolicy
+          sameDay=Path('app/src/main/java/com/multify/traderpro/engine/FixedSameDayHighEvidencePolicy.kt').read_text()
+          assert 'todayHighFromBars' in sameDay
+          assert 'local.toLocalDate() != now.toLocalDate()' in sameDay
+          assert 'snapshot?.sessionHighDistancePct' not in riskPolicy
+          assert 'verifiedSameDayCandleHigh' in riskPolicy
+          assert 'FixedMultiDayExhaustionProxyPolicy.risky(' in riskPolicy
+          proxy=Path('app/src/main/java/com/multify/traderpro/engine/FixedMultiDayExhaustionProxyPolicy.kt').read_text()
+          assert 'MAX_DISTANCE_FROM_WINDOW_HIGH_PCT = 0.35' in proxy
+          assert 'MIN_WINDOW_VWAP_EXTENSION_ATR = 3.0' in proxy
+          assert 'multi_day_15m_window_high_distance_pct_NOT_day_high' in repo
+          assert 'matched_client_quote_to_notification_ms' in fixedNotif
+          dedup=Path('app/src/main/java/com/multify/traderpro/data/repository/FixedImportedSameDayDedupJournal.kt').read_text()
+          assert 'submitMarketOrder(' not in dedup and 'registerBoughtPositionAndProtect(' not in dedup
+          assert 'allowedToTrade: Boolean = false' in dedup
+          uiClock=Path('app/src/main/java/com/multify/traderpro/engine/FixedBuyAvailabilityPolicy.kt').read_text()
+          assert 'LocalTime.of(15, 15)' in uiClock
+          assert 'nseRegularSession(atMs)' in uiClock
+
+          # Transport-only change; do not alter the broker permit or Fixed ranking.
+          pacing=Path('app/src/main/java/com/multify/traderpro/engine/AlphaLtpPacingPolicy.kt').read_text()
+          assert 'MIN_GAP_MS = 1_200L' in pacing
+          assert 'MAX_PER_MINUTE = 40' in pacing
+          window=Path('app/src/main/java/com/multify/traderpro/engine/FixedDiscoveryWindowScheduler.kt').read_text()
+          assert 'WINDOW_SIZE = 3' in window
+          fast=Path('app/src/main/java/com/multify/traderpro/data/repository/FixedFastCandidatePriceStore.kt').read_text()
+          assert 'submitMarketOrder(' not in fast
+          assert 'fixedRecommendationStore.upsert' not in fast
+          assert 'tradingEffect: String = "NONE"' in fast
+          assert 'FixedFastCandidateSelectionPolicy.select(' not in repo
+          assert 'FixedFastCandidateSamplingPolicy.candidateOnlyAllowed(' not in repo
+          assert 'fixed_fast_candidates.json' in repo
+          assert 'fixedFastCandidatePrices = fixedFastCandidatePriceStore.recent(today)' in repo
+          assert 'MONITORING_REST_NOT_EXCHANGE_TICK' not in repo # historical provenance unchanged
+
+          repo=Path('app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt').read_text()
+          assert 'FixedExecutionThinLiquidityPolicy.rejectionReason(quote)' in repo
+          assert 'fixedHistoricalEvidenceArchive.restorePriorRecommendations(it)' in repo
+          assert 'fixedMarketPulseResearchStore.capture(date, snapshot, published)' in repo
+          assert 'fixed_historical_research.json' in repo
+          assert 'fixed_market_pulse_research.json' in repo
+          service=Path('app/src/main/java/com/multify/traderpro/service/TradingEngineService.kt').read_text()
+          assert 'captureFixedMarketPulseAfterScan()' not in service
+          archive=Path('app/src/main/java/com/multify/traderpro/data/repository/FixedHistoricalEvidenceArchive.kt').read_text()
+          assert 'fixedRecommendationStore.upsert' not in archive
+          assert 'submitMarketOrder(' not in archive
+          assert 'registerBoughtPositionAndProtect(' not in archive
+          assert 'MIN_GAP_MS = 1_200L' in Path('app/src/main/java/com/multify/traderpro/engine/AlphaLtpPacingPolicy.kt').read_text()
+          print('Fixed scoring, target, universe and SELL locked; only explicit repeat-event publication identity changed')
+          dao=Path('app/src/main/java/com/multify/traderpro/data/local/ManagedTradeDao.kt').read_text()
+          assert 'updatePriceObservation(' in dao
+          repo=Path('app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt').read_text()
+          assert 'managedDao.updatePriceObservation(observed.id, ltp, markAtMs)' in repo
+          assert 'positionLifecycleMutexes' in repo
+          assert 'AppProtectionGttRecoveryPolicy.recover(' in repo
+          assert 'APP_PROTECTION_GTT_RECOVERED_DURING_MONITOR' in repo
+          assert 'MULTIFY_ENTRY_PRICE_GUARD_REJECTED' in repo
+          assert 'MULTIFY_ENTRY_FILL_PRICE_DEVIATION' in repo
+          ui=Path('app/src/main/java/com/multify/traderpro/ui/screens/TraderApp.kt').read_text()
+          assert 'Open holdings & broker protection' in ui
+          assert 'Research runs in background' not in ui
+          # v8.3 complete Forecast freeze and dual-account read-only Fixed routing.
+          app=Path('app/src/main/java/com/multify/traderpro/MultifyApp.kt').read_text()
+          assert 'wm.cancelUniqueWork("forecast-news-fallback-15m")' in app
+          assert 'preferences.setForecastScannerEnabled(false)' in app
+          assert 'preferences.setForecastAutoBuy(false)' in app
+          assert 'wm.enqueueUniquePeriodicWork(\n            "forecast-news-fallback-15m"' not in app
+          worker=Path('app/src/main/java/com/multify/traderpro/worker/ForecastNewsSyncWorker.kt').read_text()
+          assert 'repository.monitorForecastNews()' not in worker
+          start_loop=service[service.index('private fun startEngineLoop()'):service.index('private fun startMobileHealthWorker()')]
+          assert 'startForecastScanWorker()' not in start_loop
+          assert 'startForecastNewsWorker()' not in start_loop
+          watchdog=service[service.index('private fun startMobileHealthWorker()'):service.index('private fun startPositionMonitorWorker()')]
+          assert 'startForecastScanWorker()' not in watchdog
+          assert 'startForecastNewsWorker()' not in watchdog
+          assert 'repository.runAfterHoursResearch(false)' not in service
+          assert 'fun forecastBackgroundScanningEnabled(): Boolean = false' in repo
+          assert 'suspend fun autoBuyForecastRecommendations(): Int = 0' in repo
+          assert 'FixedDualAccountPolicy.betaDiscoveryBatch(index, true)' in repo
+          assert 'FixedDualAccountPolicy.betaDetailedEvaluation(symbol, true)' in repo
+          assert 'fixedBetaMarketTokenOrNull()' in repo
+          assert 'BETA_DETAIL_FALLBACK_ALPHA' in repo
+          assert 'BETA_LTP_FALLBACK_ALPHA' in repo
+          assert 'FULL_NSE_SWEEP_ACCOUNT_PROFILE' in repo
+          assert 'betaGroww.quote(' in repo and 'betaGroww.historicalCandles(' in repo
+          assert 'betaGroww.ltp(' in repo
+          beta=Path('app/src/main/java/com/multify/traderpro/data/network/BetaResearchGate.kt').read_text()
+          assert 'BETA_FIXED_RATE_BUDGET_OR_COOLDOWN' in beta
+          beta_policy=Path('app/src/main/java/com/multify/traderpro/engine/FixedDualAccountPolicy.kt').read_text()
+          assert 'BETA_LIVE_PER_MINUTE = 35' in beta_policy
+          assert 'BETA_HISTORICAL_PER_MINUTE = 8' in beta_policy
+          beta_guard=Path('app/src/main/java/com/multify/traderpro/data/network/BetaReadOnlyInterceptor.kt').read_text()
+          assert 'BETA_READ_ONLY_DENIED' in beta_guard
+          assert 'path.startsWith("/v1/live-data/")' in beta_guard
+          ui=Path('app/src/main/java/com/multify/traderpro/ui/screens/TraderApp.kt').read_text()
+          assert 'Forecast engine · FROZEN in v8.3' in ui
+          assert 'Open holdings & broker protection' in ui
+          print('Forecast frozen; Alpha-only order/GTT; Beta read-only Fixed source locks passed')
+          assert 'Fixed Fast Watch · spare-capacity price refresh' not in ui
+          print('GTT ID preservation/recovery, Multify entry guard and compact Fixed UI assertions passed')
+          PY
+      - name: Backend tests
+        shell: bash
+        run: |
+          python -m pip install -r backend/requirements.txt
+          PYTHONPATH="$GITHUB_WORKSPACE" PHONE_HMAC_SECRET=test-secret-test-secret-test-secret GROWW_API_KEY=test-api-key GROWW_TOTP_SECRET=JBSWY3DPEHPK3PXP python -m pytest -q backend/tests
+      - name: Android unit tests
+        run: gradle --no-daemon testDebugUnitTest
+      - name: Configure stable Multify signing identity
+        shell: bash
+        env:
+          MULTIFY_KEYSTORE_BASE64: ${{ secrets.MULTIFY_KEYSTORE_BASE64 }}
+          MULTIFY_KEYSTORE_PASSWORD: ${{ secrets.MULTIFY_KEYSTORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${MULTIFY_KEYSTORE_BASE64:-}" || -z "${MULTIFY_KEYSTORE_PASSWORD:-}" ]]; then
+            echo "STABLE_SIGNING_READY=false" >> "$GITHUB_ENV"
+            echo "::warning::Stable signing secrets are missing. APK will use the CI Android Debug key and cannot update an existing differently-signed install."
+          else
+            printf '%s' "$MULTIFY_KEYSTORE_BASE64" | base64 --decode > app/multify-v4-stable.jks
+            echo "MULTIFY_KEYSTORE_PASSWORD=$MULTIFY_KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+            actual="$(keytool -list -v -keystore app/multify-v4-stable.jks -storepass "$MULTIFY_KEYSTORE_PASSWORD" -alias multifyv4 | awk -F': ' '/SHA256:/{print $2; exit}' | tr -d ':' | tr '[:upper:]' '[:lower:]')"
+            expected="3f72d5c24e676c712d9e7e9feaa829960bfca9cdffc9ea4da6738372824e8755"
+            if [[ "$actual" != "$expected" ]]; then
+              echo "::error::Stable keystore certificate does not match SIGNING.md."
+              exit 1
+            fi
+            echo "STABLE_SIGNING_READY=true" >> "$GITHUB_ENV"
+            echo "Stable Multify signing identity verified."
+          fi
+
+      - name: Build debug APK
+        run: gradle --no-daemon assembleDebug
+      - name: Verify APK signature and exact package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v8.3.0-alpha-beta-fixed-debug.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/*.apk > dist/APK-SIGNATURE.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/*.apk | head -n 2 > dist/PACKAGE.txt
+          grep -q "versionCode='8300'" dist/PACKAGE.txt
+          if [[ "${STABLE_SIGNING_READY:-false}" == "true" ]]; then
+            expected_cert="3f72d5c24e676c712d9e7e9feaa829960bfca9cdffc9ea4da6738372824e8755"
+            actual_cert="$(awk '/Signer #1 certificate SHA-256 digest:/ {print $NF; exit}' dist/APK-SIGNATURE.txt | tr -d ':' | tr '[:upper:]' '[:lower:]')"
+            test "$actual_cert" = "$expected_cert"
+            echo "Stable signing identity verified." > dist/INSTALLATION-SIGNING-STATUS.txt
+          else
+            echo "CI Android Debug certificate; cannot update a differently signed installed APK. Do not uninstall while holdings/GTTs or local history remain." > dist/INSTALLATION-SIGNING-STATUS.txt
+          fi
+          sha256sum dist/*.apk > dist/SHA256SUMS.txt
+          git rev-parse HEAD > dist/SOURCE-COMMIT.txt
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile, ZIP_DEFLATED
+          with ZipFile('dist/Multify-TraderPro-v8.3.0-exact-source.zip','w',ZIP_DEFLATED) as z:
+            for p in Path('.').rglob('*'):
+              if (p.is_file()
+                  and not any(part in {'.git','.gradle','build','dist'} for part in p.parts)
+                  and p.name != 'multify-v4-stable.jks'
+                  and p.suffix.lower() != '.jks'):
+                z.write(p,p.as_posix())
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: multify-v830-alpha-beta-fixed
+          path: dist/
+          if-no-files-found: warn

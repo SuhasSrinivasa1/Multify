@@ -230,19 +230,9 @@ class TraderViewModel @Inject constructor(
     }
 
     fun generateForecasts() {
-        viewModelScope.launch {
-            remote.value = remote.value.copy(loading = true, error = null, message = null)
-            runCatching {
-                val rows = repository.generateDailyForecasts(force = true)
-                repository.autoBuyForecastRecommendations()
-                rows
-            }
-                .onSuccess { rows ->
-                    remote.value = remote.value.copy(loading = false, message = "LONG forecast refreshed · ${rows.size} candidates", error = null)
-                    refresh(silent = true)
-                }
-                .onFailure { remote.value = remote.value.copy(loading = false, error = it.userMessage()) }
-        }
+        remote.value = remote.value.copy(
+            loading = false, message = "Forecast is frozen in v8.3. Use Fixed recommendations.", error = null
+        )
     }
 
     fun generateFixed() {
@@ -278,27 +268,16 @@ class TraderViewModel @Inject constructor(
     }
 
     fun executeForecast(symbol: String) {
-        viewModelScope.launch {
-            remote.value = remote.value.copy(loading = true, error = null, message = null)
-            runCatching { repository.executeForecast(symbol) }
-                .onSuccess { result ->
-                    remote.value = remote.value.copy(loading = false, message = result, error = null)
-                    refresh(silent = true)
-                }
-                .onFailure { remote.value = remote.value.copy(loading = false, error = it.userMessage()) }
-        }
+        remote.value = remote.value.copy(
+            loading = false, error = "Forecast orders are frozen in v8.3; Alpha trading remains available for Fixed and Multify."
+        )
     }
 
     fun runAfterHoursResearch() {
-        viewModelScope.launch {
-            remote.value = remote.value.copy(loading = true, error = null, message = null)
-            runCatching { repository.runAfterHoursResearch(force = true) }
-                .onSuccess { report ->
-                    remote.value = remote.value.copy(loading = false, message = "Research updated · ${report.title}", error = null)
-                    refresh(silent = true)
-                }
-                .onFailure { remote.value = remote.value.copy(loading = false, error = it.userMessage()) }
-        }
+        // Historical Forecast research is frozen; no network request is allowed.
+        remote.value = remote.value.copy(
+            loading = false, message = "Forecast research is paused in Fixed-only v8.3", error = null
+        )
     }
 
     fun resetHalt() {

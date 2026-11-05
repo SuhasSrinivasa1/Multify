@@ -37,7 +37,12 @@ class MultifyApp : Application(), Configuration.Provider {
         super.onCreate()
         // Before any background trade scanner/service can run, require explicit opt-in again.
         // Does not disable monitoring/sells for existing app-owned positions.
-        runBlocking(Dispatchers.IO) { preferences.disableAutomaticEntriesOnceForV7931() }
+        runBlocking(Dispatchers.IO) {
+            preferences.disableAutomaticEntriesOnceForV7931()
+            // Always freeze legacy toggles on startup; never alter Fixed Auto Buy or Multify ARM.
+            preferences.setForecastScannerEnabled(false)
+            preferences.setForecastAutoBuy(false)
+        }
         GrowwRateLimitInterceptor.installRecovery(recoveryGate, preferences)
         val network = Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()
         val wm = WorkManager.getInstance(this)
@@ -46,13 +51,8 @@ class MultifyApp : Application(), Configuration.Provider {
             ExistingWorkPolicy.KEEP,
             OneTimeWorkRequestBuilder<NseSymbolSyncWorker>().setConstraints(network).build()
         )
-        // Android WorkManager cannot run 60-second jobs; this only recovers news
-        // monitoring if the foreground service was stopped by the OS.
-        wm.enqueueUniquePeriodicWork(
-            "forecast-news-fallback-15m", ExistingPeriodicWorkPolicy.UPDATE,
-            PeriodicWorkRequestBuilder<ForecastNewsSyncWorker>(15, TimeUnit.MINUTES)
-                .setConstraints(network).build()
-        )
+        // Cancel previously scheduled Forecast news jobs, including pending runs.
+        wm.cancelUniqueWork("forecast-news-fallback-15m")
         wm.enqueueUniquePeriodicWork(
             "nse-symbol-master-monthly",
             ExistingPeriodicWorkPolicy.UPDATE,

@@ -152,6 +152,7 @@ import com.multify.traderpro.engine.GttExitReconciliationPolicy
 import com.multify.traderpro.engine.StrategyEvaluation
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -1034,6 +1035,34 @@ class TradingRepository @Inject constructor(
         return "Beta authenticated for market-data research only; Alpha retains all orders"
     }
 
+    /**
+     * Beta is usable by Fixed only after explicit manual authentication of a
+     * separate Groww UCC. Missing, expired or same-account credentials mean
+     * Alpha-only Fixed; no automatic Beta login or Alpha order-token borrowing.
+     */
+    private suspend fun fixedBetaMarketTokenOrNull(): String? {
+        if (!secretStore.hasBetaCredentials() || betaSessionInvalid) return null
+        val betaToken = secretStore.getBetaAccessToken()?.takeIf { it.isNotBlank() } ?: return null
+        val betaUcc = secretStore.getBetaUcc()?.takeIf { it.isNotBlank() } ?: return null
+        val alphaUcc = preferences.settings.first().brokerUcc
+        if (betaToken == secretStore.getAccessToken() ||
+            (alphaUcc.isNotBlank() && betaUcc.equals(alphaUcc, true))) return null
+        cachedBetaResearchToken = betaToken
+        return betaToken
+    }
+
+    private suspend fun fixedBetaLtp(
+        token: String, chunk: List<String>
+    ): Map<String, Double> = betaMarketRead(
+        token, BetaResearchGate.Type.LIVE,
+        alphaCall = { error("Fixed Beta lane may not borrow Alpha credentials") },
+        betaCall = {
+            apiFactory.betaGroww.ltp(bearer(token),
+                exchangeSymbols = chunk.joinToString(",") { "NSE_$it" })
+                .requirePayload("Fixed Beta NSE LTP")
+        }
+    )
+
     private suspend fun forecastMarketToken(): String? {
         if (!secretStore.hasBetaCredentials()) return ensureToken() // compatibility until Beta configured
         if (betaSessionInvalid) return null
@@ -1178,7 +1207,8 @@ class TradingRepository @Inject constructor(
     }
 
     suspend fun setForecastScannerEnabled(enabled: Boolean) {
-        preferences.setForecastScannerEnabled(enabled)
+        require(!enabled) { "Forecast scanning is frozen in v8.3; Beta is reserved for Fixed." }
+        preferences.setForecastScannerEnabled(false)
         if (!enabled) {
             preferences.setForecastAutoBuy(false)
             runCatching {
@@ -1204,6 +1234,7 @@ class TradingRepository @Inject constructor(
     }
 
     suspend fun setForecastAutoBuy(enabled: Boolean) {
+        require(!enabled) { "Forecast Auto Buy is frozen in v8.3; only Fixed and Multify may trade." }
         // Training-session count is diagnostic only; existing execution and risk guards remain.
         if (enabled) preferences.setForecastScannerEnabled(true) // migrate old paused-scanner installs
         preferences.setForecastAutoBuy(enabled)
@@ -2268,6 +2299,9 @@ class TradingRepository @Inject constructor(
     }
 
     suspend fun runForecastOpportunisticCycle(postFixedOpportunity: Boolean = false): Boolean {
+        // v8.3 hard freeze: no Forecast scanner or auto-buy, even from legacy UI/actions.
+        return false
+        @Suppress("UNREACHABLE_CODE")
         if (postFixedOpportunity) forecastPostFixedOpportunity = true
         if (secretStore.hasBetaCredentials() && fixedScanDeferredBroker &&
             !fixedApiPriorityRequested && !marketCriticalTradeInFlight &&
@@ -2334,8 +2368,7 @@ class TradingRepository @Inject constructor(
 
     suspend fun activateForecastEarlyEntryOnce() = preferences.activateForecastEarlyEntryOnce()
 
-    suspend fun forecastBackgroundScanningEnabled(): Boolean =
-        preferences.settings.first().forecastScannerEnabled && !fixedSweepPreparationActive
+    suspend fun forecastBackgroundScanningEnabled(): Boolean = false // v8.3 hard freeze: never issue Forecast reads
 
     /** Research-only pacing; avoids waking Forecast every poll during active broker cooldown.
      * Beta uses independent credentials and remains unaffected by Alpha cooldowns.
@@ -3691,10 +3724,42 @@ class TradingRepository @Inject constructor(
     }
 
     private suspend fun fixedForecastEvaluation(symbol: String, token: String): FixedStrategyEvaluation {
+        val beta = fixedBetaMarketTokenOrNull()?.takeIf {
+            com.multify.traderpro.engine.FixedDualAccountPolicy.betaDetailedEvaluation(symbol, true)
+        }
+        if (beta != null) {
+            try {
+                return fixedForecastEvaluationUsingAccount(symbol, beta, useBeta = true)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failed: Throwable) {
+                auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "BETA_DETAIL_FALLBACK_ALPHA", mapOf(
+                    "symbol" to symbol,
+                    "error" to failed.javaClass.simpleName,
+                    "fixed_scoring_changed" to false,
+                    "broker_execution_account" to "ALPHA"
+                ))
+            }
+        }
+        return fixedForecastEvaluationUsingAccount(symbol, token, useBeta = false)
+    }
+
+    private suspend fun fixedForecastEvaluationUsingAccount(
+        symbol: String, token: String, useBeta: Boolean
+    ): FixedStrategyEvaluation {
         val now = ZonedDateTime.now(INDIA)
         val start = now.minusDays(4).toLocalDate().atTime(9, 15).format(HIST_FORMAT)
         val end = now.toLocalDateTime().format(HIST_FORMAT)
-        val quote = withFixedLiveDataSlot {
+        val quote = if (useBeta) {
+            betaMarketRead(
+                token, BetaResearchGate.Type.LIVE,
+                alphaCall = { error("Beta Fixed quote cannot use Alpha credentials") },
+                betaCall = {
+                    apiFactory.betaGroww.quote(bearer(token), tradingSymbol = symbol)
+                        .requirePayload("Fixed Beta quote $symbol")
+                }
+            )
+        } else withFixedLiveDataSlot {
             apiFactory.groww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Fixed quote $symbol")
         }
         require(RecommendationPriceBandPolicy.eligible(quote.lastPrice)) { "FIXED_PRICE_BAND_OUTSIDE" }
@@ -3713,7 +3778,18 @@ class TradingRepository @Inject constructor(
                 ))
             }
         }
-        val raw = withFixedHistoricalDataSlot {
+        val raw = if (useBeta) {
+            betaMarketRead(
+                token, BetaResearchGate.Type.HISTORICAL,
+                alphaCall = { error("Beta Fixed 15m history cannot use Alpha credentials") },
+                betaCall = {
+                    apiFactory.betaGroww.historicalCandles(
+                        bearer(token), growwSymbol = "NSE-$symbol", startTime = incremental?.startTime ?: start,
+                        endTime = end, candleInterval = "15minute"
+                    ).requirePayload("Fixed Beta 15m candles $symbol")
+                }
+            )
+        } else withFixedHistoricalDataSlot {
             apiFactory.groww.historicalCandles(
                 bearer(token), growwSymbol = "NSE-$symbol", startTime = incremental?.startTime ?: start,
                 endTime = end, candleInterval = "15minute"
@@ -3731,7 +3807,18 @@ class TradingRepository @Inject constructor(
                 // No guessing or partially stale candles: return to authoritative full history.
                 fixedHistoryStitchFallbacks.incrementAndGet()
                 fixedHistoryFullFetches.incrementAndGet()
-                withFixedHistoricalDataSlot {
+                if (useBeta) {
+                    betaMarketRead(
+                        token, BetaResearchGate.Type.HISTORICAL,
+                        alphaCall = { error("No Alpha borrowed for Beta candle fallback") },
+                        betaCall = {
+                            apiFactory.betaGroww.historicalCandles(
+                                bearer(token), growwSymbol = "NSE-$symbol",
+                                startTime = start, endTime = end, candleInterval = "15minute"
+                            ).requirePayload("Fixed Beta historical fallback $symbol")
+                        }
+                    )
+                } else withFixedHistoricalDataSlot {
                     apiFactory.groww.historicalCandles(
                         bearer(token), growwSymbol = "NSE-$symbol", startTime = start, endTime = end,
                         candleInterval = "15minute"
@@ -3777,7 +3864,7 @@ class TradingRepository @Inject constructor(
         val date = clock.toLocalDate().toString()
         val pending = pendingFixedSweepMutex.withLock {
             if (pendingFixedSweep?.completion?.isCompleted == false) return@withLock null
-            PendingFixedSweep(date, sha256(token).take(12),
+            PendingFixedSweep(date, sha256(token + "|" + (fixedBetaMarketTokenOrNull() ?: "ALPHA_ONLY")).take(12),
                 sha256(master.joinToString("|")).take(16),
                 dueAtMs, CompletableDeferred<PrecomputedFixedSweep?>()).also {
                 pendingFixedSweep = it
@@ -3829,7 +3916,7 @@ class TradingRepository @Inject constructor(
         val pending = pendingFixedSweepMutex.withLock {
             pendingFixedSweep.also { pendingFixedSweep = null }
         } ?: return null
-        if (pending.date != date || pending.tokenHash != sha256(token).take(12) ||
+        if (pending.date != date || pending.tokenHash != sha256(token + "|" + (fixedBetaMarketTokenOrNull() ?: "ALPHA_ONLY")).take(12) ||
             pending.masterHash != sha256(master.joinToString("|")).take(16)) return null
         val started = SystemClock.elapsedRealtime()
         // Await already-started batches instead of issuing a duplicate full sweep.
@@ -3865,6 +3952,10 @@ class TradingRepository @Inject constructor(
         var failures = 0
         var aborted = false
         val chunks = master.chunked(50)
+        val betaToken = fixedBetaMarketTokenOrNull()
+        val betaStopped = AtomicBoolean(false)
+        val betaSuccess = AtomicInteger(0)
+        val alphaSuccess = AtomicInteger(0)
         for (windowStart in chunks.indices step FixedDiscoveryWindowScheduler.WINDOW_SIZE) {
             if (preparing && (marketCriticalTradeInFlight || !marketDataAvailableForFixed() ||
                 ZonedDateTime.now(INDIA).toLocalTime() >= LocalTime.of(15, 25))) {
@@ -3873,7 +3964,30 @@ class TradingRepository @Inject constructor(
             }
             val results = FixedDiscoveryWindowScheduler.fetchOrdered(
                 chunks, windowStart
-            ) { index, chunk -> fetchFixedDiscoveryLtpBatch(token, chunk, index) }
+            ) { index, chunk ->
+                val useBeta = betaToken != null && !betaStopped.get() &&
+                    com.multify.traderpro.engine.FixedDualAccountPolicy.betaDiscoveryBatch(index, true)
+                if (useBeta) {
+                    try {
+                        fixedBetaLtp(betaToken!!, chunk).also { betaSuccess.incrementAndGet() }
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (failed: Throwable) {
+                        // Stop the Beta lane on any unexpected failure/429/401. The
+                        // specific missing batch is retried on original Alpha pacing.
+                        betaStopped.set(true)
+                        auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "BETA_LTP_FALLBACK_ALPHA", mapOf(
+                            "batch_index" to index, "error" to failed.javaClass.simpleName,
+                            "beta_paused_for_rest_of_sweep" to true
+                        ))
+                        fetchFixedDiscoveryLtpBatch(token, chunk, index)
+                            ?.also { alphaSuccess.incrementAndGet() }
+                    }
+                } else {
+                    fetchFixedDiscoveryLtpBatch(token, chunk, index)
+                        ?.also { alphaSuccess.incrementAndGet() }
+                }
+            }
             for ((index, payload) in results) {
                 if (payload == null) {
                     errors++
@@ -3894,6 +4008,18 @@ class TradingRepository @Inject constructor(
             }
             if (aborted) break
         }
+        auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "FULL_NSE_SWEEP_ACCOUNT_PROFILE", mapOf(
+            "master_symbols" to master.size,
+            "total_batches" to chunks.size,
+            "alpha_success_batches" to alphaSuccess.get(),
+            "beta_success_batches" to betaSuccess.get(),
+            "beta_authenticated" to (betaToken != null),
+            "beta_disabled_during_sweep" to betaStopped.get(),
+            "valid_symbols" to current.size,
+            "batch_errors" to errors,
+            "aborted" to aborted,
+            "alpha_order_account_unchanged" to true
+        ))
         return PrecomputedFixedSweep(current, errors, aborted, System.currentTimeMillis(), chunks.size)
     }
 
@@ -5808,8 +5934,7 @@ class TradingRepository @Inject constructor(
      * Forecast auto-buy is direct execution. Each eligible PRIMARY row is sent as a CNC MARKET
      * BUY using the fresh quote and actual fill logic already used by executeForecast().
      */
-    suspend fun autoBuyForecastRecommendations(): Int =
-        forecastAutoBuySubmissionMutex.withLock { autoBuyForecastRecommendationsLocked() }
+    suspend fun autoBuyForecastRecommendations(): Int = 0 // Forecast is frozen; no new orders
 
     private suspend fun autoBuyForecastRecommendationsLocked(): Int {
         val now = ZonedDateTime.now(INDIA)

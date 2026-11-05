@@ -17,13 +17,8 @@ class ForecastNewsSyncWorker @AssistedInject constructor(
     private val repository: TradingRepository,
     private val audit: AuditLogger
 ) : CoroutineWorker(context, params) {
-    override suspend fun doWork(): Result = runCatching {
-        repository.monitorForecastNews()
-        repository.monitorForecastNewsOutcomes()
-        Result.success()
-    }.getOrElse {
-        audit.logAsync("FORECAST_NEWS", "FALLBACK_WORKER_FAILED", mapOf(
-            "error_type" to it.javaClass.simpleName))
-        Result.retry()
+    override suspend fun doWork(): Result {
+        // Frozen even if Android executes an already enqueued legacy WorkManager job.
+        return Result.success()
     }
 }

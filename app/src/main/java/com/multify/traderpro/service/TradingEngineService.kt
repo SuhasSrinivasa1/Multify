@@ -100,36 +100,9 @@ class TradingEngineService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startEngineLoop()
         if (intent?.action == ACTION_SAMPLE_SIGNAL) {
-            val eventId = intent.getLongExtra(EXTRA_EVENT_ID, -1L)
-            val symbol = intent.getStringExtra(EXTRA_SYMBOL).orEmpty()
-            if (eventId > 0L) {
-                scope.launch {
-                    runCatching { repository.sampleSignal(eventId) }
-                        .onFailure {
-                            if (it !is CancellationException) {
-                                auditLogger.log("MULTIFY_RESEARCH", "POST_SIGNAL_SAMPLE_ERROR", mapOf(
-                                    "event_id" to eventId,
-                                    "symbol" to symbol,
-                                    "message" to (it.message ?: it.javaClass.simpleName)
-                                ))
-                            }
-                        }
-                }
-            }
-            if (eventId > 0L && symbol.isNotBlank()) {
-                scope.launch {
-                    runCatching { repository.captureMultifyResearchSnapshot(eventId, symbol) }
-                        .onFailure {
-                            if (it !is CancellationException) {
-                                auditLogger.log("MULTIFY_RESEARCH", "FEATURE_CAPTURE_ERROR", mapOf(
-                                    "event_id" to eventId,
-                                    "symbol" to symbol,
-                                    "message" to (it.message ?: it.javaClass.simpleName)
-                                ))
-                            }
-                        }
-                }
-            }
+            // Post-signal discretionary research is frozen; the notification listener
+            // still independently processes the live Multify BUY/order path.
+            auditLogger.logAsync("RUNTIME", "POST_SIGNAL_RESEARCH_FROZEN")
         }
         return START_STICKY
     }
@@ -177,8 +150,10 @@ class TradingEngineService : Service() {
         startMobileHealthWorker()
         startPositionMonitorWorker()
         startFixedScanWorker()
-        startForecastScanWorker()
-        startForecastNewsWorker()
+        // Forecast is completely frozen in v8.3. Alpha/Beta belong to Fixed;
+        // neither Forecast scanner nor news worker is started.
+        forecastScanJob?.cancel()
+        forecastNewsJob?.cancel()
         if (engineJob?.isActive == true) return
         engineJob = scope.launch {
             auditLogger.log("RUNTIME", "FOREGROUND_ENGINE_STARTED", mapOf(
@@ -191,7 +166,11 @@ class TradingEngineService : Service() {
             runCatching { repository.ensureFixedEngineSnapshot() }
                 .onFailure { auditLogger.log("RUNTIME", "FIXED_SNAPSHOT_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
             runCatching { repository.ensureHistoricalSeed() }
-            runCatching { repository.activateForecastEarlyEntryOnce() }
+            auditLogger.log("RUNTIME", "FORECAST_HARD_FROZEN", mapOf(
+                "forecast_scans" to false, "forecast_news" to false,
+                "forecast_replay" to false, "forecast_auto_buy" to false,
+                "beta_reserved_for_fixed" to true
+            ))
 
             var lastHeartbeatAtMs = 0L
             while (isActive) {
@@ -253,27 +232,11 @@ class TradingEngineService : Service() {
                         // loop never races ahead and notifies before an enabled auto-buy attempt.
                     } else if (nowMs - lastAfterHoursMaintenanceAtMs >= AFTER_HOURS_MAINTENANCE_INTERVAL_MS) {
                         lastAfterHoursMaintenanceAtMs = nowMs
-                        runCatching { repository.reconcileForecastAutoBuyOrders(true, "AFTER_HOURS_MAINTENANCE") }
-                            .onFailure { auditLogger.log("RUNTIME", "FORECAST_AUTO_BUY_RECONCILE_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
+                        // No Forecast order placement; existing Alpha-managed holdings
+                        // continue through the independent portfolio/GTT worker.
                         runCatching { repository.reconcileFixedAutoBuyOrders(true, "AFTER_HOURS_MAINTENANCE") }
                             .onFailure { auditLogger.log("RUNTIME", "FIXED_AUTO_BUY_RECONCILE_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
-                        lastForecastOutcomeCount = runCatching { repository.monitorForecastOutcomes() }
-                            .onFailure {
-                                if (it !is CancellationException) {
-                                    auditLogger.log("RUNTIME", "FORECAST_OUTCOME_MONITOR_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName)))
-                                }
-                            }.getOrDefault(lastForecastOutcomeCount)
-                    }
-
-                    if (regularSession && nowMs - lastForecastOutcomePollAtMs >= 60_000L &&
-                        repository.forecastBackgroundScanningEnabled()
-                    ) {
-                        lastForecastOutcomePollAtMs = nowMs
-                        lastForecastOutcomeCount = runCatching { repository.monitorForecastOutcomes() }
-                            .onFailure { if (it !is CancellationException) auditLogger.log(
-                                "RUNTIME", "FORECAST_LIVE_OUTCOME_ERROR",
-                                mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
-                            .getOrDefault(lastForecastOutcomeCount)
+                        lastForecastOutcomeCount = 0
                     }
 
                     if (nowMs - lastFixedOutcomePollAtMs >= 15_000L) {
@@ -316,18 +279,7 @@ class TradingEngineService : Service() {
                     // Mature completed-date research can catch up before market open and
                     // on closed days, not only while the app happens to run after 15:35.
                     // No replay during trading; Alpha orders/Fixed retain all priority.
-                    val replayWindow = !regularSession &&
-                        (now.dayOfWeek.value >= 6 ||
-                            now.toLocalTime() < LocalTime.of(9, 10) ||
-                            now.toLocalTime() >= LocalTime.of(15, 35))
-                    if (replayWindow &&
-                        nowMs - lastAfterHoursResearchAtMs >= AFTER_HOURS_RESEARCH_INTERVAL_MS
-                    ) {
-                        lastAfterHoursResearchAtMs = nowMs
-                        runCatching { repository.runAfterHoursResearch(false) }
-                            .onFailure { auditLogger.log("RUNTIME", "AFTER_HOURS_RESEARCH_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
-                    }
-
+                    // Forecast replay & backfill fully frozen. Preserve local records.
                     updateForegroundNotification(
                         lastKnownManagedCount,
                         lastForecastOutcomeCount,
@@ -437,8 +389,7 @@ class TradingEngineService : Service() {
                     if (positionMonitorJob?.isActive != true) startPositionMonitorWorker()
                     if (fixedScanJob?.isActive != true) startFixedScanWorker()
                     if (engineJob?.isActive != true) startEngineLoop()
-                    if (forecastScanJob?.isActive != true) startForecastScanWorker()
-                    if (forecastNewsJob?.isActive != true) startForecastNewsWorker()
+                    // Watchdog deliberately does not restart frozen Forecast jobs.
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (t: Throwable) {
