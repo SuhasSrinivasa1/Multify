@@ -526,6 +526,15 @@ class TradingEngineService : Service() {
                             )
                         }
                     }
+                    if (com.multify.traderpro.engine.NseEquitySessionCalendar.isMuhuratResearchTail(now)) {
+                        runCatching { repository.captureMuhuratClosingResearchOnly() }
+                            .onFailure { error ->
+                                if (error !is CancellationException) auditLogger.logAsync(
+                                    "FIXED_MUHURAT", "TAIL_WORKER_ERROR",
+                                    mapOf("error" to (error.message ?: error.javaClass.simpleName))
+                                )
+                            }
+                    }
                     if (com.multify.traderpro.engine.NseEquitySessionCalendar.isFixedScanWindow(now)) {
                         // Speculative historical prewarming is intentionally disabled. The
                         // 22-second verified cache remains unchanged; the old prewarm calls
