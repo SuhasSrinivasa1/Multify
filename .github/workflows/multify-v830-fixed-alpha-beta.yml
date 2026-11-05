@@ -226,7 +226,7 @@ jobs:
           assert 'FixedBetaDetailFallbackPolicy.shouldRetryOnAlpha(failed)' in repo
           assert 'primary_candidate_diagnostics' in repo
           assert 'captureFixedPreOpenResearchOnly()' in repo
-          preopen=repo[repo.index('suspend fun captureFixedPreOpenResearchOnly('):
+          preopen=repo[repo.index('private suspend fun fixedPreOpenEvaluationReadOnly('):
                        repo.index('suspend fun prepareFixedPreMarketWarmup(')]
           assert 'fixedPreOpenEvaluationReadOnly(' in preopen
           assert 'FixedLocalStrategyEngine.buildFeatures(quote, historical, 15)' in preopen
