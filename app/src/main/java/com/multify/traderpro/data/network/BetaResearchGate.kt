@@ -75,6 +75,12 @@ class BetaResearchGate @Inject constructor() {
                 wait
             }
             if (waitMs <= 0L) break
+            // Fixed has a 150-second cadence. Never let an unavailable Beta lane
+            // stall an entire official scan for a 60-second broker cooldown.
+            // Caller falls back to Alpha using the existing Alpha governor.
+            if (waitMs > 10_000L) {
+                throw java.io.IOException("BETA_FIXED_RATE_BUDGET_OR_COOLDOWN")
+            }
             delay(waitMs.coerceAtLeast(5L))
         }
         val requestStarted = SystemClock.elapsedRealtime()
