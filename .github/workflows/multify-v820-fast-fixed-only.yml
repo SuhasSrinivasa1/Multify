@@ -79,11 +79,13 @@ jobs:
           # Allow ONLY transport-stage changes after the frozen 15m evaluator.
           # Compare the exact evaluation body and full REST fetch/error handling
           # against the accepted frozen v7.9.44 baseline.
-          assert fixed_slice(new,
+          immutable_eval = fixed_slice(new,
               'private suspend fun fixedForecastEvaluation(',
-              'suspend fun prepareNextFixedDiscoverySweep(') == fixed_slice(old,
+              'suspend fun prepareNextFixedDiscoverySweep(')
+          immutable_eval = immutable_eval[:immutable_eval.rfind('    /**')] + '    '
+          assert immutable_eval == fixed_slice(old,
               'private suspend fun fixedForecastEvaluation(',
-              'private suspend fun discoverFixedMarketWideCandidates(')
+              'private suspend fun discoverFixedMarketWideCandidates('), 'Frozen 15m evaluator mutated'
           assert fixed_slice(new,
               'private suspend fun fetchFixedDiscoveryLtpBatch(',
               '// FIXED_FINAL_LOCK_END:') == fixed_slice(old,
