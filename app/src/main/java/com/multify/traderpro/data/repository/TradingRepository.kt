@@ -3760,7 +3760,7 @@ class TradingRepository @Inject constructor(
             } catch (failed: Throwable) {
                 // A correctly enforced Fixed price-band veto is not a Beta transport outage.
                 // Returning to Alpha here repeats a known-invalid quote and wastes requests.
-                if (failed is IllegalArgumentException && failed.message == "FIXED_PRICE_BAND_OUTSIDE") {
+                if (!com.multify.traderpro.engine.FixedBetaDetailFallbackPolicy.shouldRetryOnAlpha(failed)) {
                     auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "BETA_DETAIL_PRICE_BAND_SKIPPED", mapOf(
                         "symbol" to symbol, "reason" to "FIXED_PRICE_BAND_OUTSIDE",
                         "alpha_fallback_attempted" to false, "fixed_scoring_changed" to false
