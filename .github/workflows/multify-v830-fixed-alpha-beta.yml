@@ -1,7 +1,7 @@
-name: Multify v8.3.1 Muhurat Fixed Reliability TEST APK
+name: Multify v8.3.2 NSE Preopen/Muhurat TEST APK
 on:
   push:
-    branches: [v831-muhurat-fixed-reliability-test]
+    branches: [v832-preopen-session-20261108-test]
   workflow_dispatch:
 permissions:
   contents: read
@@ -161,7 +161,7 @@ jobs:
           assert 'candleInterval = "15minute"' in repo
           assert 'candleInterval = "1minute"' in repo
           gradle=Path('app/build.gradle.kts').read_text()
-          assert 'versionCode = 8310' in gradle
+          assert 'versionCode = 8320' in gradle
           store=Path('app/src/main/java/com/multify/traderpro/data/repository/FixedRecommendationStore.kt').read_text()
           assert 'filterNot { it.id == record.id }' in store
           assert 'fun fixedEventId(' in store
@@ -225,6 +225,27 @@ jobs:
           assert 'FIXED_PRICE_BAND_OUTSIDE' in betaFallback
           assert 'FixedBetaDetailFallbackPolicy.shouldRetryOnAlpha(failed)' in repo
           assert 'primary_candidate_diagnostics' in repo
+          assert 'captureFixedPreOpenResearchOnly()' in repo
+          preopen=repo[repo.index('suspend fun captureFixedPreOpenResearchOnly('):
+                       repo.index('suspend fun prepareFixedPreMarketWarmup(')]
+          assert 'fixedPreOpenEvaluationReadOnly(' in preopen
+          assert 'FixedLocalStrategyEngine.buildFeatures(quote, historical, 15)' in preopen
+          assert 'FixedLocalStrategyEngine.evaluateLong(signal, features, includeEventPrior = false)' in preopen
+          assert 'fixedRecommendationStore.upsert' not in preopen
+          assert 'submitMarketOrder(' not in preopen
+          assert 'placeCncBuy(' not in preopen
+          assert 'usable_for_official_primary_confirmation' in preopen
+          assert 'prices_are_exchange_iep' in preopen
+          assert 'NseEquitySessionCalendar.isPreOpenAuctionWindow(now)' in service
+          assert 'NseEquitySessionCalendar.isWarmupWindow(now)' in service
+          assert 'TradingSessionStartScheduler.scheduleNext(this)' in Path(
+             'app/src/main/java/com/multify/traderpro/MultifyApp.kt').read_text()
+          startup=Path('app/src/main/java/com/multify/traderpro/worker/TradingSessionStartWorker.kt').read_text()
+          assert 'TradingSessionStartScheduler.scheduleNext(applicationContext, now)' in startup
+          assert 'TradingEngineService.start(applicationContext)' in startup
+          assert 'isPreOpenAuctionWindow' in session
+          assert 'fun nextStartupAfter(' in session
+          assert 'muhuratAppStart = LocalTime.of(14, 0)' in session
 
           # Transport-only change; do not alter the broker permit or Fixed ranking.
           pacing=Path('app/src/main/java/com/multify/traderpro/engine/AlphaLtpPacingPolicy.kt').read_text()
@@ -345,10 +366,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v8.3.1-alpha-beta-muhurat-fixed-debug.apk
+          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v8.3.2-fixed-preopen-muhurat-debug.apk
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/*.apk > dist/APK-SIGNATURE.txt
           "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/*.apk | head -n 2 > dist/PACKAGE.txt
-          grep -q "versionCode='8310'" dist/PACKAGE.txt
+          grep -q "versionCode='8320'" dist/PACKAGE.txt
           if [[ "${STABLE_SIGNING_READY:-false}" == "true" ]]; then
             expected_cert="3f72d5c24e676c712d9e7e9feaa829960bfca9cdffc9ea4da6738372824e8755"
             actual_cert="$(awk '/Signer #1 certificate SHA-256 digest:/ {print $NF; exit}' dist/APK-SIGNATURE.txt | tr -d ':' | tr '[:upper:]' '[:lower:]')"
@@ -362,7 +383,7 @@ jobs:
           python - <<'PY'
           from pathlib import Path
           from zipfile import ZipFile, ZIP_DEFLATED
-          with ZipFile('dist/Multify-TraderPro-v8.3.1-exact-source.zip','w',ZIP_DEFLATED) as z:
+          with ZipFile('dist/Multify-TraderPro-v8.3.2-exact-source.zip','w',ZIP_DEFLATED) as z:
             for p in Path('.').rglob('*'):
               if (p.is_file()
                   and not any(part in {'.git','.gradle','build','dist'} for part in p.parts)
@@ -373,6 +394,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: multify-v831-muhurat-fixed
+          name: multify-v832-preopen-muhurat
           path: dist/
           if-no-files-found: warn
