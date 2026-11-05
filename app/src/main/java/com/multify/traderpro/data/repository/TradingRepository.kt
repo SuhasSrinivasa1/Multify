@@ -1187,6 +1187,51 @@ class TradingRepository @Inject constructor(
      * One full read-only LTP sample + up to six frozen 15m model evaluations per
      * date is bounded; actual Fixed publication waits for continuous trading.
      */
+    /**
+     * Pre-open model: identical frozen 15-minute factor functions, isolated
+     * broker I/O and NO changes to primary-observation caches, first-PRIMARY
+     * references, historical rolling store, recommendation state or GTTs.
+     */
+    private suspend fun fixedPreOpenEvaluationReadOnly(symbol: String, alphaToken: String): FixedStrategyEvaluation {
+        val betaToken = fixedBetaMarketTokenOrNull()?.takeIf {
+            com.multify.traderpro.engine.FixedDualAccountPolicy.betaDetailedEvaluation(symbol, true)
+        }
+        val useBeta = betaToken != null
+        val quote = if (useBeta) {
+            betaMarketRead(betaToken!!, BetaResearchGate.Type.LIVE,
+                alphaCall = { error("Pre-open Beta quote cannot borrow Alpha") },
+                betaCall = { apiFactory.betaGroww.quote(bearer(betaToken), tradingSymbol = symbol)
+                    .requirePayload("Preopen quote $symbol") })
+        } else withFixedLiveDataSlot {
+            apiFactory.groww.quote(bearer(alphaToken), tradingSymbol = symbol)
+                .requirePayload("Preopen quote $symbol")
+        }
+        require(RecommendationPriceBandPolicy.eligible(quote.lastPrice)) { "FIXED_PRICE_BAND_OUTSIDE" }
+        val now = ZonedDateTime.now(INDIA)
+        val start = now.minusDays(4).toLocalDate().atTime(9, 15).format(HIST_FORMAT)
+        val end = now.toLocalDateTime().format(HIST_FORMAT)
+        val historical = if (useBeta) {
+            betaMarketRead(betaToken!!, BetaResearchGate.Type.HISTORICAL,
+                alphaCall = { error("Pre-open Beta historical cannot borrow Alpha") },
+                betaCall = { apiFactory.betaGroww.historicalCandles(
+                    bearer(betaToken), growwSymbol = "NSE-$symbol", startTime = start,
+                    endTime = end, candleInterval = "15minute"
+                ).requirePayload("Preopen 15m candles $symbol") })
+        } else withFixedHistoricalDataSlot {
+            apiFactory.groww.historicalCandles(
+                bearer(alphaToken), growwSymbol = "NSE-$symbol", startTime = start,
+                endTime = end, candleInterval = "15minute"
+            ).requirePayload("Preopen 15m candles $symbol")
+        }
+        require(historical.candles.size >= 5) { "PREOPEN_INSUFFICIENT_HISTORICAL_15M_CANDLES" }
+        return withContext(fixedCpuDispatcher) {
+            val features = FixedLocalStrategyEngine.buildFeatures(quote, historical, 15)
+            val signal = ParsedSignal(SignalType.TRADE_RELEASE,
+                symbol = symbol, rawText = "fixed-preopen-research-only", confidence = 1.0)
+            FixedLocalStrategyEngine.evaluateLong(signal, features, includeEventPrior = false)
+        }
+    }
+
     suspend fun captureFixedPreOpenResearchOnly(): Boolean {
         val now = ZonedDateTime.now(INDIA)
         val sessionCalendar = com.multify.traderpro.engine.NseEquitySessionCalendar
@@ -1238,7 +1283,7 @@ class TradingRepository @Inject constructor(
             for (symbol in watch) {
                 if (!sessionCalendar.isPreOpenAuctionWindow(ZonedDateTime.now(INDIA))) break
                 try {
-                    val evaluation = fixedForecastEvaluation(symbol, token)
+                    val evaluation = fixedPreOpenEvaluationReadOnly(symbol, token)
                     val quality = FixedForecastQualityPolicy.evaluate(
                         evaluation, targetPct, "BREADTH_NEUTRAL"
                     )
