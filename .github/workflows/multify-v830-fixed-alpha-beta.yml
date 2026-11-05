@@ -1,7 +1,7 @@
-name: Multify v8.3.0 Fixed Alpha Beta Dual-Data TEST APK
+name: Multify v8.3.1 Muhurat Fixed Reliability TEST APK
 on:
   push:
-    branches: [v830-fixed-dual-data-beta-alpha-test]
+    branches: [v831-muhurat-fixed-reliability-test]
   workflow_dispatch:
 permissions:
   contents: read
@@ -75,7 +75,14 @@ jobs:
               ):
                 assert actual.count(exception)==1, 'Unexpected Fixed repeat publication mutation'
                 actual=actual.replace(exception,original,1)
-            assert actual==expected, first+' outside explicit repeat-identity exception changed'
+              # Explicitly authorized 2026 NSE Muhurat session override.
+              # This is the ONLY allowed change to the frozen Fixed publication
+              # slice beyond the pre-existing v8.0.6 event-ID exception.
+              muhurat_guard='if (!com.multify.traderpro.engine.NseEquitySessionCalendar.isFixedScanWindow(now)) {'
+              regular_guard='if (now.dayOfWeek.value >= 6 || now.toLocalTime() < LocalTime.of(9, 15) || now.toLocalTime() >= LocalTime.of(15, 30)) {'
+              assert actual.count(muhurat_guard)==1, 'Unexpected Fixed session-window mutation'
+              actual=actual.replace(muhurat_guard, regular_guard, 1)
+            assert actual==expected, first+' outside explicit repeat-identity and Muhurat-clock exceptions changed'
           # Allow ONLY transport-stage changes after the frozen 15m evaluator.
           # Compare the exact evaluation body and full REST fetch/error handling
           # against the accepted frozen v7.9.44 baseline.
@@ -154,7 +161,7 @@ jobs:
           assert 'candleInterval = "15minute"' in repo
           assert 'candleInterval = "1minute"' in repo
           gradle=Path('app/build.gradle.kts').read_text()
-          assert 'versionCode = 8300' in gradle
+          assert 'versionCode = 8310' in gradle
           store=Path('app/src/main/java/com/multify/traderpro/data/repository/FixedRecommendationStore.kt').read_text()
           assert 'filterNot { it.id == record.id }' in store
           assert 'fun fixedEventId(' in store
@@ -202,8 +209,22 @@ jobs:
           assert 'submitMarketOrder(' not in dedup and 'registerBoughtPositionAndProtect(' not in dedup
           assert 'allowedToTrade: Boolean = false' in dedup
           uiClock=Path('app/src/main/java/com/multify/traderpro/engine/FixedBuyAvailabilityPolicy.kt').read_text()
-          assert 'LocalTime.of(15, 15)' in uiClock
-          assert 'nseRegularSession(atMs)' in uiClock
+          assert 'NseEquitySessionCalendar.isFixedNewEntryWindow(' in uiClock
+          assert 'fun nseRegularSession(' in uiClock
+          session=Path('app/src/main/java/com/multify/traderpro/engine/NseEquitySessionCalendar.kt').read_text()
+          assert 'LocalDate.of(2026, 11, 8)' in session
+          assert 'muhuratCasClose = LocalTime.of(15, 15)' in session
+          assert 'LocalTime.of(14, 20)' in session
+          assert 'LocalTime.of(15, 0)' in session
+          assert 'NseEquitySessionCalendar.isFixedScanWindow(now)' in repo
+          assert 'NseEquitySessionCalendar.isOpen(now)' in repo
+          assert 'NseEquitySessionCalendar.isFixedNewEntryWindow(now)' in repo
+          assert 'NseEquitySessionCalendar.isFixedScanWindow(now)' in service
+          assert 'NseEquitySessionCalendar.isWarmupWindow(now)' in service
+          betaFallback=Path('app/src/main/java/com/multify/traderpro/engine/FixedBetaDetailFallbackPolicy.kt').read_text()
+          assert 'FIXED_PRICE_BAND_OUTSIDE' in betaFallback
+          assert 'FixedBetaDetailFallbackPolicy.shouldRetryOnAlpha(failed)' in repo
+          assert 'primary_candidate_diagnostics' in repo
 
           # Transport-only change; do not alter the broker permit or Fixed ranking.
           pacing=Path('app/src/main/java/com/multify/traderpro/engine/AlphaLtpPacingPolicy.kt').read_text()
@@ -324,10 +345,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v8.3.0-alpha-beta-fixed-debug.apk
+          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v8.3.1-alpha-beta-muhurat-fixed-debug.apk
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/*.apk > dist/APK-SIGNATURE.txt
           "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/*.apk | head -n 2 > dist/PACKAGE.txt
-          grep -q "versionCode='8300'" dist/PACKAGE.txt
+          grep -q "versionCode='8310'" dist/PACKAGE.txt
           if [[ "${STABLE_SIGNING_READY:-false}" == "true" ]]; then
             expected_cert="3f72d5c24e676c712d9e7e9feaa829960bfca9cdffc9ea4da6738372824e8755"
             actual_cert="$(awk '/Signer #1 certificate SHA-256 digest:/ {print $NF; exit}' dist/APK-SIGNATURE.txt | tr -d ':' | tr '[:upper:]' '[:lower:]')"
@@ -341,7 +362,7 @@ jobs:
           python - <<'PY'
           from pathlib import Path
           from zipfile import ZipFile, ZIP_DEFLATED
-          with ZipFile('dist/Multify-TraderPro-v8.3.0-exact-source.zip','w',ZIP_DEFLATED) as z:
+          with ZipFile('dist/Multify-TraderPro-v8.3.1-exact-source.zip','w',ZIP_DEFLATED) as z:
             for p in Path('.').rglob('*'):
               if (p.is_file()
                   and not any(part in {'.git','.gradle','build','dist'} for part in p.parts)
@@ -352,6 +373,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: multify-v830-alpha-beta-fixed
+          name: multify-v831-muhurat-fixed
           path: dist/
           if-no-files-found: warn
