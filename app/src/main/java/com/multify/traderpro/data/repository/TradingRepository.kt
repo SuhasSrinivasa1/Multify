@@ -1330,6 +1330,58 @@ class TradingRepository @Inject constructor(
         }
     }
 
+    /**
+     * November 8 15:15–15:30: NSE non-CAS stocks may still trade, while
+     * CAS equities have entered their closing-auction sequence. Without a
+     * verified instrument CAS flag, no new recommendation or BUY is allowed.
+     * Retain a small, low-frequency read-only quote sample for diagnostics.
+     */
+    suspend fun captureMuhuratClosingResearchOnly(): Boolean {
+        val now = ZonedDateTime.now(INDIA)
+        val calendar = com.multify.traderpro.engine.NseEquitySessionCalendar
+        if (!calendar.isMuhuratResearchTail(now)) return false
+        val prefs = appContext.getSharedPreferences("muhurat_20261108_tail_research", Context.MODE_PRIVATE)
+        val bucket = "${now.toLocalDate()}-${now.minute / 2}"
+        if (prefs.getString("last_bucket", null) == bucket) return false
+        val token = ensureToken() ?: return false
+        if (!prefs.edit().putString("last_bucket", bucket).commit()) return false
+        val watch = ensureFixedEngineSnapshot().payload.learningCalls.asSequence()
+            .filter { it.action.equals("BUY", true) }
+            .sortedByDescending { it.callDate }
+            .map { it.symbol }.distinct()
+            .filter { nseSymbols.isKnown(it) }
+            .take(8).toList()
+        if (watch.isEmpty()) return false
+        return try {
+            val betaToken = fixedBetaMarketTokenOrNull()
+            val quotes = if (betaToken != null) {
+                fixedBetaLtp(betaToken, watch)
+            } else {
+                fetchFixedDiscoveryLtpBatch(token, watch, 0)
+            }
+            auditLogger.logAsync("FIXED_MUHURAT", "NONCAS_TAIL_READONLY", mapOf(
+                "date" to now.toLocalDate().toString(),
+                "sampled_symbols" to watch,
+                "sample_size" to watch.size,
+                "raw_quote_symbols" to (quotes?.size ?: 0),
+                "cas_membership_verified" to false,
+                "nse_cas_closed_at" to "15:15_IST",
+                "nse_noncas_closes_at" to "15:30_IST",
+                "prices_may_be_stale_for_cas" to true,
+                "recommendations_published" to 0,
+                "orders_submitted" to 0
+            ))
+            true
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failed: Throwable) {
+            auditLogger.logAsync("FIXED_MUHURAT", "TAIL_READONLY_FAILED", mapOf(
+                "error" to (failed.message ?: failed.javaClass.simpleName).take(140)
+            ))
+            false
+        }
+    }
+
     suspend fun prepareFixedPreMarketWarmup(): Boolean {
         val now = ZonedDateTime.now(INDIA)
         val t = now.toLocalTime()
