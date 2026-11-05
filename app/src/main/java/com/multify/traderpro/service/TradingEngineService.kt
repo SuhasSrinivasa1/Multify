@@ -284,6 +284,12 @@ class TradingEngineService : Service() {
                                     auditLogger.log("RUNTIME", "FIXED_OUTCOME_MONITOR_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName)))
                                 }
                             }.getOrDefault(lastFixedOutcomeCount)
+                        // Candidate-only spare-capacity samples may corroborate a first PRIMARY
+                        // between full scans. Deduped notification budget is at most three per day.
+                        if (regularSession) {
+                            runCatching { repository.captureEarlyConvictionEvidence() }
+                            runCatching { notifyNewEarlyBuyIdeas() }
+                        }
                     }
 
                     if (nowMs - lastApiUsageAuditAtMs >= API_USAGE_AUDIT_INTERVAL_MS) {
@@ -698,6 +704,14 @@ class TradingEngineService : Service() {
                                             mapOf("error" to it.javaClass.simpleName,
                                                 "fixed_logic_changed" to false))
                                     }
+                                // Independent evidence lane: no additional REST request,
+                                // no Fixed publication or order-path side effects.
+                                runCatching { repository.captureEarlyConvictionEvidence() }
+                                runCatching { notifyNewEarlyBuyIdeas() }
+                                    .onFailure {
+                                        auditLogger.logAsync("EARLY_CONVICTION", "NOTIFICATION_ERROR",
+                                            mapOf("error" to it.javaClass.simpleName))
+                                    }
                             }
                             scope.launch {
                                 notifyNewFixedRecommendationsAfterOrderPath()
@@ -829,6 +843,60 @@ class TradingEngineService : Service() {
                 }
             }
         }
+    }
+
+    /** Research signal only, not an executable Fixed or Forecast recommendation.
+     * One per symbol per session and at most three early alerts total per session.
+     */
+    private fun notifyNewEarlyBuyIdeas() {
+        val clock = ZonedDateTime.now(INDIA)
+        if (clock.dayOfWeek.value > 5 ||
+            clock.toLocalTime() < LocalTime.of(9, 20) ||
+            clock.toLocalTime() >= LocalTime.of(15, 0)) return
+        val ideas = repository.earlyConvictionIdeas().filter {
+            it.status == "EARLY_BUY_IDEA" && !it.tradeEligible
+        }
+        if (ideas.isEmpty()) return
+        val today = clock.toLocalDate().toString()
+        val prefs = getSharedPreferences(EARLY_NOTIFICATION_PREFS, Context.MODE_PRIVATE)
+        val oldDay = prefs.getString("date", "").orEmpty()
+        val seen = if (oldDay == today) prefs.getStringSet("symbols", emptySet())
+            .orEmpty().toMutableSet() else mutableSetOf()
+        if (seen.size >= 3) return
+        val manager = getSystemService(NotificationManager::class.java)
+        var changed = false
+        for (idea in ideas) {
+            if (seen.size >= 3) break
+            if (!seen.add(idea.symbol)) continue
+            changed = true
+            val message = "Research idea, NOT confirmed Fixed BUY · Quality " +
+                idea.qualityScore + "/100 (not win probability) · " +
+                "Observed ₹" + String.format(Locale.US, "%.2f", idea.observedPrice) +
+                " · No auto-buy permitted"
+            val notification = NotificationCompat.Builder(this, EARLY_CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_stat_trader)
+                .setContentTitle("EARLY BUY IDEA · " + idea.symbol)
+                .setContentText(message)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(message + "\n" + idea.note))
+                .setAutoCancel(true)
+                .setCategory(NotificationCompat.CATEGORY_RECOMMENDATION)
+                .build()
+            manager.notify((idea.symbol.hashCode() xor EARLY_NOTIFICATION_ID_SALT).and(Int.MAX_VALUE),
+                notification)
+            auditLogger.logAsync("EARLY_CONVICTION", "EARLY_IDEA_POSTED", mapOf(
+                "symbol" to idea.symbol,
+                "quality_score_not_probability" to idea.qualityScore,
+                "first_primary_at_ms" to idea.firstObservedAtMs,
+                "last_evidence_at_ms" to idea.lastObservedAtMs,
+                "pulse_corrob" to idea.corroboratingPulse,
+                "fast_sample_corrob" to idea.corroboratingFastPrice,
+                "official_fixed" to false,
+                "buy_order_submitted" to false,
+                "alert_budget_per_day" to 3
+            ))
+        }
+        if (changed) prefs.edit().putString("date", today)
+            .putStringSet("symbols", seen).apply()
     }
 
     private fun notifyNewFixedRecommendationsAfterOrderPath() {
@@ -1043,6 +1111,15 @@ class TradingEngineService : Service() {
         )
         manager.createNotificationChannel(
             NotificationChannel(
+                EARLY_CHANNEL_ID,
+                "Early BUY ideas · research only",
+                NotificationManager.IMPORTANCE_DEFAULT
+            ).apply {
+                description = "At most three higher-quality early research ideas per day. Not confirmed Fixed BUYs; no automated trading."
+            }
+        )
+        manager.createNotificationChannel(
+            NotificationChannel(
                 FORECAST_CHANNEL_ID,
                 "Forecast opportunities",
                 NotificationManager.IMPORTANCE_DEFAULT
@@ -1054,6 +1131,9 @@ class TradingEngineService : Service() {
         private val INDIA = ZoneId.of("Asia/Kolkata")
         private const val ENGINE_CHANNEL_ID = "production_engine"
         private const val FIXED_CHANNEL_ID = "fixed_buy_recommendations_v773"
+        private const val EARLY_CHANNEL_ID = "early_buy_ideas_v810"
+        private const val EARLY_NOTIFICATION_PREFS = "early_buy_ideas_dedup_v810"
+        private const val EARLY_NOTIFICATION_ID_SALT = 0x810
         private const val FORECAST_CHANNEL_ID = "forecast_opportunities"
         private const val FIXED_NOTIFICATION_PREFS = "fixed_notification_v773"
         private const val FIXED_NOTIFICATION_DATE_KEY = "date"

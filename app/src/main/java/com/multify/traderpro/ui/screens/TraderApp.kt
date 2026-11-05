@@ -971,23 +971,48 @@ private fun FixedScreen(
             }
         }
         item {
-            val evidence = dashboard?.fixedResearchSafety
-            val prices = dashboard?.fixedFastCandidatePrices.orEmpty()
-            val pulse = dashboard?.fixedPulseResearch.orEmpty()
-            val early = dashboard?.fixedEarlyWatch.orEmpty()
+            val allIdeas = dashboard?.earlyOpportunities.orEmpty()
+            val strongIdeas = allIdeas.filter { it.status == "EARLY_BUY_IDEA" }.take(3)
+            val shown = if (strongIdeas.isNotEmpty()) strongIdeas else allIdeas.take(1)
             Card(
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                 shape = RoundedCornerShape(20.dp)
             ) {
-                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                    Text("Research runs in background", fontWeight = FontWeight.SemiBold)
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("Early opportunity radar", fontWeight = FontWeight.SemiBold)
+                        Text("Max 3", style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    if (shown.isEmpty()) {
+                        Text("No fresh, independently qualified early ideas. Official Fixed continues normally.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    } else {
+                        shown.forEach { idea ->
+                            HorizontalDivider()
+                            Text(
+                                (if (idea.status == "EARLY_BUY_IDEA") "EARLY BUY IDEA" else "WATCH") +
+                                    " · " + idea.symbol,
+                                fontWeight = FontWeight.SemiBold,
+                                color = if (idea.status == "EARLY_BUY_IDEA")
+                                    MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                            )
+                            Text(
+                                "Observed ₹" + String.format(Locale.US, "%.2f", idea.observedPrice) +
+                                    " · Quality " + idea.qualityScore + "/100",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                            Text(
+                                idea.note + " · NOT official Fixed · no automatic BUY",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
                     Text(
-                        "Early Watch ${early.size} · Fast Watch ${prices.size} · Market Pulse ${pulse.size} · Archived observations ${evidence?.historicalSnapshots ?: 0}",
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                    Text(
-                        "Factor breakdowns, candidate rejections, API timings, cache details and worker traces are saved in Export Logs, not displayed here.",
-                        style = MaterialTheme.typography.bodySmall,
+                        "Quality is a heuristic, not win probability. Raw Fast Watch, Market Pulse, 40-factor and API diagnostics remain in Export Logs.",
+                        style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }

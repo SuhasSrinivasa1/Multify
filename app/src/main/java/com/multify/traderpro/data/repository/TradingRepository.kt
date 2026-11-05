@@ -34,6 +34,7 @@ import com.multify.traderpro.data.network.ForecastDto
 import com.multify.traderpro.data.network.ForecastLearningStatsDto
 import com.multify.traderpro.data.network.ForecastReferenceStatsDto
 import com.multify.traderpro.data.network.FixedSnapshotDto
+import com.multify.traderpro.data.network.EarlyOpportunityDto
 import com.multify.traderpro.data.network.FixedEarlyWatchDto
 import com.multify.traderpro.data.network.FixedPulseResearchDto
 import com.multify.traderpro.data.network.FixedOutcomeStatsDto
@@ -108,6 +109,7 @@ import com.multify.traderpro.engine.FixedAdaptiveLearningMath
 import com.multify.traderpro.engine.FixedForecastPublicationPolicy
 import com.multify.traderpro.engine.FixedRepeatQualificationPolicy
 import com.multify.traderpro.engine.FixedEntryActionabilityPolicy
+import com.multify.traderpro.engine.EarlyConvictionPolicy
 import com.multify.traderpro.engine.FixedEarlyWatchPolicy
 import com.multify.traderpro.engine.FixedFinalContract
 import com.multify.traderpro.engine.RecommendationPriceBandPolicy
@@ -236,6 +238,7 @@ class TradingRepository @Inject constructor(
     private val fixedEarlyWatchJournal: FixedEarlyWatchJournal,
     private val fixedMarketPulseResearchStore: FixedMarketPulseResearchStore,
     private val fixedFastCandidatePriceStore: FixedFastCandidatePriceStore,
+    private val earlyOpportunityJournal: EarlyOpportunityJournal,
     private val fixedOutcomePerformanceStore: FixedOutcomePerformanceStore,
     private val fixedHistoricalEvidenceArchive: FixedHistoricalEvidenceArchive,
     private val fixedImportedSameDayDedupJournal: FixedImportedSameDayDedupJournal,
@@ -1476,6 +1479,7 @@ class TradingRepository @Inject constructor(
             fixedWatchlist = emptyList(),
             fixedEarlyWatch = fixedEarlyWatchJournal.recent(today),
             fixedPulseResearch = fixedMarketPulseResearchStore.recent(today),
+            earlyOpportunities = earlyConvictionIdeas(),
             fixedFastCandidatePrices = fixedFastCandidatePriceStore.recent(today),
             research = research,
             univestResearch = forecastUnivestJournal.recent().map { row ->
@@ -1632,6 +1636,7 @@ class TradingRepository @Inject constructor(
             fixedWatchlist = emptyList(),
             fixedEarlyWatch = fixedEarlyWatchJournal.recent(today),
             fixedPulseResearch = fixedMarketPulseResearchStore.recent(today),
+            earlyOpportunities = earlyConvictionIdeas(),
             forecastChampions = champions,
                 research = research,
             univestResearch = forecastUnivestJournal.recent().map { row ->
@@ -2071,6 +2076,43 @@ class TradingRepository @Inject constructor(
                 fixedApiPriorityRequested = false
             }
         }
+    }
+
+    /** Separate early-awareness lane. This never changes Fixed, BUY or SELL decisions.
+     * Quality scores are heuristic research rankings, NOT expected win probabilities.
+     * Reads local evidence only; no broker network requests and no auto-buy authority.
+     */
+    fun earlyConvictionIdeas(nowMs: Long = System.currentTimeMillis()): List<EarlyOpportunityDto> {
+        val date = LocalDate.now(INDIA).toString()
+        return EarlyConvictionPolicy.rank(
+            early = fixedEarlyWatchJournal.recent(date, 100),
+            pulses = fixedMarketPulseResearchStore.recent(date, 100),
+            fast = fixedFastCandidatePriceStore.recent(date, 100),
+            officialSymbols = fixedRecommendationStore.recommendations(date).map { it.symbol },
+            nowMs = nowMs,
+            limit = EarlyConvictionPolicy.MAX_VISIBLE
+        )
+    }
+
+    /** Persist ranked research opportunities and independently reconcile later
+     * Fixed publication; never writes production recommendation or order state.
+     * Returns number of new early observations (at most three per recording).
+     */
+    fun captureEarlyConvictionEvidence(): Int {
+        val date = LocalDate.now(INDIA).toString()
+        val official = fixedRecommendationStore.recommendations(date)
+        val ideas = earlyConvictionIdeas()
+        val added = earlyOpportunityJournal.observe(date, ideas, official)
+        if (added > 0) {
+            auditLogger.logAsync("EARLY_CONVICTION", "NEW_TIMELINE_EVIDENCE", mapOf(
+                "new_research_ideas" to added,
+                "high_quality_ideas" to ideas.count { it.status == "EARLY_BUY_IDEA" },
+                "market_data_requests_added" to 0,
+                "frozen_fixed_publication_changed" to false,
+                "buy_authority" to false
+            ))
+        }
+        return added
     }
 
     /**
@@ -6858,7 +6900,7 @@ class TradingRepository @Inject constructor(
         val fastCandidates = FixedFastCandidateSelectionPolicy.select(
             fixedEarlyWatchJournal.recent(today, 48),
             fixedMarketPulseResearchStore.recent(today, 48),
-            rows.map { it.symbol }, nowMs
+            rows.map { it.symbol }, nowMs, limit = 12
         )
         if (rows.isEmpty() && fastCandidates.isEmpty()) return 0
 
@@ -9815,6 +9857,15 @@ class TradingRepository @Inject constructor(
         auditLogger.log("MIGRATION", "FIXED_EARLY_WATCH_RESTORED", mapOf(
             "records" to restoredEarlyWatch, "trading_state_restored" to false
         ))
+        restoreStage = "Early opportunity research timeline"
+        entries["early_opportunity_timeline.json"]?.let { timelineJson ->
+            val imported = earlyOpportunityJournal.restoreArchived(timelineJson)
+            auditLogger.log("MIGRATION", "EARLY_OPPORTUNITY_TIMELINE_RESTORED", mapOf(
+                "research_rows_imported" to imported,
+                "trading_state_restored" to false,
+                "broker_orders_restored" to false
+            ))
+        }
         restoreStage = "Historical audit events"
         val restoredAudit = entries["system_audit.jsonl"]?.let { auditLogger.restoreArchived(it) } ?: 0
         auditLogger.log("MIGRATION", "FORECAST_NEWS_AND_AUDIT_RESTORED", mapOf(
@@ -10113,6 +10164,7 @@ class TradingRepository @Inject constructor(
                 addText("fixed_early_watch.json", fixedEarlyWatchJournal.archive())
                 addText("fixed_market_pulse_research.json", fixedMarketPulseResearchStore.archive())
                 addText("fixed_fast_candidates.json", fixedFastCandidatePriceStore.archive())
+                addText("early_opportunity_timeline.json", earlyOpportunityJournal.archive())
                 add("fixed_5m_shadow_pairs.json", fixedFiveMinuteShadowJournal.all())
                 add("fixed_5m_shadow_comparison_summary.json", mapOf(
                     "source" to "READ_ONLY_SAME_ENTRY_SAMPLED_LTP",
