@@ -93,7 +93,8 @@ data class FixedPulseResearchDto(
     val pulsePct: Double = 0.0,
     val latestPrice: Double = 0.0,
     val officialEntryPrice: Double? = null,
-    val publishedAtMs: Long? = null
+    val publishedAtMs: Long? = null,
+    val latestObservedAtMs: Long = 0L
 )
 
 data class FixedEarlyWatchDto(
@@ -114,6 +115,24 @@ data class FixedEarlyWatchDto(
     val dayChangePct: Double? = null,
     val distanceFromQuoteDayHighPct: Double? = null,
     val warnings: List<String> = emptyList()
+)
+
+/** Heuristic signal quality, never a probability of winning or trade permission. */
+data class EarlyOpportunityDto(
+    val symbol: String = "",
+    val status: String = "WATCH",
+    val qualityScore: Int = 0,
+    val observedPrice: Double = 0.0,
+    val firstObservedAtMs: Long = 0L,
+    val lastObservedAtMs: Long = 0L,
+    val primaryObservations: Int = 0,
+    val corroboratingPulse: Boolean = false,
+    val corroboratingFastPrice: Boolean = false,
+    val spreadBps: Double? = null,
+    val dayTradedShares: Long? = null,
+    val note: String = "",
+    val tradeEligible: Boolean = false,
+    val evidenceSource: String = ""
 )
 
 data class FixedResearchSafetyDto(
@@ -148,6 +167,7 @@ data class DashboardDto(
     val fixedEarlyWatch: List<FixedEarlyWatchDto> = emptyList(),
     val fixedPulseResearch: List<FixedPulseResearchDto> = emptyList(),
     val fixedFastCandidatePrices: List<FixedFastCandidateDto> = emptyList(),
+    val earlyOpportunities: List<EarlyOpportunityDto> = emptyList(),
     val forecastChampions: List<ForecastChampionDto> = emptyList(),
     val research: ResearchDto = ResearchDto(),
     val univestResearch: List<UnivestResearchDto> = emptyList(),
