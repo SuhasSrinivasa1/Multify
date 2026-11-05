@@ -222,9 +222,7 @@ class TradingEngineService : Service() {
                     }
 
                     val now = ZonedDateTime.now(INDIA)
-                    val regularSession = now.dayOfWeek.value < 6 &&
-                        now.toLocalTime() >= LocalTime.of(9, 15) &&
-                        now.toLocalTime() < LocalTime.of(15, 30)
+                    val regularSession = com.multify.traderpro.engine.NseEquitySessionCalendar.isOpen(now)
 
                     if (regularSession) {
                         // Market hours are intentionally clean: recommendation delivery lives behind
@@ -314,9 +312,7 @@ class TradingEngineService : Service() {
                 try {
                     val nowMs = System.currentTimeMillis()
                     val clock = ZonedDateTime.now(INDIA)
-                    val marketOpen = clock.dayOfWeek.value < 6 &&
-                        clock.toLocalTime() >= LocalTime.of(9, 15) &&
-                        clock.toLocalTime() < LocalTime.of(15, 30)
+                    val marketOpen = com.multify.traderpro.engine.NseEquitySessionCalendar.isOpen(clock)
                     val connected = runCatching {
                         val manager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
                         manager.getNetworkCapabilities(manager.activeNetwork)
@@ -448,9 +444,7 @@ class TradingEngineService : Service() {
                     }
 
                     val now = ZonedDateTime.now(INDIA)
-                    val regularSession = now.dayOfWeek.value < 6 &&
-                        now.toLocalTime() >= LocalTime.of(9, 15) &&
-                        now.toLocalTime() < LocalTime.of(15, 30)
+                    val regularSession = com.multify.traderpro.engine.NseEquitySessionCalendar.isOpen(now)
                     delay(
                         when {
                             !regularSession -> CLOSED_SESSION_LOOP_INTERVAL_MS
@@ -502,10 +496,7 @@ class TradingEngineService : Service() {
             while (isActive) {
                 try {
                     val now = ZonedDateTime.now(INDIA)
-                    if (now.dayOfWeek.value < 6 &&
-                        now.toLocalTime() >= LocalTime.of(9, 0) &&
-                        now.toLocalTime() < LocalTime.of(9, 15)
-                    ) {
+                    if (com.multify.traderpro.engine.NseEquitySessionCalendar.isWarmupWindow(now)) {
                         runCatching { repository.prepareFixedPreMarketWarmup() }
                             .onFailure {
                                 if (it !is CancellationException) {
@@ -515,10 +506,7 @@ class TradingEngineService : Service() {
                                 }
                             }
                     }
-                    if (now.dayOfWeek.value < 6 &&
-                        now.toLocalTime() >= LocalTime.of(9, 15) &&
-                        now.toLocalTime() < LocalTime.of(15, 30)
-                    ) {
+                    if (com.multify.traderpro.engine.NseEquitySessionCalendar.isFixedScanWindow(now)) {
                         // Speculative historical prewarming is intentionally disabled. The
                         // 22-second verified cache remains unchanged; the old prewarm calls
                         // regularly expired before Fixed used them and consumed broker quota.
