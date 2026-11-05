@@ -152,6 +152,7 @@ import com.multify.traderpro.engine.GttExitReconciliationPolicy
 import com.multify.traderpro.engine.StrategyEvaluation
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -289,6 +290,20 @@ class TradingRepository @Inject constructor(
     )
     @Volatile private var forecastPostFixedOpportunity = false
     private var lastFixedScanAtMs = 0L
+    /** A single full-NSE sweep prepared for the NEXT scan, not a separate strategy. */
+    private data class PrecomputedFixedSweep(
+        val prices: Map<String, Double>,
+        val errors: Int, val aborted: Boolean,
+        val completedAtMs: Long, val requestCount: Int
+    )
+    private data class PendingFixedSweep(
+        val date: String, val tokenHash: String, val masterHash: String,
+        val dueAtMs: Long, val completion: CompletableDeferred<PrecomputedFixedSweep?>
+    )
+    private val pendingFixedSweepMutex = Mutex()
+    private var pendingFixedSweep: PendingFixedSweep? = null
+    @Volatile private var fixedSweepPreparationActive = false
+
     private var lastForecastOutcomeMonitorAtMs = 0L
     private var lastFixedOutcomeMonitorAtMs = 0L
     private var lastFixedCandidateOnlyLtpAtMs = 0L
@@ -2320,7 +2335,7 @@ class TradingRepository @Inject constructor(
     suspend fun activateForecastEarlyEntryOnce() = preferences.activateForecastEarlyEntryOnce()
 
     suspend fun forecastBackgroundScanningEnabled(): Boolean =
-        preferences.settings.first().forecastScannerEnabled
+        preferences.settings.first().forecastScannerEnabled && !fixedSweepPreparationActive
 
     /** Research-only pacing; avoids waking Forecast every poll during active broker cooldown.
      * Beta uses independent credentials and remains unaffected by Alpha cooldowns.
@@ -3741,6 +3756,147 @@ class TradingRepository @Inject constructor(
         return evaluation
     }
 
+    /**
+     * Schedule the NEXT original full-universe LTP sweep while the Fixed worker
+     * is otherwise idle. Requests are not duplicated on a successful cycle.
+     * Never feed a partial or stale sweep into official Fixed discovery.
+     */
+    suspend fun prepareNextFixedDiscoverySweep(): Boolean {
+        val clock = ZonedDateTime.now(INDIA)
+        if (clock.dayOfWeek.value >= 6 || clock.toLocalTime() < LocalTime.of(9, 16) ||
+            clock.toLocalTime() >= LocalTime.of(15, 17) || lastFixedScanAtMs <= 0L ||
+            marketCriticalTradeInFlight || !marketDataAvailableForFixed()) return false
+        val nowMs = System.currentTimeMillis()
+        val dueAtMs = lastFixedScanAtMs + FIXED_V741_FORECAST_SCAN_INTERVAL_MS
+        if (!com.multify.traderpro.engine.FixedSweepPrefetchPolicy.canStart(
+                nowMs, dueAtMs, marketCriticalTradeInFlight, marketDataAvailableForFixed()
+            )) return false
+        val token = ensureToken() ?: return false
+        val master = nseSymbols.symbols().distinct()
+        if (master.isEmpty()) return false
+        val date = clock.toLocalDate().toString()
+        val pending = pendingFixedSweepMutex.withLock {
+            if (pendingFixedSweep?.completion?.isCompleted == false) return@withLock null
+            PendingFixedSweep(date, sha256(token).take(12),
+                sha256(master.joinToString("|")).take(16),
+                dueAtMs, CompletableDeferred<PrecomputedFixedSweep?>()).also {
+                pendingFixedSweep = it
+            }
+        } ?: return false
+        // Fetch just ahead of the next official scan, keeping the sample age bounded.
+        val startDelay = (dueAtMs - System.currentTimeMillis() -
+            com.multify.traderpro.engine.FixedSweepPrefetchPolicy.EXPECTED_SWEEP_MS).coerceAtLeast(0L)
+        try {
+            if (startDelay > 0L) delay(startDelay)
+            if (marketCriticalTradeInFlight || !marketDataAvailableForFixed() ||
+                ZonedDateTime.now(INDIA).toLocalDate().toString() != date ||
+                System.currentTimeMillis() > dueAtMs +
+                    com.multify.traderpro.engine.FixedSweepPrefetchPolicy.MAX_OVERRUN_MS) {
+                pending.completion.complete(null)
+                return false
+            }
+            fixedSweepPreparationActive = true
+            val started = SystemClock.elapsedRealtime()
+            val sweep = collectFixedWideLtp(token, master, preparing = true)
+            val usable = !sweep.aborted &&
+                sweep.prices.size.toDouble() / master.size >=
+                    FIXED_V741_MIN_DISCOVERY_COVERAGE_RATIO && marketDataAvailableForFixed()
+            auditLogger.logAsync("FIXED_PERFORMANCE", "NEXT_FULL_NSE_SWEEP_PREPARED", mapOf(
+                "elapsed_ms" to (SystemClock.elapsedRealtime() - started),
+                "ltp_batches" to sweep.requestCount,
+                "coverage" to sweep.prices.size, "batch_errors" to sweep.errors,
+                "usable" to usable, "same_broker_pacing" to true,
+                "fixed_logic_changed" to false
+            ))
+            pending.completion.complete(if (usable) sweep else null)
+            return usable
+        } catch (cancelled: CancellationException) {
+            pending.completion.complete(null)
+            throw cancelled
+        } catch (t: Throwable) {
+            pending.completion.complete(null)
+            auditLogger.logAsync("FIXED_PERFORMANCE", "NEXT_FULL_NSE_SWEEP_ERROR",
+                mapOf("error" to (t.message ?: t.javaClass.simpleName)))
+            return false
+        } finally {
+            fixedSweepPreparationActive = false
+        }
+    }
+
+    private suspend fun takeNextFixedDiscoverySweep(
+        token: String, master: List<String>, date: String
+    ): PrecomputedFixedSweep? {
+        val pending = pendingFixedSweepMutex.withLock {
+            pendingFixedSweep.also { pendingFixedSweep = null }
+        } ?: return null
+        if (pending.date != date || pending.tokenHash != sha256(token).take(12) ||
+            pending.masterHash != sha256(master.joinToString("|")).take(16)) return null
+        val started = SystemClock.elapsedRealtime()
+        // Await already-started batches instead of issuing a duplicate full sweep.
+        val sweep = withTimeoutOrNull(
+            com.multify.traderpro.engine.FixedSweepPrefetchPolicy.MAX_WAIT_MS
+        ) { pending.completion.await() }
+        val waitedMs = (SystemClock.elapsedRealtime() - started).coerceAtLeast(0L)
+        if (sweep == null || !com.multify.traderpro.engine.FixedSweepPrefetchPolicy.canConsume(
+            sweep.completedAtMs, System.currentTimeMillis(), sweep.prices.size,
+            master.size, sweep.aborted
+        )) {
+            auditLogger.logAsync("FIXED_PERFORMANCE", "PREFETCH_INVALID_NORMAL_SCAN_FALLBACK",
+                mapOf("reason" to "FAILED_STALE_OR_INCOMPLETE", "waited_ms" to waitedMs,
+                    "fixed_recommendation_rules_unchanged" to true))
+            return null
+        }
+        auditLogger.logAsync("FIXED_PERFORMANCE", "PREFETCHED_SWEEP_CONSUMED", mapOf(
+            "blocking_wait_ms" to waitedMs,
+            "sweep_age_ms" to (System.currentTimeMillis() - sweep.completedAtMs),
+            "nse_coverage" to sweep.prices.size,
+            "ltp_batches_moved_off_critical_scan" to sweep.requestCount,
+            "extra_full_market_scans" to 0,
+            "fixed_formula_changed" to false
+        ))
+        return sweep
+    }
+
+    private suspend fun collectFixedWideLtp(
+        token: String, master: List<String>, preparing: Boolean = false
+    ): PrecomputedFixedSweep {
+        val current = linkedMapOf<String, Double>()
+        var errors = 0
+        var failures = 0
+        var aborted = false
+        val chunks = master.chunked(50)
+        for (windowStart in chunks.indices step FixedDiscoveryWindowScheduler.WINDOW_SIZE) {
+            if (preparing && (marketCriticalTradeInFlight || !marketDataAvailableForFixed() ||
+                ZonedDateTime.now(INDIA).toLocalTime() >= LocalTime.of(15, 25))) {
+                aborted = true
+                break
+            }
+            val results = FixedDiscoveryWindowScheduler.fetchOrdered(
+                chunks, windowStart
+            ) { index, chunk -> fetchFixedDiscoveryLtpBatch(token, chunk, index) }
+            for ((index, payload) in results) {
+                if (payload == null) {
+                    errors++
+                    failures++
+                    if (failures >= FIXED_V741_DISCOVERY_CONSECUTIVE_FAILURE_ABORT) {
+                        aborted = true
+                        break
+                    }
+                } else {
+                    failures = 0
+                    payload.forEach { (key, value) ->
+                        if (value.isFinite() && value >= 10.0) {
+                            current[key.removePrefix("NSE_").uppercase(Locale.US)] = value
+                        }
+                    }
+                }
+                if (index + 1 < chunks.size) delay(FIXED_V741_DISCOVERY_BATCH_PACING_MS)
+            }
+            if (aborted) break
+        }
+        return PrecomputedFixedSweep(current, errors, aborted, System.currentTimeMillis(), chunks.size)
+    }
+
     private suspend fun discoverFixedMarketWideCandidates(
         token: String,
         master: List<String>,
@@ -3752,39 +3908,11 @@ class TradingRepository @Inject constructor(
         val previous = persisted?.previousLtps.orEmpty()
         val sessionOpen = persisted?.sessionOpenLtps.orEmpty()
         val restored = persisted != null
-        val current = linkedMapOf<String, Double>()
-        var batchErrors = 0
-        var consecutiveFailures = 0
-        var abortedForNetwork = false
-        val chunks = distinctMaster.chunked(50)
-
-        // Fixed v7.4.1's universe, inputs and ranking are unchanged. Only independent
-        // LTP batches are fetched two at a time; all responses are consumed in original
-        // index order, preserving the original network-failure abort and coverage rules.
-        for (windowStart in chunks.indices step FixedDiscoveryWindowScheduler.WINDOW_SIZE) {
-            val results = FixedDiscoveryWindowScheduler.fetchOrdered(
-                chunks, windowStart
-            ) { index, chunk -> fetchFixedDiscoveryLtpBatch(token, chunk, index) }
-            for ((index, payload) in results) {
-                if (payload == null) {
-                    batchErrors++
-                    consecutiveFailures++
-                    if (consecutiveFailures >= FIXED_V741_DISCOVERY_CONSECUTIVE_FAILURE_ABORT) {
-                        abortedForNetwork = true
-                        break
-                    }
-                } else {
-                    consecutiveFailures = 0
-                    payload.forEach { (key, value) ->
-                        if (value.isFinite() && value >= 10.0) {
-                            current[key.removePrefix("NSE_").uppercase(Locale.US)] = value
-                        }
-                    }
-                }
-                if (index + 1 < chunks.size) delay(FIXED_V741_DISCOVERY_BATCH_PACING_MS)
-            }
-            if (abortedForNetwork) break
-        }
+        val staged = takeNextFixedDiscoverySweep(token, distinctMaster, today)
+        val sweep = staged ?: collectFixedWideLtp(token, distinctMaster)
+        val current = sweep.prices
+        val batchErrors = sweep.errors
+        val abortedForNetwork = sweep.aborted
 
         val denominator = distinctMaster.size.coerceAtLeast(1)
         val coverageRatio = current.size.toDouble() / denominator.toDouble()
@@ -6853,14 +6981,8 @@ class TradingRepository @Inject constructor(
         val rows = fixedRecommendationStore.recommendations(today)
         fixedOutcomePerformanceStore.record(rows)
         fixedHistoricalEvidenceArchive.capture(rows)
-        // Read-only additional candidates can be sampled in otherwise idle gaps.
-        // The official Fixed scanner and its confirmation logic never consume these prices.
-        val fastCandidates = FixedFastCandidateSelectionPolicy.select(
-            fixedEarlyWatchJournal.recent(today, 48),
-            fixedMarketPulseResearchStore.recent(today, 48),
-            rows.map { it.symbol }, nowMs
-        )
-        if (rows.isEmpty() && fastCandidates.isEmpty()) return 0
+        // No research-only candidates: monitor official Fixed published stocks only.
+        if (rows.isEmpty()) return 0
 
         val open = marketSession() == "OPEN"
         if (!open) {
@@ -6903,29 +7025,10 @@ class TradingRepository @Inject constructor(
             if (observed > 0) fixedOutcomePerformanceStore.record(fixedRecommendationStore.recommendations(today))
             return fixedRecommendationStore.recommendations(today).count { it.status == "ACTIVE" }
         }
-        // When there is no published Fixed recommendation, a candidate-only request
-        // is allowed ONLY with generous live quota and enough time before the next
-        // Fixed scan. It never preempts active holdings or any broker order.
-        val candidateOnly = rows.isEmpty()
-        val optionalResearchAllowed = FixedFastCandidateSamplingPolicy.candidateOnlyAllowed(
-            nowMs, lastFixedCandidateOnlyLtpAtMs,
-            millisUntilNextFixedScan(), fixedApiPriorityRequested,
-            marketCriticalTradeInFlight, MarketDataPriorityAdmissionPolicy.hasManagedHoldings,
-            liveUsage.minuteHeadroom, marketDataAvailableForFixed()
-        )
-        if (candidateOnly && !optionalResearchAllowed) return 0
         lastFixedOutcomeMonitorAtMs = nowMs
         val token = ensureToken() ?: return fixedRecommendationStore.recommendations(today).count { it.status == "ACTIVE" }
-        val publishedSymbols = rows.map { it.symbol.uppercase(Locale.US) }.distinct()
-        val canPiggyback = !fixedApiPriorityRequested && !marketCriticalTradeInFlight &&
-            liveUsage.minuteHeadroom >= FixedFastCandidateSamplingPolicy.MIN_LIVE_HEADROOM &&
-            millisUntilNextFixedScan() >= FixedFastCandidateSamplingPolicy.MIN_FIXED_SCAN_HEADROOM_MS
-        val selectedFast = if (candidateOnly || canPiggyback)
-            fastCandidates.take((FixedFastCandidateSelectionPolicy.MAX_LTP_SYMBOLS -
-                publishedSymbols.size).coerceAtLeast(0)) else emptyList()
-        val symbols = (publishedSymbols + selectedFast.map { it.symbol }).distinct()
+        val symbols = rows.map { it.symbol.uppercase(Locale.US) }.distinct()
         if (symbols.isEmpty()) return 0
-        if (candidateOnly) lastFixedCandidateOnlyLtpAtMs = nowMs
         val fetched = runCatching {
             withFixedLiveDataSlot {
                 apiFactory.groww.ltp(
@@ -6938,16 +7041,6 @@ class TradingRepository @Inject constructor(
             ))
         }.getOrNull().orEmpty()
         val observedAt = System.currentTimeMillis()
-        val fastPriceObservations = fixedFastCandidatePriceStore.capture(today, selectedFast, fetched, observedAt)
-        if (fastPriceObservations > 0) {
-            auditLogger.logAsync("FIXED_FAST_CANDIDATE", "SPARE_CAPACITY_PRICE_OBSERVATION",
-                mapOf("candidate_symbols" to selectedFast.size,
-                    "updated" to fastPriceObservations,
-                    "shared_outcome_ltp_request" to !candidateOnly,
-                    "extra_market_request" to candidateOnly,
-                    "fixed_ranking_changed" to false, "fixed_confirmation_changed" to false,
-                    "trading_effect" to "NONE", "provider_timestamp_verified" to false))
-        }
         for (row in fixedRecommendationStore.recommendations(today)) {
             val price = fetched["NSE_${row.symbol.uppercase(Locale.US)}"]
                 ?: fetched[row.symbol.uppercase(Locale.US)] ?: continue
@@ -6956,7 +7049,7 @@ class TradingRepository @Inject constructor(
                 observed++
             }
         }
-        if (observed > 0 || fastPriceObservations > 0) {
+        if (observed > 0) {
             if (observed > 0) fixedOutcomePerformanceStore.record(fixedRecommendationStore.recommendations(today))
             fixedHistoricalEvidenceArchive.capture(fixedRecommendationStore.recommendations(today))
             _fixedDeliveryEvents.tryEmit(observedAt) // Repaint Fixed badges and Averages promptly.
