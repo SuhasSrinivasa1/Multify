@@ -971,29 +971,6 @@ private fun FixedScreen(
             }
         }
         item {
-            val evidence = dashboard?.fixedResearchSafety
-            val prices = dashboard?.fixedFastCandidatePrices.orEmpty()
-            val pulse = dashboard?.fixedPulseResearch.orEmpty()
-            val early = dashboard?.fixedEarlyWatch.orEmpty()
-            Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                shape = RoundedCornerShape(20.dp)
-            ) {
-                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                    Text("Research runs in background", fontWeight = FontWeight.SemiBold)
-                    Text(
-                        "Early Watch ${early.size} · Fast Watch ${prices.size} · Market Pulse ${pulse.size} · Archived observations ${evidence?.historicalSnapshots ?: 0}",
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                    Text(
-                        "Factor breakdowns, candidate rejections, API timings, cache details and worker traces are saved in Export Logs, not displayed here.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-        }
-        item {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
                 Button(onClick = onGenerate, modifier = Modifier.weight(1f)) { Text("Refresh Fixed") }
                 OutlinedButton(
