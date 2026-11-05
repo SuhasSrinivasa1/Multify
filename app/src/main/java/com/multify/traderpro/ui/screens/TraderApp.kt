@@ -100,7 +100,7 @@ import java.util.Locale
 private enum class Destination(val label: String, val subtitle: String, val icon: ImageVector) {
     Execution("Execution", "ARM status and app-owned CNC holdings", Icons.Default.Dashboard),
     Averages("Averages", "30-day LONG averages", Icons.Default.Analytics),
-    Forecast("Forecast", "Early-entry LONG recommendations · ≥1% target", Icons.Default.Science),
+    Forecast("Forecast", "Paused in v8.3 · historical records only", Icons.Default.Science),
     Fixed("Fixed", "Frozen v7.4.1 recommendation engine", Icons.Default.Shield),
     Settings("Settings", "Broker, ARM, holding budget and device controls", Icons.Default.Settings)
 }
@@ -623,12 +623,9 @@ private fun ForecastScreen(
                 shape = RoundedCornerShape(20.dp)
             ) {
                 Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("Forecast engine · AUTOMATIC DISCOVERY", fontWeight = FontWeight.SemiBold)
+                    Text("Forecast engine · FROZEN in v8.3", fontWeight = FontWeight.SemiBold)
                     Text(
-                        if (state.settings.forecastAutoBuyEnabled)
-                            "Forecast screens the entire NSE universe but uses only spare API capacity after SELL, Multify and Fixed. Automatic CNC BUY remains subject to broker readiness, fresh PRIMARY quality and existing safety rules. Research sessions are tracked for learning, not an activation mandate."
-                        else
-                            "Forecast can publish early-entry and news-confirmed PRIMARY calls without a five-session gate. Auto Buy is OFF until you enable it; research-only candidates never BUY. Broker and safety checks still apply.",
+                        "All Forecast scanning, news research, learning backfills, and Forecast BUYs are paused. Alpha and Beta market data are dedicated to Fixed. Prior history remains available for viewing.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -1259,12 +1256,9 @@ private fun SettingsScreen(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
-                        Checkbox(
-                            checked = !state.settings.forecastScannerEnabled,
-                            onCheckedChange = { fixedOnly -> onForecastScannerChanged(!fixedOnly) }
-                        )
+                        Checkbox(checked = true, onCheckedChange = {}, enabled = false)
                     }
-                    KeyValueRow("Forecast background discovery", if (state.settings.forecastScannerEnabled) "ON · opportunistic" else "PAUSED · Fixed-only")
+                    KeyValueRow("Forecast background discovery", "FROZEN · Beta dedicated to Fixed")
                     HorizontalDivider()
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
@@ -1275,14 +1269,11 @@ private fun SettingsScreen(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
-                        Switch(
-                            checked = state.settings.forecastAutoBuyEnabled,
-                            onCheckedChange = onForecastAutoBuyChanged
-                        )
+                        Switch(checked = false, onCheckedChange = {}, enabled = false)
                     }
                     KeyValueRow(
                         "Forecast auto-buy",
-                        if (state.settings.forecastAutoBuyEnabled) "ON · execution subject to broker and quality guards" else "OFF · only verified PRIMARY calls are buy-eligible"
+                        "FROZEN · no Forecast BUY orders permitted"
                     )
                     Text(
                         "Entry control: no Fixed entry GTT. Auto-buy uses a fresh quote for sizing and sends a direct CNC MARKET BUY immediately. The actual broker fill becomes the holding average and trailing anchor; the live execution target keeps the frozen recommendation target percentage but is anchored to that actual fill.",
