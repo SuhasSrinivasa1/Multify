@@ -286,7 +286,10 @@ class TradingEngineService : Service() {
                             }.getOrDefault(lastFixedOutcomeCount)
                         // Candidate-only spare-capacity samples may corroborate a first PRIMARY
                         // between full scans. Deduped notification budget is at most three per day.
-                        if (regularSession) runCatching { notifyNewEarlyBuyIdeas() }
+                        if (regularSession) {
+                            runCatching { repository.captureEarlyConvictionEvidence() }
+                            runCatching { notifyNewEarlyBuyIdeas() }
+                        }
                     }
 
                     if (nowMs - lastApiUsageAuditAtMs >= API_USAGE_AUDIT_INTERVAL_MS) {
@@ -703,6 +706,7 @@ class TradingEngineService : Service() {
                                     }
                                 // Independent evidence lane: no additional REST request,
                                 // no Fixed publication or order-path side effects.
+                                runCatching { repository.captureEarlyConvictionEvidence() }
                                 runCatching { notifyNewEarlyBuyIdeas() }
                                     .onFailure {
                                         auditLogger.logAsync("EARLY_CONVICTION", "NOTIFICATION_ERROR",
