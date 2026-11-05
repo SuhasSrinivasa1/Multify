@@ -290,15 +290,10 @@ class TraderViewModel @Inject constructor(
     }
 
     fun runAfterHoursResearch() {
-        viewModelScope.launch {
-            remote.value = remote.value.copy(loading = true, error = null, message = null)
-            runCatching { repository.runAfterHoursResearch(force = true) }
-                .onSuccess { report ->
-                    remote.value = remote.value.copy(loading = false, message = "Research updated · ${report.title}", error = null)
-                    refresh(silent = true)
-                }
-                .onFailure { remote.value = remote.value.copy(loading = false, error = it.userMessage()) }
-        }
+        // Historical Forecast research is frozen; no network request is allowed.
+        remote.value = remote.value.copy(
+            loading = false, message = "Forecast research is paused in Fixed-only v8.3", error = null
+        )
     }
 
     fun resetHalt() {
