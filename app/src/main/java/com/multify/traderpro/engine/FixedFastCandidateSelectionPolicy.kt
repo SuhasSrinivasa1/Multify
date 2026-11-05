@@ -7,7 +7,7 @@ import java.util.Locale
 /** Research-only price refresh; NEVER counts as Fixed confirmation or BUY signal. */
 object FixedFastCandidateSelectionPolicy {
     const val MAX_LTP_SYMBOLS = 50
-    const val MAX_EXTRA_CANDIDATES = 12
+    const val MAX_EXTRA_CANDIDATES = 48
     const val WATCH_MAX_AGE_MS = 20L * 60_000L
     const val PULSE_MAX_AGE_MS = 12L * 60_000L
     data class Candidate(val symbol: String, val baselinePrice: Double,
