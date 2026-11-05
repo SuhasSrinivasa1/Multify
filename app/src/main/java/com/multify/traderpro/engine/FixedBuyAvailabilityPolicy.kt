@@ -9,16 +9,13 @@ object FixedBuyAvailabilityPolicy {
     private val india = ZoneId.of("Asia/Kolkata")
     fun nseRegularSession(atMs: Long): Boolean {
         val local = Instant.ofEpochMilli(atMs).atZone(india)
-        return local.dayOfWeek.value < 6 &&
-            !local.toLocalTime().isBefore(LocalTime.of(9, 15)) &&
-            local.toLocalTime().isBefore(LocalTime.of(15, 30))
+        return NseEquitySessionCalendar.isOpen(local)
     }
 
     /** UI mirrors the independent authoritative Fixed entry cutoff. Existing
      * portfolio SELL/GTT monitoring keeps the full regular market session. */
     fun fixedNewEntryWindow(atMs: Long): Boolean =
-        nseRegularSession(atMs) &&
-            Instant.ofEpochMilli(atMs).atZone(india).toLocalTime().isBefore(LocalTime.of(15, 15))
+        NseEquitySessionCalendar.isFixedNewEntryWindow(Instant.ofEpochMilli(atMs).atZone(india))
 
     fun canBuy(atMs: Long, brokerReady: Boolean, status: String, executionEligible: Boolean): Boolean =
         fixedNewEntryWindow(atMs) && brokerReady && status == "ACTIVE" && executionEligible
