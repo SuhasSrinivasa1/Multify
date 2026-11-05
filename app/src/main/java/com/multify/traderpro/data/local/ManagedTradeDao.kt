@@ -14,6 +14,10 @@ interface ManagedTradeDao {
     @Update
     suspend fun updatePosition(position: ManagedPositionEntity)
 
+    /** Update only market-mark fields; stale snapshots must never erase a newer broker GTT association. */
+    @Query("UPDATE managed_positions SET lastPrice=:lastPrice, lastEvaluatedAtMs=:lastEvaluatedAtMs WHERE id=:id AND status='OPEN'")
+    suspend fun updatePriceObservation(id: Long, lastPrice: Double, lastEvaluatedAtMs: Long)
+
     @Query("SELECT * FROM managed_positions WHERE status='OPEN' ORDER BY openedAtMs ASC")
     suspend fun openPositions(): List<ManagedPositionEntity>
 
