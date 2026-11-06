@@ -3,6 +3,7 @@ package com.multify.traderpro.engine
 import com.multify.traderpro.data.network.SmartOrderPayload
 import java.security.MessageDigest
 import java.util.Locale
+import kotlin.math.abs
 
 /**
  * Recovers only the exact GTT reference generated for a managed position.
@@ -29,6 +30,67 @@ object AppProtectionGttRecoveryPolicy {
             .digest(seed.toByteArray())
             .joinToString("") { "%02x".format(it) }
         return prefix + digest.take(14)
+    }
+
+    fun expectedReferenceForMode(
+        mode: String, positionId: Long, symbol: String, openedAtMs: Long
+    ): String? {
+        val prefix = prefixModes.entries.firstOrNull { it.value == mode }?.key ?: return null
+        return expectedReference(prefix, positionId, symbol, openedAtMs)
+    }
+
+    data class TriggeredReferenceResolution(
+        val referenceId: String,
+        val reconstructed: Boolean,
+        val reasonCode: String
+    )
+
+    /**
+     * Groww may omit reference_id on a triggered GTT parent. Reconstruct only the
+     * deterministic reference originally sent by this app, and only after every
+     * parent identity field matches the locally managed position and GTT.
+     */
+    fun resolveTriggeredReference(
+        mode: String,
+        positionId: Long,
+        symbol: String,
+        openedAtMs: Long,
+        quantity: Int,
+        expectedGttId: String,
+        expectedTriggerPrice: Double?,
+        expectedDirection: String?,
+        parent: SmartOrderPayload
+    ): TriggeredReferenceResolution? {
+        if (quantity <= 0 || expectedGttId.isBlank() || symbol.isBlank()) return null
+        val expected = expectedReferenceForMode(mode, positionId, symbol, openedAtMs) ?: return null
+        if (!parent.smartOrderId.equals(expectedGttId, true) ||
+            !parent.smartOrderType.equals("GTT", true) ||
+            parent.status.uppercase(Locale.US) !in setOf("TRIGGERED", "COMPLETED") ||
+            !parent.tradingSymbol.equals(symbol, true) ||
+            parent.quantity != quantity ||
+            !parent.productType.equals("CNC", true) ||
+            !parent.exchange.equals("NSE", true) ||
+            !parent.order?.transactionType.equals("SELL", true)
+        ) return null
+        val expectedOrderType = if (mode == HoldingSmartOrderPolicy.MODE_RECOVERY_GTT) "LIMIT" else "MARKET"
+        if (!parent.order?.orderType.equals(expectedOrderType, true)) return null
+        val direction = parent.triggerDirection?.uppercase(Locale.US) ?: return null
+        if (direction !in setOf("UP", "DOWN") ||
+            !direction.equals(expectedDirection?.uppercase(Locale.US), true)
+        ) return null
+        val actualTrigger = parent.triggerPrice?.toDoubleOrNull()
+            ?.takeIf { it.isFinite() && it > 0.0 } ?: return null
+        if (expectedTriggerPrice == null || !expectedTriggerPrice.isFinite() ||
+            expectedTriggerPrice <= 0.0 || abs(actualTrigger - expectedTriggerPrice) > 0.11
+        ) return null
+        val brokerReference = parent.referenceId?.takeIf { it.isNotBlank() }
+        if (brokerReference != null && !brokerReference.equals(expected, true)) return null
+        return TriggeredReferenceResolution(
+            referenceId = expected,
+            reconstructed = brokerReference == null,
+            reasonCode = if (brokerReference == null) "REFERENCE_RECONSTRUCTED_FROM_LOCAL_SEED"
+                else "EXACT_PARENT_REFERENCE"
+        )
     }
 
     fun recover(

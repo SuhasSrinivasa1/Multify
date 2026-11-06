@@ -40,6 +40,10 @@ internal object FixedQuoteTelemetryPolicy {
             "volume_available" to (q.volume != null),
             "bid_ask_missing_is_not_zero" to true,
             "last_price" to clean(q.lastPrice),
+            "last_trade_time_ms" to q.lastTradeTimeMs?.takeIf { it > 0L },
+            "last_trade_quantity" to q.lastTradeQuantity?.takeIf { it >= 0L },
+            "last_trade_time_source" to if (q.lastTradeTimeMs != null && q.lastTradeTimeMs > 0L)
+                "GROWW_QUOTE_LAST_TRADE_TIME" else "UNAVAILABLE",
             "bid_price" to bid, "ask_price" to ask,
             "bid_quantity" to clean(q.bidQuantity),
             "ask_quantity" to clean(q.offerQuantity),

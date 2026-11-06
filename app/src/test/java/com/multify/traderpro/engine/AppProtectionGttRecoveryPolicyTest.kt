@@ -62,6 +62,46 @@ class AppProtectionGttRecoveryPolicyTest {
         ))
     }
 
+    @Test fun triggeredParentWithoutReferenceReconstructsOnlyAfterExactIdentityMatch() {
+        val expected = AppProtectionGttRecoveryPolicy.expectedReference("MHS", 1L, "ENTERO", 1_793_945_957_436L)
+        assertEquals("MHS85a6bec864cb38", expected)
+        val parent = SmartOrderPayload(
+            smartOrderId = "GTT_1793945959629_DFE6759BCF90", smartOrderType = "GTT",
+            referenceId = null, status = "TRIGGERED", tradingSymbol = "ENTERO",
+            quantity = 15, productType = "CNC", exchange = "NSE", triggerPrice = "1865.45",
+            triggerDirection = "DOWN", order = GttOrder(orderType = "MARKET", transactionType = "SELL")
+        )
+        val resolved = AppProtectionGttRecoveryPolicy.resolveTriggeredReference(
+            mode = HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT, positionId = 1L, symbol = "ENTERO",
+            openedAtMs = 1_793_945_957_436L, quantity = 15,
+            expectedGttId = "GTT_1793945959629_DFE6759BCF90", expectedTriggerPrice = 1865.45,
+            expectedDirection = "DOWN", parent = parent
+        )
+        assertNotNull(resolved)
+        assertEquals(expected, resolved!!.referenceId)
+        assertTrue(resolved.reconstructed)
+        assertEquals("REFERENCE_RECONSTRUCTED_FROM_LOCAL_SEED", resolved.reasonCode)
+    }
+
+    @Test fun triggeredReferenceFallbackRejectsAnyParentIdentityMismatch() {
+        val parent = gtt(null, status = "TRIGGERED")
+        fun resolve(payload: SmartOrderPayload) = AppProtectionGttRecoveryPolicy.resolveTriggeredReference(
+            HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT, positionId, symbol, openedAtMs,
+            quantity, "gtt-1", 386.15, "DOWN", payload
+        )
+        assertNotNull(resolve(parent))
+        assertNull(resolve(parent.copy(smartOrderId = "other-gtt")))
+        assertNull(resolve(parent.copy(tradingSymbol = "OTHER")))
+        assertNull(resolve(parent.copy(quantity = quantity + 1)))
+        assertNull(resolve(parent.copy(productType = "MIS")))
+        assertNull(resolve(parent.copy(exchange = "BSE")))
+        assertNull(resolve(parent.copy(triggerDirection = "UP")))
+        assertNull(resolve(parent.copy(triggerPrice = "380.00")))
+        assertNull(resolve(parent.copy(referenceId = "manual-reference")))
+        assertNull(resolve(parent.copy(order = GttOrder(orderType = "MARKET", transactionType = "BUY"))))
+        assertNull(resolve(parent.copy(status = "ACTIVE")))
+    }
+
     @Test fun onlyOneExactActiveGttCanBeRecovered() {
         val expected = AppProtectionGttRecoveryPolicy.expectedReference("MHS", positionId, symbol, openedAtMs)
         assertNull(AppProtectionGttRecoveryPolicy.recover(

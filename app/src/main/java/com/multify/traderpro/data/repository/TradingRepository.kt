@@ -319,6 +319,9 @@ class TradingRepository @Inject constructor(
     private var lastIdlePortfolioAuditAtMs = 0L
     private val lastPortfolioConflictAuditAtMs = ConcurrentHashMap<String, Long>()
     private val gttExitReconcileLastAttemptAtMs = ConcurrentHashMap<Long, Long>()
+    private val gttExitManualReviewLastAuditAtMs = ConcurrentHashMap<Long, Long>()
+    private val gttExitPendingLastAuditAtMs = ConcurrentHashMap<Long, Long>()
+    private val gttExitReferenceReconstructedAtMs = ConcurrentHashMap<Long, Long>()
     private val recentlyClosedSymbolsAtMs = ConcurrentHashMap<String, Long>()
     private var lastArmHotAuditAtMs = 0L
     private var lastMfeBackfillAtMs = 0L
@@ -2275,7 +2278,7 @@ class TradingRepository @Inject constructor(
 
     suspend fun runFixedPriorityCycle(): Boolean {
         fixedApiPriorityRequested = true
-        return scanApiCycleMutex.withLock {
+        val scanned = scanApiCycleMutex.withLock {
             val cycleStartedAtMs = System.currentTimeMillis()
             try {
                 fixedScanDeferredBroker = false
@@ -2408,6 +2411,19 @@ class TradingRepository @Inject constructor(
                 fixedApiPriorityRequested = false
             }
         }
+        if (scanned && !fixedApiPriorityRequested && !scanApiCycleMutex.isLocked) {
+            try {
+                updateFixedFiveMinuteShadowOutcomes()
+                val scanNumber = fixedShadowPrefs.getInt("completed_scan_number", 0) + 1
+                fixedShadowPrefs.edit().putInt("completed_scan_number", scanNumber).apply()
+                sampleFixedFiveMinuteShadow(scanNumber)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                // Optional shadow evidence must never interfere with Fixed scan/BUY.
+            }
+        }
+        return scanned
     }
 
     /**
@@ -4460,33 +4476,40 @@ class TradingRepository @Inject constructor(
                 return
             }
             val today = now.toLocalDate().toString()
-            // Rotate across eligible evaluated symbols (including non-recommendations).
-            // Otherwise a single published symbol would dominate all shadow samples.
+            // Only Alpha quotes can be paired with Alpha historical candles. The registry
+            // provides the actual HTTP response timestamp, not the delayed post-evaluation time.
             val preferred = fixedRecommendationStore.recommendations(today).map { it.symbol }
             val candidates = (preferred + fixedShadowReferences.keys.sorted()).distinct().mapNotNull { symbol ->
-                fixedShadowReferences[symbol]?.takeIf {
-                    RecommendationPriceBandPolicy.eligible(it.quote.lastPrice) &&
-                        (nowMs - it.quoteCapturedAtMs) in 0L..FixedShadowSamplingPolicy.MAX_REFERENCE_AGE_MS
-                }?.let { symbol to it }
+                val reference = fixedShadowReferences[symbol] ?: return@mapNotNull null
+                if (!RecommendationPriceBandPolicy.eligible(reference.quote.lastPrice)) return@mapNotNull null
+                val timing = FixedQuoteTimingRegistry.closestCompletedQuote(
+                    symbol, lastFixedScanAtMs, reference.quoteCapturedAtMs
+                ) ?: return@mapNotNull null
+                val age = nowMs - timing.responseReceivedAtMs
+                if (age !in 0L..FixedShadowSamplingPolicy.MAX_REFERENCE_AGE_MS) return@mapNotNull null
+                Triple(symbol, reference, timing)
             }
             val candidate = if (candidates.isEmpty()) null
                 else candidates[Math.floorMod(completedScanNumber, candidates.size)]
             if (candidate == null) {
-                auditLogger.logAsync("FIXED_5M_SHADOW", "NO_FRESH_PRODUCTION_15M_REFERENCE")
+                auditLogger.logAsync("FIXED_5M_SHADOW", "NO_FRESH_ALPHA_15M_REFERENCE")
                 return
             }
-            val (symbol, reference) = candidate
-            val token = ensureToken() ?: return // Alpha only: no Beta account, no fallback.
+            val (symbol, reference, quoteTiming) = candidate
+            val referenceQuoteAtMs = quoteTiming.responseReceivedAtMs
+            val lastAttemptAtMs = fixedShadowPrefs.getLong("last_attempted_at_ms", 0L)
+            if (lastAttemptAtMs > 0L && nowMs - lastAttemptAtMs < FIXED_SHADOW_MIN_ATTEMPT_GAP_MS) return
+            fixedShadowPrefs.edit().putLong("last_attempted_at_ms", nowMs).apply()
+            val token = ensureToken() ?: return
             if (fixedApiPriorityRequested || marketCriticalTradeInFlight ||
                 millisUntilNextFixedScan() < FixedShadowSamplingPolicy.MIN_FIXED_HEADROOM_MS
             ) return
-            val referenceTime = ZonedDateTime.ofInstant(
-                java.time.Instant.ofEpochMilli(reference.quoteCapturedAtMs), INDIA
-            )
+            val referenceTime = ZonedDateTime.ofInstant(java.time.Instant.ofEpochMilli(referenceQuoteAtMs), INDIA)
             val start = referenceTime.minusDays(4).toLocalDate().atTime(9, 15).format(HIST_FORMAT)
             val end = referenceTime.toLocalDateTime().format(HIST_FORMAT)
             val before = System.currentTimeMillis()
-            // Never occupy Fixed's request slot waiting for a full network timeout.
+            // One policy-gated 5m history request. 10m bars are derived locally from paired
+            // completed 5m bars, so this adds no second broker request.
             val history = withTimeoutOrNull(
                 (millisUntilNextFixedScan() - 1_500L).coerceIn(500L, 4_000L)
             ) {
@@ -4496,7 +4519,7 @@ class TradingRepository @Inject constructor(
                     startTime = start, endTime = end, candleInterval = "5minute"
                 ).requirePayload("Alpha idle Fixed shadow 5m $symbol")
             }
-            if (history == null || history.candles.size < 5) {
+            if (history == null) {
                 auditLogger.logAsync("FIXED_5M_SHADOW", "HISTORICAL_UNAVAILABLE_OR_TIMED_OUT", mapOf(
                     "symbol" to symbol, "alpha_only" to true,
                     "elapsed_ms" to (System.currentTimeMillis() - before),
@@ -4504,39 +4527,106 @@ class TradingRepository @Inject constructor(
                 ))
                 return
             }
+            val parsedFiveMinute = history.candles.mapNotNull { candle ->
+                if (candle.size < 6) return@mapNotNull null
+                val atMs = com.multify.traderpro.engine.MarketCandleTimestampParser.toEpochMillis(candle[0])
+                    ?: return@mapNotNull null
+                val open = runCatching { candle[1].asDouble }.getOrNull() ?: return@mapNotNull null
+                val high = runCatching { candle[2].asDouble }.getOrNull() ?: return@mapNotNull null
+                val low = runCatching { candle[3].asDouble }.getOrNull() ?: return@mapNotNull null
+                val close = runCatching { candle[4].asDouble }.getOrNull() ?: return@mapNotNull null
+                val volume = runCatching { candle[5].asDouble }.getOrNull() ?: return@mapNotNull null
+                val bar = com.multify.traderpro.engine.MarketCandleBar(atMs, open, high, low, close, volume)
+                if (atMs + 5L * 60_000L > referenceQuoteAtMs ||
+                    !listOf(open, high, low, close, volume).all { it.isFinite() } ||
+                    open <= 0.0 || high < maxOf(open, close) || low <= 0.0 ||
+                    low > minOf(open, close) || close <= 0.0 || volume < 0.0
+                ) return@mapNotNull null
+                candle to bar
+            }.sortedBy { it.second.atMs }.distinctBy { it.second.atMs }
+            val completedFiveRows = parsedFiveMinute.map { it.first }
+            val fiveBars = parsedFiveMinute.map { it.second }
+            if (completedFiveRows.size < 5) {
+                auditLogger.logAsync("FIXED_5M_SHADOW", "COMPLETED_5M_CANDLES_INSUFFICIENT", mapOf(
+                    "symbol" to symbol, "valid_completed_5m_bars" to completedFiveRows.size,
+                    "timestamp_source" to "GROWW_HISTORICAL_CANDLE_TIMESTAMP",
+                    "incomplete_bars_excluded" to true
+                ))
+                return
+            }
+            val completedFiveHistory = history.copy(candles = completedFiveRows, intervalInMinutes = 5)
+            val tenBars = com.multify.traderpro.engine.TenMinuteCandleAggregator.aggregate(fiveBars, referenceQuoteAtMs)
             val signal = ParsedSignal(SignalType.TRADE_RELEASE, symbol = symbol,
-                rawText = "fixed-5m-idle-research", confidence = 1.0)
+                rawText = "fixed-5m-10m-idle-research", confidence = 1.0)
             val five = FixedLocalStrategyEngine.evaluateLong(
-                signal, FixedLocalStrategyEngine.buildFeatures(reference.quote, history, 5),
+                signal, FixedLocalStrategyEngine.buildFeatures(reference.quote, completedFiveHistory, 5),
                 includeEventPrior = false
             )
+            val ten = if (tenBars.size >= 5) {
+                val tenHistory = HistoricalPayload(
+                    candles = tenBars.map { bar ->
+                        listOf(
+                            com.google.gson.JsonPrimitive(bar.atMs / 1_000L),
+                            com.google.gson.JsonPrimitive(bar.open),
+                            com.google.gson.JsonPrimitive(bar.high),
+                            com.google.gson.JsonPrimitive(bar.low),
+                            com.google.gson.JsonPrimitive(bar.close),
+                            com.google.gson.JsonPrimitive(bar.volume)
+                        )
+                    },
+                    intervalInMinutes = 10
+                )
+                FixedLocalStrategyEngine.evaluateLong(
+                    signal, FixedLocalStrategyEngine.buildFeatures(reference.quote, tenHistory, 10),
+                    includeEventPrior = false
+                )
+            } else null
             val fifteen = reference.evaluation
             val targetPct = FixedForecastQualityPolicy.adaptiveTargetPct(
                 fixedSnapshotMultifyMfeAverage(ensureFixedEngineSnapshot()), emptyList()
             )
-            val regime = "BREADTH_NEUTRAL" // Same neutral reference for both variants.
+            val regime = "BREADTH_NEUTRAL"
             val tier15 = FixedForecastQualityPolicy.evaluate(fifteen, targetPct, regime).tier
             val tier5 = FixedForecastQualityPolicy.evaluate(five, targetPct, regime).tier
+            val tier10 = ten?.let { FixedForecastQualityPolicy.evaluate(it, targetPct, regime).tier } ?: "UNAVAILABLE"
             val price = reference.quote.lastPrice ?: return
+            val lastTradeTimeMs = reference.quote.lastTradeTimeMs?.takeIf { it > 0L }
+            val lastTradeAgeMs = lastTradeTimeMs?.let { (referenceQuoteAtMs - it).coerceAtLeast(0L) }
             val pair = FixedFiveMinuteShadowPair(
-                date = today, atMs = reference.quoteCapturedAtMs, symbol = symbol,
+                date = today, atMs = referenceQuoteAtMs, symbol = symbol,
                 entryPrice = price, targetPct = targetPct,
                 fifteenMinuteTier = tier15, fiveMinuteTier = tier5,
                 fifteenMinuteConfidence = fifteen.confidence, fiveMinuteConfidence = five.confidence,
                 fifteenMinuteDirection = fifteen.directionalScore, fiveMinuteDirection = five.directionalScore,
-                fifteenMinuteStrategy = fifteen.strategy, fiveMinuteStrategy = five.strategy
+                fifteenMinuteStrategy = fifteen.strategy, fiveMinuteStrategy = five.strategy,
+                tenMinuteTier = tier10, tenMinuteConfidence = ten?.confidence,
+                tenMinuteDirection = ten?.directionalScore, tenMinuteStrategy = ten?.strategy,
+                fiveMinuteCompletedBars = completedFiveRows.size, tenMinuteCompletedBars = tenBars.size,
+                fiveMinuteLastBarVolume = five.features.candles.lastOrNull()?.volume,
+                tenMinuteLastBarVolume = tenBars.lastOrNull()?.volume,
+                providerLastTradeTimeMs = lastTradeTimeMs, providerLastTradeAgeMs = lastTradeAgeMs,
+                brokerReportedDayVolume = reference.quote.volume
             )
             fixedFiveMinuteShadowJournal.append(pair)
             fixedShadowPrefs.edit().putLong("last_successful_at_ms", System.currentTimeMillis()).apply()
             auditLogger.logAsync("FIXED_5M_SHADOW", "PAIRED_SIGNAL_CAPTURED", mapOf(
                 "date" to today, "symbol" to symbol,
-                "entry_price" to price, "reference_quote_at_ms" to reference.quoteCapturedAtMs,
-                "reference_age_ms" to (nowMs - reference.quoteCapturedAtMs),
+                "entry_price" to price, "reference_quote_at_ms" to referenceQuoteAtMs,
+                "reference_quote_timestamp_source" to "GROWW_ALPHA_HTTP_RESPONSE_TIME",
+                "reference_age_ms" to (nowMs - referenceQuoteAtMs),
                 "target_pct" to targetPct, "tier_15m" to tier15, "tier_5m" to tier5,
+                "tier_10m" to tier10,
                 "confidence_15m" to fifteen.confidence, "confidence_5m" to five.confidence,
+                "confidence_10m" to ten?.confidence,
                 "direction_15m" to fifteen.directionalScore, "direction_5m" to five.directionalScore,
+                "direction_10m" to ten?.directionalScore,
+                "complete_5m_bars" to completedFiveRows.size, "complete_10m_bars" to tenBars.size,
                 "volume_15m_last_bar" to fifteen.features.candles.lastOrNull()?.volume,
                 "volume_5m_last_bar" to five.features.candles.lastOrNull()?.volume,
+                "volume_10m_last_bar" to tenBars.lastOrNull()?.volume,
+                "provider_last_trade_time_ms" to lastTradeTimeMs,
+                "provider_last_trade_age_ms" to lastTradeAgeMs,
+                "broker_reported_day_volume" to reference.quote.volume,
                 "bid_price" to reference.quote.bidPrice, "ask_price" to reference.quote.offerPrice,
                 "bid_quantity" to reference.quote.bidQuantity,
                 "ask_quantity" to reference.quote.offerQuantity,
@@ -4545,12 +4635,13 @@ class TradingRepository @Inject constructor(
                 "day_traded_volume" to reference.quote.volume,
                 "account" to "ALPHA", "extra_quote_requests" to 0,
                 "extra_historical_requests" to 1,
-                "one_in_ten_sampling_removed" to true,
+                "sampling_policy" to "ONE_ALPHA_5M_REQUEST_PER_12_MINUTES_WHEN_SPARE_CAPACITY",
                 "orders_allowed" to false, "production_fixed_candles" to "15minute",
                 "comparison_group" to pair.comparisonGroup,
                 "session_bucket" to pair.sessionBucket,
                 "both_variants_same_15m_reference_quote" to true,
-                "5m_research_only" to true, "same_production_quote" to true,
+                "5m_research_only" to true, "10m_derived_from_same_5m_request" to true,
+                "same_production_quote" to true, "same_entry_reference_all_intervals" to true,
                 "outcomes_are_sampled_not_realised" to true
             ))
         } catch (cancelled: CancellationException) {
@@ -9483,7 +9574,7 @@ class TradingRepository @Inject constructor(
         return closeLock.withLock {
             if (managedDao.openPositionById(position.id) == null) return@withLock false
             val now = System.currentTimeMillis()
-            if (now - (gttExitReconcileLastAttemptAtMs[position.id] ?: 0L) < 8_000L)
+            if (now - (gttExitReconcileLastAttemptAtMs[position.id] ?: 0L) < GTT_EXIT_RECONCILE_MIN_GAP_MS)
                 return@withLock false
             gttExitReconcileLastAttemptAtMs[position.id] = now
 
@@ -9510,20 +9601,57 @@ class TradingRepository @Inject constructor(
                 ))
                 return@withLock false
             }
-            // Do not guess from symbol + quantity alone: an unrelated manual SELL must not
-            // close an app-owned position. Groww's child order must carry this exact GTT reference.
-            val expectedReference = parent.referenceId
-                ?.takeIf { AppPositionOwnershipPolicy.isAppProtectionReference(it) }
-            if (expectedReference.isNullOrBlank()) {
-                auditLogger.log("GTT", "PARENT_REFERENCE_UNVERIFIED_MANUAL_REVIEW", mapOf(
+            // Never infer a fill from a trigger or a same-symbol SELL. If Groww omits
+            // reference_id on the triggered parent, reconstruct only the deterministic reference
+            // sent when this app created that GTT, after validating every parent identity field.
+            val referenceResolution = com.multify.traderpro.engine.AppProtectionGttRecoveryPolicy
+                .resolveTriggeredReference(
+                    mode = position.smartOrderMode,
+                    positionId = position.id,
+                    symbol = position.symbol,
+                    openedAtMs = position.openedAtMs,
+                    quantity = position.quantity,
+                    expectedGttId = position.smartOrderId.orEmpty(),
+                    expectedTriggerPrice = position.smartOrderTriggerPrice,
+                    expectedDirection = position.smartOrderDirection,
+                    parent = parent
+                )
+            if (referenceResolution == null) {
+                val lastAuditAtMs = gttExitManualReviewLastAuditAtMs[position.id] ?: 0L
+                if (now - lastAuditAtMs >= GTT_EXIT_AUDIT_MIN_GAP_MS) {
+                    gttExitManualReviewLastAuditAtMs[position.id] = now
+                    auditLogger.log("GTT", "PARENT_REFERENCE_UNVERIFIED_MANUAL_REVIEW", mapOf(
+                        "symbol" to confirmed.symbol,
+                        "gtt_id" to confirmed.smartOrderId,
+                        "parent_status" to parentStatus,
+                        "parent_reference_id" to parent.referenceId,
+                        "expected_reference_id" to com.multify.traderpro.engine.AppProtectionGttRecoveryPolicy
+                            .expectedReferenceForMode(position.smartOrderMode, position.id, position.symbol, position.openedAtMs),
+                        "parent_symbol" to parent.tradingSymbol,
+                        "parent_quantity" to parent.quantity,
+                        "parent_product" to parent.productType,
+                        "parent_transaction" to parent.order?.transactionType,
+                        "parent_trigger_direction" to parent.triggerDirection,
+                        "parent_trigger_price" to parent.triggerPrice,
+                        "no_close_booked" to true,
+                        "duplicate_sell_allowed" to false
+                    ))
+                }
+                return@withLock false
+            }
+            val expectedReference = referenceResolution.referenceId
+            if (referenceResolution.reconstructed &&
+                gttExitReferenceReconstructedAtMs.putIfAbsent(position.id, now) == null
+            ) {
+                auditLogger.log("GTT", "PARENT_REFERENCE_RECONSTRUCTED_FROM_LOCAL_SEED", mapOf(
                     "symbol" to confirmed.symbol,
                     "gtt_id" to confirmed.smartOrderId,
+                    "reference_id" to expectedReference,
                     "parent_status" to parentStatus,
-                    "reference_available" to !parent.referenceId.isNullOrBlank(),
-                    "no_close_booked" to true,
-                    "duplicate_sell_allowed" to false
+                    "parent_identity_fields_verified" to true,
+                    "child_order_still_requires_exact_reference_match" to true,
+                    "no_sell_submitted" to true
                 ))
-                return@withLock false
             }
             val brokerOrders = mutableListOf<GrowwOrderBookRow>()
             for (page in 0..2) {
@@ -9539,7 +9667,10 @@ class TradingRepository @Inject constructor(
                 brokerOrders, confirmed.symbol, confirmed.quantity, confirmed.openOrderId, expectedReference
             )
             if (full == null || brokerQuantity != 0) {
-                auditLogger.log("GTT", "BROKER_FILL_PENDING_OR_PARTIAL_QUARANTINE", mapOf(
+                val lastPendingAuditAtMs = gttExitPendingLastAuditAtMs[position.id] ?: 0L
+                if (now - lastPendingAuditAtMs >= GTT_EXIT_AUDIT_MIN_GAP_MS) {
+                    gttExitPendingLastAuditAtMs[position.id] = now
+                    auditLogger.log("GTT", "BROKER_FILL_PENDING_OR_PARTIAL_QUARANTINE", mapOf(
                     "symbol" to confirmed.symbol,
                     "parent_status" to parentStatus,
                     "gtt_id" to confirmed.smartOrderId,
@@ -9559,7 +9690,8 @@ class TradingRepository @Inject constructor(
                     "unique_full_order_match" to (full != null),
                     "manual_review_if_persistent" to true,
                     "duplicate_sell_allowed" to false
-                ))
+                    ))
+                }
                 return@withLock false
             }
             val price = full.averageFillPrice ?: return@withLock false
@@ -9576,6 +9708,9 @@ class TradingRepository @Inject constructor(
             managedDao.deletePosition(confirmed.id)
             brokerInventorySnapshot = null
             gttExitReconcileLastAttemptAtMs.remove(confirmed.id)
+            gttExitManualReviewLastAuditAtMs.remove(confirmed.id)
+            gttExitPendingLastAuditAtMs.remove(confirmed.id)
+            gttExitReferenceReconstructedAtMs.remove(confirmed.id)
             lastTrailStateAuditAtMs.remove(confirmed.id)
             lastSmartOrderStatusAtMs.remove(confirmed.id)
             auditLogger.log("HOLDING", "GTT_BROKER_SELL_RECONCILED", mapOf(
@@ -10869,8 +11004,14 @@ class TradingRepository @Inject constructor(
                     "fixed_market_path_quote_exchange_timestamp_verified" to false,
                     "fixed_market_path_has_intraday_volume" to false,
                     "fixed_90s_schedule_target_not_guaranteed" to true,
-                    "fixed_5m_10m_alternative_candles_captured" to false,
-                    "fixed_5m_shadow_collection_active" to false,
+                    "fixed_5m_10m_alternative_candles_collection_policy_enabled" to true,
+                    "fixed_5m_10m_alternative_candles_captured" to fixedFiveMinuteShadowJournal.all().any {
+                        it.date == today && it.fiveMinuteCompletedBars > 0 && it.tenMinuteCompletedBars > 0
+                    },
+                    "fixed_5m_shadow_collection_active" to fixedFiveMinuteShadowJournal.all().any { it.date == today },
+                    "fixed_5m_shadow_sample_count_today" to fixedFiveMinuteShadowJournal.all().count { it.date == today },
+                    "fixed_factor_telemetry_has_provider_last_trade_time" to true,
+                    "fixed_factor_telemetry_has_broker_reported_day_volume" to true,
                     "full_market_path_is_sampled_ltp_not_intrabar_high_low" to true,
                     "fixed_scan_observation_file" to "fixed_scan_observations.json",
                     "publication_candidate_timeline_event" to "ALL_CANDIDATE_CONFIRMATION_TIMELINE",
@@ -11268,6 +11409,9 @@ class TradingRepository @Inject constructor(
         private const val CLOSED_SESSION_RECONCILE_MS = 60_000L
         private const val TRAIL_STATE_LOG_INTERVAL_MS = 5_000L
         private const val SMART_ORDER_STATUS_REFRESH_MS = 15_000L
+        private const val GTT_EXIT_RECONCILE_MIN_GAP_MS = 30_000L
+        private const val GTT_EXIT_AUDIT_MIN_GAP_MS = 60_000L
+        private const val FIXED_SHADOW_MIN_ATTEMPT_GAP_MS = 5L * 60_000L
         private const val SMART_ORDER_PRICE_EPSILON = 0.001
         private const val RECOVERY_NET_PROFIT_RUPEES = 100.0
         private const val MULTIFY_PACKAGE = "com.multyfi.invest"

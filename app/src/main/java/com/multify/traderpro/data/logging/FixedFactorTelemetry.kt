@@ -89,6 +89,10 @@ class FixedFactorTelemetry @Inject constructor(@ApplicationContext context: Cont
         val quality = FixedMarketQualityShadowPolicy.assess(rawQuote)
         val atr = f.atr14?.takeIf { it.isFinite() && it > 0.0 }
         fun clean(v: Double?): Double? = v?.takeIf { it.isFinite() }
+        val quoteResponseAtMs = quoteNetwork?.responseReceivedAtMs ?: quoteCapturedAtMs
+        val providerLastTradeAtMs = rawQuote?.lastTradeTimeMs?.takeIf { it > 0L }
+        val providerLastTradeAgeMs = if (providerLastTradeAtMs != null && quoteResponseAtMs != null)
+            (quoteResponseAtMs - providerLastTradeAtMs).coerceAtLeast(0L) else null
         return mapOf(
             "schema" to "fixed_factor_v1",
             "source" to "SHADOW_ONLY_NOT_FOR_TRADING",
@@ -105,14 +109,23 @@ class FixedFactorTelemetry @Inject constructor(@ApplicationContext context: Cont
             "regime" to e.regime,
             "confidence" to clean(e.confidence),
             "directional_score" to clean(e.directionalScore),
-            "quote_age_ms" to null, // The provider has no quote/source timestamp.
-            "quote_captured_at_ms" to quoteCapturedAtMs,
+            "quote_age_ms" to null, // Last-trade time is not the age of every quote field.
+            "quote_captured_at_ms" to quoteResponseAtMs,
+            "quote_capture_timestamp_source" to if (quoteNetwork != null)
+                "GROWW_ALPHA_HTTP_RESPONSE_TIME" else "CLIENT_CAPTURE_FALLBACK",
+            "provider_last_trade_time_ms" to providerLastTradeAtMs,
+            "provider_last_trade_quantity" to rawQuote?.lastTradeQuantity,
+            "provider_last_trade_age_ms" to providerLastTradeAgeMs,
+            "provider_last_trade_timestamp_source" to if (providerLastTradeAtMs != null)
+                "GROWW_QUOTE_LAST_TRADE_TIME" else "UNAVAILABLE",
+            "broker_reported_day_volume" to rawQuote?.volume,
             "quote_client_network_timing" to quoteNetwork?.let {
                 mapOf("request_started_at_ms" to it.requestStartedAtMs,
                     "http_response_received_at_ms" to it.responseReceivedAtMs,
                     "http_duration_ms" to it.networkElapsedMs, "http_status" to it.httpStatus,
                     "attribution" to "MATCHED_CLIENT_RESPONSE_BEST_EFFORT",
-                    "provider_market_data_age_ms" to null)
+                    "provider_market_data_age_ms" to null,
+                    "provider_last_trade_age_ms" to providerLastTradeAgeMs)
             },
             "market_quality_shadow" to mapOf(
                 "not_a_trading_gate" to true,
