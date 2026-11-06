@@ -29,6 +29,9 @@ class HardStopLossPolicyTest {
         assertFalse(HardStopLossPolicy.isLegacyTwoPercentStop(100.0, 97.80))
         assertFalse(HardStopLossPolicy.isLegacyTwoPercentStop(100.0, 100.50))
         assertFalse(HardStopLossPolicy.isLegacyTwoPercentStop(100.0, null))
+        assertTrue(HardStopLossPolicy.isFivePercentStop(100.0, 95.0))
+        assertTrue(HardStopLossPolicy.isFivePercentStop(100.0, 95.05))
+        assertFalse(HardStopLossPolicy.isFivePercentStop(100.0, 98.0))
     }
 
     @Test fun profitableTrailingIsUnchangedAndAlwaysTighterOnceArmed() {
