@@ -8812,7 +8812,41 @@ class TradingRepository @Inject constructor(
             return position
         }
 
-        val refreshed = refreshKnownSmartOrderStatus(token, position, force = true)
+        val statusPayload = apiFactory.groww.smartOrderStatus(
+            bearer(token), segment = "CASH", smartOrderType = "GTT",
+            smartOrderId = position.smartOrderId!!
+        ).requirePayload("Verify legacy hard-stop GTT ${position.symbol}")
+        val expectedReference = com.multify.traderpro.engine.AppProtectionGttRecoveryPolicy.expectedReference(
+            "MHS", position.id, position.symbol, position.openedAtMs
+        )
+        val brokerTrigger = statusPayload.triggerPrice?.toDoubleOrNull()
+        val exactLegacyGtt = statusPayload.smartOrderId == position.smartOrderId &&
+            statusPayload.tradingSymbol.equals(position.symbol, true) &&
+            statusPayload.quantity == position.quantity &&
+            statusPayload.productType.equals("CNC", true) &&
+            statusPayload.order?.transactionType.equals("SELL", true) &&
+            statusPayload.triggerDirection.equals("DOWN", true) &&
+            statusPayload.referenceId == expectedReference &&
+            HardStopLossPolicy.isLegacyTwoPercentStop(position.entryPrice, brokerTrigger)
+        if (!exactLegacyGtt) {
+            auditLogger.log("GTT", "LEGACY_HARD_STOP_MIGRATION_MANUAL_REVIEW", mapOf(
+                "symbol" to position.symbol,
+                "gtt_id" to position.smartOrderId,
+                "broker_reference_matches_app_position" to (statusPayload.referenceId == expectedReference),
+                "broker_trigger" to brokerTrigger,
+                "broker_status" to statusPayload.status,
+                "expected_legacy_minus_2_trigger" to HardStopLossPolicy.legacyStopPrice(position.entryPrice),
+                "reason" to reason,
+                "broker_gtt_left_untouched" to true
+            ))
+            return position
+        }
+        val refreshed = position.copy(
+            smartOrderTriggerPrice = brokerTrigger,
+            smartOrderStatus = statusPayload.status.ifBlank { position.smartOrderStatus ?: "ACTIVE" },
+            smartOrderUpdatedAtMs = System.currentTimeMillis()
+        )
+        managedDao.updatePosition(refreshed)
         when (refreshed.smartOrderStatus.orEmpty().uppercase(Locale.US)) {
             "ACTIVE", "OPEN" -> {
                 // Modify the exact existing app GTT in place. Do not cancel first:
