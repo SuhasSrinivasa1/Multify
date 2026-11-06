@@ -8786,6 +8786,18 @@ class TradingRepository @Inject constructor(
             )
         ) return position
 
+        val observedHighWater = max(position.maxFavourablePrice, currentPrice ?: position.lastPrice)
+        if (SteppedTrailingPolicy.stopGainPctForHighWater(position.entryPrice, observedHighWater) != null) {
+            auditLogger.log("GTT", "LEGACY_HARD_STOP_MIGRATION_SKIPPED_TRAILING_ALREADY_ARMED", mapOf(
+                "symbol" to position.symbol,
+                "gtt_id" to position.smartOrderId,
+                "high_water" to observedHighWater,
+                "high_water_gain_pct" to SteppedTrailingPolicy.gainPct(position.entryPrice, observedHighWater),
+                "reason" to reason,
+                "existing_protection_preserved_until_trail_upgrade" to true
+            ))
+            return position
+        }
         val newHardStop = HardStopLossPolicy.stopPrice(position.entryPrice)
         if (currentPrice != null && currentPrice <= newHardStop + SMART_ORDER_PRICE_EPSILON) {
             auditLogger.log("GTT", "LEGACY_HARD_STOP_MIGRATION_DEFERRED_NEW_STOP_ALREADY_BREACHED", mapOf(
