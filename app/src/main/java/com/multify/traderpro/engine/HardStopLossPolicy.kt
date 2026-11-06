@@ -27,6 +27,7 @@ object HardStopLossPolicy {
         return entryPrice * (1.0 - LEGACY_MAX_LOSS_PCT / 100.0)
     }
 
+    /** Compares rounded broker GTT trigger values against the old -2% formula. */
     fun isLegacyTwoPercentStop(entryPrice: Double, triggerPrice: Double?): Boolean {
         if (!entryPrice.isFinite() || entryPrice <= 0.0 ||
             triggerPrice == null || !triggerPrice.isFinite() || triggerPrice <= 0.0
