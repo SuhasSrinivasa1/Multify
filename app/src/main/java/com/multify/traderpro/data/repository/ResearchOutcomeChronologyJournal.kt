@@ -2,6 +2,7 @@ package com.multify.traderpro.data.repository
 
 import android.content.Context
 import com.google.gson.Gson
+import com.multify.traderpro.engine.HardStopLossPolicy
 import com.multify.traderpro.engine.ResearchOutcomeChronology
 import com.multify.traderpro.engine.ResearchOutcomeChronologyPolicy
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -31,9 +32,12 @@ class ResearchOutcomeChronologyJournal @Inject constructor(@ApplicationContext c
         if (source !in setOf("FIXED","FORECAST") || !symbol.matches(Regex("[A-Z0-9&.\\-]{1,30}")) ||
             !entryPrice.isFinite() || entryPrice <= 0.0 ||
             !targetPrice.isFinite() || targetPrice <= entryPrice || entryAtMs <= 0L) return@synchronized null
-        val key = "$source|$entryAtMs|$symbol"
+        // Version the key so historic -2% observations remain intact while new
+        // research follows the live -5% hard-stop policy.
+        val key = "$source|$entryAtMs|$symbol|HARD_STOP_${HardStopLossPolicy.MAX_LOSS_PCT.toInt()}PCT"
         val old = latest[key] ?: ResearchOutcomeChronology(
-            key, source, symbol, entryAtMs, entryPrice, targetPrice, entryPrice * 0.98
+            key, source, symbol, entryAtMs, entryPrice, targetPrice,
+            HardStopLossPolicy.stopPrice(entryPrice)
         )
         val next = ResearchOutcomeChronologyPolicy.observe(old, price, observedAtMs, quoteSource)
         if (next == old) return@synchronized null
@@ -54,8 +58,10 @@ class ResearchOutcomeChronologyJournal @Inject constructor(@ApplicationContext c
             if (line.isBlank() || line.length > 10_000 || count >= 10_000) return@forEach
             val row = runCatching { gson.fromJson(line, ResearchOutcomeChronology::class.java) }
                 .getOrNull() ?: return@forEach
+            val legacyKey = "${row.source}|${row.entryAtMs}|${row.symbol}"
+            val currentKey = "$legacyKey|HARD_STOP_${HardStopLossPolicy.MAX_LOSS_PCT.toInt()}PCT"
             if (row.source !in setOf("FIXED","FORECAST") || row.entryAtMs <= 0L ||
-                row.symbol.isBlank() || row.key != "${row.source}|${row.entryAtMs}|${row.symbol}" ||
+                row.symbol.isBlank() || row.key !in setOf(legacyKey, currentKey) ||
                 row.sampleCount < 0 || row.lastObservedAtMs < row.entryAtMs) return@forEach
             if (row.lastObservedAtMs > (latest[row.key]?.lastObservedAtMs ?: 0L)) {
                 file.appendText(gson.toJson(row) + "\n")
