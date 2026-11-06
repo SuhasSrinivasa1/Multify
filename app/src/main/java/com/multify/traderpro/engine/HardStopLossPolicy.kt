@@ -7,6 +7,8 @@ package com.multify.traderpro.engine
  */
 object HardStopLossPolicy {
     const val MAX_LOSS_PCT = 5.0
+    const val LEGACY_MAX_LOSS_PCT = 2.0 // Migration marker only; not an active stop.
+    private const val LEGACY_STOP_TOLERANCE_PCT = 0.15
 
     fun stopPrice(entryPrice: Double): Double {
         require(entryPrice.isFinite() && entryPrice > 0.0) { "Entry price must be positive" }
@@ -31,8 +33,12 @@ object HardStopLossPolicy {
             !existingTriggerPrice.isFinite() || existingTriggerPrice <= 0.0 ||
             !desiredStopPrice.isFinite() || desiredStopPrice <= 0.0
         ) return false
-        if (existingTriggerPrice > entryPrice + 1e-9) return false
-        return kotlin.math.abs(existingTriggerPrice - desiredStopPrice) > 1e-9
+        val existingLossPct = lossPct(entryPrice, existingTriggerPrice)
+        val legacyTwoPercentFloor = kotlin.math.abs(existingLossPct + LEGACY_MAX_LOSS_PCT) <=
+            LEGACY_STOP_TOLERANCE_PCT
+        // Migrate the previous default -2% floor, or tighten a stop that is
+        // looser than -5%. Preserve any other user-tightened loss stop.
+        return legacyTwoPercentFloor || existingTriggerPrice < desiredStopPrice - 1e-9
     }
 
     /**
@@ -46,12 +52,18 @@ object HardStopLossPolicy {
         serverMode: String
     ): Double? {
         if (!entryPrice.isFinite() || entryPrice <= 0.0) return null
+        val newFloor = stopPrice(entryPrice)
+        fun isLegacyTwoPercentFloor(price: Double): Boolean =
+            kotlin.math.abs(lossPct(entryPrice, price) + LEGACY_MAX_LOSS_PCT) <=
+                LEGACY_STOP_TOLERANCE_PCT
         return listOfNotNull(
-            localStopPrice?.takeIf { it.isFinite() && it > entryPrice + 1e-9 },
+            localStopPrice?.takeIf {
+                it.isFinite() && it > newFloor + 1e-9 && !isLegacyTwoPercentFloor(it)
+            },
             serverTriggerPrice?.takeIf {
                 it.isFinite() && it > 0.0 &&
                     (serverMode == HoldingSmartOrderPolicy.MODE_TRAILING_GTT ||
-                        it > entryPrice + 1e-9)
+                        (it > newFloor + 1e-9 && !isLegacyTwoPercentFloor(it)))
             }
         ).maxOrNull()
     }
