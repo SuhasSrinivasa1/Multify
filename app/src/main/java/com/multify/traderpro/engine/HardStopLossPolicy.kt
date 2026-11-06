@@ -34,6 +34,13 @@ object HardStopLossPolicy {
         return abs(triggerPrice - legacyStopPrice(entryPrice)) <= LEGACY_TRIGGER_ROUNDING_TOLERANCE
     }
 
+    fun isFivePercentStop(entryPrice: Double, triggerPrice: Double?): Boolean {
+        if (!entryPrice.isFinite() || entryPrice <= 0.0 ||
+            triggerPrice == null || !triggerPrice.isFinite() || triggerPrice <= 0.0
+        ) return false
+        return abs(triggerPrice - stopPrice(entryPrice)) <= LEGACY_TRIGGER_ROUNDING_TOLERANCE
+    }
+
     fun lossPct(entryPrice: Double, currentPrice: Double): Double {
         require(entryPrice.isFinite() && entryPrice > 0.0) { "Entry price must be positive" }
         return ((currentPrice / entryPrice) - 1.0) * 100.0
