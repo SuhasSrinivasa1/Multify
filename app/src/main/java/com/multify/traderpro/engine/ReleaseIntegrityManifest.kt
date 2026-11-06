@@ -9,7 +9,7 @@ object ReleaseIntegrityManifest {
     const val TRAIL_INITIAL_PROTECTED_GAIN_PCT = 0.50
     const val TRAIL_STEP_PCT = 0.10
     const val TRAIL_SECOND_TRIGGER_PCT = 0.75
-    const val HARD_STOP_LOSS_PCT = 2.0
+    const val HARD_STOP_LOSS_PCT = 5.0
 
     fun verifyRuntimeConstants(): Boolean =
         FixedFinalContract.CONTRACT_ID == FIXED_CONTRACT_ID &&
