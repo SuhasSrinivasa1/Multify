@@ -1,7 +1,7 @@
-name: Multify v8.3.4 Fixed 90s Full Evidence TEST APK
+name: Multify v8.3.5 Fixed 90s + 5% Hard Stop TEST APK
 on:
   push:
-    branches: [v834-full-evidence-observability-test]
+    branches: [v835-five-percent-hard-stop-test]
   workflow_dispatch:
 permissions:
   contents: read
@@ -45,6 +45,11 @@ jobs:
           allowed={
             repo, service, market, factor, store,
             'app/src/test/java/com/multify/traderpro/data/logging/FixedMarketPathCodecTest.kt',
+            'app/src/main/java/com/multify/traderpro/engine/HardStopLossPolicy.kt',
+            'app/src/main/java/com/multify/traderpro/engine/ReleaseIntegrityManifest.kt',
+            'app/src/main/java/com/multify/traderpro/data/repository/ResearchOutcomeChronologyJournal.kt',
+            'app/src/test/java/com/multify/traderpro/engine/HardStopLossPolicyTest.kt',
+            'app/src/test/java/com/multify/traderpro/engine/ResearchOutcomeChronologyPolicyTest.kt',
             'app/build.gradle.kts', '.github/workflows/multify-v830-fixed-alpha-beta.yml',
           }
           modified=set(subprocess.check_output(
@@ -79,11 +84,19 @@ jobs:
              root+'engine/FixedEntryActionabilityPolicy.kt',
              root+'engine/NseEquitySessionCalendar.kt',
              root+'engine/SteppedTrailingPolicy.kt',
-             root+'engine/HardStopLossPolicy.kt',
              root+'engine/FixedDualAccountPolicy.kt',
              root+'data/network/GrowwApi.kt',
           ):
              assert old(file)==current(file),f'Protected strategy/session/broker source changed: {file}'
+          policy_path=root+'engine/HardStopLossPolicy.kt'
+          policy_hash=subprocess.check_output(['git','hash-object',policy_path],text=True).strip()
+          assert policy_hash=='6b759d0988f82b414a04c1e551ac6e401527a111', 'Unexpected hard-stop policy source'
+          assert 'HARD_STOP_LOSS_PCT = 5.0' in current(root+'engine/ReleaseIntegrityManifest.kt')
+          assert 'shouldMigrateHardStopGtt' in live and 'previousProfitProtection' in live
+          assert 'HARD_STOP_5PCT_MIGRATION_REQUESTED' in live
+          assert 'HARD_STOP_MINUS_5' in live and 'HARD_STOP_MINUS_2' not in live
+          assert 'HardStopLossPolicy.stopPrice(entryPrice)' in current(root+'data/repository/ResearchOutcomeChronologyJournal.kt')
+          assert 'HARD_STOP_5PCT' in current(root+'data/repository/ResearchOutcomeChronologyJournal.kt')
           assert 'fixedMarketPathTelemetry.tryRecord(' in live
           assert 'FULL_NSE_SWEEP_ACCOUNT_PROFILE' in live
           assert 'ALL_CANDIDATE_CONFIRMATION_TIMELINE' in live
@@ -106,7 +119,7 @@ jobs:
           assert 'actual_completed_scan_start_spacing_ms' in current(service)
           assert 'candle_data_quality' in current(factor)
           assert 'archivedObservations()' in current(store)
-          print('Production scoring, confirmation, target, BUY/SELL, session, Alpha/Beta and 90-second cadence locked. New telemetry is read-only.')
+          print('Fixed selection, 90s cadence, Alpha/Beta, session and profitable trailing logic locked; common hard stop explicitly changed to -5%.')
           PY
       - name: Assert protected Fixed strategy and SELL rules byte-for-byte unchanged
         shell: bash
@@ -123,11 +136,12 @@ jobs:
             'app/src/main/java/com/multify/traderpro/engine/FixedForecastPublicationPolicy.kt',
             'app/src/main/java/com/multify/traderpro/engine/FixedMarketDiscoveryPolicy.kt',
             'app/src/main/java/com/multify/traderpro/engine/FixedFinalContract.kt',
-            'app/src/main/java/com/multify/traderpro/engine/HardStopLossPolicy.kt',
             'app/src/main/java/com/multify/traderpro/engine/SteppedTrailingPolicy.kt',
             'app/src/main/java/com/multify/traderpro/engine/NetGainTrailingPolicy.kt',
             'app/src/main/java/com/multify/traderpro/engine/HoldingSmartOrderPolicy.kt',
           ]
+          policy_path='app/src/main/java/com/multify/traderpro/engine/HardStopLossPolicy.kt'
+          assert subprocess.check_output(['git','hash-object',policy_path],text=True).strip() == '6b759d0988f82b414a04c1e551ac6e401527a111'
           for p in paths:
             baseline=subprocess.check_output(['git','show',f'{ref}:{p}'])
             actual=Path(p).read_bytes()
@@ -447,10 +461,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v8.3.4-fixed-90s-full-evidence-debug.apk
+          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v8.3.5-fixed-90s-full-evidence-5pct-stop-debug.apk
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/*.apk > dist/APK-SIGNATURE.txt
           "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/*.apk | head -n 2 > dist/PACKAGE.txt
-          grep -q "versionCode='8340'" dist/PACKAGE.txt
+          grep -q "versionCode='8350'" dist/PACKAGE.txt
           if [[ "${STABLE_SIGNING_READY:-false}" == "true" ]]; then
             expected_cert="3f72d5c24e676c712d9e7e9feaa829960bfca9cdffc9ea4da6738372824e8755"
             actual_cert="$(awk '/Signer #1 certificate SHA-256 digest:/ {print $NF; exit}' dist/APK-SIGNATURE.txt | tr -d ':' | tr '[:upper:]' '[:lower:]')"
@@ -464,7 +478,7 @@ jobs:
           python - <<'PY'
           from pathlib import Path
           from zipfile import ZipFile, ZIP_DEFLATED
-          with ZipFile('dist/Multify-TraderPro-v8.3.4-exact-source.zip','w',ZIP_DEFLATED) as z:
+          with ZipFile('dist/Multify-TraderPro-v8.3.5-exact-source.zip','w',ZIP_DEFLATED) as z:
             for p in Path('.').rglob('*'):
               if (p.is_file()
                   and not any(part in {'.git','.gradle','build','dist'} for part in p.parts)
@@ -475,6 +489,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: multify-v834-90s-full-evidence
+          name: multify-v835-90s-5pct-stop
           path: dist/
           if-no-files-found: warn
