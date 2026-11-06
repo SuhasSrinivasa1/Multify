@@ -111,6 +111,9 @@ jobs:
           assert 'migrateLegacyHardStopToFivePercent(' in live
           assert 'LEGACY_HARD_STOP_MIGRATION_SKIPPED_TRAILING_ALREADY_ARMED' in live
           assert 'LEGACY_HARD_STOP_MIGRATED_TO_MINUS_5' in live
+          assert 'LEGACY_HARD_STOP_MIGRATION_MANUAL_REVIEW' in live
+          assert 'AppProtectionGttRecoveryPolicy.expectedReference(' in live
+          assert 'broker_gtt_left_untouched' in live
           assert 'modifyPositionGtt(' in live
           assert 'SteppedTrailingPolicy.stopGainPctForHighWater(' in live
           print('Common hard stop is -5%; exact legacy -2% hard-stop GTTs migrate in place; profitable trail and Fixed selection remain frozen.')
