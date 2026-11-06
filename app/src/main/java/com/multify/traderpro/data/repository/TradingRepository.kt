@@ -8832,7 +8832,8 @@ class TradingRepository @Inject constructor(
         // Common sell protection for every managed CNC LONG, regardless of source:
         // 1) hard -5% loss floor from the actual holding cost basis;
         // 2) once +0.55% high-water is reached, the existing stepped profitable trail takes over;
-        // 3) the active stop only moves upward. There is no averaging-down path.
+        // 3) profitable trails only ratchet upward; the legacy -2% hard floor
+        // is migrated once to -5%. There is no averaging-down path.
         val decisionStartedNs = SystemClock.elapsedRealtimeNanos()
         val previousHighWater = position.maxFavourablePrice
         val highWater = max(position.maxFavourablePrice, ltp)
