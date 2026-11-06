@@ -407,7 +407,7 @@ private fun HoldingCard(p: PositionDto) {
             KeyValueRow("Average", money(p.averagePrice))
             KeyValueRow("LTP", p.ltp?.let(::money) ?: "—")
             KeyValueRow("Unrealised", money(p.pnl), pnlColor(p.pnl))
-            KeyValueRow("Sell protection", "hard -2.00% · then +0.55% arm → +0.50% protect · +0.10% steps")
+            KeyValueRow("Sell protection", "hard -5.00% · then +0.55% arm → +0.50% protect · +0.10% steps")
             KeyValueRow(
                 "Arm trigger",
                 p.trailArmPct?.let { "+${String.format(Locale.US, "%.2f", it)}%" } ?: "+0.55%"
@@ -1300,7 +1300,7 @@ private fun SettingsScreen(
                         if (state.settings.fixedAutoBuyEnabled) "ON · entries require fresh call and broker readiness" else "OFF · manual BUY only"
                     )
                     Text(
-                        "Fixed remains immutable. Forecast may read prior positive Fixed outcomes, but can never write into Fixed or change its v7.4.1 rules. Every app-owned Multify, Fixed and Forecast LONG uses the same sell protection: hard -2% loss floor, then the existing +0.55% arm → +0.50% protected gain → +0.10% ratchet when profitable. No averaging down.",
+                        "Fixed remains immutable. Forecast may read prior positive Fixed outcomes, but can never write into Fixed or change its v7.4.1 rules. Every app-owned Multify, Fixed and Forecast LONG uses the same sell protection: hard -5% loss floor, then the existing +0.55% arm → +0.50% protected gain → +0.10% ratchet when profitable. No averaging down.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
