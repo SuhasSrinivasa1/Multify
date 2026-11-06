@@ -138,6 +138,7 @@ import com.multify.traderpro.engine.AppPositionOwnershipPolicy
 import com.multify.traderpro.engine.HoldingSmartOrderPolicy
 import com.multify.traderpro.engine.BrokerExecutionSafetyPolicy
 import com.multify.traderpro.engine.MarketPriorityPolicy
+import com.multify.traderpro.engine.NseCircuitLimitProtectionPolicy
 import com.multify.traderpro.engine.ForecastResearchWindowPolicy
 import com.multify.traderpro.engine.ForecastBetaPriorityPolicy
 import com.multify.traderpro.engine.LocalStrategyEngine
@@ -11018,6 +11019,54 @@ class TradingRepository @Inject constructor(
             "critical_trading_priority" to true
         ))
         require(unprotected.isEmpty()) { "New BUY blocked: app-owned holding lacks verified broker GTT" }
+
+        // Recheck the exchange price band immediately before any new CNC MARKET BUY.
+        // Groww's quote endpoint supplies the circuit limits; if they are unavailable,
+        // fail closed rather than sending a broker order whose protected price is unknown.
+        val circuitQuote = try {
+            apiFactory.groww.quote(bearer(token), tradingSymbol = symbol)
+                .requirePayload("NSE circuit-limit preflight $symbol")
+        } catch (failure: CancellationException) {
+            throw failure
+        } catch (failure: Throwable) {
+            auditLogger.log("EXECUTION", "CIRCUIT_LIMIT_BUY_PREFLIGHT_FAILED", mapOf(
+                "symbol" to symbol,
+                "error" to (failure.message ?: failure.javaClass.simpleName),
+                "order_submitted" to false
+            ))
+            throw IllegalStateException(
+                "BUY blocked: unable to verify the NSE upper circuit for " + symbol + "; no order submitted.",
+                failure
+            )
+        }
+        preferences.recordMarketData()
+        val circuitVerdict = NseCircuitLimitProtectionPolicy.evaluate(
+            lastPrice = circuitQuote.lastPrice,
+            upperCircuitLimit = circuitQuote.upperCircuitLimit,
+            lowerCircuitLimit = circuitQuote.lowerCircuitLimit
+        )
+        val circuitEvent = if (circuitVerdict.allowed)
+            "CIRCUIT_LIMIT_BUY_PREFLIGHT_PASSED" else "CIRCUIT_LIMIT_BUY_BLOCKED"
+        auditLogger.log("EXECUTION", circuitEvent, mapOf(
+            "symbol" to symbol,
+            "last_price" to circuitVerdict.lastPrice,
+            "lower_circuit_limit" to circuitVerdict.lowerCircuitLimit,
+            "upper_circuit_limit" to circuitVerdict.upperCircuitLimit,
+            "estimated_protected_buy_price" to circuitVerdict.estimatedProtectedBuyPrice,
+            "market_protection_buffer_pct" to NseCircuitLimitProtectionPolicy.MARKET_PROTECTION_BUFFER_PCT,
+            "reason" to circuitVerdict.reasonCode,
+            "order_submitted" to circuitVerdict.allowed
+        ))
+        if (!circuitVerdict.allowed) {
+            val ltpText = circuitVerdict.lastPrice?.let { "₹" + fmt(it) } ?: "unavailable"
+            val protectedText = circuitVerdict.estimatedProtectedBuyPrice?.let { "₹" + fmt(it) } ?: "unavailable"
+            val upperText = circuitVerdict.upperCircuitLimit?.let { "₹" + fmt(it) } ?: "unavailable"
+            throw IllegalStateException(
+                "BUY blocked by NSE circuit protection (" + circuitVerdict.reasonCode +
+                    "): LTP " + ltpText + ", conservative 5% market-protection estimate " +
+                    protectedText + ", upper circuit " + upperText + ". No order submitted."
+            )
+        }
         submitMarketOrder(token, symbol, "BUY", qty, "CNC", reference, notificationStartedNs)
     }
 

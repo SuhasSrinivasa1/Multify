@@ -1,4 +1,4 @@
-name: Multify v8.3.5 Fixed 90s + Minus 5% Hard Stop TEST APK
+name: Multify v8.3.6 Fixed 90s + Minus 5% Hard Stop + Circuit Protection TEST APK
 on:
   push:
     branches: [v835-hard-stop-minus-5pct-test]
@@ -42,12 +42,18 @@ jobs:
           manifest=root+'engine/ReleaseIntegrityManifest.kt'
           research=root+'engine/ResearchCandleFirstTouchPolicy.kt'
           ui='app/src/main/java/com/multify/traderpro/ui/screens/TraderApp.kt'
+          circuit=root+'engine/NseCircuitLimitProtectionPolicy.kt'
+          circuit_test='app/src/test/java/com/multify/traderpro/engine/NseCircuitLimitProtectionPolicyTest.kt'
+          groww_models=root+'data/network/GrowwModels.kt'
           service=root+'service/TradingEngineService.kt'
           market=root+'data/logging/FixedMarketPathTelemetry.kt'
           factor=root+'data/logging/FixedFactorTelemetry.kt'
           store=root+'data/repository/FixedRecommendationStore.kt'
           allowed={
             repo, hard, manifest, research, ui,
+            root+'data/network/GrowwModels.kt',
+            root+'engine/NseCircuitLimitProtectionPolicy.kt',
+            'app/src/test/java/com/multify/traderpro/engine/NseCircuitLimitProtectionPolicyTest.kt',
             'app/src/test/java/com/multify/traderpro/engine/HardStopLossPolicyTest.kt',
             'app/src/test/java/com/multify/traderpro/engine/ResearchCandleFirstTouchPolicyTest.kt',
             'app/build.gradle.kts', '.github/workflows/multify-v830-fixed-alpha-beta.yml',
@@ -99,6 +105,12 @@ jobs:
           assert 'isLegacyTwoPercentStop(' in hardPolicy
           assert 'isFivePercentStop(' in hardPolicy
           assert 'HARD_STOP_LOSS_PCT = 5.0' in manifestPolicy
+          assert 'MARKET_PROTECTION_BUFFER_PCT = 5.0' in manifestPolicy
+          assert 'NseCircuitLimitProtectionPolicy.MARKET_PROTECTION_BUFFER_PCT == MARKET_PROTECTION_BUFFER_PCT' in manifestPolicy
+          assert 'MARKET_PROTECTION_BUFFER_PCT = 5.0' in circuitPolicy
+          assert '@SerializedName("upper_circuit_limit") val upperCircuitLimit' in growwModels
+          assert '@SerializedName("lower_circuit_limit") val lowerCircuitLimit' in growwModels
+          assert 'screenshotMarketProtectionPriceIsBlockedBeforeOrderSubmission' in circuitTest
           assert 'hypotheticalStopPct: Double = -HardStopLossPolicy.MAX_LOSS_PCT' in researchPolicy
           assert 'HardStopLossPolicy.stopPrice(entryPrice)' in researchPolicy
           assert 'fivePercentResearchStopDoesNotTreatTwoPercentPullbackAsStop' in researchTest
@@ -116,6 +128,10 @@ jobs:
           assert 'broker_gtt_left_untouched' in live
           assert 'modifyPositionGtt(' in live
           assert 'SteppedTrailingPolicy.stopGainPctForHighWater(' in live
+          assert 'NseCircuitLimitProtectionPolicy.evaluate(' in live
+          assert 'CIRCUIT_LIMIT_BUY_BLOCKED' in live
+          assert 'CIRCUIT_LIMIT_BUY_PREFLIGHT_PASSED' in live
+          assert 'CIRCUIT_LIMIT_BUY_PREFLIGHT_FAILED' in live
           print('Common hard stop is -5%; exact legacy -2% hard-stop GTTs migrate in place; profitable trail and Fixed selection remain frozen.')
           assert 'fixedMarketPathTelemetry.tryRecord(' in live
           assert 'FULL_NSE_SWEEP_ACCOUNT_PROFILE' in live
@@ -274,8 +290,8 @@ jobs:
           assert 'candleInterval = "15minute"' in repo
           assert 'candleInterval = "1minute"' in repo
           gradle=Path('app/build.gradle.kts').read_text()
-          assert 'versionCode = 8350' in gradle
-          assert 'versionName = "8.3.5-hard-stop-5pct-test"' in gradle
+          assert 'versionCode = 8360' in gradle
+          assert 'versionName = "8.3.6-circuit-limit-protection-test"' in gradle
           store=Path('app/src/main/java/com/multify/traderpro/data/repository/FixedRecommendationStore.kt').read_text()
           assert 'filterNot { it.id == record.id }' in store
           assert 'fun fixedEventId(' in store
@@ -480,10 +496,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v8.3.5-fixed-90s-hard-stop-5pct-debug.apk
+          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v8.3.6-fixed-90s-hard-stop-5pct-circuit-guard-debug.apk
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/*.apk > dist/APK-SIGNATURE.txt
           "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/*.apk | head -n 2 > dist/PACKAGE.txt
-          grep -q "versionCode='8350'" dist/PACKAGE.txt
+          grep -q "versionCode='8360'" dist/PACKAGE.txt
           if [[ "${STABLE_SIGNING_READY:-false}" == "true" ]]; then
             expected_cert="3f72d5c24e676c712d9e7e9feaa829960bfca9cdffc9ea4da6738372824e8755"
             actual_cert="$(awk '/Signer #1 certificate SHA-256 digest:/ {print $NF; exit}' dist/APK-SIGNATURE.txt | tr -d ':' | tr '[:upper:]' '[:lower:]')"
@@ -497,7 +513,7 @@ jobs:
           python - <<'PY'
           from pathlib import Path
           from zipfile import ZipFile, ZIP_DEFLATED
-          with ZipFile('dist/Multify-TraderPro-v8.3.5-exact-source.zip','w',ZIP_DEFLATED) as z:
+          with ZipFile('dist/Multify-TraderPro-v8.3.6-exact-source.zip','w',ZIP_DEFLATED) as z:
             for p in Path('.').rglob('*'):
               if (p.is_file()
                   and not any(part in {'.git','.gradle','build','dist'} for part in p.parts)
@@ -508,6 +524,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: multify-v835-90s-hard-stop-5pct
+          name: multify-v836-90s-hard-stop-5pct-circuit-guard
           path: dist/
           if-no-files-found: warn
