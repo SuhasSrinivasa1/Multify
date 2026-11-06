@@ -89,6 +89,7 @@ class AuditLogger @Inject constructor(
         timestampMs: Long = System.currentTimeMillis(),
         timestampUtc: String = Instant.now().toString()
     ) {
+        val normalized = AuditEventNormalizationPolicy.normalize(category, event, details)
         runCatching {
             synchronized(lock) {
                 rotateIfNeeded()
@@ -96,16 +97,16 @@ class AuditLogger @Inject constructor(
                     .put("timestamp_ms", timestampMs)
                     .put("timestamp_utc", timestampUtc)
                     .put("category", category)
-                    .put("event", event)
+                    .put("event", normalized.event)
                 val safe = JSONObject()
-                details.forEach { (key, value) ->
+                normalized.details.forEach { (key, value) ->
                     if (!isSensitiveKey(key)) safe.put(key, value ?: JSONObject.NULL)
                 }
                 obj.put("details", safe)
                 file.appendText(obj.toString() + "\n")
                 // Keep curated decisions/outcomes in a separate persistent evidence journal.
                 // Never let an evidence write failure block broker/order protection.
-                decisionEvidenceJournal.capture(category, event, safe, timestampMs)
+                decisionEvidenceJournal.capture(category, normalized.event, safe, timestampMs)
             }
         }
     }

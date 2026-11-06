@@ -8,7 +8,7 @@ object ResearchCandleFirstTouchPolicy {
     data class Result(
         val firstTouch: String, val firstTouchAtMs: Long?,
         val eligibleBars: Int, val completeSequence: Boolean,
-        val hypotheticalStopPct: Double = -2.0,
+        val hypotheticalStopPct: Double = -HardStopLossPolicy.MAX_LOSS_PCT,
         val evidence: String = "HISTORICAL_1M_CANDLE_SIMULATION_NOT_EXECUTED_PNL"
     )
 
@@ -25,7 +25,7 @@ object ResearchCandleFirstTouchPolicy {
                 it.low.isFinite() && it.close.isFinite() }
             .distinctBy { it.atMs }.sortedBy { it.atMs }.toList()
         if (valid.isEmpty()) return Result("INCOMPLETE", null, 0, false)
-        val stop = entryPrice * 0.98
+        val stop = HardStopLossPolicy.stopPrice(entryPrice)
         var previous: ForecastReplayCandleDecoder.Bar? = null
         var missingInterval = valid.first().atMs - entryAtMs > 120_000L
         for (bar in valid) {

@@ -19,6 +19,17 @@ internal data class FixedFiveMinuteShadowPair(
     val fiveMinuteDirection: Double,
     val fifteenMinuteStrategy: String,
     val fiveMinuteStrategy: String,
+    val tenMinuteTier: String? = null,
+    val tenMinuteConfidence: Double? = null,
+    val tenMinuteDirection: Double? = null,
+    val tenMinuteStrategy: String? = null,
+    val fiveMinuteCompletedBars: Int = 0,
+    val tenMinuteCompletedBars: Int = 0,
+    val fiveMinuteLastBarVolume: Double? = null,
+    val tenMinuteLastBarVolume: Double? = null,
+    val providerLastTradeTimeMs: Long? = null,
+    val providerLastTradeAgeMs: Long? = null,
+    val brokerReportedDayVolume: Long? = null,
     val maxFavourablePct: Double = 0.0,
     val maxAdversePct: Double = 0.0,
     val observations: Int = 0,
@@ -47,6 +58,16 @@ internal data class FixedFiveMinuteShadowPair(
                 firstTargetObservedAtMs < firstTwoPctRiskObservedAtMs)
     val fifteenMinutePrimary get() = fifteenMinuteTier == "PRIMARY"
     val fiveMinutePrimary get() = fiveMinuteTier == "PRIMARY"
+    val tenMinutePrimary get() = tenMinuteTier == "PRIMARY"
+    val triadComparisonGroup: String get() {
+        val primaryCount = listOf(fifteenMinutePrimary, fiveMinutePrimary, tenMinutePrimary).count { it }
+        return when (primaryCount) {
+            3 -> "ALL_THREE_PRIMARY"
+            2 -> "TWO_PRIMARY"
+            1 -> "ONE_PRIMARY"
+            else -> "NONE_PRIMARY"
+        }
+    }
     val targetObserved get() = maxFavourablePct >= targetPct
 }
 

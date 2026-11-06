@@ -110,7 +110,11 @@ data class QuotePayload(
     val high: Double? = null,
     val low: Double? = null,
     val close: Double? = null,
-    @SerializedName("depth") val depth: QuoteMarketDepth? = null
+    @SerializedName("depth") val depth: QuoteMarketDepth? = null,
+    @SerializedName("upper_circuit_limit") val upperCircuitLimit: Double? = null,
+    @SerializedName("lower_circuit_limit") val lowerCircuitLimit: Double? = null,
+    @SerializedName("last_trade_time") val lastTradeTimeMs: Long? = null,
+    @SerializedName("last_trade_quantity") val lastTradeQuantity: Long? = null
 )
 
 data class HistoricalPayload(

@@ -20,6 +20,8 @@ class FixedQuoteTelemetryPolicyTest {
             totalBuyQuantity = 2200.0,
             totalSellQuantity = 1800.0,
             volume = 47000L,
+            lastTradeTimeMs = 1_798_500_000_000L,
+            lastTradeQuantity = 250L,
             depth = QuoteMarketDepth(
                 buy = listOf(QuoteDepthLevel(243.1, 150.0)),
                 sell = listOf(QuoteDepthLevel(243.4, 120.0))
@@ -33,6 +35,9 @@ class FixedQuoteTelemetryPolicyTest {
         assertEquals(2200.0, row["total_buy_quantity"])
         assertEquals(1800.0, row["total_sell_quantity"])
         assertEquals(47000L, row["day_traded_volume"])
+        assertEquals(1_798_500_000_000L, row["last_trade_time_ms"])
+        assertEquals(250L, row["last_trade_quantity"])
+        assertEquals("GROWW_QUOTE_LAST_TRADE_TIME", row["last_trade_time_source"])
         assertEquals("RESTING_NOT_EXECUTED", row["order_book_quantity_kind"])
         assertEquals("VALID_BOOK", row["quote_book_status"])
         assertEquals(true, row["spread_verified"])
