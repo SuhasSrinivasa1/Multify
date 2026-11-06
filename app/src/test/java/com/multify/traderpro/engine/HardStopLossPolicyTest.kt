@@ -2,24 +2,44 @@ package com.multify.traderpro.engine
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class HardStopLossPolicyTest {
-    @Test fun commonStopIsTwoPercentBelowActualFill() {
-        assertEquals(2.0, HardStopLossPolicy.MAX_LOSS_PCT, 0.0)
-        assertEquals(98.0, HardStopLossPolicy.stopPrice(100.0), 0.0001)
-        assertEquals(245.0, HardStopLossPolicy.stopPrice(250.0), 0.0001)
-        assertEquals(121.7748, HardStopLossPolicy.stopPrice(124.26), 0.0001)
-        assertEquals(2.0, ReleaseIntegrityManifest.HARD_STOP_LOSS_PCT, 0.0)
+    @Test fun commonStopIsFivePercentBelowActualFill() {
+        assertEquals(5.0, HardStopLossPolicy.MAX_LOSS_PCT, 0.0)
+        assertEquals(95.0, HardStopLossPolicy.stopPrice(100.0), 0.0001)
+        assertEquals(237.5, HardStopLossPolicy.stopPrice(250.0), 0.0001)
+        assertEquals(118.047, HardStopLossPolicy.stopPrice(124.26), 0.0001)
+        assertEquals(5.0, ReleaseIntegrityManifest.HARD_STOP_LOSS_PCT, 0.0)
         assertTrue(ReleaseIntegrityManifest.verifyRuntimeConstants())
     }
 
-    @Test fun breachOccursAtOrBelowTwoPercentLoss() {
-        assertFalse(HardStopLossPolicy.breached(100.0, 98.01))
-        assertTrue(HardStopLossPolicy.breached(100.0, 98.0))
-        assertTrue(HardStopLossPolicy.breached(100.0, 97.99))
+    @Test fun breachOccursOnlyAtOrBelowFivePercentLossNotAtOldTwoPercentFloor() {
+        assertFalse(HardStopLossPolicy.breached(100.0, 98.0))
+        assertFalse(HardStopLossPolicy.breached(100.0, 95.01))
+        assertTrue(HardStopLossPolicy.breached(100.0, 95.0))
+        assertTrue(HardStopLossPolicy.breached(100.0, 94.99))
         assertFalse(HardStopLossPolicy.breached(100.0, Double.NaN))
+    }
+
+    @Test fun oldLossFloorGttMigratesButProfitableProtectionIsNeverLoosened() {
+        assertTrue(HardStopLossPolicy.shouldMigrateHardStopGtt(100.0, 98.0, 95.0))
+        assertTrue(HardStopLossPolicy.shouldMigrateHardStopGtt(100.0, 94.0, 95.0))
+        assertFalse(HardStopLossPolicy.shouldMigrateHardStopGtt(100.0, 95.0, 95.0))
+        assertFalse(HardStopLossPolicy.shouldMigrateHardStopGtt(100.0, 100.5, 95.0))
+    }
+
+    @Test fun oldLossFloorIsIgnoredDuringMigrationButProfitableTrailingStopIsPreserved() {
+        assertNull(HardStopLossPolicy.previousProfitProtection(
+            100.0, 98.0, 98.0, HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT))
+        assertNull(HardStopLossPolicy.previousProfitProtection(
+            100.0, 98.0, null, HoldingSmartOrderPolicy.MODE_NONE))
+        assertEquals(100.5, HardStopLossPolicy.previousProfitProtection(
+            100.0, 100.5, 100.5, HoldingSmartOrderPolicy.MODE_TRAILING_GTT)!!, 0.0)
+        assertEquals(100.5, HardStopLossPolicy.previousProfitProtection(
+            100.0, 100.5, null, HoldingSmartOrderPolicy.MODE_NONE)!!, 0.0)
     }
 
     @Test fun profitableTrailingIsUnchangedAndAlwaysTighterOnceArmed() {
