@@ -8776,20 +8776,24 @@ class TradingRepository @Inject constructor(
         val hardStop = HardStopLossPolicy.stopPrice(position.entryPrice)
         val existingTrigger = position.smartOrderTriggerPrice
         val existingProtected = HoldingSmartOrderPolicy.isServerProtected(position.smartOrderMode, position.smartOrderId)
+        val preservedTighterStop = HardStopLossPolicy.previousProfitProtection(
+            position.entryPrice, position.stopPrice, existingTrigger, position.smartOrderMode
+        )
+        val desiredStop = maxOf(hardStop, preservedTighterStop ?: hardStop)
         if (existingProtected && position.smartOrderMode == HoldingSmartOrderPolicy.MODE_TRAILING_GTT &&
-            existingTrigger != null && existingTrigger + SMART_ORDER_PRICE_EPSILON >= hardStop
+            existingTrigger != null && existingTrigger + SMART_ORDER_PRICE_EPSILON >= desiredStop
         ) return position
         if (existingProtected && position.smartOrderMode == HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT &&
             existingTrigger != null
         ) {
-            val desiredRoundedStop = roundSmartOrderPrice(hardStop)
+            val desiredRoundedStop = roundSmartOrderPrice(desiredStop)
             if (!HardStopLossPolicy.shouldMigrateHardStopGtt(
                     position.entryPrice, existingTrigger, desiredRoundedStop
                 )
             ) return position
             // Keep the existing broker GTT in place while moving its trigger to
-            // the new -5% floor. If Groww rejects the edit, the old protection
-            // remains active and the next monitoring pass retries.
+            // the current -5% floor or a previously tighter user stop. If Groww
+            // rejects the edit, old protection remains active and is retried.
             auditLogger.log("GTT", "HARD_STOP_5PCT_MIGRATION_REQUESTED", mapOf(
                 "symbol" to position.symbol,
                 "gtt_id" to position.smartOrderId,
@@ -8798,7 +8802,7 @@ class TradingRepository @Inject constructor(
                 "entry" to position.entryPrice
             ))
             return modifyPositionGtt(
-                token, position, hardStop, "DOWN", HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT
+                token, position, desiredStop, "DOWN", HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT
             )
         }
 
@@ -8808,7 +8812,7 @@ class TradingRepository @Inject constructor(
             if (!working.smartOrderId.isNullOrBlank()) return working
         }
         working = working.copy(
-            stopPrice = hardStop,
+            stopPrice = desiredStop,
             smartOrderMode = HoldingSmartOrderPolicy.MODE_NONE,
             smartOrderTriggerPrice = null,
             smartOrderDirection = null,
@@ -8817,7 +8821,7 @@ class TradingRepository @Inject constructor(
             lastEvaluatedAtMs = System.currentTimeMillis()
         )
         managedDao.updatePosition(working)
-        return createPositionGtt(token, working, hardStop, "DOWN", HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT)
+        return createPositionGtt(token, working, desiredStop, "DOWN", HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT)
     }
 
     private suspend fun monitorLongHolding(observedPosition: ManagedPositionEntity, token: String, ltp: Double) {
