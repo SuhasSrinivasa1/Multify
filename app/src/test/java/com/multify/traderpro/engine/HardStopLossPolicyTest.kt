@@ -27,6 +27,8 @@ class HardStopLossPolicyTest {
     @Test fun oldLossFloorGttMigratesButProfitableProtectionIsNeverLoosened() {
         assertTrue(HardStopLossPolicy.shouldMigrateHardStopGtt(100.0, 98.0, 95.0))
         assertTrue(HardStopLossPolicy.shouldMigrateHardStopGtt(100.0, 94.0, 95.0))
+        assertFalse(HardStopLossPolicy.shouldMigrateHardStopGtt(100.0, 97.0, 95.0))
+        assertFalse(HardStopLossPolicy.shouldMigrateHardStopGtt(100.0, 99.0, 95.0))
         assertFalse(HardStopLossPolicy.shouldMigrateHardStopGtt(100.0, 95.0, 95.0))
         assertFalse(HardStopLossPolicy.shouldMigrateHardStopGtt(100.0, 100.5, 95.0))
     }
@@ -36,6 +38,8 @@ class HardStopLossPolicyTest {
             100.0, 98.0, 98.0, HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT))
         assertNull(HardStopLossPolicy.previousProfitProtection(
             100.0, 98.0, null, HoldingSmartOrderPolicy.MODE_NONE))
+        assertEquals(97.0, HardStopLossPolicy.previousProfitProtection(
+            100.0, 97.0, 97.0, HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT)!!, 0.0)
         assertEquals(100.5, HardStopLossPolicy.previousProfitProtection(
             100.0, 100.5, 100.5, HoldingSmartOrderPolicy.MODE_TRAILING_GTT)!!, 0.0)
         assertEquals(100.5, HardStopLossPolicy.previousProfitProtection(
