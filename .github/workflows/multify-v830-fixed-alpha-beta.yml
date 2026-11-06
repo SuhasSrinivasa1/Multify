@@ -257,7 +257,7 @@ jobs:
           assert 'candleInterval = "15minute"' in repo
           assert 'candleInterval = "1minute"' in repo
           gradle=Path('app/build.gradle.kts').read_text()
-          assert 'versionCode = 8340' in gradle
+          assert 'versionCode = 8350' in gradle
           store=Path('app/src/main/java/com/multify/traderpro/data/repository/FixedRecommendationStore.kt').read_text()
           assert 'filterNot { it.id == record.id }' in store
           assert 'fun fixedEventId(' in store
