@@ -3,6 +3,8 @@ on:
   push:
     branches: [v835-circuit-aware-buy-test]
   workflow_dispatch:
+  pull_request:
+    branches: [v834-full-evidence-observability-test]
 permissions:
   contents: read
 jobs:
