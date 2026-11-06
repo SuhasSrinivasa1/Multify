@@ -1,4 +1,4 @@
-name: Multify v8.3.4 Fixed 90s Full Evidence TEST APK
+name: Multify v8.3.4 Fixed 90s Full Evidence TEST APK — 5% Hard Stop
 on:
   push:
     branches: [v834-full-evidence-observability-test]
@@ -44,6 +44,8 @@ jobs:
           store=root+'data/repository/FixedRecommendationStore.kt'
           allowed={
             repo, service, market, factor, store,
+            root+'engine/HardStopLossPolicy.kt', root+'engine/ReleaseIntegrityManifest.kt',
+            'app/src/test/java/com/multify/traderpro/engine/HardStopLossPolicyTest.kt',
             'app/src/test/java/com/multify/traderpro/data/logging/FixedMarketPathCodecTest.kt',
             'app/build.gradle.kts', '.github/workflows/multify-v830-fixed-alpha-beta.yml',
           }
@@ -79,11 +81,30 @@ jobs:
              root+'engine/FixedEntryActionabilityPolicy.kt',
              root+'engine/NseEquitySessionCalendar.kt',
              root+'engine/SteppedTrailingPolicy.kt',
-             root+'engine/HardStopLossPolicy.kt',
              root+'engine/FixedDualAccountPolicy.kt',
              root+'data/network/GrowwApi.kt',
           ):
              assert old(file)==current(file),f'Protected strategy/session/broker source changed: {file}'
+          hard_path=root+'engine/HardStopLossPolicy.kt'
+          old_hard=old(hard_path); new_hard=current(hard_path)
+          assert old_hard.count('const val MAX_LOSS_PCT = 2.0')==1
+          assert new_hard==old_hard.replace('const val MAX_LOSS_PCT = 2.0','const val MAX_LOSS_PCT = 5.0',1)
+          manifest_path=root+'engine/ReleaseIntegrityManifest.kt'
+          old_manifest=old(manifest_path); new_manifest=current(manifest_path)
+          assert old_manifest.count('const val HARD_STOP_LOSS_PCT = 2.0')==1
+          assert new_manifest==old_manifest.replace('const val HARD_STOP_LOSS_PCT = 2.0','const val HARD_STOP_LOSS_PCT = 5.0',1)
+          # Only hard-stop descriptions may differ in TradingRepository.
+          parent_repo=subprocess.check_output(['git','show','HEAD^:'+repo],text=True)
+          expected_repo=parent_repo
+          for before,after in (
+            ('hard -2% floor','hard -5% floor'),
+            ('the common -2% hard stop','the common -5% hard stop'),
+            ('common -2% server-side hard stop','common -5% server-side hard stop'),
+            ('1) hard -2% loss floor','1) hard -5% loss floor'),
+          ):
+            assert before in expected_repo, 'Missing v8.3.4 hard-stop label: '+before
+            expected_repo=expected_repo.replace(before,after)
+          assert current(repo)==expected_repo, 'TradingRepository changed beyond hard-stop descriptions'
           assert 'fixedMarketPathTelemetry.tryRecord(' in live
           assert 'FULL_NSE_SWEEP_ACCOUNT_PROFILE' in live
           assert 'ALL_CANDIDATE_CONFIRMATION_TIMELINE' in live
@@ -123,7 +144,6 @@ jobs:
             'app/src/main/java/com/multify/traderpro/engine/FixedForecastPublicationPolicy.kt',
             'app/src/main/java/com/multify/traderpro/engine/FixedMarketDiscoveryPolicy.kt',
             'app/src/main/java/com/multify/traderpro/engine/FixedFinalContract.kt',
-            'app/src/main/java/com/multify/traderpro/engine/HardStopLossPolicy.kt',
             'app/src/main/java/com/multify/traderpro/engine/SteppedTrailingPolicy.kt',
             'app/src/main/java/com/multify/traderpro/engine/NetGainTrailingPolicy.kt',
             'app/src/main/java/com/multify/traderpro/engine/HoldingSmartOrderPolicy.kt',
@@ -132,6 +152,17 @@ jobs:
             baseline=subprocess.check_output(['git','show',f'{ref}:{p}'])
             actual=Path(p).read_bytes()
             assert actual==baseline,f'PROTECTED CODE CHANGED: {p}'
+          # The sole authorized exception is the common hard-stop threshold.
+          hard_path='app/src/main/java/com/multify/traderpro/engine/HardStopLossPolicy.kt'
+          hard_old=subprocess.check_output(['git','show',f'{ref}:{hard_path}']).decode()
+          hard_new=Path(hard_path).read_text()
+          assert hard_old.count('const val MAX_LOSS_PCT = 2.0')==1
+          assert hard_new==hard_old.replace('const val MAX_LOSS_PCT = 2.0','const val MAX_LOSS_PCT = 5.0',1)
+          manifest_path='app/src/main/java/com/multify/traderpro/engine/ReleaseIntegrityManifest.kt'
+          manifest_old=subprocess.check_output(['git','show',f'{ref}:{manifest_path}']).decode()
+          manifest_new=Path(manifest_path).read_text()
+          assert manifest_old.count('const val HARD_STOP_LOSS_PCT = 2.0')==1
+          assert manifest_new==manifest_old.replace('const val HARD_STOP_LOSS_PCT = 2.0','const val HARD_STOP_LOSS_PCT = 5.0',1)
           # Compare Fixed-only repository regions byte-for-byte against v7.9.44.
           p='app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt'
           old=subprocess.check_output(['git','show',f'{ref}:{p}']).decode()
@@ -447,7 +478,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v8.3.4-fixed-90s-full-evidence-debug.apk
+          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v8.3.4-stop-loss-5pct-debug.apk
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/*.apk > dist/APK-SIGNATURE.txt
           "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/*.apk | head -n 2 > dist/PACKAGE.txt
           grep -q "versionCode='8340'" dist/PACKAGE.txt
@@ -464,7 +495,7 @@ jobs:
           python - <<'PY'
           from pathlib import Path
           from zipfile import ZipFile, ZIP_DEFLATED
-          with ZipFile('dist/Multify-TraderPro-v8.3.4-exact-source.zip','w',ZIP_DEFLATED) as z:
+          with ZipFile('dist/Multify-TraderPro-v8.3.4-stop-loss-5pct-exact-source.zip','w',ZIP_DEFLATED) as z:
             for p in Path('.').rglob('*'):
               if (p.is_file()
                   and not any(part in {'.git','.gradle','build','dist'} for part in p.parts)
@@ -475,6 +506,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: multify-v834-90s-full-evidence
+          name: multify-v834-stoploss-5pct
           path: dist/
           if-no-files-found: warn
