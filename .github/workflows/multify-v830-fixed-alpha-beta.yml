@@ -27,7 +27,7 @@ jobs:
         run: |
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
-      - name: Assert production Fixed and SELL unchanged from verified v8.3.3
+      - name: Assert Fixed strategy and evidence logging unchanged from verified v8.3.4
         shell: bash
         run: |
           set -euo pipefail
@@ -109,6 +109,7 @@ jobs:
           assert 'COMMON_HARD_STOP_MINUS_2' not in live
           assert 'HARD_STOP_MINUS_2_ARMED' not in live
           assert 'migrateLegacyHardStopToFivePercent(' in live
+          assert 'LEGACY_HARD_STOP_MIGRATION_SKIPPED_TRAILING_ALREADY_ARMED' in live
           assert 'LEGACY_HARD_STOP_MIGRATED_TO_MINUS_5' in live
           assert 'modifyPositionGtt(' in live
           assert 'SteppedTrailingPolicy.stopGainPctForHighWater(' in live
