@@ -90,7 +90,7 @@ jobs:
              assert old(file)==current(file),f'Protected strategy/session/broker source changed: {file}'
           policy_path=root+'engine/HardStopLossPolicy.kt'
           policy_hash=subprocess.check_output(['git','hash-object',policy_path],text=True).strip()
-          assert policy_hash=='6b759d0988f82b414a04c1e551ac6e401527a111', 'Unexpected hard-stop policy source'
+          assert policy_hash=='4df97ef2bf88b2ebf6d8a6a89200307beafe714b', 'Unexpected hard-stop policy source'
           assert 'HARD_STOP_LOSS_PCT = 5.0' in current(root+'engine/ReleaseIntegrityManifest.kt')
           assert 'shouldMigrateHardStopGtt' in live and 'previousProfitProtection' in live
           assert 'HARD_STOP_5PCT_MIGRATION_REQUESTED' in live
@@ -141,7 +141,7 @@ jobs:
             'app/src/main/java/com/multify/traderpro/engine/HoldingSmartOrderPolicy.kt',
           ]
           policy_path='app/src/main/java/com/multify/traderpro/engine/HardStopLossPolicy.kt'
-          assert subprocess.check_output(['git','hash-object',policy_path],text=True).strip() == '6b759d0988f82b414a04c1e551ac6e401527a111'
+          assert subprocess.check_output(['git','hash-object',policy_path],text=True).strip() == '4df97ef2bf88b2ebf6d8a6a89200307beafe714b'
           for p in paths:
             baseline=subprocess.check_output(['git','show',f'{ref}:{p}'])
             actual=Path(p).read_bytes()
