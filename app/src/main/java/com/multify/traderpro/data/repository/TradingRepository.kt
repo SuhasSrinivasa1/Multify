@@ -8915,8 +8915,9 @@ class TradingRepository @Inject constructor(
                     "old_trigger" to refreshed.smartOrderTriggerPrice,
                     "status" to refreshed.smartOrderStatus,
                     "reason" to reason,
-                    "manual_or_exit_reconciliation_required" to
+                    "manual_or_exit_reconciliation_required" to (
                         refreshed.smartOrderStatus.orEmpty().uppercase(Locale.US) in setOf("TRIGGERED", "COMPLETED", "FAILED")
+                    )
                 ))
                 return refreshed
             }
