@@ -9,7 +9,8 @@ object ReleaseIntegrityManifest {
     const val TRAIL_INITIAL_PROTECTED_GAIN_PCT = 0.50
     const val TRAIL_STEP_PCT = 0.10
     const val TRAIL_SECOND_TRIGGER_PCT = 0.75
-    const val HARD_STOP_LOSS_PCT = 2.0
+    const val HARD_STOP_LOSS_PCT = 5.0
+    const val MARKET_PROTECTION_BUFFER_PCT = 5.0
 
     fun verifyRuntimeConstants(): Boolean =
         FixedFinalContract.CONTRACT_ID == FIXED_CONTRACT_ID &&
@@ -18,5 +19,6 @@ object ReleaseIntegrityManifest {
             SteppedTrailingPolicy.INITIAL_STOP_GAIN_PCT == TRAIL_INITIAL_PROTECTED_GAIN_PCT &&
             SteppedTrailingPolicy.STEP_PCT == TRAIL_STEP_PCT &&
             SteppedTrailingPolicy.SECOND_TRIGGER_PCT == TRAIL_SECOND_TRIGGER_PCT &&
-            HardStopLossPolicy.MAX_LOSS_PCT == HARD_STOP_LOSS_PCT
+            HardStopLossPolicy.MAX_LOSS_PCT == HARD_STOP_LOSS_PCT &&
+            NseCircuitLimitProtectionPolicy.MARKET_PROTECTION_BUFFER_PCT == MARKET_PROTECTION_BUFFER_PCT
 }
