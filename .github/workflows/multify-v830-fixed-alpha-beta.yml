@@ -96,7 +96,8 @@ jobs:
           assert 'HARD_STOP_5PCT_MIGRATION_REQUESTED' in live
           assert 'HARD_STOP_MINUS_5' in live and 'HARD_STOP_MINUS_2' not in live
           assert 'HardStopLossPolicy.stopPrice(entryPrice)' in current(root+'data/repository/ResearchOutcomeChronologyJournal.kt')
-          assert 'HARD_STOP_5PCT' in current(root+'data/repository/ResearchOutcomeChronologyJournal.kt')
+          journal=current(root+'data/repository/ResearchOutcomeChronologyJournal.kt')
+          assert 'HARD_STOP_' in journal and 'MAX_LOSS_PCT.toInt()' in journal
           assert 'fixedMarketPathTelemetry.tryRecord(' in live
           assert 'FULL_NSE_SWEEP_ACCOUNT_PROFILE' in live
           assert 'ALL_CANDIDATE_CONFIRMATION_TIMELINE' in live
