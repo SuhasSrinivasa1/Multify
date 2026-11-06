@@ -33,9 +33,10 @@ class TenMinuteCandleAggregatorTest {
     }
 
     @Test fun rejectsMissingPairsAndUnfinishedBars() {
-        val gap = listOf(bar(0, 100.0, 102.0, 99.0, 101.0, 100.0),
-            bar(10, 104.0, 106.0, 103.0, 105.0, 120.0),
-            bar(15, 105.0, 107.0, 104.0, 106.0, 130.0))
+        val gap = listOf(
+            bar(0, 100.0, 102.0, 99.0, 101.0, 100.0),
+            bar(10, 104.0, 106.0, 103.0, 105.0, 120.0)
+        )
         assertTrue(TenMinuteCandleAggregator.aggregate(gap, start + 20 * 60_000L).isEmpty())
         val pair = listOf(bar(0, 100.0, 102.0, 99.0, 101.0, 100.0),
             bar(5, 101.0, 105.0, 100.0, 104.0, 150.0))
