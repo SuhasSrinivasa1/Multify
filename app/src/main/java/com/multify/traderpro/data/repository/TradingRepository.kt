@@ -8851,7 +8851,7 @@ class TradingRepository @Inject constructor(
         } else {
             HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT
         }
-        // A legacy -2% hard-stop trigger is a loss floor, not a profitable
+        // A legacy -2% hard-stop trigger is the old loss floor, not profitable
         // ratchet. Ignore it while applying the new -5% floor. Preserve any
         // stop already above entry, including every armed profitable GTT.
         val previousProtected = HardStopLossPolicy.previousProfitProtection(
