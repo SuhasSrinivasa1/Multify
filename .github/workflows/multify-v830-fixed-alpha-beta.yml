@@ -42,6 +42,10 @@ jobs:
           manifest=root+'engine/ReleaseIntegrityManifest.kt'
           research=root+'engine/ResearchCandleFirstTouchPolicy.kt'
           ui='app/src/main/java/com/multify/traderpro/ui/screens/TraderApp.kt'
+          service=root+'service/TradingEngineService.kt'
+          market=root+'data/logging/FixedMarketPathTelemetry.kt'
+          factor=root+'data/logging/FixedFactorTelemetry.kt'
+          store=root+'data/repository/FixedRecommendationStore.kt'
           allowed={
             repo, hard, manifest, research, ui,
             'app/src/test/java/com/multify/traderpro/engine/HardStopLossPolicyTest.kt',
@@ -84,32 +88,32 @@ jobs:
              root+'data/network/GrowwApi.kt',
           ):
              assert old(file)==current(file),f'Protected strategy/session/broker source changed: {file}'
-                     hardPolicy=Path(hard).read_text()
-           manifestPolicy=Path(manifest).read_text()
-           researchPolicy=Path(research).read_text()
-           researchTest=Path('app/src/test/java/com/multify/traderpro/engine/ResearchCandleFirstTouchPolicyTest.kt').read_text()
-           hardTest=Path('app/src/test/java/com/multify/traderpro/engine/HardStopLossPolicyTest.kt').read_text()
-           uiText=Path(ui).read_text()
-           assert 'MAX_LOSS_PCT = 5.0' in hardPolicy
-           assert 'LEGACY_MAX_LOSS_PCT = 2.0' in hardPolicy
-           assert 'isLegacyTwoPercentStop(' in hardPolicy
-           assert 'isFivePercentStop(' in hardPolicy
-           assert 'HARD_STOP_LOSS_PCT = 5.0' in manifestPolicy
-           assert 'hypotheticalStopPct: Double = -HardStopLossPolicy.MAX_LOSS_PCT' in researchPolicy
-           assert 'HardStopLossPolicy.stopPrice(entryPrice)' in researchPolicy
-           assert 'fivePercentResearchStopDoesNotTreatTwoPercentPullbackAsStop' in researchTest
-           assert 'commonStopIsFivePercentBelowActualFill' in hardTest
-           assert 'hard -5.00%' in uiText
-           assert 'hard -2.00%' not in uiText
-           assert live.count('-2%') == 4, 'Only explicit legacy GTT migration references may retain -2%'
-           assert 'COMMON_HARD_STOP_MINUS_2' not in live
-           assert 'HARD_STOP_MINUS_2_ARMED' not in live
-           assert 'migrateLegacyHardStopToFivePercent(' in live
-           assert 'LEGACY_HARD_STOP_MIGRATED_TO_MINUS_5' in live
-           assert 'modifyPositionGtt(' in live
-           assert 'SteppedTrailingPolicy.stopGainPctForHighWater(' in live
-           print('Common hard stop is -5%; exact legacy -2% hard-stop GTTs migrate in place; profitable trail and Fixed selection remain frozen.')
-           assert 'fixedMarketPathTelemetry.tryRecord(' in live
+          hardPolicy=Path(hard).read_text()
+          manifestPolicy=Path(manifest).read_text()
+          researchPolicy=Path(research).read_text()
+          researchTest=Path('app/src/test/java/com/multify/traderpro/engine/ResearchCandleFirstTouchPolicyTest.kt').read_text()
+          hardTest=Path('app/src/test/java/com/multify/traderpro/engine/HardStopLossPolicyTest.kt').read_text()
+          uiText=Path(ui).read_text()
+          assert 'MAX_LOSS_PCT = 5.0' in hardPolicy
+          assert 'LEGACY_MAX_LOSS_PCT = 2.0' in hardPolicy
+          assert 'isLegacyTwoPercentStop(' in hardPolicy
+          assert 'isFivePercentStop(' in hardPolicy
+          assert 'HARD_STOP_LOSS_PCT = 5.0' in manifestPolicy
+          assert 'hypotheticalStopPct: Double = -HardStopLossPolicy.MAX_LOSS_PCT' in researchPolicy
+          assert 'HardStopLossPolicy.stopPrice(entryPrice)' in researchPolicy
+          assert 'fivePercentResearchStopDoesNotTreatTwoPercentPullbackAsStop' in researchTest
+          assert 'commonStopIsFivePercentBelowActualFill' in hardTest
+          assert 'hard -5.00%' in uiText
+          assert 'hard -2.00%' not in uiText
+          assert live.count('-2%') == 4, 'Only explicit legacy GTT migration references may retain -2%'
+          assert 'COMMON_HARD_STOP_MINUS_2' not in live
+          assert 'HARD_STOP_MINUS_2_ARMED' not in live
+          assert 'migrateLegacyHardStopToFivePercent(' in live
+          assert 'LEGACY_HARD_STOP_MIGRATED_TO_MINUS_5' in live
+          assert 'modifyPositionGtt(' in live
+          assert 'SteppedTrailingPolicy.stopGainPctForHighWater(' in live
+          print('Common hard stop is -5%; exact legacy -2% hard-stop GTTs migrate in place; profitable trail and Fixed selection remain frozen.')
+          assert 'fixedMarketPathTelemetry.tryRecord(' in live
           assert 'FULL_NSE_SWEEP_ACCOUNT_PROFILE' in live
           assert 'ALL_CANDIDATE_CONFIRMATION_TIMELINE' in live
           assert 'fixed_scan_observations.json' in live
@@ -267,6 +271,7 @@ jobs:
           assert 'candleInterval = "1minute"' in repo
           gradle=Path('app/build.gradle.kts').read_text()
           assert 'versionCode = 8350' in gradle
+          assert 'versionName = "8.3.5-hard-stop-5pct-test"' in gradle
           store=Path('app/src/main/java/com/multify/traderpro/data/repository/FixedRecommendationStore.kt').read_text()
           assert 'filterNot { it.id == record.id }' in store
           assert 'fun fixedEventId(' in store
