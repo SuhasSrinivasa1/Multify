@@ -1,7 +1,7 @@
-name: Multify v8.3.3 Fixed 90-second Scan TEST APK
+name: Multify v8.3.4 Fixed 90s Full Evidence TEST APK — 5% Hard Stop
 on:
   push:
-    branches: [v833-fixed-90s-scan-only-test]
+    branches: [v834-full-evidence-observability-test]
   workflow_dispatch:
 permissions:
   contents: read
@@ -27,31 +27,107 @@ jobs:
         run: |
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
-      - name: Assert only authorized Fixed cadence source change
+      - name: Assert production Fixed and SELL unchanged from verified v8.3.3
         shell: bash
         run: |
           set -euo pipefail
-          git fetch --no-tags origin v832-preopen-session-20261108-test
+          git fetch --no-tags origin v833-fixed-90s-scan-only-test
           python - <<'PY'
           from pathlib import Path
           import subprocess
-          base='origin/v832-preopen-session-20261108-test'
-          repo='app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt'
-          changed=set(subprocess.check_output(
-              ['git','diff','--name-only',base,'HEAD'],text=True).splitlines())
-          allowed={repo,'app/build.gradle.kts','.github/workflows/multify-v830-fixed-alpha-beta.yml'}
-          assert changed==allowed, f'Unexpected changed files: {changed ^ allowed}'
-          old=subprocess.check_output(['git','show',f'{base}:{repo}'],text=True)
-          new=Path(repo).read_text()
-          assert old.count('FIXED_V741_FORECAST_SCAN_INTERVAL_MS = 150_000L')==1
-          assert old.count('Never delays the frozen 150s Fixed cadence')==1
-          expected=old.replace('FIXED_V741_FORECAST_SCAN_INTERVAL_MS = 150_000L',
-             'FIXED_V741_FORECAST_SCAN_INTERVAL_MS = 90_000L')
-          expected=expected.replace('Never delays the frozen 150s Fixed cadence',
-             'Never delays the configured 90s Fixed cadence')
-          assert new==expected, 'Trading source differs beyond exact 150s -> 90s cadence change'
-          assert new.count('FIXED_V741_FORECAST_SCAN_INTERVAL_MS = 90_000L')==1
-          print('Only Fixed scan interval changed; all production selection and execution code identical')
+          baseline='origin/v833-fixed-90s-scan-only-test'
+          root='app/src/main/java/com/multify/traderpro/'
+          repo=root+'data/repository/TradingRepository.kt'
+          service=root+'service/TradingEngineService.kt'
+          market=root+'data/logging/FixedMarketPathTelemetry.kt'
+          factor=root+'data/logging/FixedFactorTelemetry.kt'
+          store=root+'data/repository/FixedRecommendationStore.kt'
+          allowed={
+            repo, service, market, factor, store,
+            root+'engine/HardStopLossPolicy.kt', root+'engine/ReleaseIntegrityManifest.kt',
+            'app/src/test/java/com/multify/traderpro/engine/HardStopLossPolicyTest.kt',
+            'app/src/test/java/com/multify/traderpro/data/logging/FixedMarketPathCodecTest.kt',
+            'app/build.gradle.kts', '.github/workflows/multify-v830-fixed-alpha-beta.yml',
+          }
+          modified=set(subprocess.check_output(
+            ['git','diff','--name-only',baseline,'HEAD'],text=True).splitlines())
+          assert modified==allowed,f'Unexpected source changes: {modified ^ allowed}'
+          def old(p): return subprocess.check_output(['git','show',f'{baseline}:{p}']).decode()
+          def current(p): return Path(p).read_text()
+          orig=old(repo); live=current(repo)
+          def part(s,a,b):
+            start=s.index(a);end=s.index(b,start);return s[start:end]
+          assert 'FIXED_V741_FORECAST_SCAN_INTERVAL_MS = 90_000L' in orig
+          assert 'FIXED_V741_FORECAST_SCAN_INTERVAL_MS = 90_000L' in live
+          assert part(orig,'suspend fun generateFixedForecasts(',
+                      'private fun fixedSnapshotMultifyMfeAverage(')==part(
+                         live,'suspend fun generateFixedForecasts(',
+                         'private fun fixedSnapshotMultifyMfeAverage(')
+          assert part(orig,'private suspend fun fixedForecastEvaluationUsingAccount(',
+                      'suspend fun prepareNextFixedDiscoverySweep(')==part(
+                         live,'private suspend fun fixedForecastEvaluationUsingAccount(',
+                         'suspend fun prepareNextFixedDiscoverySweep(')
+          assert part(orig,'private suspend fun fetchFixedDiscoveryLtpBatch(',
+                      '// FIXED_FINAL_LOCK_END:')==part(
+                         live,'private suspend fun fetchFixedDiscoveryLtpBatch(',
+                         '// FIXED_FINAL_LOCK_END:')
+          for file in (
+             root+'engine/FixedLocalStrategyEngine.kt',
+             root+'engine/FixedMultifyFactorFamilies.kt',
+             root+'engine/FixedForecastQualityPolicy.kt',
+             root+'engine/FixedMarketDiscoveryPolicy.kt',
+             root+'engine/FixedFinalContract.kt',
+             root+'engine/FixedRepeatQualificationPolicy.kt',
+             root+'engine/FixedEntryActionabilityPolicy.kt',
+             root+'engine/NseEquitySessionCalendar.kt',
+             root+'engine/SteppedTrailingPolicy.kt',
+             root+'engine/FixedDualAccountPolicy.kt',
+             root+'data/network/GrowwApi.kt',
+          ):
+             assert old(file)==current(file),f'Protected strategy/session/broker source changed: {file}'
+          hard_path=root+'engine/HardStopLossPolicy.kt'
+          old_hard=old(hard_path); new_hard=current(hard_path)
+          assert old_hard.count('const val MAX_LOSS_PCT = 2.0')==1
+          assert new_hard==old_hard.replace('const val MAX_LOSS_PCT = 2.0','const val MAX_LOSS_PCT = 5.0',1)
+          manifest_path=root+'engine/ReleaseIntegrityManifest.kt'
+          old_manifest=old(manifest_path); new_manifest=current(manifest_path)
+          assert old_manifest.count('const val HARD_STOP_LOSS_PCT = 2.0')==1
+          assert new_manifest==old_manifest.replace('const val HARD_STOP_LOSS_PCT = 2.0','const val HARD_STOP_LOSS_PCT = 5.0',1)
+          # Only hard-stop descriptions may differ in TradingRepository.
+          parent_repo=subprocess.check_output(['git','show','HEAD^:'+repo],text=True)
+          expected_repo=parent_repo
+          for before,after in (
+            ('hard -2% floor','hard -5% floor'),
+            ('the common -2% hard stop','the common -5% hard stop'),
+            ('common -2% server-side hard stop','common -5% server-side hard stop'),
+            ('1) hard -2% loss floor','1) hard -5% loss floor'),
+          ):
+            assert before in expected_repo, 'Missing v8.3.4 hard-stop label: '+before
+            expected_repo=expected_repo.replace(before,after)
+          assert current(repo)==expected_repo, 'TradingRepository changed beyond hard-stop descriptions'
+          assert 'fixedMarketPathTelemetry.tryRecord(' in live
+          assert 'FULL_NSE_SWEEP_ACCOUNT_PROFILE' in live
+          assert 'ALL_CANDIDATE_CONFIRMATION_TIMELINE' in live
+          assert 'fixed_scan_observations.json' in live
+          assert 'fixed_market_path.jsonl' in live
+          assert 'fixed_5m_10m_alternative_candles_captured" to false' in live
+          trace=current(market)
+          assert 'fixed_market_path_v1' in trace
+          assert 'READ_ONLY_NO_TRADING' in trace
+          assert 'full_market_ltp_packed' in trace
+          assert 'broker_source' in trace
+          assert 'bulk_quote_has_volume" to false' in trace
+          assert 'QUEUE_CAPACITY = 12' in trace
+          assert 'MAX_FILE_BYTES' in trace
+          assert 'apiFactory.' not in trace
+          assert 'placeCncBuy(' not in trace
+          assert 'fixedRecommendationStore.upsert(' not in trace
+          assert 'submitMarketOrder(' not in trace
+          assert 'FixedLocalStrategyEngine.evaluateLong(' not in trace
+          assert 'actual_completed_scan_start_spacing_ms' in current(service)
+          assert 'candle_data_quality' in current(factor)
+          assert 'archivedObservations()' in current(store)
+          print('Production scoring, confirmation, target, BUY/SELL, session, Alpha/Beta and 90-second cadence locked. New telemetry is read-only.')
           PY
       - name: Assert protected Fixed strategy and SELL rules byte-for-byte unchanged
         shell: bash
@@ -68,7 +144,6 @@ jobs:
             'app/src/main/java/com/multify/traderpro/engine/FixedForecastPublicationPolicy.kt',
             'app/src/main/java/com/multify/traderpro/engine/FixedMarketDiscoveryPolicy.kt',
             'app/src/main/java/com/multify/traderpro/engine/FixedFinalContract.kt',
-            'app/src/main/java/com/multify/traderpro/engine/HardStopLossPolicy.kt',
             'app/src/main/java/com/multify/traderpro/engine/SteppedTrailingPolicy.kt',
             'app/src/main/java/com/multify/traderpro/engine/NetGainTrailingPolicy.kt',
             'app/src/main/java/com/multify/traderpro/engine/HoldingSmartOrderPolicy.kt',
@@ -77,6 +152,17 @@ jobs:
             baseline=subprocess.check_output(['git','show',f'{ref}:{p}'])
             actual=Path(p).read_bytes()
             assert actual==baseline,f'PROTECTED CODE CHANGED: {p}'
+          # The sole authorized exception is the common hard-stop threshold.
+          hard_path='app/src/main/java/com/multify/traderpro/engine/HardStopLossPolicy.kt'
+          hard_old=subprocess.check_output(['git','show',f'{ref}:{hard_path}']).decode()
+          hard_new=Path(hard_path).read_text()
+          assert hard_old.count('const val MAX_LOSS_PCT = 2.0')==1
+          assert hard_new==hard_old.replace('const val MAX_LOSS_PCT = 2.0','const val MAX_LOSS_PCT = 5.0',1)
+          manifest_path='app/src/main/java/com/multify/traderpro/engine/ReleaseIntegrityManifest.kt'
+          manifest_old=subprocess.check_output(['git','show',f'{ref}:{manifest_path}']).decode()
+          manifest_new=Path(manifest_path).read_text()
+          assert manifest_old.count('const val HARD_STOP_LOSS_PCT = 2.0')==1
+          assert manifest_new==manifest_old.replace('const val HARD_STOP_LOSS_PCT = 2.0','const val HARD_STOP_LOSS_PCT = 5.0',1)
           # Compare Fixed-only repository regions byte-for-byte against v7.9.44.
           p='app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt'
           old=subprocess.check_output(['git','show',f'{ref}:{p}']).decode()
@@ -187,7 +273,7 @@ jobs:
           assert 'candleInterval = "15minute"' in repo
           assert 'candleInterval = "1minute"' in repo
           gradle=Path('app/build.gradle.kts').read_text()
-          assert 'versionCode = 8330' in gradle
+          assert 'versionCode = 8340' in gradle
           store=Path('app/src/main/java/com/multify/traderpro/data/repository/FixedRecommendationStore.kt').read_text()
           assert 'filterNot { it.id == record.id }' in store
           assert 'fun fixedEventId(' in store
@@ -392,10 +478,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v8.3.3-fixed-90-second-scan-debug.apk
+          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v8.3.4-stop-loss-5pct-debug.apk
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/*.apk > dist/APK-SIGNATURE.txt
           "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/*.apk | head -n 2 > dist/PACKAGE.txt
-          grep -q "versionCode='8330'" dist/PACKAGE.txt
+          grep -q "versionCode='8340'" dist/PACKAGE.txt
           if [[ "${STABLE_SIGNING_READY:-false}" == "true" ]]; then
             expected_cert="3f72d5c24e676c712d9e7e9feaa829960bfca9cdffc9ea4da6738372824e8755"
             actual_cert="$(awk '/Signer #1 certificate SHA-256 digest:/ {print $NF; exit}' dist/APK-SIGNATURE.txt | tr -d ':' | tr '[:upper:]' '[:lower:]')"
@@ -409,7 +495,7 @@ jobs:
           python - <<'PY'
           from pathlib import Path
           from zipfile import ZipFile, ZIP_DEFLATED
-          with ZipFile('dist/Multify-TraderPro-v8.3.3-exact-source.zip','w',ZIP_DEFLATED) as z:
+          with ZipFile('dist/Multify-TraderPro-v8.3.4-stop-loss-5pct-exact-source.zip','w',ZIP_DEFLATED) as z:
             for p in Path('.').rglob('*'):
               if (p.is_file()
                   and not any(part in {'.git','.gradle','build','dist'} for part in p.parts)
@@ -420,6 +506,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: multify-v833-90s-scan-only
+          name: multify-v834-stoploss-5pct
           path: dist/
           if-no-files-found: warn

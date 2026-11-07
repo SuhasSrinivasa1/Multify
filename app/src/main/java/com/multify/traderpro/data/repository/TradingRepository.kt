@@ -23,6 +23,7 @@ import com.multify.traderpro.data.local.SignalEventEntity
 import com.multify.traderpro.data.logging.AuditLogger
 import com.multify.traderpro.data.logging.DecisionEvidenceJournal
 import com.multify.traderpro.data.logging.FixedFactorTelemetry
+import com.multify.traderpro.data.logging.FixedMarketPathTelemetry
 import com.multify.traderpro.data.network.BrokerStatusDto
 import com.multify.traderpro.data.network.DashboardDto
 import com.multify.traderpro.data.network.DaySummaryDto
@@ -224,6 +225,7 @@ class TradingRepository @Inject constructor(
     private val auditLogger: AuditLogger,
     private val decisionEvidenceJournal: DecisionEvidenceJournal,
     private val fixedFactorTelemetry: FixedFactorTelemetry,
+    private val fixedMarketPathTelemetry: FixedMarketPathTelemetry,
     private val forecastNewsMonitor: ForecastNewsMonitor,
     private val forecastNewsJournal: ForecastNewsJournal,
     private val nseMarketCapResearch: NseMarketCapResearch,
@@ -1259,6 +1261,15 @@ class TradingRepository @Inject constructor(
             // The same 53-batch 50-stock full-market data transport is used,
             // but this result is never cached as a valid 09:15/14:20 snapshot.
             val sweep = collectFixedWideLtp(token, master, preparing = false)
+            // Audit the actual pre-open bulk LTP path without making new requests.
+            // Broker LTP is NOT verified NSE indicative auction equilibrium price.
+            fixedMarketPathTelemetry.tryRecord(
+                date = date, phase = "PREOPEN_UNVERIFIED_BROKER_LTP",
+                scanStartedAtMs = now.toInstant().toEpochMilli(),
+                sweepCompletedAtMs = sweep.completedAtMs,
+                prices = sweep.prices, universeCount = master.size,
+                baselineReady = false
+            )
             auditLogger.logAsync("FIXED_PREOPEN", "MARKET_SNAPSHOT_RESEARCH_ONLY", mapOf(
                 "date" to date,
                 "universe_count" to master.size, "price_count" to sweep.prices.size,
@@ -2146,7 +2157,7 @@ class TradingRepository @Inject constructor(
                 engine = ENGINE_MULTIFY_HOLDING, symbol = symbol, product = "CNC", side = "LONG", quantity = filled,
                 entryPrice = entry, stopPrice = HardStopLossPolicy.stopPrice(entry),
                 targetPrice = signal.target,
-                strategy = "Multify ARM holding · hard -2% floor · common trail 0.55→0.50, 0.75→0.60, 0.85→0.70 then +0.10%",
+                strategy = "Multify ARM holding · hard -5% floor · common trail 0.55→0.50, 0.75→0.60, 0.85→0.70 then +0.10%",
                 regime = "HOLDING_LONG", confidence = 1.0, sourceEventId = eventId,
                 openOrderId = order.growwOrderId, openReferenceId = ref, openedAtMs = System.currentTimeMillis(),
                 lastPrice = entry, maxFavourablePrice = entry, maxAdversePrice = entry, lastEvaluatedAtMs = System.currentTimeMillis(),
@@ -2211,7 +2222,7 @@ class TradingRepository @Inject constructor(
 
         dao.updateForwarding(
             eventId, "ANALYZED", "MULTIFY_EXIT_TRAIL_CONTINUES",
-            "Multify Book Profit recorded for MFE learning only. $symbol remains held; the common -2% hard stop and fixed stepped profitable trail remain the mandatory sell logic.",
+            "Multify Book Profit recorded for MFE learning only. $symbol remains held; the common -5% hard stop and fixed stepped profitable trail remain the mandatory sell logic.",
             null
         )
         auditLogger.log("HOLDING", "MULTIFY_BOOK_PROFIT_IGNORED_FOR_EXECUTION", mapOf(
@@ -2332,6 +2343,44 @@ class TradingRepository @Inject constructor(
                         "explanatory_detail" to "read-only counts and per-symbol confirmation evidence; original gates unchanged",
                         "pre_spike_discovery_slots" to 0, // original v7.9.17 has no pre-spike bucket,
                         "scoring_or_publication_changed" to false
+                    ))
+                    // Comprehensive candidate-stage timeline for ALL tiers, not
+                    // just PRIMARY. This reports existing observations only:
+                    // no factor recalculation, new API request or publication.
+                    auditLogger.logAsync("FIXED_EVIDENCE", "ALL_CANDIDATE_CONFIRMATION_TIMELINE", mapOf(
+                        "scan_at_ms" to latestScanTime,
+                        "source" to "PERSISTED_FIXED_SCAN_OBSERVATIONS",
+                        "timestamp_is_scan_start_not_quote_exchange_time" to true,
+                        "candidate_count" to latest.size,
+                        "candidates" to latest.mapIndexed { index, item ->
+                            val history = prior.filter { old ->
+                                old.symbol.equals(item.symbol, true) &&
+                                    latestScanTime != null && old.scanAtMs < latestScanTime &&
+                                    latestScanTime - old.scanAtMs <= FIXED_V741_PRIMARY_CONFIRMATION_WINDOW_MS
+                            }
+                            val primary = history.filter {
+                                it.qualityTier == "PRIMARY" && it.publishEligible && it.executionEligible
+                            }
+                            mapOf(
+                                "rank_in_observed_top_48" to index + 1,
+                                "symbol" to item.symbol,
+                                "observed_price" to item.observedPrice,
+                                "quality_tier" to item.qualityTier,
+                                "publish_eligible" to item.publishEligible,
+                                "execution_eligible" to item.executionEligible,
+                                "observed_primary_before_current" to primary.size,
+                                "first_prior_primary_scan_at_ms" to primary.minOfOrNull { it.scanAtMs },
+                                "last_prior_primary_scan_at_ms" to primary.maxOfOrNull { it.scanAtMs },
+                                "first_prior_nonprimary_scan_at_ms" to history
+                                    .filter { it.qualityTier != "PRIMARY" || !it.publishEligible || !it.executionEligible }
+                                    .minOfOrNull { it.scanAtMs },
+                                "prior_scans_within_20_min" to history.size,
+                                "previously_published" to fixedRecommendationStore.recommendations(currentDate)
+                                    .any { it.symbol.equals(item.symbol, true) }
+                            )
+                        },
+                        "for_diagnostics_only" to true,
+                        "scoring_and_orders_unchanged" to true
                     ))
                 }
                 var autoBuySubmitted = 0
@@ -4311,6 +4360,16 @@ class TradingRepository @Inject constructor(
             fixedMarketDiscoveryStateStore.save(today, mergedSessionOpen, current)
         }
         fixedMarketDiscoveryStateStore.recordHealth(today, coverageRatio, batchErrors, abortedForNetwork, baselineReady)
+        // Full-universe price evidence for missed movers. Off-thread, bounded and
+        // strictly non-trading: NO new live/historical request and NO model change.
+        fixedMarketPathTelemetry.tryRecord(
+            date = today, phase = "OFFICIAL_FIXED_MARKET_WIDE_DISCOVERY",
+            scanStartedAtMs = lastFixedScanAtMs,
+            sweepCompletedAtMs = sweep.completedAtMs,
+            prices = current, universeCount = distinctMaster.size,
+            previousLtps = previous, sessionOpenLtps = sessionOpen,
+            selected = ranked, baselineReady = baselineReady
+        )
         preferences.recordMarketData()
         auditLogger.log("FIXED_DISCOVERY", "MARKET_WIDE_SCAN", mapOf(
             "snapshot_id" to FixedEngineSnapshotStore.SNAPSHOT_ID,
@@ -6160,7 +6219,7 @@ class TradingRepository @Inject constructor(
                 engine = ENGINE_FORECAST_HOLDING, symbol = row.symbol, product = "CNC", side = "LONG", quantity = filled,
                 entryPrice = entry, stopPrice = HardStopLossPolicy.stopPrice(entry),
                 targetPrice = entry * (1.0 + row.targetPct / 100.0),
-                strategy = "Forecast holding · ${row.strategy} · hard -2% floor · v7 fixed stepped trail 0.55→0.50 then +0.10%",
+                strategy = "Forecast holding · ${row.strategy} · hard -5% floor · v7 fixed stepped trail 0.55→0.50 then +0.10%",
                 regime = row.regime, confidence = row.confidence,
                 sourceEventId = null, openOrderId = order.growwOrderId, openReferenceId = ref,
                 openedAtMs = System.currentTimeMillis(), lastPrice = entry,
@@ -6500,7 +6559,7 @@ class TradingRepository @Inject constructor(
                     append(" · MARKET child · fixed target ₹")
                     append(fmt(state.fixedTargetPrice))
                     forecast?.strategy?.takeIf { it.isNotBlank() }?.let { append(" · "); append(it) }
-                    append(" · hard -2% floor · v7 fixed stepped trail 0.55→0.50 then +0.10%")
+                    append(" · hard -5% floor · v7 fixed stepped trail 0.55→0.50 then +0.10%")
                 },
                 regime = forecast?.regime ?: "FORECAST_AUTO_BUY",
                 confidence = forecast?.confidence ?: 1.0,
@@ -6594,7 +6653,7 @@ class TradingRepository @Inject constructor(
                 entryPrice = actualFill,
                 stopPrice = HardStopLossPolicy.stopPrice(actualFill),
                 targetPrice = state.fixedTargetPrice,
-                strategy = "Migrated legacy forecast LIMIT fill · fixed target ₹${fmt(state.fixedTargetPrice)} · hard -2% floor · v7 fixed stepped trail 0.55→0.50 then +0.10%",
+                strategy = "Migrated legacy forecast LIMIT fill · fixed target ₹${fmt(state.fixedTargetPrice)} · hard -5% floor · v7 fixed stepped trail 0.55→0.50 then +0.10%",
                 regime = "FORECAST_AUTO_BUY",
                 confidence = 1.0,
                 sourceEventId = null,
@@ -6722,7 +6781,7 @@ class TradingRepository @Inject constructor(
                 entryPrice = actualFill,
                 stopPrice = HardStopLossPolicy.stopPrice(actualFill),
                 targetPrice = executionTarget,
-                strategy = "Fixed ${FixedEngineSnapshotStore.SNAPSHOT_ID} manual direct MARKET BUY · published entry ₹${fmt(row.entryPrice)} · broker fill ₹${fmt(actualFill)} · execution target ₹${fmt(executionTarget)} · ${row.strategy} · hard -2% floor · v7 stepped trail 0.55→0.50 then +0.10%",
+                strategy = "Fixed ${FixedEngineSnapshotStore.SNAPSHOT_ID} manual direct MARKET BUY · published entry ₹${fmt(row.entryPrice)} · broker fill ₹${fmt(actualFill)} · execution target ₹${fmt(executionTarget)} · ${row.strategy} · hard -5% floor · v7 stepped trail 0.55→0.50 then +0.10%",
                 regime = row.regime,
                 confidence = row.confidence,
                 sourceEventId = null,
@@ -6976,7 +7035,7 @@ class TradingRepository @Inject constructor(
                     entryPrice = actualFill,
                     stopPrice = HardStopLossPolicy.stopPrice(actualFill),
                     targetPrice = executionTarget,
-                    strategy = "Fixed ${FixedEngineSnapshotStore.SNAPSHOT_ID} auto-buy · direct MARKET · published entry ₹${fmt(row.entryPrice)} · fill ₹${fmt(actualFill)} · execution target ₹${fmt(executionTarget)} · ${row.strategy} · hard -2% floor · v7 stepped trail 0.55→0.50 then +0.10%",
+                    strategy = "Fixed ${FixedEngineSnapshotStore.SNAPSHOT_ID} auto-buy · direct MARKET · published entry ₹${fmt(row.entryPrice)} · fill ₹${fmt(actualFill)} · execution target ₹${fmt(executionTarget)} · ${row.strategy} · hard -5% floor · v7 stepped trail 0.55→0.50 then +0.10%",
                     regime = row.regime,
                     confidence = row.confidence,
                     sourceEventId = null,
@@ -7212,7 +7271,7 @@ class TradingRepository @Inject constructor(
                 entryPrice = actualEntry,
                 stopPrice = HardStopLossPolicy.stopPrice(actualEntry),
                 targetPrice = executionTarget,
-                strategy = "Fixed ${FixedEngineSnapshotStore.SNAPSHOT_ID} legacy GTT migrated · actual entry ₹${fmt(actualEntry)} · execution target ₹${fmt(executionTarget)} · ${row?.strategy.orEmpty()} · hard -2% floor · v7 stepped trail 0.55→0.50 then +0.10%",
+                strategy = "Fixed ${FixedEngineSnapshotStore.SNAPSHOT_ID} legacy GTT migrated · actual entry ₹${fmt(actualEntry)} · execution target ₹${fmt(executionTarget)} · ${row?.strategy.orEmpty()} · hard -5% floor · v7 stepped trail 0.55→0.50 then +0.10%",
                 regime = row?.regime ?: "FIXED_ENGINE",
                 confidence = row?.confidence ?: 1.0,
                 sourceEventId = null,
@@ -8499,7 +8558,7 @@ class TradingRepository @Inject constructor(
 
         if (!marketOpen) {
             // Keep every managed LONG protected overnight. Existing profitable trailing GTTs are
-            // preserved; an unarmed holding receives the common -2% server-side hard stop. This
+            // preserved; an unarmed holding receives the common -5% server-side hard stop. This
             // also self-recovers protection after an app/service restart or a prior GTT failure.
             var hardStopReady = 0
             var hardStopFailures = 0
@@ -8752,7 +8811,7 @@ class TradingRepository @Inject constructor(
 
     private suspend fun monitorLongHoldingLocked(position: ManagedPositionEntity, token: String, ltp: Double) {
         // Common sell protection for every managed CNC LONG, regardless of source:
-        // 1) hard -2% loss floor from the actual holding cost basis;
+        // 1) hard -5% loss floor from the actual holding cost basis;
         // 2) once +0.55% high-water is reached, the existing stepped profitable trail takes over;
         // 3) the active stop only moves upward. There is no averaging-down path.
         val decisionStartedNs = SystemClock.elapsedRealtimeNanos()
@@ -10579,6 +10638,9 @@ class TradingRepository @Inject constructor(
                 add("research.json", research)
                 add("forecast_auto_buy_orders.json", forecastAutoBuyOrders)
                 add("fixed_recommendations.json", fixedRecommendations)
+                // Include ALL recorded 5-day per-scan tier observations; without
+                // this file offline studies cannot reconstruct confirmations.
+                add("fixed_scan_observations.json", fixedRecommendationStore.archivedObservations())
                 fixedHistoricalEvidenceArchive.capture(fixedRecommendations)
                 addText("fixed_historical_research.json", fixedHistoricalEvidenceArchive.archive())
                 addText("fixed_imported_same_day_dedup.json", fixedImportedSameDayDedupJournal.archive())
@@ -10598,6 +10660,7 @@ class TradingRepository @Inject constructor(
                 ))
                 add("fixed_auto_buy_orders.json", fixedAutoBuyOrders)
                 fixedFactorTelemetry.appendExportEntry(zip)
+                fixedMarketPathTelemetry.appendExportEntry(zip)
                 add("api_usage_snapshot.json", GrowwApiUsageLedger.snapshot())
                 add("groww_recovery_state.json", recoveryGate.status())
                 add("telemetry_metadata.json", mapOf(
@@ -10606,6 +10669,20 @@ class TradingRepository @Inject constructor(
                     "fixed_factor_telemetry_dropped_total" to fixedFactorTelemetry.droppedCount(),
                     "fixed_factor_telemetry_written_total" to fixedFactorTelemetry.writtenCount(),
                     "fixed_factor_telemetry_nonblocking" to true,
+                    "fixed_market_path_file" to "fixed_market_path.jsonl",
+                    "fixed_market_path_schema" to "fixed_market_path_v1",
+                    "fixed_market_path_written_total" to fixedMarketPathTelemetry.writtenCount(),
+                    "fixed_market_path_dropped_total" to fixedMarketPathTelemetry.droppedCount(),
+                    "fixed_market_path_queue_pending" to fixedMarketPathTelemetry.queuedCount(),
+                    "fixed_market_path_no_extra_broker_calls" to true,
+                    "fixed_market_path_quote_exchange_timestamp_verified" to false,
+                    "fixed_market_path_has_intraday_volume" to false,
+                    "fixed_90s_schedule_target_not_guaranteed" to true,
+                    "fixed_5m_10m_alternative_candles_captured" to false,
+                    "fixed_5m_shadow_collection_active" to false,
+                    "full_market_path_is_sampled_ltp_not_intrabar_high_low" to true,
+                    "fixed_scan_observation_file" to "fixed_scan_observations.json",
+                    "publication_candidate_timeline_event" to "ALL_CANDIDATE_CONFIRMATION_TIMELINE",
                     "fixed_factor_telemetry_file" to "fixed_factor_snapshots.jsonl",
                     "fixed_early_watch_file" to "fixed_early_watch.json",
                     "fixed_early_watch_read_only" to true,

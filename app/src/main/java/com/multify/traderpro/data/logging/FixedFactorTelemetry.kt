@@ -166,6 +166,19 @@ class FixedFactorTelemetry @Inject constructor(@ApplicationContext context: Cont
             "families_unweighted_reference" to model.families.map { mapOf("name" to it.name,
                 "score" to clean(it.score), "available_factors" to it.availableFactors,
                 "total_factors" to it.totalFactors) },
+            "candle_data_quality" to mapOf(
+                "source" to "GROWW_15M_HISTORICAL",
+                "last_bar_complete_verified" to false,
+                "last_bar_may_still_be_forming" to true,
+                "candle_timestamp_format" to "NUMBER_IF_AVAILABLE_ELSE_LOCAL_INDEX",
+                "numeric_epoch_like_timestamps" to f.candles.count { it.ts > 1_500_000_000L },
+                "candle_count" to f.candles.size,
+                "vwap_and_window_high_scope" to "FULL_RETURNED_MULTI_DAY_15M_RANGE_NOT_VERIFIED_TODAY",
+                "five_minute_opening_range_verified" to false,
+                "alternate_5m_10m_candle_data_available_in_this_row" to false,
+                "provider_quote_exchange_age_verified" to false,
+                "do_not_infer_exact_peak_or_intrabar_volume" to true
+            ),
             "recent_candles" to f.candles.takeLast(3).map { mapOf("ts" to it.ts, "open" to clean(it.open),
                 "high" to clean(it.high), "low" to clean(it.low), "close" to clean(it.close),
                 "volume" to clean(it.volume)) }

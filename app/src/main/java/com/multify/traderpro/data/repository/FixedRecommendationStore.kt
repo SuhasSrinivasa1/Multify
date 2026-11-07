@@ -81,6 +81,10 @@ class FixedRecommendationStore @Inject constructor(
     @Synchronized
     internal fun archivedRecommendations(): List<FixedRecommendationRecord> = load().recommendations
 
+    /** Read-only archive of the existing last five dates of full Fixed tier observations. */
+    @Synchronized
+    internal fun archivedObservations(): List<FixedScanObservation> = load().observations
+
     @Synchronized
     internal fun recommendations(date: String): List<FixedRecommendationRecord> =
         load().recommendations.filter { it.recommendationDate == date }.sortedBy { it.rank }
