@@ -112,6 +112,7 @@ import com.multify.traderpro.engine.FixedEntryActionabilityPolicy
 import com.multify.traderpro.engine.FixedEarlyWatchPolicy
 import com.multify.traderpro.engine.FixedFinalContract
 import com.multify.traderpro.engine.RecommendationPriceBandPolicy
+import com.multify.traderpro.engine.CircuitAwareBuyPolicy
 import com.multify.traderpro.engine.ExecutionQuoteLiquidityPolicy
 import com.multify.traderpro.engine.FixedExecutionThinLiquidityPolicy
 import com.multify.traderpro.engine.FixedShadowSamplingPolicy
@@ -2089,6 +2090,7 @@ class TradingRepository @Inject constructor(
         ).requirePayload("Multify entry quote $symbol")
         preferences.recordMarketData()
         val quoteElapsedMs = (SystemClock.elapsedRealtime() - quoteStartedAtMs).coerceAtLeast(0L)
+        val quoteReceivedAtMs = System.currentTimeMillis()
         val livePrice = entryQuote.lastPrice?.takeIf { it.isFinite() && it > 0.0 }
             ?: error("Groww quote does not contain a valid LTP for $symbol")
         val referencePrice = signalReference ?: livePrice
@@ -2130,7 +2132,7 @@ class TradingRepository @Inject constructor(
         require(qty > 0) { "Multify BUY skipped: full configured budget ₹${settings.holdingBudgetRupees} is not available" }
 
         val ref = stableRef("MLH", "$eventId-$symbol")
-        val order = placeCncBuy(token, symbol, qty, ref, notificationStartedNs)
+        val order = placeCncBuy(token, symbol, qty, ref, notificationStartedNs, entryQuote, quoteReceivedAtMs)
         auditLogger.log("EXECUTION", "CNC_BUY_SIZED", mapOf(
             "symbol" to symbol, "available_cnc" to available, "configured_budget" to settings.holdingBudgetRupees,
             "cash_reserve" to sizing.cashReserve, "reference_price" to referencePrice,
@@ -6203,7 +6205,7 @@ class TradingRepository @Inject constructor(
         val qty = sizing.quantity
         require(qty > 0) { "Forecast BUY skipped: full configured budget ₹${settings.holdingBudgetRupees} is not available" }
         val ref = stableRef("FLH", "${row.id}-${row.symbol}")
-        val order = placeCncBuy(token, row.symbol, qty, ref)
+        val order = placeCncBuy(token, row.symbol, qty, ref, entryQuote = quote, quoteReceivedAtMs = quoteRequestStartedAtMs + quoteRequestElapsedMs)
         auditLogger.log("EXECUTION", "CNC_BUY_SIZED", mapOf(
             "symbol" to row.symbol, "available_cnc" to available, "configured_budget" to settings.holdingBudgetRupees,
             "cash_reserve" to sizing.cashReserve, "reference_price" to ltp,
@@ -6766,7 +6768,7 @@ class TradingRepository @Inject constructor(
             "Fixed BUY disabled: recommendation is no longer active"
         }
         val ref = stableRef("FXH", "${row.recommendationDate}-${row.id}-${row.symbol}")
-        val order = placeCncBuy(token, row.symbol, sizing.quantity, ref)
+        val order = placeCncBuy(token, row.symbol, sizing.quantity, ref, entryQuote = quote, quoteReceivedAtMs = quoteRequestStartedAtMs + quoteRequestElapsedMs)
         val filled = order.filledQuantity?.takeIf { it > 0 } ?: sizing.quantity
         val actualFill = order.averageFillPrice?.takeIf { it.isFinite() && it > 0.0 } ?: ltp
         val executionTarget = actualFill * (1.0 + row.targetPct / 100.0)
@@ -7010,7 +7012,7 @@ class TradingRepository @Inject constructor(
             val reference = stableRef("FXM", "${row.recommendationDate}-${row.id}-${row.symbol}")
             val orderStartedAtMs = System.currentTimeMillis()
             val order = runCatching {
-                placeCncBuy(token, row.symbol, sizing.quantity, reference)
+                placeCncBuy(token, row.symbol, sizing.quantity, reference, entryQuote = quote, quoteReceivedAtMs = quoteStartedAtMs + quoteElapsedMs)
             }.onFailure {
                 auditLogger.log("FIXED_AUTO_BUY", "MARKET_BUY_ERROR", mapOf(
                     "symbol" to row.symbol,
@@ -9871,7 +9873,8 @@ class TradingRepository @Inject constructor(
         qty: Int,
         product: String,
         reference: String,
-        notificationStartedNs: Long? = null
+        notificationStartedNs: Long? = null,
+        buyLimitPrice: Double? = null
     ): OrderPayload {
         require(qty > 0) { "Order quantity is zero" }
         val dispatchStartedNs = SystemClock.elapsedRealtimeNanos()
@@ -9886,7 +9889,9 @@ class TradingRepository @Inject constructor(
                     quantity = qty,
                     product = product,
                     transactionType = transaction,
-                    orderReferenceId = reference
+                    orderReferenceId = reference,
+                    orderType = if (transaction == "BUY" && buyLimitPrice != null) "LIMIT" else "MARKET",
+                    price = if (transaction == "BUY") (buyLimitPrice ?: 0.0) else 0.0
                 )
             ).requirePayload("Place $transaction $symbol")
         } catch (original: Throwable) {
@@ -9962,6 +9967,35 @@ class TradingRepository @Inject constructor(
             if (status.orderStatus.uppercase(Locale.US) in setOf("REJECTED", "FAILED", "CANCELLED")) {
                 error("Groww order ${status.orderStatus}: ${status.remark.orEmpty()}")
             }
+        }
+        if (transaction == "BUY" && buyLimitPrice != null) {
+            // Groww documents DAY validity, not IOC. Never leave a timed-out LIMIT BUY
+            // open and unprotected. Cancel then reconcile before reporting any fill.
+            val cancel = runCatching {
+                apiFactory.groww.cancelOrder(bearer(token), OrderCancelRequest(growwOrderId = id))
+                    .requirePayload("Cancel unfilled BUY $symbol")
+            }.getOrNull()
+            val settled = runCatching {
+                apiFactory.groww.orderStatus(bearer(token), id)
+                    .requirePayload("Reconcile cancelled BUY $symbol")
+            }.getOrNull()
+            val terminal = settled?.orderStatus?.uppercase(Locale.US) in
+                setOf("CANCELLED", "REJECTED", "FAILED", "EXECUTED", "COMPLETED")
+            if (terminal && (settled?.filledQuantity ?: 0) > 0) {
+                auditLogger.log("EXECUTION", "PARTIAL_LIMIT_BUY_RECONCILED", mapOf(
+                    "symbol" to symbol, "quantity" to settled?.filledQuantity,
+                    "status" to settled?.orderStatus))
+                return acceptFilled(settled!!)
+            }
+            if (terminal && (settled?.filledQuantity ?: 0) == 0) {
+                error("LIMIT_BUY_UNFILLED_CANCELLED: $symbol")
+            }
+            auditLogger.log("SAFETY", "LIMIT_BUY_CANCEL_UNCONFIRMED", mapOf(
+                "symbol" to symbol, "order_id" to id,
+                "cancel_status" to (cancel?.orderStatus ?: "UNKNOWN"),
+                "reconciled_status" to (settled?.orderStatus ?: "UNKNOWN"),
+                "manual_broker_reconciliation_required" to true))
+            error("LIMIT_BUY_UNRESOLVED: $symbol order $id; check broker before enabling new buys")
         }
         error("Groww order $id was not confirmed filled; deterministic reference $reference prevents duplicate resubmission")
     }
@@ -10808,7 +10842,9 @@ class TradingRepository @Inject constructor(
         symbol: String,
         qty: Int,
         reference: String,
-        notificationStartedNs: Long? = null
+        notificationStartedNs: Long? = null,
+        entryQuote: QuotePayload,
+        quoteReceivedAtMs: Long
     ): OrderPayload = appOwnedBuyMutex.withLock {
         // Serialize all application CNC entries so two independent engines cannot both buy
         // the same symbol while the first order is still awaiting broker acknowledgement.
@@ -10828,7 +10864,30 @@ class TradingRepository @Inject constructor(
             "critical_trading_priority" to true
         ))
         require(unprotected.isEmpty()) { "New BUY blocked: app-owned holding lacks verified broker GTT" }
-        submitMarketOrder(token, symbol, "BUY", qty, "CNC", reference, notificationStartedNs)
+        // Reuse the quote fetched on the signal path. If broker inventory checks made
+        // it stale, refresh only this one symbol once, never the full NSE universe.
+        val age = System.currentTimeMillis() - quoteReceivedAtMs
+        val freshQuote: QuotePayload
+        val freshAt: Long
+        if (age < 0L || age > CircuitAwareBuyPolicy.MAX_QUOTE_AGE_MS) {
+            freshQuote = apiFactory.groww.quote(bearer(token), tradingSymbol = symbol)
+                .requirePayload("Circuit refresh $symbol")
+            freshAt = System.currentTimeMillis()
+            preferences.recordMarketData()
+        } else {
+            freshQuote = entryQuote
+            freshAt = quoteReceivedAtMs
+        }
+        val price = CircuitAwareBuyPolicy.decide(freshQuote, freshAt, System.currentTimeMillis())
+        auditLogger.log("EXECUTION", "CIRCUIT_SAFE_LIMIT_BUY", mapOf(
+            "symbol" to symbol, "qty" to qty, "limit_price" to price.limitPrice,
+            "upper_circuit" to price.upperCircuit, "best_offer" to price.bestOffer,
+            "last_price" to price.lastPrice, "quote_age_ms" to price.quoteAgeMs,
+            "single_symbol_quote_refresh" to (freshAt != quoteReceivedAtMs),
+            "full_market_refresh" to false, "max_slippage_bps" to CircuitAwareBuyPolicy.MAX_BUY_SLIPPAGE_BPS
+        ))
+        submitMarketOrder(token, symbol, "BUY", qty, "CNC", reference,
+            notificationStartedNs, buyLimitPrice = price.limitPrice)
     }
 
     private fun LongForecastEntity.toForecastDto() = ForecastDto(

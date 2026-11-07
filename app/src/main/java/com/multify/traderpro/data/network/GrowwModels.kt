@@ -93,6 +93,11 @@ data class QuoteMarketDepth(
 )
 
 data class QuotePayload(
+    @SerializedName("upper_circuit_limit") val upperCircuitLimit: Double? = null,
+    @SerializedName("lower_circuit_limit") val lowerCircuitLimit: Double? = null,
+    @SerializedName("high_trade_range") val highTradeRange: Double? = null,
+    @SerializedName("low_trade_range") val lowTradeRange: Double? = null,
+    @SerializedName("last_trade_time") val lastTradeTime: Long? = null,
     @SerializedName("average_price") val averagePrice: Double? = null,
     @SerializedName("bid_price") val bidPrice: Double? = null,
     @SerializedName("bid_quantity") val bidQuantity: Double? = null,
