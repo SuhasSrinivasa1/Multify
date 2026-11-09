@@ -202,6 +202,8 @@ class TradingEngineService : Service() {
                         }
                         val betaLiveDelta = (betaAfter.liveRequests - (betaBefore?.liveRequests ?: betaAfter.liveRequests)).coerceAtLeast(0L)
                         val betaHistoricalDelta = (betaAfter.historicalRequests - (betaBefore?.historicalRequests ?: betaAfter.historicalRequests)).coerceAtLeast(0L)
+                        val betaLive429Delta = (betaAfter.liveRateLimits - (betaBefore?.liveRateLimits ?: betaAfter.liveRateLimits)).coerceAtLeast(0L)
+                        val betaHistorical429Delta = (betaAfter.historicalRateLimits - (betaBefore?.historicalRateLimits ?: betaAfter.historicalRateLimits)).coerceAtLeast(0L)
                         auditLogger.logAsync("RUNTIME", "TRAILING_MONITOR_PROFILE", mapOf(
                             "window_ms" to (profileNowMs - positionProfileWindowStartedAtMs),
                             "passes" to positionProfilePasses,
@@ -212,7 +214,11 @@ class TradingEngineService : Service() {
                             "live_network_requests" to delta(GrowwApiUsageLedger.Category.LIVE_DATA) { it.totalRequests },
                             "beta_live_network_requests" to betaLiveDelta,
                             "combined_live_network_requests" to (delta(GrowwApiUsageLedger.Category.LIVE_DATA) { it.totalRequests } + betaLiveDelta),
+                            "historical_network_requests" to delta(GrowwApiUsageLedger.Category.HISTORICAL) { it.totalRequests },
                             "beta_historical_network_requests" to betaHistoricalDelta,
+                            "combined_historical_network_requests" to (delta(GrowwApiUsageLedger.Category.HISTORICAL) { it.totalRequests } + betaHistoricalDelta),
+                            "beta_live_429s" to betaLive429Delta,
+                            "beta_historical_429s" to betaHistorical429Delta,
                             "order_network_requests" to delta(GrowwApiUsageLedger.Category.ORDERS) { it.totalRequests },
                             "non_trading_network_requests" to delta(GrowwApiUsageLedger.Category.NON_TRADING) { it.totalRequests },
                             "live_429s" to delta(GrowwApiUsageLedger.Category.LIVE_DATA) { it.rateLimitResponses },
