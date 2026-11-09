@@ -1060,7 +1060,10 @@ class TradingRepository @Inject constructor(
     }
 
     private suspend fun fixedBetaLtp(
-        token: String, chunk: List<String>, preparing: Boolean = false
+        token: String,
+        chunk: List<String>,
+        preparing: Boolean = false,
+        priority: BetaResearchGate.Priority = BetaResearchGate.Priority.FIXED
     ): Map<String, Double> = betaMarketRead(
         token, BetaResearchGate.Type.LIVE,
         alphaCall = { error("Fixed Beta lane may not borrow Alpha credentials") },
@@ -1071,7 +1074,7 @@ class TradingRepository @Inject constructor(
                 trafficPriority = MarketDataPriorityAdmissionPolicy.FIXED
             ).requirePayload("Fixed Beta NSE LTP")
         },
-        priority = BetaResearchGate.Priority.FIXED,
+        priority = priority,
         maxWaitMs = if (preparing) 90_000L else 10_000L
     )
 
@@ -1382,7 +1385,7 @@ class TradingRepository @Inject constructor(
         return try {
             val betaToken = fixedBetaMarketTokenOrNull()
             val quotes = if (betaToken != null) {
-                fixedBetaLtp(betaToken, watch)
+                fixedBetaLtp(betaToken, watch, priority = BetaResearchGate.Priority.BACKGROUND)
             } else {
                 fetchFixedDiscoveryLtpBatch(token, watch, 0)
             }
@@ -4079,8 +4082,10 @@ class TradingRepository @Inject constructor(
     }
 
     private suspend fun fixedForecastEvaluation(symbol: String, token: String): FixedStrategyEvaluation {
+        // Beta's bounded live lane is reserved for the complete NSE discovery sweep.
+        // Detailed 40-factor evaluation remains on Alpha; only account routing changes.
         val beta = fixedBetaMarketTokenOrNull()?.takeIf {
-            com.multify.traderpro.engine.FixedDualAccountPolicy.betaDetailedEvaluation(symbol, true)
+            com.multify.traderpro.engine.FixedDualAccountTransportPolicy.betaDetailedEvaluation(symbol, true)
         }
         if (beta != null) {
             try {
@@ -4371,7 +4376,9 @@ class TradingRepository @Inject constructor(
                 chunks, windowStart
             ) { index, chunk ->
                 val useBeta = betaToken != null && !betaStopped.get() &&
-                    com.multify.traderpro.engine.FixedDualAccountPolicy.betaDiscoveryBatch(index, true)
+                    com.multify.traderpro.engine.FixedDualAccountTransportPolicy.betaDiscoveryBatch(
+                        index, chunks.size, betaReady = true
+                    )
                 if (useBeta) {
                     try {
                         fixedBetaLtp(betaToken!!, chunk, preparing).also { betaSuccess.incrementAndGet() }
