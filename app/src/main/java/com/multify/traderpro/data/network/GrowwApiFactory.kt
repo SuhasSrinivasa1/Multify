@@ -64,6 +64,7 @@ class GrowwApiFactory @Inject constructor(
             .retryOnConnectionFailure(true)
             .addInterceptor(GrowwHotDataCacheInterceptor(account = "BETA", recordAlphaStats = false))
             .addInterceptor(BetaReadOnlyInterceptor())
+            .addInterceptor(BetaHttpTraceInterceptor(auditLogger))
             .addInterceptor { chain ->
                 chain.proceed(chain.request().newBuilder()
                     .header("Accept", "application/json")
