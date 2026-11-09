@@ -920,10 +920,10 @@ private fun FixedScreen(
                             it.category == com.multify.traderpro.data.network.GrowwApiUsageLedger.Category.LIVE_DATA
                         }
                     val betaLive = com.multify.traderpro.data.network.BetaResearchGate.latestLiveStatus()
-                    Text("ALPHA independent LIVE: ${alphaLive.usedLastMinute}/${alphaLive.appPerMinuteLimit} app requests/min · broker published ceiling 300/min",
+                    Text("ALPHA Live Data: ${alphaLive.usedLastMinute}/${alphaLive.appPerMinuteLimit} per minute · Fixed max 240/min · 60/min reserved for priority quotes",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text("BETA independent LIVE: ${betaLive.usedLastMinute}/${betaLive.endpointLimitPerMinute} conservative endpoint requests/min" +
+                    Text("BETA Live Data: ${betaLive.usedLastMinute}/${betaLive.endpointLimitPerMinute} per minute · adaptive gap ${betaLive.activeGapMs}ms" +
                         if (betaLive.cooldownRemainingMs > 0)
                             " · Beta retry in ${(betaLive.cooldownRemainingMs + 999) / 1000}s"
                         else if (betaLive.halfOpenProbeInFlight) " · recovery probe" else "",

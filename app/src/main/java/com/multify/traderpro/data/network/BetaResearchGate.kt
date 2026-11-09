@@ -4,6 +4,7 @@ import android.os.SystemClock
 import com.multify.traderpro.engine.FixedDualAccountPolicy
 import com.multify.traderpro.engine.GrowwRecoveryPolicy
 import com.multify.traderpro.engine.GrowwRetryAfterPolicy
+import com.multify.traderpro.engine.LtpAdaptivePacingPolicy
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -34,7 +35,8 @@ class BetaResearchGate @Inject constructor() {
         val endpointLimitPerMinute: Int = FixedDualAccountPolicy.BETA_LIVE_PER_MINUTE,
         val cooldownRemainingMs: Long = 0L,
         val halfOpenProbeInFlight: Boolean = false,
-        val rateLimitResponses: Long = 0L
+        val rateLimitResponses: Long = 0L,
+        val activeGapMs: Long = LtpAdaptivePacingPolicy.START_GAP_MS
     )
     private data class Window(
         val second: ArrayDeque<Long> = ArrayDeque(),
@@ -51,11 +53,11 @@ class BetaResearchGate @Inject constructor() {
     // Conservative per-endpoint limits observed necessary after 429s. Groww
     // documents 300 LIVE category requests/min per account; that is not a
     // promise that one /ltp endpoint can safely sustain 300 requests/min.
-    private val liveSec = 1
+    private val liveSec = 9
     private val liveMinute = FixedDualAccountPolicy.BETA_LIVE_PER_MINUTE
     private val histSec = 1
     private val histMinute = FixedDualAccountPolicy.BETA_HISTORICAL_PER_MINUTE
-    private val liveGapMs = FixedDualAccountPolicy.BETA_LTP_MIN_GAP_MS
+    private var livePace = LtpAdaptivePacingPolicy.State(LtpAdaptivePacingPolicy.START_GAP_MS, SystemClock.elapsedRealtime())
 
     private val liveRequests = AtomicLong()
     private val historicalRequests = AtomicLong()
@@ -75,7 +77,8 @@ class BetaResearchGate @Inject constructor() {
             endpointLimitPerMinute = liveMinute,
             cooldownRemainingMs = (w.cooldownUntil - now).coerceAtLeast(0L),
             halfOpenProbeInFlight = w.probeInFlight,
-            rateLimitResponses = liveRateLimits.get()
+            rateLimitResponses = liveRateLimits.get(),
+            activeGapMs = livePace.gapMs
         )
     }
 
@@ -89,7 +92,7 @@ class BetaResearchGate @Inject constructor() {
                 val perSecond = if (type == Type.LIVE) liveSec else histSec
                 val perMinute = if (type == Type.LIVE) liveMinute else histMinute
                 val spacingWait = if (w.lastGrantedAt > 0L)
-                    (w.lastGrantedAt + (if (type == Type.LIVE) liveGapMs else 1_500L) - now)
+                    (w.lastGrantedAt + (if (type == Type.LIVE) livePace.gapMs else 1_500L) - now)
                         .coerceAtLeast(0L) else 0L
                 val wait = maxOf(
                     spacingWait,
@@ -122,7 +125,10 @@ class BetaResearchGate @Inject constructor() {
                     w.probeInFlight = false
                     w.probeRequired = false
                 }
-                if (type == Type.LIVE) updateLiveStatus(SystemClock.elapsedRealtime(), w)
+                if (type == Type.LIVE) {
+                    livePace = LtpAdaptivePacingPolicy.onSuccess(livePace, SystemClock.elapsedRealtime())
+                    updateLiveStatus(SystemClock.elapsedRealtime(), w)
+                }
             }
             result
         } catch (failure: Throwable) {
@@ -131,8 +137,10 @@ class BetaResearchGate @Inject constructor() {
                 val w = windows.getValue(type)
                 val now = SystemClock.elapsedRealtime()
                 if (failure is HttpException && failure.code() == 429) {
-                    if (type == Type.LIVE) liveRateLimits.incrementAndGet()
-                    else historicalRateLimits.incrementAndGet()
+                    if (type == Type.LIVE) {
+                        liveRateLimits.incrementAndGet()
+                        livePace = LtpAdaptivePacingPolicy.on429(livePace, now)
+                    } else historicalRateLimits.incrementAndGet()
                     while (w.rateLimitIncidents.isNotEmpty() && w.rateLimitIncidents.first() <= now - 3_600_000L)
                         w.rateLimitIncidents.removeFirst()
                     // Multiple replies in the same 5-second window are ONE incident.
