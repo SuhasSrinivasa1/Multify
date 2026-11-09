@@ -72,6 +72,9 @@ import com.multify.traderpro.domain.ParsedSignal
 import com.multify.traderpro.domain.SignalType
 import com.multify.traderpro.engine.AdaptiveLearningMath
 import com.multify.traderpro.engine.CashAwareCncSizing
+import com.multify.traderpro.engine.ExecutionFillQuantityPolicy
+import com.multify.traderpro.engine.FixedScanBuyIsolationPolicy
+import com.multify.traderpro.engine.IdleBrokerPollingPolicy
 import com.multify.traderpro.engine.BrokerInventorySymbolPolicy
 import com.multify.traderpro.engine.AutoBuyEntrySafetyPolicy
 import com.multify.traderpro.engine.ExecutionTelemetryMath
@@ -2292,6 +2295,10 @@ class TradingRepository @Inject constructor(
             "historical_cooldown_until_ms" to historicalUntil,
             "retry_at_ms" to retryAt,
             "remaining_cooldown_ms" to (retryAt - now).coerceAtLeast(0L),
+            "last_completed_fixed_scan_at_ms" to lastFixedScanAtMs,
+            "last_completed_fixed_scan_age_ms" to lastFixedScanAtMs.takeIf { it > 0L }?.let { (now - it).coerceAtLeast(0L) },
+            "stale_snapshot_never_used_as_fresh_live_data" to true,
+            "retry_after_broker_cooldown_not_an_extra_fixed_scan" to true,
             "reconnect_required" to state.reconnectRequired
         )
     }
@@ -2411,7 +2418,22 @@ class TradingRepository @Inject constructor(
                 var autoBuyElapsedMs = 0L
                 if (scanned) {
                     val autoBuyStartedAtMs = System.currentTimeMillis()
-                    autoBuySubmitted = autoBuyFixedRecommendations()
+                    // Execution readiness is independent of the already completed frozen
+                    // Fixed scan. A GTT exit awaiting broker child confirmation can
+                    // block BUY without marking fresh Fixed selection as failed.
+                    autoBuySubmitted = FixedScanBuyIsolationPolicy.execute(
+                        buy = { autoBuyFixedRecommendations() },
+                        onFailure = { cause ->
+                            auditLogger.log("FIXED_AUTO_BUY", "EXECUTION_DEFERRED_SCAN_PRESERVED", mapOf(
+                                "reason" to (cause.message ?: cause.javaClass.simpleName),
+                                "exception_type" to cause.javaClass.simpleName,
+                                "fixed_scan_completed" to true,
+                                "fixed_selection_or_filtering_changed" to false,
+                                "duplicate_buy_attempted" to false,
+                                "next_fixed_due_unchanged" to true
+                            ))
+                        }
+                    )
                     autoBuyElapsedMs = (System.currentTimeMillis() - autoBuyStartedAtMs).coerceAtLeast(0L)
                 }
                 if (scanned) {
@@ -8396,10 +8418,21 @@ class TradingRepository @Inject constructor(
         val noTrackedPositions = !managedOpen && managedDao.openPositions().isEmpty()
         val pendingEntry = fixedAutoBuyOrderStore.all().any { !ForecastAutoBuyPolicy.isTerminal(it.status) } ||
             forecastAutoBuyOrderStore.all().any { !ForecastAutoBuyPolicy.isTerminal(it.status) }
-        if (marketOpen && noTrackedPositions && !pendingEntry && !marketCriticalTradeInFlight &&
-            confirmedEmpty && brokerInventorySnapshot != null &&
-            now - brokerInventorySnapshot!!.atMs < EMPTY_PORTFOLIO_BROKER_RECHECK_MS
-        ) {
+        // An external/manual holding or GTT must never become app-owned exposure.
+        // Once both snapshots were obtained, skip repeat *idle* polls even when
+        // they contain somebody else's positions/GTTs. The per-BUY guard independently
+        // refreshes broker holdings and active GTTs; app-owned rows or unresolved
+        // entries always retain the original fast SELL-monitor cadence.
+        if (IdleBrokerPollingPolicy.maySkip(
+            marketOpen = marketOpen,
+            localOpenRows = if (noTrackedPositions) 0 else 1,
+            pendingEntry = pendingEntry,
+            criticalTradeInFlight = marketCriticalTradeInFlight,
+            inventoryObservedAtMs = brokerInventorySnapshot?.atMs,
+            gttObservedAtMs = activeGttSnapshot?.atMs,
+            nowMs = now,
+            maxRecheckIntervalMs = EMPTY_PORTFOLIO_BROKER_RECHECK_MS
+        )) {
             val auditAt = lastIdlePortfolioAuditAtMs
             if (now - auditAt >= 60_000L) {
                 lastIdlePortfolioAuditAtMs = now
@@ -8407,7 +8440,9 @@ class TradingRepository @Inject constructor(
                     "next_reverify_after_ms" to EMPTY_PORTFOLIO_BROKER_RECHECK_MS,
                     "app_owned_holdings" to 0,
                     "pending_entries" to 0,
-                    "active_gtts" to 0,
+                    "external_broker_inventory_may_be_nonempty" to true,
+                    "no_app_owned_or_unresolved_rows" to true,
+                    "per_buy_fresh_inventory_check_preserved" to true,
                     "protective_sell_priority_preserved" to true
                 ))
             }
@@ -9958,12 +9993,17 @@ class TradingRepository @Inject constructor(
         suspend fun acceptFilled(status: OrderPayload): OrderPayload {
             val filledAtMs = System.currentTimeMillis()
             val totalExecutionMs = ((SystemClock.elapsedRealtimeNanos() - brokerStartedNs).coerceAtLeast(0L)) / 1_000_000L
+            val effectiveFilled = ExecutionFillQuantityPolicy.confirmedFilledQuantity(
+                requestedQuantity = qty,
+                reportedFilledQuantity = status.filledQuantity,
+                terminalStatus = status.orderStatus
+            ) ?: error("BROKER_FILLED_QUANTITY_UNVERIFIED: $symbol order $id; manual reconciliation required")
             if (product == "CNC" && transaction in setOf("BUY", "SELL") && !reference.startsWith("LGC")) {
                 managedDao.insertExecutionSample(
                     ExecutionSampleEntity(
                         transactionType = transaction,
                         symbol = symbol,
-                        quantity = qty,
+                        quantity = effectiveFilled,
                         product = product,
                         orderId = id,
                         submittedAtMs = submittedAtMs,
@@ -9978,10 +10018,14 @@ class TradingRepository @Inject constructor(
             auditLogger.logAsync("EXECUTION_LATENCY", "ORDER_FILLED", mapOf(
                 "symbol" to symbol,
                 "transaction" to transaction,
+                "requested_quantity" to qty,
+                "actual_filled_quantity" to effectiveFilled,
+                "quantity_basis" to if (status.filledQuantity != null) "BROKER_REPORTED" else "EXECUTED_STATUS_FULL_ORDER",
+                "partial_fill" to (effectiveFilled < qty),
                 "total_execution_ms" to totalExecutionMs,
                 "broker_ack_ms" to brokerAckLatencyMs
             ))
-            return status.copy(growwOrderId = id, orderReferenceId = reference)
+            return status.copy(growwOrderId = id, orderReferenceId = reference, filledQuantity = effectiveFilled)
         }
 
         if (response.orderStatus.equals("EXECUTED", true) || (response.filledQuantity ?: 0) >= qty) {
