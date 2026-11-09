@@ -1159,10 +1159,7 @@ class TradingRepository @Inject constructor(
                 error("Multify ARM unavailable: $rejected. Check Groww settings and broker recovery.")
             }
             // Validate before persisting ARM. A failed broker call must not briefly show ARM=ON.
-            val cooldown = fixedAutoBuyCooldownOrNull(
-                GrowwApiUsageLedger.Category.LIVE_DATA,
-                GrowwApiUsageLedger.Category.NON_TRADING
-            )
+            val cooldown = buyApiCooldownOrNull()
             if (cooldown != null) {
                 auditLogger.log("SETTINGS", "ARM_REJECTED", mapOf(
                     "reason" to cooldown.reason,
@@ -6335,10 +6332,7 @@ class TradingRepository @Inject constructor(
         val settings = preferences.settings.first()
         if (!settings.forecastAutoBuyEnabled || settings.safetyHalt) return 0
         // No session-count BUY lock; production PRIMARY and broker safeguards below are unchanged.
-        val preflightCooldown = fixedAutoBuyCooldownOrNull(
-            GrowwApiUsageLedger.Category.LIVE_DATA,
-            GrowwApiUsageLedger.Category.NON_TRADING
-        )
+        val preflightCooldown = buyApiCooldownOrNull()
         if (preflightCooldown != null) {
             auditAutoBuyBlocked("FORECAST_AUTO_BUY", preflightCooldown)
             return 0
@@ -6931,7 +6925,10 @@ class TradingRepository @Inject constructor(
         // An activation with only previously published recommendations should not
         // trigger a broker token refresh or any order-preparation API traffic.
         if (rows.isEmpty()) return 0
-        val preflightCooldown = buyApiCooldownOrNull()
+        val preflightCooldown = fixedAutoBuyCooldownOrNull(
+            GrowwApiUsageLedger.Category.LIVE_DATA,
+            GrowwApiUsageLedger.Category.NON_TRADING
+        )
         if (preflightCooldown != null) {
             auditAutoBuyBlocked("FIXED_AUTO_BUY", preflightCooldown)
             return 0
@@ -6970,7 +6967,10 @@ class TradingRepository @Inject constructor(
                 ))
                 continue
             }
-            val cooldown = buyApiCooldownOrNull()
+            val cooldown = fixedAutoBuyCooldownOrNull(
+                GrowwApiUsageLedger.Category.LIVE_DATA,
+                GrowwApiUsageLedger.Category.NON_TRADING
+            )
             if (cooldown != null) {
                 auditAutoBuyBlocked("FIXED_AUTO_BUY", cooldown)
                 break
