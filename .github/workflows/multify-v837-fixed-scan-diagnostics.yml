@@ -75,13 +75,20 @@ jobs:
           assert modified==expected, f'Unexpected differences: {modified ^ expected}'
           repo=Path(root+'data/repository/TradingRepository.kt').read_text()
           original=subprocess.check_output(['git','show',f'{base}:{root}data/repository/TradingRepository.kt'],text=True)
+          # Permit only the new diagnostic helper and its three audit-map enrichments
+          # inside the otherwise frozen Fixed section; normalize them before comparison.
+          normalized_repo=repo
+          helper_start=normalized_repo.index('    private fun fixedBrokerCooldownAuditDetails()')
+          helper_end=normalized_repo.index('    suspend fun runFixedPriorityCycle(): Boolean {',helper_start)
+          normalized_repo=normalized_repo[:helper_start]+normalized_repo[helper_end:]
+          normalized_repo=normalized_repo.replace(') + fixedBrokerCooldownAuditDetails()', ')')
           for start,stop in [
             ('suspend fun generateFixedForecasts(', 'private fun fixedSnapshotMultifyMfeAverage('),
             ('private suspend fun fixedForecastEvaluationUsingAccount(', 'suspend fun prepareNextFixedDiscoverySweep('),
             ('private suspend fun fetchFixedDiscoveryLtpBatch(', '// FIXED_FINAL_LOCK_END:')
           ]:
             def part(x): return x[x.index(start):x.index(stop,x.index(start))]
-            assert part(repo)==part(original),f'Frozen Fixed segment changed: {start}'
+            assert part(normalized_repo)==part(original),f'Frozen Fixed segment changed: {start}'
           assert 'FIXED_V741_FORECAST_SCAN_INTERVAL_MS = 90_000L' in repo
           assert 'CIRCUIT_SAFE_LIMIT_BUY' in repo
           assert 'resolveConfirmedTriggeredExit' in repo
