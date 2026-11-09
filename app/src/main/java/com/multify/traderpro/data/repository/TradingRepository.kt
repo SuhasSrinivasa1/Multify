@@ -8352,7 +8352,11 @@ class TradingRepository @Inject constructor(
         }
     }
 
-    /** Broker inventory must consist entirely of this app's one tracked BUY for the symbol. */
+    /**
+     * Normal SELL scope requires broker inventory to equal the one app-owned BUY.
+     * A just-filled Fixed Auto Buy may instead use its verified empty pre-trade snapshot
+     * briefly while Groww's post-fill holdings/positions view catches up.
+     */
     private suspend fun safeAppSellScope(
         token: String, position: ManagedPositionEntity,
         inventory: BrokerInventorySnapshot? = null,
@@ -8835,6 +8839,7 @@ class TradingRepository @Inject constructor(
             "symbol" to position.symbol, "engine" to position.engine,
             "position_id" to id, "quantity" to position.quantity,
             "reason" to reason, "new_buys_blocked" to true,
+            "fixed_auto_buy_distinct_symbols_may_continue" to true,
             "manual_broker_review_required" to true
         ))
         runCatching {
@@ -8849,7 +8854,8 @@ class TradingRepository @Inject constructor(
                 .setContentText("BUY filled but broker GTT is not verified. Review Groww directly.")
                 .setStyle(NotificationCompat.BigTextStyle().bigText(
                     "A ${position.engine} BUY was confirmed, but its protective SELL GTT could not be verified. " +
-                    "Do not rely on an in-app stop. Check Groww's holdings and active GTT orders."))
+                    "Do not rely on an in-app stop. Check Groww's holdings and active GTT orders. " +
+                    "Fixed Auto Buy may continue for distinct eligible symbols while this holding is reconciled."))
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
                 .setAutoCancel(true)
                 .build()
