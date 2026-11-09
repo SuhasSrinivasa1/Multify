@@ -8,7 +8,7 @@ package com.multify.traderpro.engine
  */
 object AlphaLtpPacingPolicy {
     const val MIN_GAP_MS = 1_200L
-    const val MAX_PER_MINUTE = 40
+    const val MAX_PER_MINUTE = 18
 
     fun waitMs(nowMs: Long, lastGrantedAtMs: Long, oldestInMinuteAtMs: Long?, usedInMinute: Int): Long {
         val gap = if (lastGrantedAtMs > 0L)
