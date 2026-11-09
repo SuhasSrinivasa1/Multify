@@ -28,6 +28,14 @@ class AppPositionOwnershipPolicyTest {
         assertFalse(AppPositionOwnershipPolicy.exclusiveBrokerQuantity(10, 0, 0))
     }
 
+    @Test fun freshPostFillInventoryLagProofIsStrictlyTimeBounded() {
+        assertTrue(AppPositionOwnershipPolicy.freshPostFillInventoryLagAllowed(1_000L, 1_000L))
+        assertTrue(AppPositionOwnershipPolicy.freshPostFillInventoryLagAllowed(1_000L, 121_000L))
+        assertFalse(AppPositionOwnershipPolicy.freshPostFillInventoryLagAllowed(1_000L, 121_001L))
+        assertFalse(AppPositionOwnershipPolicy.freshPostFillInventoryLagAllowed(1_000L, 999L))
+        assertFalse(AppPositionOwnershipPolicy.freshPostFillInventoryLagAllowed(0L, 1_000L))
+    }
+
     @Test fun onlyAppGeneratedGttReferencesCanBeCleanedUp() {
         assertTrue(AppPositionOwnershipPolicy.isAppProtectionReference("MTG1234567890abcd"))
         assertFalse(AppPositionOwnershipPolicy.isAppProtectionReference("PFH1234567890abcd"))
