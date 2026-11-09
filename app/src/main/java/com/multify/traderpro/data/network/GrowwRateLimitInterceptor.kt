@@ -164,6 +164,10 @@ internal class GrowwRateLimitInterceptor(
         val fixedPriority = MarketDataPriorityAdmissionPolicy.isFixedHeader(
             request.header(MarketDataPriorityAdmissionPolicy.HEADER))
         if (protectionLtp) pendingProtectionLtps.incrementAndGet()
+        if (fixedPriority && category in setOf(
+                GrowwApiUsageLedger.Category.LIVE_DATA,
+                GrowwApiUsageLedger.Category.HISTORICAL
+            )) pendingFixedLiveRequests.incrementAndGet()
         var totalWaitMs = 0L
         var dominantReason = "NONE"
         try {
@@ -200,9 +204,12 @@ internal class GrowwRateLimitInterceptor(
                 ) else 0L
                 val protectionYield = MarketDataPriorityAdmissionPolicy.ltpPriorityYieldMs(
                     isAlphaLtp, protection, pendingProtectionLtps.get())
-                val wait = maxOf(cooldownWait, secondWait, minuteWait, ltpWait, protectionYield)
+                val fixedYield = if (!fixedPriority && !protection && pendingFixedLiveRequests.get() > 0)
+                    com.multify.traderpro.engine.FixedUnifiedRequestBudgetPolicy.BACKGROUND_YIELD_MS else 0L
+                val wait = maxOf(cooldownWait, secondWait, minuteWait, ltpWait, protectionYield, fixedYield)
                 reason = when {
                     protectionYield > 0L && wait == protectionYield -> "YIELD_TO_HOLDING_PROTECTION"
+                    fixedYield > 0L && wait == fixedYield -> "YIELD_TO_FIXED"
                     cooldownWait > 0L && wait == cooldownWait -> "429_COOLDOWN"
                     ltpWait > 0L && wait == ltpWait -> "ALPHA_LTP_ENDPOINT_PACING"
                     minuteWait > 0L && wait == minuteWait -> "APP_PER_MINUTE"
@@ -251,6 +258,10 @@ internal class GrowwRateLimitInterceptor(
         }
         } finally {
             if (protectionLtp) pendingProtectionLtps.decrementAndGet()
+            if (fixedPriority && category in setOf(
+                    GrowwApiUsageLedger.Category.LIVE_DATA,
+                    GrowwApiUsageLedger.Category.HISTORICAL
+                )) pendingFixedLiveRequests.decrementAndGet()
         }
     }
 
