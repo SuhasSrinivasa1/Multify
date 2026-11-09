@@ -1199,7 +1199,7 @@ class TradingRepository @Inject constructor(
      */
     private suspend fun fixedPreOpenEvaluationReadOnly(symbol: String, alphaToken: String): FixedStrategyEvaluation {
         val betaToken = fixedBetaMarketTokenOrNull()?.takeIf {
-            com.multify.traderpro.engine.FixedDualAccountPolicy.betaDetailedEvaluation(symbol, true)
+            com.multify.traderpro.engine.FixedBetaDetailRoutingPolicy.useBeta(symbol, true)
         }
         val useBeta = betaToken != null
         val quote = if (useBeta) {
@@ -4052,7 +4052,7 @@ class TradingRepository @Inject constructor(
 
     private suspend fun fixedForecastEvaluation(symbol: String, token: String): FixedStrategyEvaluation {
         val beta = fixedBetaMarketTokenOrNull()?.takeIf {
-            com.multify.traderpro.engine.FixedDualAccountPolicy.betaDetailedEvaluation(symbol, true)
+            com.multify.traderpro.engine.FixedBetaDetailRoutingPolicy.useBeta(symbol, true)
         }
         if (beta != null) {
             try {
