@@ -1,24 +1,35 @@
 package com.multify.traderpro.engine
 
 /**
- * Network-readiness policy outside the immutable Fixed v7.4.1 forecasting region.
- * It never changes candidate construction, indicator inputs, model scores or targets.
- * An unavailable historical-candle API pauses a scan before it produces 48 predictable
- * local request errors; scanning resumes as soon as the broker cooldown expires.
+ * Readiness diagnostics for the immutable Fixed scan pipeline.
+ * Distinguishes the actual blocked API category without changing when scans run.
  */
 object FixedDataPipelinePolicy {
-    enum class Readiness { READY, AUTH_RECONNECT_REQUIRED, HISTORICAL_COOLDOWN }
+    enum class Readiness {
+        READY,
+        AUTH_RECONNECT_REQUIRED,
+        LIVE_DATA_COOLDOWN,
+        HISTORICAL_COOLDOWN,
+        MULTIPLE_API_COOLDOWNS
+    }
 
     const val SUPPRESSION_AUDIT_INTERVAL_MS = 60_000L
 
     fun readiness(
         reconnectRequired: Boolean,
         historicalCooldownUntilMs: Long,
+        liveDataCooldownUntilMs: Long,
         nowMs: Long
-    ): Readiness = when {
-        reconnectRequired -> Readiness.AUTH_RECONNECT_REQUIRED
-        historicalCooldownUntilMs > nowMs -> Readiness.HISTORICAL_COOLDOWN
-        else -> Readiness.READY
+    ): Readiness {
+        if (reconnectRequired) return Readiness.AUTH_RECONNECT_REQUIRED
+        val historicalBlocked = historicalCooldownUntilMs > nowMs
+        val liveBlocked = liveDataCooldownUntilMs > nowMs
+        return when {
+            historicalBlocked && liveBlocked -> Readiness.MULTIPLE_API_COOLDOWNS
+            historicalBlocked -> Readiness.HISTORICAL_COOLDOWN
+            liveBlocked -> Readiness.LIVE_DATA_COOLDOWN
+            else -> Readiness.READY
+        }
     }
 
     fun shouldAuditSuppression(
