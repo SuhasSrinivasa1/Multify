@@ -40,6 +40,7 @@ internal class GrowwRateLimitInterceptor(
     // This never changes Fixed scoring, SELL stop triggers or order dispatch.
     private val alphaLtpMinute = ArrayDeque<Long>()
     private val pendingProtectionLtps = AtomicInteger(0)
+    private val pendingFixedLiveRequests = AtomicInteger(0)
     private var lastAlphaLtpGrantedAtMs = 0L
     private val lastBlockedAuditMs = EnumMap<GrowwApiUsageLedger.Category, Long>(GrowwApiUsageLedger.Category::class.java)
     private val states = EnumMap<GrowwApiUsageLedger.Category, State>(GrowwApiUsageLedger.Category::class.java).apply {
