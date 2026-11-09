@@ -7147,15 +7147,22 @@ class TradingRepository @Inject constructor(
                     quoteReceivedAtMs = quoteStartedAtMs + quoteElapsedMs,
                     allowOtherSymbolProtectionRecovery = true)
             }.onFailure {
+                // Response body is already available locally; this does not request wallet
+                // balance or make another broker call. Never persist the raw broker body.
+                val brokerError = runCatching {
+                    (it as? HttpException)?.response()?.errorBody()?.string()?.take(1_024)
+                }.getOrNull()
+                val insufficient = BrokerBuyFailureMessagePolicy.insufficientFunds(
+                    it.message.orEmpty() + " " + brokerError.orEmpty())
                 auditLogger.log("FIXED_AUTO_BUY", "MARKET_BUY_ERROR", mapOf(
                     "symbol" to row.symbol,
                     "reference" to reference,
                     "fresh_ltp" to ltp,
                     "message" to (it.message ?: it.javaClass.simpleName),
-                    "insufficient_funds" to BrokerBuyFailureMessagePolicy.insufficientFunds(it.message),
+                    "insufficient_funds" to insufficient,
                     "wallet_api_calls" to 0
                 ))
-                notifyInsufficientFundsIfConfirmed(row.symbol, it)
+                if (insufficient) notifyInsufficientFundsIfConfirmed(row.symbol)
             }.getOrNull() ?: continue
 
             val orderElapsedMs = (System.currentTimeMillis() - orderStartedAtMs).coerceAtLeast(0L)
@@ -8917,8 +8924,7 @@ class TradingRepository @Inject constructor(
     }
 
     /** Inform the user about explicit broker funds rejection; never queries wallet or changes order flow. */
-    private fun notifyInsufficientFundsIfConfirmed(symbol: String, failure: Throwable) {
-        if (!BrokerBuyFailureMessagePolicy.insufficientFunds(failure.message)) return
+    private fun notifyInsufficientFundsIfConfirmed(symbol: String) {
         auditLogger.logAsync("BROKER_BUY", "INSUFFICIENT_FUNDS_REJECTED", mapOf(
             "symbol" to symbol, "source" to "BROKER_REJECTION_MESSAGE",
             "wallet_api_calls" to 0, "buy_was_not_placed" to true
