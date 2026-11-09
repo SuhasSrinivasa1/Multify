@@ -10844,7 +10844,7 @@ class TradingRepository @Inject constructor(
                     "fixed_factor_telemetry_file" to "fixed_factor_snapshots.jsonl",
                     "fixed_early_watch_file" to "fixed_early_watch.json",
                     "fixed_early_watch_read_only" to true,
-                    "fixed_quality_shadow_no_buy_filter" to false,
+                    "fixed_quality_shadow_no_buy_filter" to true,
                     "fixed_multi_day_late_entry_guard_enabled" to true,
                     "fixed_multi_day_late_entry_guard_version" to "FIXED_MULTI_DAY_15M_LATE_ENTRY_V1",
                     "fixed_multi_day_window_is_not_today_high" to true,
