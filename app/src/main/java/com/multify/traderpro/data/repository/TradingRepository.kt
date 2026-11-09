@@ -4101,8 +4101,12 @@ class TradingRepository @Inject constructor(
                     GrowwApiUsageLedger.Category.LIVE_DATA,
                     GrowwApiUsageLedger.Category.HISTORICAL
                 ).firstNotNullOfOrNull { category ->
-                    runCatching { recoveryGate.checkRequestAllowed(category); null }
-                        .getOrElse { it as? GrowwRecoveryGate.LocallyBlocked }
+                    try {
+                        recoveryGate.checkRequestAllowed(category)
+                        null
+                    } catch (blocked: GrowwRecoveryGate.LocallyBlocked) {
+                        blocked
+                    }
                 }
                 if (alphaCooldown != null) {
                     auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "BETA_DETAIL_FALLBACK_DEFERRED_ALPHA_COOLDOWN", mapOf(
