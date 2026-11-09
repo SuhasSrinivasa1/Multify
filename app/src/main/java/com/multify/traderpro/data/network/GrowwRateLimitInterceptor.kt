@@ -98,6 +98,9 @@ internal class GrowwRateLimitInterceptor(
             auditLogger.logAsync("API_RATE_LIMIT", "HTTP_429", mapOf(
                 "method" to request.method,
                 "path" to path,
+                "account" to "ALPHA",
+                "beta_request_counters_excluded" to true,
+                "groww_documented_quota_is_category_shared" to true,
                 "category" to category.name,
                 "network_ms" to networkMs,
                 "retry_after_raw" to rawRetryAfter,
