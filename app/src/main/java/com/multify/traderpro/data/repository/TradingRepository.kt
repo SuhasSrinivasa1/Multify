@@ -4097,12 +4097,29 @@ class TradingRepository @Inject constructor(
                     ))
                     throw failed
                 }
+                val alphaCooldown = listOf(
+                    GrowwApiUsageLedger.Category.LIVE_DATA,
+                    GrowwApiUsageLedger.Category.HISTORICAL
+                ).firstNotNullOfOrNull { category ->
+                    runCatching { recoveryGate.checkRequestAllowed(category); null }
+                        .getOrElse { it as? GrowwRecoveryGate.LocallyBlocked }
+                }
+                if (alphaCooldown != null) {
+                    auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "BETA_DETAIL_FALLBACK_DEFERRED_ALPHA_COOLDOWN", mapOf(
+                        "symbol" to symbol, "reason" to alphaCooldown.reason,
+                        "next_allowed_at_ms" to alphaCooldown.nextAllowedAtMs,
+                        "alpha_requests_suppressed" to true,
+                        "fixed_scoring_changed" to false
+                    ))
+                    throw failed
+                }
                 auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "BETA_DETAIL_FALLBACK_ALPHA", mapOf(
                     "symbol" to symbol,
                     "error" to failed.javaClass.simpleName,
                     "reason" to (failed.message ?: "UNSPECIFIED").take(180),
                     "fixed_scoring_changed" to false,
-                    "broker_execution_account" to "ALPHA"
+                    "broker_execution_account" to "ALPHA",
+                    "shared_request_budget_enforced" to true
                 ))
             }
         }
@@ -4489,6 +4506,17 @@ class TradingRepository @Inject constructor(
         chunk: List<String>,
         batchIndex: Int
     ): Map<String, Double>? {
+        try {
+            recoveryGate.checkRequestAllowed(GrowwApiUsageLedger.Category.LIVE_DATA)
+        } catch (blocked: GrowwRecoveryGate.LocallyBlocked) {
+            auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "ALPHA_LTP_FALLBACK_DEFERRED_COOLDOWN", mapOf(
+                "batch_index" to batchIndex,
+                "reason" to blocked.reason,
+                "next_allowed_at_ms" to blocked.nextAllowedAtMs,
+                "broker_request_suppressed" to true
+            ))
+            return null
+        }
         var lastFailure: Throwable? = null
         for (attempt in 0 until FIXED_V741_DISCOVERY_BATCH_ATTEMPTS) {
             try {
