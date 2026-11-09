@@ -6,6 +6,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import retrofit2.HttpException
 import com.multify.traderpro.engine.GrowwRetryAfterPolicy
+import com.multify.traderpro.engine.GrowwRecoveryPolicy
 import java.util.ArrayDeque
 import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
@@ -103,13 +104,9 @@ class BetaResearchGate @Inject constructor() {
                     }
                     val sameIncident = w.rateLimitTimes.lastOrNull()?.let { now - it < 5_000L } == true
                     if (!sameIncident) w.rateLimitTimes.addLast(now)
-                    val cooldownFloor = when {
-                        w.rateLimitTimes.size >= 4 -> 30L * 60_000L
-                        w.rateLimitTimes.size == 3 -> 10L * 60_000L
-                        w.rateLimitTimes.size == 2 -> 3L * 60_000L
-                        else -> 60_000L
-                    }
-                    val cooldownMs = maxOf(cooldownFloor, retryAfterMs.coerceIn(0L, 6L * 60L * 60_000L))
+                    val cooldownMs = GrowwRecoveryPolicy.cooldownMs(
+                        w.rateLimitTimes.size.coerceAtLeast(1), retryAfterMs
+                    )
                     w.cooldownUntil = maxOf(w.cooldownUntil, now + cooldownMs)
                 }
             }
