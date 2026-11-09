@@ -6887,7 +6887,7 @@ class TradingRepository @Inject constructor(
             auditAutoBuyBlocked("FIXED_AUTO_BUY", preflightCooldown)
             return 0
         }
-        preIndependentExecutionGuard(settings)
+        preFixedAutoBuyExecutionGuard(settings)
         val token = ensureToken() ?: run {
             auditLogger.logAsync("FIXED_AUTO_BUY", "BUY_BLOCKED_BROKER_NOT_READY", mapOf("reason" to "TOKEN_NOT_READY"))
             return 0
@@ -7063,7 +7063,9 @@ class TradingRepository @Inject constructor(
             val reference = stableRef("FXM", "${row.recommendationDate}-${row.id}-${row.symbol}")
             val orderStartedAtMs = System.currentTimeMillis()
             val order = runCatching {
-                placeCncBuy(token, row.symbol, sizing.quantity, reference, entryQuote = quote, quoteReceivedAtMs = quoteStartedAtMs + quoteElapsedMs)
+                placeCncBuy(token, row.symbol, sizing.quantity, reference, entryQuote = quote,
+                    quoteReceivedAtMs = quoteStartedAtMs + quoteElapsedMs,
+                    allowOtherSymbolProtectionRecovery = true)
             }.onFailure {
                 auditLogger.log("FIXED_AUTO_BUY", "MARKET_BUY_ERROR", mapOf(
                     "symbol" to row.symbol,
@@ -7102,7 +7104,9 @@ class TradingRepository @Inject constructor(
                     trailingArmPct = SteppedTrailingPolicy.ARM_TRIGGER_PCT,
                     trailingLastRatchetPrice = 0.0,
                     smartOrderMode = HoldingSmartOrderPolicy.MODE_NONE
-                )
+                ),
+                allowFreshPostFillProof = true,
+                deferProtectionRetryToMonitor = true
             )
             brokerInventorySnapshot = null
             auditLogger.logAsync("FIXED_AUTO_BUY", "ENTRY_LATENCY_PROFILE", mapOf(
@@ -8348,21 +8352,34 @@ class TradingRepository @Inject constructor(
         }
     }
 
-    /** Broker inventory must consist entirely of this app's one tracked BUY for the symbol. */
+    /**
+     * Normal SELL scope requires broker inventory to equal the one app-owned BUY.
+     * A just-filled Fixed Auto Buy may instead use its verified empty pre-trade snapshot
+     * briefly while Groww's post-fill holdings/positions view catches up.
+     */
     private suspend fun safeAppSellScope(
         token: String, position: ManagedPositionEntity,
         inventory: BrokerInventorySnapshot? = null,
         forceGttRefresh: Boolean = false,
-        knownActiveGtts: Map<String, List<SmartOrderPayload>>? = null
+        knownActiveGtts: Map<String, List<SmartOrderPayload>>? = null,
+        allowFreshPostFillProof: Boolean = false
     ): Boolean {
         if (!appOwned(position)) return false
         val openSameSymbol = managedDao.openPositions().filter { it.symbol.equals(position.symbol, true) }
         if (openSameSymbol.size != 1 || openSameSymbol.single().id != position.id) return false
-        val broker = inventory ?: brokerInventory(token, force = true)
+        // The Fixed Auto Buy caller can supply this proof only after placeCncBuy has
+        // just verified zero pre-existing broker quantity for this symbol and received
+        // a confirmed app BUY fill. Groww's holdings/positions endpoints may lag that fill.
         val key = position.symbol.uppercase(Locale.US)
-        val demat = broker.holdings[key]?.quantity ?: 0
-        val cnc = broker.positions[key]?.quantity ?: 0
-        if (!AppPositionOwnershipPolicy.exclusiveBrokerQuantity(position.quantity, demat, cnc)) return false
+        val freshPostFillProof = inventory == null && allowFreshPostFillProof &&
+            AppPositionOwnershipPolicy.freshPostFillInventoryLagAllowed(
+                position.openedAtMs, System.currentTimeMillis())
+        if (!freshPostFillProof) {
+            val broker = inventory ?: brokerInventory(token, force = true)
+            val demat = broker.holdings[key]?.quantity ?: 0
+            val cnc = broker.positions[key]?.quantity ?: 0
+            if (!AppPositionOwnershipPolicy.exclusiveBrokerQuantity(position.quantity, demat, cnc)) return false
+        }
         val activeGtts = knownActiveGtts ?: activeGttsBySymbol(token, force = forceGttRefresh)
         val otherActiveGtt = activeGtts.getOrDefault(key, emptyList())
             .any { it.smartOrderId != position.smartOrderId }
@@ -8744,7 +8761,11 @@ class TradingRepository @Inject constructor(
      * of recommendation source. A local stop alone is NOT server-side protection.
      * An unverified GTT is retained for reconciliation, never duplicated.
      */
-    private suspend fun registerBoughtPositionAndProtect(position: ManagedPositionEntity): Long {
+    private suspend fun registerBoughtPositionAndProtect(
+        position: ManagedPositionEntity,
+        allowFreshPostFillProof: Boolean = false,
+        deferProtectionRetryToMonitor: Boolean = false
+    ): Long {
         val lifecycleMutex = positionLifecycleMutexes.computeIfAbsent(position.symbol.uppercase(Locale.US)) { Mutex() }
         return lifecycleMutex.withLock {
         val id = managedDao.insertPosition(position)
@@ -8762,7 +8783,10 @@ class TradingRepository @Inject constructor(
             return@withLock id
         }
         var lastFailure = "BROKER_PROTECTION_NOT_VERIFIED"
-        for (attempt in 1..3) {
+        // Fixed Auto Buy makes one immediate protection attempt, then hands any
+        // broker-visibility delay to the independent 1-second position-monitor worker.
+        val maxImmediateProtectionAttempts = if (deferProtectionRetryToMonitor) 1 else 3
+        for (attempt in 1..maxImmediateProtectionAttempts) {
             try {
                 val current = managedDao.openPositionById(id) ?: return@withLock id
                 val protected = if (!current.smartOrderId.isNullOrBlank()) {
@@ -8770,7 +8794,8 @@ class TradingRepository @Inject constructor(
                 } else {
                     createPositionGtt(
                         token, current, HardStopLossPolicy.stopPrice(current.entryPrice),
-                        "DOWN", HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT
+                        "DOWN", HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT,
+                        allowFreshPostFillProof = allowFreshPostFillProof
                     ).let { refreshKnownSmartOrderStatus(token, it, force = true) }
                 }
                 if (com.multify.traderpro.engine.GttProtectionReadinessPolicy.verified(
@@ -8795,8 +8820,14 @@ class TradingRepository @Inject constructor(
                     "new_buy_allowed_before_protection" to false
                 ))
             }
-            if (attempt < 3) delay(700L * attempt)
+            if (attempt < maxImmediateProtectionAttempts) delay(700L * attempt)
         }
+        if (deferProtectionRetryToMonitor) auditLogger.log("PROTECTION",
+            "POST_FILL_PROTECTION_HANDED_TO_BACKGROUND_MONITOR", mapOf(
+                "symbol" to position.symbol, "engine" to position.engine,
+                "position_id" to id, "immediate_attempts" to maxImmediateProtectionAttempts,
+                "portfolio_monitor_retry_interval_ms" to 1_000L
+            ))
         reportCriticalUnprotected(position, id, lastFailure)
         id
         }
@@ -8808,6 +8839,7 @@ class TradingRepository @Inject constructor(
             "symbol" to position.symbol, "engine" to position.engine,
             "position_id" to id, "quantity" to position.quantity,
             "reason" to reason, "new_buys_blocked" to true,
+            "fixed_auto_buy_distinct_symbols_may_continue" to true,
             "manual_broker_review_required" to true
         ))
         runCatching {
@@ -8822,7 +8854,8 @@ class TradingRepository @Inject constructor(
                 .setContentText("BUY filled but broker GTT is not verified. Review Groww directly.")
                 .setStyle(NotificationCompat.BigTextStyle().bigText(
                     "A ${position.engine} BUY was confirmed, but its protective SELL GTT could not be verified. " +
-                    "Do not rely on an in-app stop. Check Groww's holdings and active GTT orders."))
+                    "Do not rely on an in-app stop. Check Groww's holdings and active GTT orders. " +
+                    "Fixed Auto Buy may continue for distinct eligible symbols while this holding is reconciled."))
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
                 .setAutoCancel(true)
                 .build()
@@ -9102,7 +9135,8 @@ class TradingRepository @Inject constructor(
         position: ManagedPositionEntity,
         triggerPrice: Double,
         direction: String,
-        mode: String
+        mode: String,
+        allowFreshPostFillProof: Boolean = false
     ): ManagedPositionEntity = protectiveGttCreationMutex.withLock {
         // Always use the latest Room row; callers may hold an older portfolio snapshot.
         val current = managedDao.openPositionById(position.id)
@@ -9152,9 +9186,20 @@ class TradingRepository @Inject constructor(
             return@withLock updated
         }
 
+        val freshPostFillProof = allowFreshPostFillProof &&
+            AppPositionOwnershipPolicy.freshPostFillInventoryLagAllowed(
+                current.openedAtMs, System.currentTimeMillis())
         require(safeAppSellScope(
-            token, current, forceGttRefresh = false, knownActiveGtts = active
+            token, current, forceGttRefresh = false, knownActiveGtts = active,
+            allowFreshPostFillProof = freshPostFillProof
         )) { "GTT SELL blocked: ${current.symbol} is not exclusively app-bought or another GTT exists" }
+        if (freshPostFillProof) auditLogger.log("PROTECTION", "POST_FILL_INVENTORY_LAG_PROOF_USED", mapOf(
+            "symbol" to current.symbol, "quantity" to current.quantity,
+            "pre_buy_broker_inventory_verified_empty" to true,
+            "same_symbol_app_position_exclusive" to true,
+            "active_gtt_conflict_checked" to true,
+            "broker_inventory_recheck_deferred" to true
+        ))
         require(direction in setOf("UP", "DOWN"))
         require(mode in setOf(
             HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT,
@@ -10905,6 +10950,19 @@ class TradingRepository @Inject constructor(
         require(marketSession() == "OPEN") { "NSE regular market session is not open" }
     }
 
+    /**
+     * Fixed Auto Buy is independent of asynchronous portfolio recovery. Every new symbol
+     * still passes its own fresh broker-inventory/duplicate check, account readiness,
+     * price/liquidity safeguards and immediate post-fill GTT attempt.
+     */
+    private fun preFixedAutoBuyExecutionGuard(settings: AppSettings) {
+        require(settings.brokerAuthenticated) { "Groww is not authenticated" }
+        require(settings.staticIpMatched) { "Static IP verification failed" }
+        require(settings.brokerDdpiEnabled) { "DDPI is required for CNC holdings" }
+        require(!settings.safetyHalt) { "Safety halt is active" }
+        require(marketSession() == "OPEN") { "NSE regular market session is not open" }
+    }
+
     private suspend fun placeCncBuy(
         token: String,
         symbol: String,
@@ -10912,7 +10970,8 @@ class TradingRepository @Inject constructor(
         reference: String,
         notificationStartedNs: Long? = null,
         entryQuote: QuotePayload,
-        quoteReceivedAtMs: Long
+        quoteReceivedAtMs: Long,
+        allowOtherSymbolProtectionRecovery: Boolean = false
     ): OrderPayload = appOwnedBuyMutex.withLock {
         // Serialize all application CNC entries so two independent engines cannot both buy
         // the same symbol while the first order is still awaiting broker acknowledgement.
@@ -10927,11 +10986,19 @@ class TradingRepository @Inject constructor(
             com.multify.traderpro.engine.GttProtectionReadinessPolicy.verified(
                 it.smartOrderMode, it.smartOrderId, it.smartOrderStatus)
         }
-        if (unprotected.isNotEmpty()) auditLogger.log("SAFETY", "NEW_BUY_BLOCKED_UNPROTECTED_HOLDING", mapOf(
-            "symbol" to symbol, "unprotected_symbols" to unprotected.map { it.symbol },
-            "critical_trading_priority" to true
-        ))
-        require(unprotected.isEmpty()) { "New BUY blocked: app-owned holding lacks verified broker GTT" }
+        if (unprotected.isNotEmpty()) {
+            auditLogger.log("SAFETY",
+                if (allowOtherSymbolProtectionRecovery)
+                    "FIXED_BUY_CONTINUED_DURING_OTHER_SYMBOL_PROTECTION_RECOVERY"
+                else "NEW_BUY_BLOCKED_UNPROTECTED_HOLDING",
+                mapOf("symbol" to symbol, "unprotected_symbols" to unprotected.map { it.symbol },
+                    "critical_trading_priority" to true,
+                    "new_symbol_ownership_check_passed" to true,
+                    "buy_allowed" to allowOtherSymbolProtectionRecovery))
+        }
+        require(allowOtherSymbolProtectionRecovery || unprotected.isEmpty()) {
+            "New BUY blocked: app-owned holding lacks verified broker GTT"
+        }
         // Reuse the quote fetched on the signal path. If broker inventory checks made
         // it stale, refresh only this one symbol once, never the full NSE universe.
         val age = System.currentTimeMillis() - quoteReceivedAtMs

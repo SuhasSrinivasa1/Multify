@@ -30,8 +30,8 @@ android {
         applicationId = "com.multify.traderpro.vivoy73final"
         minSdk = 26
         targetSdk = 35
-        versionCode = 8391
-        versionName = "8.3.10-fixed-auto-buy-new-signals-only"
+        versionCode = 8392
+        versionName = "8.3.11-fixed-auto-buy-independent-recovery"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
     }
