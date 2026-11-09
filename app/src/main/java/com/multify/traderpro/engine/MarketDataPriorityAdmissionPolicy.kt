@@ -22,7 +22,9 @@ object MarketDataPriorityAdmissionPolicy {
         hasHoldings: Boolean,
         isProtection: Boolean
     ): Allowance {
-        val reserve = hasHoldings && !isProtection
+        // Keep the 20% Alpha reserve even when no holding is currently open: a
+        // new Multify/Fixed fill may require a protection quote immediately.
+        val reserve = !isProtection
         return Allowance(
             GrowwApiBudgetPolicy.APP_LIVE_DATA_PER_SECOND -
                 if (reserve) GrowwApiBudgetPolicy.SELL_MONITOR_RESERVED_PER_SECOND else 0,
