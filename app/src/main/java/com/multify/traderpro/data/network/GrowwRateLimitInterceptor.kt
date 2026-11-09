@@ -86,10 +86,16 @@ internal class GrowwRateLimitInterceptor(
             )
         }
         GrowwApiUsageLedger.recordResponse(category, networkMs, response.code)
+        val sharedLane = when (category) {
+            GrowwApiUsageLedger.Category.LIVE_DATA -> GrowwSharedMarketDataBudget.Lane.LIVE
+            GrowwApiUsageLedger.Category.HISTORICAL -> GrowwSharedMarketDataBudget.Lane.HISTORICAL
+            else -> null
+        }
         if (response.code == 429) {
             val rawRetryAfter = response.header("Retry-After")
             val retryAfterMs = GrowwRetryAfterPolicy.retryAfterMs(rawRetryAfter, System.currentTimeMillis())
             val appliedCooldownMs = recoveryGate.on429(category, retryAfterMs)
+            if (sharedLane != null) GrowwSharedMarketDataBudget.on429(sharedLane, maxOf(appliedCooldownMs, retryAfterMs))
             synchronized(lock) {
                 val state = states.getValue(category)
                 state.cooldownUntilMs = maxOf(state.cooldownUntilMs, SystemClock.elapsedRealtime() + appliedCooldownMs)
@@ -118,6 +124,7 @@ internal class GrowwRateLimitInterceptor(
                 "governor_wait_ms_max" to row.maxPermitWaitMs
             ))
         }
+        if (sharedLane != null) GrowwSharedMarketDataBudget.completed(sharedLane, response.code)
         if (response.code == 401 && category != GrowwApiUsageLedger.Category.AUTH) {
             recoveryGate.onUnauthorized()
             stateScope.launch { appPreferences.updateAuthState(authenticated = false) }
@@ -224,6 +231,14 @@ internal class GrowwRateLimitInterceptor(
                             "hard_limit_60s" to row.hardPerMinuteLimit
                         ))
                     }
+                }
+                val sharedLane = when (category) {
+                    GrowwApiUsageLedger.Category.LIVE_DATA -> GrowwSharedMarketDataBudget.Lane.LIVE
+                    GrowwApiUsageLedger.Category.HISTORICAL -> GrowwSharedMarketDataBudget.Lane.HISTORICAL
+                    else -> null
+                }
+                if (sharedLane != null) {
+                    GrowwSharedMarketDataBudget.acquire(sharedLane, "ALPHA", protection)
                 }
                 return
             }
