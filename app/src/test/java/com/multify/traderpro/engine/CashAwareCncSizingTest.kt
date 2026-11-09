@@ -40,6 +40,20 @@ class CashAwareCncSizingTest {
         assertEquals(15, limitedByFreshCash.quantity)
     }
 
+    @Test fun configuredBudgetSizingNeverNeedsWalletBalance() {
+        val s = CashAwareCncSizing.sizeConfiguredBudget(30_000.0, 1_000.0)
+        assertEquals(29, s.quantity)
+        assertEquals(30_000.0, s.deployableCash, 0.0001)
+        assertEquals(1_020.0, s.bufferedPrice, 0.0001)
+        assertEquals(0.0, s.cashReserve, 0.0001)
+    }
+
+    @Test fun configuredBudgetRejectsInvalidOrTooSmallBudgetsWithoutWalletLookup() {
+        assertEquals(0, CashAwareCncSizing.sizeConfiguredBudget(0.0, 1_000.0).quantity)
+        assertEquals(0, CashAwareCncSizing.sizeConfiguredBudget(30_000.0, 40_000.0).quantity)
+        assertEquals(0, CashAwareCncSizing.sizeConfiguredBudget(30_000.0, 0.0).quantity)
+    }
+
     @Test fun fixedStillCapsAtConfiguredBudget() {
         val s = CashAwareCncSizing.sizeFixedAvailable(50_000.0, 200_000.0, 1_000.0)
         assertEquals(49, s.quantity)
