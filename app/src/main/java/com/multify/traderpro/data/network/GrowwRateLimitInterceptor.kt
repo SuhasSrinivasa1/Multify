@@ -72,8 +72,18 @@ internal class GrowwRateLimitInterceptor(
         val started = SystemClock.elapsedRealtime()
         val requestStartedAtMs = System.currentTimeMillis()
         // Request priority is internal scheduler metadata, never a Groww API header.
-        val response = chain.proceed(request.newBuilder()
-            .removeHeader(MarketDataPriorityAdmissionPolicy.HEADER).build())
+        val permitLane = when (category) {
+            GrowwApiUsageLedger.Category.LIVE_DATA -> GrowwSharedMarketDataBudget.Lane.LIVE
+            GrowwApiUsageLedger.Category.HISTORICAL -> GrowwSharedMarketDataBudget.Lane.HISTORICAL
+            else -> null
+        }
+        val response = try {
+            chain.proceed(request.newBuilder()
+                .removeHeader(MarketDataPriorityAdmissionPolicy.HEADER).build())
+        } catch (failure: Throwable) {
+            if (permitLane != null) GrowwSharedMarketDataBudget.completed(permitLane, 0)
+            throw failure
+        }
         val networkMs = (SystemClock.elapsedRealtime() - started).coerceAtLeast(0L)
         if (path == "/v1/live-data/quote" &&
             request.url.queryParameter("exchange").equals("NSE", ignoreCase = true) &&
@@ -86,10 +96,16 @@ internal class GrowwRateLimitInterceptor(
             )
         }
         GrowwApiUsageLedger.recordResponse(category, networkMs, response.code)
+        val sharedLane = when (category) {
+            GrowwApiUsageLedger.Category.LIVE_DATA -> GrowwSharedMarketDataBudget.Lane.LIVE
+            GrowwApiUsageLedger.Category.HISTORICAL -> GrowwSharedMarketDataBudget.Lane.HISTORICAL
+            else -> null
+        }
         if (response.code == 429) {
             val rawRetryAfter = response.header("Retry-After")
             val retryAfterMs = GrowwRetryAfterPolicy.retryAfterMs(rawRetryAfter, System.currentTimeMillis())
             val appliedCooldownMs = recoveryGate.on429(category, retryAfterMs)
+            if (sharedLane != null) GrowwSharedMarketDataBudget.on429(sharedLane, maxOf(appliedCooldownMs, retryAfterMs))
             synchronized(lock) {
                 val state = states.getValue(category)
                 state.cooldownUntilMs = maxOf(state.cooldownUntilMs, SystemClock.elapsedRealtime() + appliedCooldownMs)
@@ -118,6 +134,7 @@ internal class GrowwRateLimitInterceptor(
                 "governor_wait_ms_max" to row.maxPermitWaitMs
             ))
         }
+        if (sharedLane != null) GrowwSharedMarketDataBudget.completed(sharedLane, response.code)
         if (response.code == 401 && category != GrowwApiUsageLedger.Category.AUTH) {
             recoveryGate.onUnauthorized()
             stateScope.launch { appPreferences.updateAuthState(authenticated = false) }
@@ -224,6 +241,14 @@ internal class GrowwRateLimitInterceptor(
                             "hard_limit_60s" to row.hardPerMinuteLimit
                         ))
                     }
+                }
+                val sharedLane = when (category) {
+                    GrowwApiUsageLedger.Category.LIVE_DATA -> GrowwSharedMarketDataBudget.Lane.LIVE
+                    GrowwApiUsageLedger.Category.HISTORICAL -> GrowwSharedMarketDataBudget.Lane.HISTORICAL
+                    else -> null
+                }
+                if (sharedLane != null) {
+                    GrowwSharedMarketDataBudget.acquire(sharedLane, "ALPHA", protection)
                 }
                 return
             }

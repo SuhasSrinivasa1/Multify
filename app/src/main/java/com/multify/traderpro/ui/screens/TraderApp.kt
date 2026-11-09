@@ -915,6 +915,12 @@ private fun FixedScreen(
             ) {
                 Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
                     Text("Market discovery · ${health.discovery}", fontWeight = FontWeight.SemiBold)
+                    val liveBudget = com.multify.traderpro.data.network.GrowwSharedMarketDataBudget
+                        .snapshot(com.multify.traderpro.data.network.GrowwSharedMarketDataBudget.Lane.LIVE)
+                    Text("Shared Alpha/Beta live API: ${liveBudget.state} · ${liveBudget.usedLastMinute}/${liveBudget.minuteLimit} requests/min" +
+                        if (liveBudget.cooldownRemainingMs > 0) " · retry in ${(liveBudget.cooldownRemainingMs + 999) / 1000}s" else "",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Text(
                         "${String.format(Locale.US, "%.1f%%", health.discoveryCoveragePct)} NSE coverage · baseline " +
                             if (health.discoveryBaselineReady) "ready" else "warming",
