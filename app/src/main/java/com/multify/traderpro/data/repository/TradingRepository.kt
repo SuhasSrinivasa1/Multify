@@ -208,7 +208,7 @@ data class AuthenticationResult(
     val publicIp: String,
     val staticIpMatched: Boolean,
     val accessTokenExpiry: String,
-    val cncBalanceAvailable: Double,
+    val cncBalanceAvailable: Double?,
     val ddpiEnabled: Boolean,
     val detail: String
 )
@@ -313,6 +313,7 @@ class TradingRepository @Inject constructor(
 
     private var lastForecastOutcomeMonitorAtMs = 0L
     private var lastFixedOutcomeMonitorAtMs = 0L
+    private var lastFixedOutcomeCooldownAuditAtMs = 0L
     private var lastFixedCandidateOnlyLtpAtMs = 0L
     private var lastFixedPreMarketWarmupAtMs = 0L
     private var lastFixedHotPrewarmForDueAtMs = 0L
@@ -325,7 +326,6 @@ class TradingRepository @Inject constructor(
     private val recentlyClosedSymbolsAtMs = ConcurrentHashMap<String, Long>()
     private var lastArmHotAuditAtMs = 0L
     private var lastMfeBackfillAtMs = 0L
-    private var lastArmHotAuditBalance = Double.NaN
     private var lastArmHotAuditArmed: Boolean? = null
     private val closePositionMutexes = ConcurrentHashMap<Long, Mutex>()
     private val appOwnedBuyMutex = Mutex()
@@ -428,7 +428,6 @@ class TradingRepository @Inject constructor(
     private data class ArmHotState(
         val token: String,
         val settings: AppSettings,
-        val cncBalance: Double,
         val warmedAtMs: Long
     )
 
@@ -1162,7 +1161,7 @@ class TradingRepository @Inject constructor(
                 val cause = warm.exceptionOrNull()
                 val reason = when (cause) {
                     is GrowwRecoveryGate.LocallyBlocked -> cause.reason
-                    null -> "TOKEN_OR_MARGIN_UNAVAILABLE"
+                    null -> "TOKEN_NOT_READY"
                     else -> "BROKER_PREWARM_EXCEPTION"
                 }
                 auditLogger.log("SETTINGS", "ARM_REJECTED", mapOf(
@@ -1492,7 +1491,7 @@ class TradingRepository @Inject constructor(
 
     /** A read-only check: never send doomed live-data or non-trading calls during broker cooldowns. */
     private fun buyApiCooldownOrNull(): GrowwRecoveryGate.LocallyBlocked? {
-        for (category in listOf(GrowwApiUsageLedger.Category.LIVE_DATA, GrowwApiUsageLedger.Category.NON_TRADING)) {
+        for (category in listOf(GrowwApiUsageLedger.Category.LIVE_DATA, GrowwApiUsageLedger.Category.ORDERS)) {
             try {
                 recoveryGate.checkRequestAllowed(category)
             } catch (blocked: GrowwRecoveryGate.LocallyBlocked) {
@@ -1600,28 +1599,28 @@ class TradingRepository @Inject constructor(
         }
         val cashEnabled = profile.nseEnabled && profile.activeSegments.any { it.equals("CASH", true) }
         require(cashEnabled) { "Groww profile is not enabled for NSE CASH trading" }
-        val margin = apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin")
         val expiry = tokenResponse.expiry.orEmpty()
         preferences.updateAuthState(
             authenticated = true, authenticatedAtMs = System.currentTimeMillis(), accessTokenExpiry = expiry,
             brokerUcc = profile.ucc.orEmpty(), brokerDdpiEnabled = profile.ddpiEnabled,
             verifiedPublicIp = publicIp, staticIpMatched = staticMatched
         )
-        val cnc = margin.equity?.cncBalanceAvailable ?: margin.clearCash
         val refreshedSettings = preferences.settings.first()
-        armHotState = ArmHotState(token, refreshedSettings, cnc.coerceAtLeast(0.0), System.currentTimeMillis())
+        armHotState = ArmHotState(token, refreshedSettings, System.currentTimeMillis())
         auditLogger.log("AUTH", "AUTHENTICATION_SUCCESS", mapOf(
             "nse_cash_enabled" to cashEnabled, "ddpi_enabled" to profile.ddpiEnabled,
-            "static_ip_matched" to staticMatched, "cnc_balance_available" to cnc
+            "static_ip_matched" to staticMatched, "wallet_balance_queried" to false,
+            "order_funds_validation" to "GROWW_ORDER_RESPONSE"
         ))
         return AuthenticationResult(
             authenticated = true, ucc = profile.ucc.orEmpty(), nseCashEnabled = cashEnabled,
             publicIp = publicIp, staticIpMatched = staticMatched, accessTokenExpiry = expiry,
-            cncBalanceAvailable = cnc, ddpiEnabled = profile.ddpiEnabled,
+            cncBalanceAvailable = null, ddpiEnabled = profile.ddpiEnabled,
             detail = buildString {
                 append("Groww authenticated")
                 if (profile.ucc?.isNotBlank() == true) append(" · UCC ${profile.ucc}")
                 append(if (profile.ddpiEnabled) " · DDPI enabled" else " · DDPI required before ARM")
+                append(" · wallet not queried; Groww validates each order")
                 if (publicIp.isNotBlank()) append(" · egress $publicIp")
                 if (settings.expectedStaticIp.isNotBlank()) append(if (staticMatched) " · static IP matched" else " · STATIC IP MISMATCH")
             }
@@ -1833,15 +1832,13 @@ class TradingRepository @Inject constructor(
             return disconnectedDashboard(settings, fixedSnapshotState)
         }
         return try {
-            val margin = apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin")
-            val cnc = (margin.equity?.cncBalanceAvailable ?: margin.clearCash).coerceAtLeast(0.0)
-            armHotState = ArmHotState(token, settings, cnc, System.currentTimeMillis())
+            armHotState = ArmHotState(token, settings, System.currentTimeMillis())
             ensureHistoricalSeed()
             runCatching { backfillRecentMultifyMfe(token, MFE_BACKFILL_BATCH_SIZE) }
             val learning = learningStats()
             val forecastLearning = forecastLearningStats()
             val forecastReferences = forecastReferenceStats()
-            val snapshot = managedSnapshot(token)
+            val snapshot = managedSnapshotLocal()
             val execution = executionStats()
             val today = LocalDate.now(INDIA).toString()
             val forecasts = learningDao.longForecastsForDate(today)
@@ -1885,7 +1882,7 @@ class TradingRepository @Inject constructor(
                 asOf = ZonedDateTime.now(INDIA).format(DateTimeFormatter.ISO_OFFSET_DATE_TIME),
                 broker = BrokerStatusDto(
                     configured = hasBrokerCredentials(), connected = true,
-                    detail = "CNC holdings only · DDPI ${if (settings.brokerDdpiEnabled) "enabled" else "required"} · available ₹${fmt(margin.equity?.cncBalanceAvailable ?: margin.clearCash)} · NSE master ${symbolStatus.count}"
+                    detail = "CNC holdings only · DDPI ${if (settings.brokerDdpiEnabled) "enabled" else "required"} · wallet not queried (Groww validates orders) · NSE master ${symbolStatus.count}"
                 ),
                 risk = RiskStatusDto(
                     maxExposure = settings.holdingBudgetRupees.toDouble(),
@@ -2083,10 +2080,6 @@ class TradingRepository @Inject constructor(
         val hot = armHotState?.takeIf {
             it.token == token && System.currentTimeMillis() - it.warmedAtMs <= ARM_HOT_STATE_MAX_AGE_MS
         }
-        val available = hot?.cncBalance ?: run {
-            val margin = apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin")
-            (margin.equity?.cncBalanceAvailable ?: margin.clearCash).coerceAtLeast(0.0)
-        }
         val quoteStartedAtMs = SystemClock.elapsedRealtime()
         val entryQuote = apiFactory.groww.quote(
             bearer(token), tradingSymbol = symbol
@@ -2129,16 +2122,17 @@ class TradingRepository @Inject constructor(
             "quote_elapsed_ms" to quoteElapsedMs,
             "market_order_fill_can_slip_after_quote" to true
         ))
-        val sizing = CashAwareCncSizing.sizeStrictBudget(settings.holdingBudgetRupees.toDouble(), available, referencePrice)
+        val sizing = CashAwareCncSizing.sizeConfiguredBudget(settings.holdingBudgetRupees.toDouble(), livePrice)
         val capital = sizing.deployableCash
         val qty = sizing.quantity
-        require(qty > 0) { "Multify BUY skipped: full configured budget ₹${settings.holdingBudgetRupees} is not available" }
+        require(qty > 0) { "Multify BUY skipped: configured per-order budget is too small for $symbol" }
 
         val ref = stableRef("MLH", "$eventId-$symbol")
         val order = placeCncBuy(token, symbol, qty, ref, notificationStartedNs, entryQuote, quoteReceivedAtMs)
         auditLogger.log("EXECUTION", "CNC_BUY_SIZED", mapOf(
-            "symbol" to symbol, "available_cnc" to available, "configured_budget" to settings.holdingBudgetRupees,
-            "cash_reserve" to sizing.cashReserve, "reference_price" to referencePrice,
+            "symbol" to symbol, "configured_budget" to settings.holdingBudgetRupees,
+            "wallet_balance_prechecked" to false, "wallet_api_calls" to 0,
+            "cash_reserve" to sizing.cashReserve, "reference_price" to livePrice,
             "buffered_price" to sizing.bufferedPrice, "deployable_cash" to capital, "quantity" to qty,
             "fresh_quote" to livePrice, "quote_elapsed_ms" to quoteElapsedMs,
             "entry_band_low" to signal.entryLow, "entry_band_high" to signal.entryHigh
@@ -2170,10 +2164,7 @@ class TradingRepository @Inject constructor(
                 smartOrderMode = HoldingSmartOrderPolicy.MODE_NONE
             )
         )
-        armHotState = hot?.copy(
-            cncBalance = max(0.0, hot.cncBalance - entry * filled),
-            warmedAtMs = System.currentTimeMillis()
-        )
+        armHotState = hot?.copy(warmedAtMs = System.currentTimeMillis())
         val protectedPosition = managedDao.openPosition(ENGINE_MULTIFY_HOLDING, symbol)
         val protectionVerified = protectedPosition?.let {
             com.multify.traderpro.engine.GttProtectionReadinessPolicy.verified(
@@ -6242,16 +6233,15 @@ class TradingRepository @Inject constructor(
             error("Forecast BUY blocked: entry quote guard ($forecastExtensionReject)")
         }
         require(ltp < row.targetPrice) { "Forecast target already reached; BUY disabled" }
-        val margin = apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin")
-        val available = (margin.equity?.cncBalanceAvailable ?: margin.clearCash).coerceAtLeast(0.0)
-        val sizing = CashAwareCncSizing.sizeStrictBudget(settings.holdingBudgetRupees.toDouble(), available, ltp)
+        val sizing = CashAwareCncSizing.sizeConfiguredBudget(settings.holdingBudgetRupees.toDouble(), ltp)
         val capital = sizing.deployableCash
         val qty = sizing.quantity
-        require(qty > 0) { "Forecast BUY skipped: full configured budget ₹${settings.holdingBudgetRupees} is not available" }
+        require(qty > 0) { "Forecast BUY skipped: configured per-order budget is too small for ${row.symbol}" }
         val ref = stableRef("FLH", "${row.id}-${row.symbol}")
         val order = placeCncBuy(token, row.symbol, qty, ref, entryQuote = quote, quoteReceivedAtMs = quoteRequestStartedAtMs + quoteRequestElapsedMs)
         auditLogger.log("EXECUTION", "CNC_BUY_SIZED", mapOf(
-            "symbol" to row.symbol, "available_cnc" to available, "configured_budget" to settings.holdingBudgetRupees,
+            "symbol" to row.symbol, "configured_budget" to settings.holdingBudgetRupees,
+            "wallet_balance_prechecked" to false, "wallet_api_calls" to 0,
             "cash_reserve" to sizing.cashReserve, "reference_price" to ltp,
             "buffered_price" to sizing.bufferedPrice, "deployable_cash" to capital, "quantity" to qty,
             "order_first" to true
@@ -6800,10 +6790,8 @@ class TradingRepository @Inject constructor(
             fixedOutcomePerformanceStore.record(fixedRecommendationStore.recommendations(today))
             error("Fixed target already reached for $symbol; BUY disabled")
         }
-        val margin = apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin")
-        val available = (margin.equity?.cncBalanceAvailable ?: margin.clearCash).coerceAtLeast(0.0)
-        val sizing = CashAwareCncSizing.sizeFixedAvailable(settings.holdingBudgetRupees.toDouble(), available, ltp)
-        require(sizing.quantity > 0) { "Fixed BUY skipped: remaining CNC cash cannot fund one buffered share of ${row.symbol}" }
+        val sizing = CashAwareCncSizing.sizeConfiguredBudget(settings.holdingBudgetRupees.toDouble(), ltp)
+        require(sizing.quantity > 0) { "Fixed BUY skipped: configured per-order budget is too small for ${row.symbol}" }
 
         require(com.multify.traderpro.engine.NseEquitySessionCalendar.isFixedNewEntryWindow(ZonedDateTime.now(INDIA)) && marketSession() == "OPEN") {
             "Fixed BUY disabled: NSE special-session/regular entry cutoff reached"
@@ -7005,51 +6993,26 @@ class TradingRepository @Inject constructor(
                 continue
             }
 
-            val marginCooldown = buyApiCooldownOrNull()
-            if (marginCooldown != null) {
-                auditAutoBuyBlocked("FIXED_AUTO_BUY", marginCooldown)
-                break
-            }
-            val marginStartedAtMs = System.currentTimeMillis()
-            val margin = runCatching { apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin") }
-                .onFailure {
-                    auditLogger.log("FIXED_AUTO_BUY", "MARGIN_ERROR", mapOf(
-                        "symbol" to row.symbol,
-                        "message" to (it.message ?: it.javaClass.simpleName)
-                    ))
-                }.getOrNull()
-            if (margin == null) {
-                val cooldown = buyApiCooldownOrNull()
-                if (cooldown != null) {
-                    auditAutoBuyBlocked("FIXED_AUTO_BUY", cooldown)
-                    break
-                }
-                continue
-            }
-            val marginElapsedMs = (System.currentTimeMillis() - marginStartedAtMs).coerceAtLeast(0L)
-            val available = (margin.equity?.cncBalanceAvailable ?: margin.clearCash).coerceAtLeast(0.0)
-            val sizing = CashAwareCncSizing.sizeFixedAvailable(
-                liveSettings.holdingBudgetRupees.toDouble(),
-                available,
-                ltp
+            val sizing = CashAwareCncSizing.sizeConfiguredBudget(
+                liveSettings.holdingBudgetRupees.toDouble(), ltp
             )
-            // Per-stock, per-order budget; this is the freshly returned Groww CNC balance.
-            // No daily cumulative allocation, wallet cache, or reservation is applied.
-            auditLogger.logAsync("FIXED_AUTO_BUY", "WALLET_PER_ORDER_SIZED", mapOf(
+            auditLogger.logAsync("FIXED_AUTO_BUY", "CONFIGURED_BUDGET_ORDER_SIZED", mapOf(
                 "symbol" to row.symbol,
                 "per_order_cap_rupees" to liveSettings.holdingBudgetRupees,
-                "fresh_available_cnc_rupees" to available,
-                "deployable_rupees" to sizing.deployableCash,
+                "configured_budget_rupees" to sizing.deployableCash,
                 "requested_quantity" to sizing.quantity,
+                "wallet_balance_prechecked" to false,
+                "wallet_api_calls" to 0,
                 "daily_budget_limit_applied" to false,
-                "margin_elapsed_ms" to marginElapsedMs
+                "broker_rejects_if_funds_insufficient" to true,
+                "execution_price_buffer_pct" to 2.0
             ))
             if (sizing.quantity <= 0) {
-                auditLogger.log("FIXED_AUTO_BUY", "SKIPPED_NO_CASH", mapOf(
+                auditLogger.log("FIXED_AUTO_BUY", "SKIPPED_BUDGET_TOO_SMALL", mapOf(
                     "symbol" to row.symbol,
                     "published_entry" to row.entryPrice,
                     "fresh_ltp" to ltp,
-                    "available_cnc" to available
+                    "configured_budget" to liveSettings.holdingBudgetRupees
                 ))
                 continue
             }
@@ -7114,12 +7077,12 @@ class TradingRepository @Inject constructor(
                 "recommendation_generated_at_ms" to row.generatedAtMs,
                 "recommendation_age_at_auto_buy_start_ms" to recommendationAgeAtStartMs,
                 "quote_ms" to quoteElapsedMs,
-                "margin_ms" to marginElapsedMs,
+                "wallet_api_calls" to 0,
                 "order_to_fill_ms" to orderElapsedMs,
                 "symbol_total_ms" to (System.currentTimeMillis() - symbolStartedAtMs).coerceAtLeast(0L),
                 "notification_before_order" to false,
                 "fresh_quote_preserved" to true,
-                "fresh_margin_preserved" to true,
+                "wallet_balance_prechecked" to false,
                 "fixed_formula_changed" to false
             ))
             auditLogger.logAsync("FIXED_AUTO_BUY", "ENTRY_MARKET_FILLED", mapOf(
@@ -7518,6 +7481,21 @@ class TradingRepository @Inject constructor(
             .firstOrNull { it.category == GrowwApiUsageLedger.Category.LIVE_DATA }
         if (liveUsage == null || liveUsage.minuteHeadroom <= 5) {
             if (observed > 0) fixedOutcomePerformanceStore.record(fixedRecommendationStore.recommendations(today))
+            return fixedRecommendationStore.recommendations(today).count { it.status == "ACTIVE" }
+        }
+        val cooldown = runCatching {
+            recoveryGate.checkRequestAllowed(GrowwApiUsageLedger.Category.LIVE_DATA)
+        }.exceptionOrNull()
+        if (cooldown is GrowwRecoveryGate.LocallyBlocked) {
+            if (nowMs - lastFixedOutcomeCooldownAuditAtMs >= 60_000L) {
+                lastFixedOutcomeCooldownAuditAtMs = nowMs
+                auditLogger.logAsync("FIXED_OUTCOME", "OUTCOME_SAMPLE_SKIPPED_COOLDOWN", mapOf(
+                    "reason" to cooldown.reason,
+                    "retry_after_ms" to (cooldown.nextAllowedAtMs - nowMs).coerceAtLeast(0L),
+                    "cached_discovery_evidence_still_used" to true,
+                    "extra_broker_requests" to 0
+                ))
+            }
             return fixedRecommendationStore.recommendations(today).count { it.status == "ACTIVE" }
         }
         lastFixedOutcomeMonitorAtMs = nowMs
@@ -10853,20 +10831,18 @@ class TradingRepository @Inject constructor(
         val token = ensureToken() ?: return false
         val settings = preferences.settings.first()
         if (!settings.brokerAuthenticated || settings.safetyHalt) return false
-        val margin = apiFactory.groww.margins(bearer(token)).requirePayload("Groww margin")
-        val cnc = (margin.equity?.cncBalanceAvailable ?: margin.clearCash).coerceAtLeast(0.0)
         val now = System.currentTimeMillis()
-        armHotState = ArmHotState(token, settings, cnc, now)
+        armHotState = ArmHotState(token, settings, now)
         val auditDue = now - lastArmHotAuditAtMs >= ARM_HOT_AUDIT_INTERVAL_MS
-        val balanceChanged = !lastArmHotAuditBalance.isFinite() || abs(cnc - lastArmHotAuditBalance) >= 1.0
         val armedChanged = lastArmHotAuditArmed == null || lastArmHotAuditArmed != settings.armEffective
-        if (auditDue || balanceChanged || armedChanged) {
+        if (auditDue || armedChanged) {
             auditLogger.log("RUNTIME", "ARM_HOT_PATH_READY", mapOf(
-                "cnc_balance" to cnc,
+                "wallet_balance_queried" to false,
+                "wallet_api_calls" to 0,
+                "configured_per_order_budget" to settings.holdingBudgetRupees,
                 "armed" to settings.armEffective
             ))
             lastArmHotAuditAtMs = now
-            lastArmHotAuditBalance = cnc
             lastArmHotAuditArmed = settings.armEffective
         }
         return true
