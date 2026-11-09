@@ -45,6 +45,7 @@ import com.multify.traderpro.data.network.GttModifyRequest
 import com.multify.traderpro.data.network.GttOrder
 import com.multify.traderpro.data.network.GrowwApiFactory
 import com.multify.traderpro.data.network.GrowwApiUsageLedger
+import com.multify.traderpro.data.network.FixedUnifiedRequestBudget
 import com.multify.traderpro.data.network.BetaResearchGate
 import com.multify.traderpro.data.network.GrowwRecoveryGate
 import com.multify.traderpro.data.network.GrowwHolding
@@ -1058,15 +1059,19 @@ class TradingRepository @Inject constructor(
     }
 
     private suspend fun fixedBetaLtp(
-        token: String, chunk: List<String>
+        token: String, chunk: List<String>, preparing: Boolean = false
     ): Map<String, Double> = betaMarketRead(
         token, BetaResearchGate.Type.LIVE,
         alphaCall = { error("Fixed Beta lane may not borrow Alpha credentials") },
         betaCall = {
-            apiFactory.betaGroww.ltp(bearer(token),
-                exchangeSymbols = chunk.joinToString(",") { "NSE_$it" })
-                .requirePayload("Fixed Beta NSE LTP")
-        }
+            apiFactory.betaGroww.ltp(
+                bearer(token),
+                exchangeSymbols = chunk.joinToString(",") { "NSE_$it" },
+                trafficPriority = MarketDataPriorityAdmissionPolicy.FIXED
+            ).requirePayload("Fixed Beta NSE LTP")
+        },
+        priority = BetaResearchGate.Priority.FIXED,
+        maxWaitMs = if (preparing) 90_000L else 75_000L
     )
 
     private suspend fun forecastMarketToken(): String? {
@@ -1080,8 +1085,14 @@ class TradingRepository @Inject constructor(
     private fun forecastUsesBeta(token: String): Boolean = secretStore.hasBetaCredentials() &&
         cachedBetaResearchToken == token && !betaSessionInvalid
 
-    private suspend fun <T> betaMarketRead(token: String, type: BetaResearchGate.Type,
-                                           alphaCall: suspend () -> T, betaCall: suspend () -> T): T {
+    private suspend fun <T> betaMarketRead(
+        token: String,
+        type: BetaResearchGate.Type,
+        alphaCall: suspend () -> T,
+        betaCall: suspend () -> T,
+        priority: BetaResearchGate.Priority = BetaResearchGate.Priority.BACKGROUND,
+        maxWaitMs: Long = 10_000L
+    ): T {
         val tokenIsBeta = cachedBetaResearchToken == token || secretStore.getBetaAccessToken() == token
         if (tokenIsBeta || secretStore.hasBetaCredentials()) {
             if (!forecastUsesBeta(token)) {
@@ -1095,7 +1106,7 @@ class TradingRepository @Inject constructor(
         }
         val started = SystemClock.elapsedRealtime()
         return try {
-            val result = betaResearchGate.read(type, betaCall)
+            val result = betaResearchGate.read(type, priority, maxWaitMs, betaCall)
             val usage = betaResearchGate.snapshot()
             auditLogger.logAsync("BETA_API", "REQUEST_PROFILE", mapOf(
                 "account" to "BETA", "category" to type.name, "outcome" to "SUCCESS",
@@ -1148,7 +1159,10 @@ class TradingRepository @Inject constructor(
                 error("Multify ARM unavailable: $rejected. Check Groww settings and broker recovery.")
             }
             // Validate before persisting ARM. A failed broker call must not briefly show ARM=ON.
-            val cooldown = buyApiCooldownOrNull()
+            val cooldown = fixedAutoBuyCooldownOrNull(
+                GrowwApiUsageLedger.Category.LIVE_DATA,
+                GrowwApiUsageLedger.Category.NON_TRADING
+            )
             if (cooldown != null) {
                 auditLogger.log("SETTINGS", "ARM_REJECTED", mapOf(
                     "reason" to cooldown.reason,
@@ -1491,8 +1505,17 @@ class TradingRepository @Inject constructor(
     }
 
     /** A read-only check: never send doomed live-data or non-trading calls during broker cooldowns. */
-    private fun buyApiCooldownOrNull(): GrowwRecoveryGate.LocallyBlocked? {
-        for (category in listOf(GrowwApiUsageLedger.Category.LIVE_DATA, GrowwApiUsageLedger.Category.NON_TRADING)) {
+    private fun buyApiCooldownOrNull(): GrowwRecoveryGate.LocallyBlocked? =
+        fixedAutoBuyCooldownOrNull(
+            GrowwApiUsageLedger.Category.LIVE_DATA,
+            GrowwApiUsageLedger.Category.NON_TRADING
+        )
+
+    /** Check only the endpoint categories needed at the current Fixed BUY stage. */
+    private fun fixedAutoBuyCooldownOrNull(
+        vararg categories: GrowwApiUsageLedger.Category
+    ): GrowwRecoveryGate.LocallyBlocked? {
+        for (category in categories) {
             try {
                 recoveryGate.checkRequestAllowed(category)
             } catch (blocked: GrowwRecoveryGate.LocallyBlocked) {
@@ -4097,12 +4120,19 @@ class TradingRepository @Inject constructor(
                 token, BetaResearchGate.Type.LIVE,
                 alphaCall = { error("Beta Fixed quote cannot use Alpha credentials") },
                 betaCall = {
-                    apiFactory.betaGroww.quote(bearer(token), tradingSymbol = symbol)
-                        .requirePayload("Fixed Beta quote $symbol")
-                }
+                    apiFactory.betaGroww.quote(
+                        bearer(token), tradingSymbol = symbol,
+                        trafficPriority = MarketDataPriorityAdmissionPolicy.FIXED
+                    ).requirePayload("Fixed Beta quote $symbol")
+                },
+                priority = BetaResearchGate.Priority.FIXED,
+                maxWaitMs = 15_000L
             )
         } else withFixedLiveDataSlot {
-            apiFactory.groww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Fixed quote $symbol")
+            apiFactory.groww.quote(
+                bearer(token), tradingSymbol = symbol,
+                trafficPriority = MarketDataPriorityAdmissionPolicy.FIXED
+            ).requirePayload("Fixed quote $symbol")
         }
         require(RecommendationPriceBandPolicy.eligible(quote.lastPrice)) { "FIXED_PRICE_BAND_OUTSIDE" }
         // Token-scope the RAM snapshot so a reconnect or account change cannot reuse candles.
@@ -4127,14 +4157,18 @@ class TradingRepository @Inject constructor(
                 betaCall = {
                     apiFactory.betaGroww.historicalCandles(
                         bearer(token), growwSymbol = "NSE-$symbol", startTime = incremental?.startTime ?: start,
-                        endTime = end, candleInterval = "15minute"
+                        endTime = end, candleInterval = "15minute",
+                        trafficPriority = MarketDataPriorityAdmissionPolicy.FIXED
                     ).requirePayload("Fixed Beta 15m candles $symbol")
-                }
+                },
+                priority = BetaResearchGate.Priority.FIXED,
+                maxWaitMs = 15_000L
             )
         } else withFixedHistoricalDataSlot {
             apiFactory.groww.historicalCandles(
                 bearer(token), growwSymbol = "NSE-$symbol", startTime = incremental?.startTime ?: start,
-                endTime = end, candleInterval = "15minute"
+                endTime = end, candleInterval = "15minute",
+                trafficPriority = MarketDataPriorityAdmissionPolicy.FIXED
             ).requirePayload("Fixed forecast candles $symbol")
         }
         val historical = if (incremental == null) {
@@ -4156,14 +4190,18 @@ class TradingRepository @Inject constructor(
                         betaCall = {
                             apiFactory.betaGroww.historicalCandles(
                                 bearer(token), growwSymbol = "NSE-$symbol",
-                                startTime = start, endTime = end, candleInterval = "15minute"
+                                startTime = start, endTime = end, candleInterval = "15minute",
+                                trafficPriority = MarketDataPriorityAdmissionPolicy.FIXED
                             ).requirePayload("Fixed Beta historical fallback $symbol")
-                        }
+                        },
+                        priority = BetaResearchGate.Priority.FIXED,
+                        maxWaitMs = 15_000L
                     )
                 } else withFixedHistoricalDataSlot {
                     apiFactory.groww.historicalCandles(
                         bearer(token), growwSymbol = "NSE-$symbol", startTime = start, endTime = end,
-                        candleInterval = "15minute"
+                        candleInterval = "15minute",
+                        trafficPriority = MarketDataPriorityAdmissionPolicy.FIXED
                     ).requirePayload("Fixed historical fallback $symbol")
                 }
             }
@@ -4310,7 +4348,7 @@ class TradingRepository @Inject constructor(
                     com.multify.traderpro.engine.FixedDualAccountPolicy.betaDiscoveryBatch(index, true)
                 if (useBeta) {
                     try {
-                        fixedBetaLtp(betaToken!!, chunk).also { betaSuccess.incrementAndGet() }
+                        fixedBetaLtp(betaToken!!, chunk, preparing).also { betaSuccess.incrementAndGet() }
                     } catch (cancelled: CancellationException) {
                         throw cancelled
                     } catch (failed: Throwable) {
@@ -4437,8 +4475,10 @@ class TradingRepository @Inject constructor(
             try {
                 val exchangeSymbols = chunk.joinToString(",") { "NSE_$it" }
                 return withFixedLiveDataSlot {
-                    apiFactory.groww.ltp(bearer(token), exchangeSymbols = exchangeSymbols)
-                        .requirePayload("Fixed market-wide discovery LTP")
+                    apiFactory.groww.ltp(
+                        bearer(token), exchangeSymbols = exchangeSymbols,
+                        trafficPriority = MarketDataPriorityAdmissionPolicy.FIXED
+                    ).requirePayload("Fixed market-wide discovery LTP")
                 }
             } catch (t: Throwable) {
                 lastFailure = t
@@ -6215,7 +6255,10 @@ class TradingRepository @Inject constructor(
         }
         val quoteRequestStartedAtMs = System.currentTimeMillis()
         val quote = withFixedLiveDataSlot {
-            apiFactory.groww.quote(bearer(token), tradingSymbol = row.symbol).requirePayload("Quote ${row.symbol}")
+            apiFactory.groww.quote(
+                bearer(token), tradingSymbol = row.symbol,
+                trafficPriority = MarketDataPriorityAdmissionPolicy.EXECUTION
+            ).requirePayload("Quote ${row.symbol}")
         }
         val quoteRequestElapsedMs = System.currentTimeMillis() - quoteRequestStartedAtMs
         val ltp = quote.lastPrice ?: error("Groww quote has no LTP")
@@ -6292,7 +6335,10 @@ class TradingRepository @Inject constructor(
         val settings = preferences.settings.first()
         if (!settings.forecastAutoBuyEnabled || settings.safetyHalt) return 0
         // No session-count BUY lock; production PRIMARY and broker safeguards below are unchanged.
-        val preflightCooldown = buyApiCooldownOrNull()
+        val preflightCooldown = fixedAutoBuyCooldownOrNull(
+            GrowwApiUsageLedger.Category.LIVE_DATA,
+            GrowwApiUsageLedger.Category.NON_TRADING
+        )
         if (preflightCooldown != null) {
             auditAutoBuyBlocked("FORECAST_AUTO_BUY", preflightCooldown)
             return 0
@@ -6948,7 +6994,8 @@ class TradingRepository @Inject constructor(
                 withFixedLiveDataSlot {
                     apiFactory.groww.quote(
                         bearer(token),
-                        tradingSymbol = row.symbol
+                        tradingSymbol = row.symbol,
+                        trafficPriority = MarketDataPriorityAdmissionPolicy.EXECUTION
                     ).requirePayload("Fixed direct quote ${row.symbol}")
                 }
             }.onFailure {
@@ -6958,7 +7005,9 @@ class TradingRepository @Inject constructor(
                 ))
             }.getOrNull()
             if (quote == null) {
-                val cooldown = buyApiCooldownOrNull()
+                val cooldown = fixedAutoBuyCooldownOrNull(
+                    GrowwApiUsageLedger.Category.LIVE_DATA
+                )
                 if (cooldown != null) {
                     auditAutoBuyBlocked("FIXED_AUTO_BUY", cooldown)
                     break
@@ -7022,7 +7071,10 @@ class TradingRepository @Inject constructor(
                 continue
             }
 
-            val marginCooldown = buyApiCooldownOrNull()
+            val marginCooldown = fixedAutoBuyCooldownOrNull(
+                GrowwApiUsageLedger.Category.NON_TRADING,
+                GrowwApiUsageLedger.Category.ORDERS
+            )
             if (marginCooldown != null) {
                 auditAutoBuyBlocked("FIXED_AUTO_BUY", marginCooldown)
                 break
@@ -10820,6 +10872,7 @@ class TradingRepository @Inject constructor(
                 fixedFactorTelemetry.appendExportEntry(zip)
                 fixedMarketPathTelemetry.appendExportEntry(zip)
                 add("api_usage_snapshot.json", GrowwApiUsageLedger.snapshot())
+                add("fixed_unified_api_usage_snapshot.json", FixedUnifiedRequestBudget.snapshot())
                 add("groww_recovery_state.json", recoveryGate.status())
                 add("telemetry_metadata.json", mapOf(
                     "exported_at_ms" to System.currentTimeMillis(),
@@ -11015,8 +11068,10 @@ class TradingRepository @Inject constructor(
         val freshQuote: QuotePayload
         val freshAt: Long
         if (age < 0L || age > CircuitAwareBuyPolicy.MAX_QUOTE_AGE_MS) {
-            freshQuote = apiFactory.groww.quote(bearer(token), tradingSymbol = symbol)
-                .requirePayload("Circuit refresh $symbol")
+            freshQuote = apiFactory.groww.quote(
+                bearer(token), tradingSymbol = symbol,
+                trafficPriority = MarketDataPriorityAdmissionPolicy.EXECUTION
+            ).requirePayload("Circuit refresh $symbol")
             freshAt = System.currentTimeMillis()
             preferences.recordMarketData()
         } else {
