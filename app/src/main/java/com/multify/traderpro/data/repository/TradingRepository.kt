@@ -1198,10 +1198,12 @@ class TradingRepository @Inject constructor(
      * references, historical rolling store, recommendation state or GTTs.
      */
     private suspend fun fixedPreOpenEvaluationReadOnly(symbol: String, alphaToken: String): FixedStrategyEvaluation {
-        val betaToken = fixedBetaMarketTokenOrNull()?.takeIf {
-            com.multify.traderpro.engine.FixedBetaDetailRoutingPolicy.useBeta(symbol, true)
-        }
-        val useBeta = betaToken != null
+        val betaCandidate = fixedBetaMarketTokenOrNull()
+        val useBeta = betaCandidate != null &&
+            com.multify.traderpro.engine.FixedBetaDetailRoutingPolicy.useBeta(symbol, true) &&
+            betaResearchGate.healthyForFixed(BetaResearchGate.Type.LIVE) &&
+            betaResearchGate.healthyForFixed(BetaResearchGate.Type.HISTORICAL)
+        val betaToken = betaCandidate.takeIf { useBeta }
         val quote = if (useBeta) {
             betaMarketRead(betaToken!!, BetaResearchGate.Type.LIVE,
                 alphaCall = { error("Pre-open Beta quote cannot borrow Alpha") },
@@ -4051,9 +4053,12 @@ class TradingRepository @Inject constructor(
     }
 
     private suspend fun fixedForecastEvaluation(symbol: String, token: String): FixedStrategyEvaluation {
-        val beta = fixedBetaMarketTokenOrNull()?.takeIf {
-            com.multify.traderpro.engine.FixedBetaDetailRoutingPolicy.useBeta(symbol, true)
-        }
+        val betaCandidate = fixedBetaMarketTokenOrNull()
+        val useBeta = betaCandidate != null &&
+            com.multify.traderpro.engine.FixedBetaDetailRoutingPolicy.useBeta(symbol, true) &&
+            betaResearchGate.healthyForFixed(BetaResearchGate.Type.LIVE) &&
+            betaResearchGate.healthyForFixed(BetaResearchGate.Type.HISTORICAL)
+        val beta = betaCandidate.takeIf { useBeta }
         if (beta != null) {
             try {
                 return fixedForecastEvaluationUsingAccount(symbol, beta, useBeta = true)
