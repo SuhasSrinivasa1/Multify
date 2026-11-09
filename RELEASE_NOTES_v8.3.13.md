@@ -69,4 +69,4 @@ The changes in this release are request routing, admission, recovery, coverage a
 
 The dedicated CI workflow checks the frozen Fixed/SELL/GTT source, verifies that Groww endpoint paths and parameters are unchanged apart from internal priority metadata, runs backend tests and Android unit tests, builds the APK, verifies its package/signature and packages the exact source.
 
-The APK is CI-debug-signed unless the repository's stable signing material is supplied to the build. It may not update an installation signed with a different key. CI success does not replace live broker validation.
+The CI workflow now supports stable production signing when the original keystore is configured as GitHub Actions secrets: MULTIFY_KEYSTORE_BASE64, MULTIFY_KEYSTORE_PASSWORD, and optionally MULTIFY_KEY_ALIAS / MULTIFY_KEY_PASSWORD. Without those secrets it produces a CI-debug-signed fallback APK, which may not update an installation signed with a different key. CI success does not replace live broker validation.
