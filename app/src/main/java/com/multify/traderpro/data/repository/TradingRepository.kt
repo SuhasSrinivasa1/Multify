@@ -141,6 +141,7 @@ import com.multify.traderpro.engine.HardStopLossPolicy
 import com.multify.traderpro.engine.AppPositionOwnershipPolicy
 import com.multify.traderpro.engine.HoldingSmartOrderPolicy
 import com.multify.traderpro.engine.BrokerExecutionSafetyPolicy
+import com.multify.traderpro.engine.BrokerBuyFailureMessagePolicy
 import com.multify.traderpro.engine.MarketPriorityPolicy
 import com.multify.traderpro.engine.ForecastResearchWindowPolicy
 import com.multify.traderpro.engine.ForecastBetaPriorityPolicy
@@ -1111,10 +1112,19 @@ class TradingRepository @Inject constructor(
             auditLogger.logAsync("BETA_API", "REQUEST_PROFILE", mapOf(
                 "account" to "BETA", "category" to type.name, "outcome" to "FAILURE",
                 "http_code" to (code ?: 0),
+                "origin" to (if (code != null) "BROKER_HTTP_RESPONSE" else if (
+                    t is IOException && t.message.orEmpty().startsWith("BETA_")
+                ) "LOCAL_ADMISSION" else "TRANSPORT_OR_PRE_DISPATCH"),
+                "type" to t.javaClass.simpleName,
                 "elapsed_ms" to (SystemClock.elapsedRealtime() - started).coerceAtLeast(0L),
                 "live_requests" to usage.liveRequests, "historical_requests" to usage.historicalRequests,
                 "live_429" to usage.liveRateLimits, "historical_429" to usage.historicalRateLimits
             ))
+            if (code == null && t is IOException && t.message.orEmpty().startsWith("BETA_")) {
+                com.multify.traderpro.data.network.GrowwHttpTraceLedger.localBlock(
+                    auditLogger, "BETA", type.name, "GATE_BEFORE_ENDPOINT",
+                    t.message.orEmpty().take(120))
+            }
             if (t is HttpException && t.code() == 401) {
                 betaSessionInvalid = true
                 cachedBetaResearchToken = null
@@ -7137,12 +7147,22 @@ class TradingRepository @Inject constructor(
                     quoteReceivedAtMs = quoteStartedAtMs + quoteElapsedMs,
                     allowOtherSymbolProtectionRecovery = true)
             }.onFailure {
+                // Response body is already available locally; this does not request wallet
+                // balance or make another broker call. Never persist the raw broker body.
+                val brokerError = runCatching {
+                    (it as? HttpException)?.response()?.errorBody()?.string()?.take(1_024)
+                }.getOrNull()
+                val insufficient = BrokerBuyFailureMessagePolicy.insufficientFunds(
+                    it.message.orEmpty() + " " + brokerError.orEmpty())
                 auditLogger.log("FIXED_AUTO_BUY", "MARKET_BUY_ERROR", mapOf(
                     "symbol" to row.symbol,
                     "reference" to reference,
                     "fresh_ltp" to ltp,
-                    "message" to (it.message ?: it.javaClass.simpleName)
+                    "message" to (it.message ?: it.javaClass.simpleName),
+                    "insufficient_funds" to insufficient,
+                    "wallet_api_calls" to 0
                 ))
+                if (insufficient) notifyInsufficientFundsIfConfirmed(row.symbol)
             }.getOrNull() ?: continue
 
             val orderElapsedMs = (System.currentTimeMillis() - orderStartedAtMs).coerceAtLeast(0L)
@@ -8900,6 +8920,32 @@ class TradingRepository @Inject constructor(
             ))
         reportCriticalUnprotected(position, id, lastFailure)
         id
+        }
+    }
+
+    /** Inform the user about explicit broker funds rejection; never queries wallet or changes order flow. */
+    private fun notifyInsufficientFundsIfConfirmed(symbol: String) {
+        auditLogger.logAsync("BROKER_BUY", "INSUFFICIENT_FUNDS_REJECTED", mapOf(
+            "symbol" to symbol, "source" to "BROKER_REJECTION_MESSAGE",
+            "wallet_api_calls" to 0, "buy_was_not_placed" to true
+        ))
+        runCatching {
+            val manager = appContext.getSystemService(NotificationManager::class.java)
+            val channel = "multify_funds_rejection"
+            manager.createNotificationChannel(NotificationChannel(
+                channel, "Groww order rejections", NotificationManager.IMPORTANCE_DEFAULT
+            ))
+            val alert = NotificationCompat.Builder(appContext, channel)
+                .setSmallIcon(R.drawable.ic_stat_trader)
+                .setContentTitle("BUY not placed · " + symbol)
+                .setContentText("Groww rejected the order: insufficient available funds.")
+                .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+                .setAutoCancel(true)
+                .build()
+            manager.notify(520_000 + (symbol.hashCode() and 0x7fff), alert)
+        }.onFailure {
+            auditLogger.logAsync("BROKER_BUY", "FUNDS_ALERT_FAILED", mapOf(
+                "symbol" to symbol, "type" to it.javaClass.simpleName))
         }
     }
 

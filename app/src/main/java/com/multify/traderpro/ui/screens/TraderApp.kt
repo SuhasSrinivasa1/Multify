@@ -9,6 +9,7 @@ import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -69,6 +70,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -80,6 +82,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.multify.traderpro.BuildConfig
 import com.multify.traderpro.engine.FixedBuyAvailabilityPolicy
 import com.multify.traderpro.data.network.DashboardDto
+import com.multify.traderpro.data.network.FixedScanTrendStore
+import com.multify.traderpro.data.network.GrowwHttpTraceLedger
 import com.multify.traderpro.data.network.ExecutionAverageDto
 import com.multify.traderpro.engine.FixedFinalContract
 import com.multify.traderpro.engine.FixedForecastQualityPolicy
@@ -96,6 +100,63 @@ import java.text.NumberFormat
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+
+
+@Composable
+private fun FixedScanTrendChart() {
+    val context = LocalContext.current
+    var refresh by remember { mutableIntStateOf(0) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(10_000L)
+            refresh++
+        }
+    }
+    val history = remember(refresh) { FixedScanTrendStore.read(context) }
+    val successes = history.filter { it.result == "COMPLETED" }.takeLast(30)
+    val durations = successes.map { it.elapsedMs }
+    val median = FixedScanTrendStore.percentile(durations, 0.5)
+    val p90 = FixedScanTrendStore.percentile(durations, 0.9)
+    val blocked = history.count { it.result.startsWith("DEFERRED") }
+    val failures = history.count { it.result == "FAILED_OR_SKIPPED" }
+    val stroke = MaterialTheme.colorScheme.primary
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        shape = RoundedCornerShape(20.dp)) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("Fixed scan speed · last 30 completed", fontWeight = FontWeight.SemiBold)
+            Text("Median " + (median?.let { "%.1fs".format(Locale.US, it / 1000.0) } ?: "Pending") +
+                " · P90 " + (p90?.let { "%.1fs".format(Locale.US, it / 1000.0) } ?: "Pending") +
+                " · " + successes.size + " completed",
+                style = MaterialTheme.typography.bodySmall)
+            if (successes.size >= 2) {
+                Canvas(Modifier.fillMaxWidth().height(120.dp)) {
+                    val high = (durations.maxOrNull() ?: 1L).coerceAtLeast(1L).toFloat() * 1.15f
+                    val dx = size.width / (successes.size - 1)
+                    val dots = successes.mapIndexed { index, point ->
+                        Offset(index * dx, size.height * (1f - point.elapsedMs.toFloat() / high))
+                    }
+                    dots.zipWithNext().forEach { (a, b) ->
+                        drawLine(stroke, a, b, strokeWidth = 3.dp.toPx())
+                    }
+                    dots.forEach { drawCircle(stroke, radius = 3.dp.toPx(), center = it) }
+                }
+            } else {
+                Text("Learning · chart appears after two completed scans.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Text("Saved attempts: " + history.size + " · deferred " + blocked +
+                " · failed/skipped " + failures +
+                " · original v8.3.4 comparable scan-duration baseline not available.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("Per-scan Alpha/Beta HTTP counts and 429 errors are included in the exported audit. " +
+                "Overlapping service traffic is labeled as such; fewer evaluated stocks must not be mistaken for a speed win.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
 
 private enum class Destination(val label: String, val subtitle: String, val icon: ImageVector) {
     Execution("Execution", "ARM status and app-owned CNC holdings", Icons.Default.Dashboard),
@@ -893,6 +954,7 @@ private fun FixedScreen(
                 }
             }
         }
+        item { FixedScanTrendChart() }
         item {
             MetricCard(
                 label = "Fixed Avg Upside · FROZEN",
@@ -920,6 +982,9 @@ private fun FixedScreen(
                             it.category == com.multify.traderpro.data.network.GrowwApiUsageLedger.Category.LIVE_DATA
                         }
                     val betaLive = com.multify.traderpro.data.network.BetaResearchGate.latestLiveStatus()
+                    val accountActual = GrowwHttpTraceLedger.summary()
+                    val actualAlpha = accountActual["ALPHA"]
+                    val actualBeta = accountActual["BETA"]
                     Text("ALPHA Live Data: ${alphaLive.usedLastMinute}/${alphaLive.appPerMinuteLimit} per minute · Fixed max 240/min · 60/min reserved for priority quotes",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -927,6 +992,9 @@ private fun FixedScreen(
                         if (betaLive.cooldownRemainingMs > 0)
                             " · Beta retry in ${(betaLive.cooldownRemainingMs + 999) / 1000}s"
                         else if (betaLive.halfOpenProbeInFlight) " · recovery probe" else "",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Actual outgoing HTTP this minute: Alpha ${actualAlpha?.get("all_requests_60s") ?: "—"} · Beta ${actualBeta?.get("all_requests_60s") ?: "—"}",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Text(

@@ -73,9 +73,17 @@ internal class GrowwRateLimitInterceptor(
         GrowwApiUsageLedger.recordRequest(category)
         val started = SystemClock.elapsedRealtime()
         val requestStartedAtMs = System.currentTimeMillis()
+        val trace = GrowwHttpTraceLedger.start("ALPHA", request.method, path)
         // Request priority is internal scheduler metadata, never a Groww API header.
-        val response = chain.proceed(request.newBuilder()
-            .removeHeader(MarketDataPriorityAdmissionPolicy.HEADER).build())
+        val response = try {
+            chain.proceed(request.newBuilder()
+                .removeHeader(MarketDataPriorityAdmissionPolicy.HEADER).build())
+        } catch (failure: Exception) {
+            GrowwHttpTraceLedger.finish(trace, auditLogger, null,
+                failureType = failure.javaClass.simpleName)
+            throw failure
+        }
+        GrowwHttpTraceLedger.finish(trace, auditLogger, response.code, response.header("Retry-After"))
         val networkMs = (SystemClock.elapsedRealtime() - started).coerceAtLeast(0L)
         if (path == "/v1/live-data/quote" &&
             request.url.queryParameter("exchange").equals("NSE", ignoreCase = true) &&
@@ -146,10 +154,16 @@ internal class GrowwRateLimitInterceptor(
             val previous = lastBlockedAuditMs[category] ?: 0L
             if (previous > 0L && now - previous < 60_000L) false else { lastBlockedAuditMs[category] = now; true }
         }
-        if (log) auditLogger.logAsync("API_RATE_LIMIT", "LOCAL_REQUEST_SUPPRESSED", mapOf(
-            "category" to category.name, "path" to path,
-            "reason" to blocked.reason, "next_allowed_at_ms" to blocked.nextAllowedAtMs
-        ))
+        if (log) {
+            auditLogger.logAsync("API_RATE_LIMIT", "LOCAL_REQUEST_SUPPRESSED", mapOf(
+                "account" to "ALPHA",
+                "category" to category.name, "path" to path,
+                "reason" to blocked.reason, "next_allowed_at_ms" to blocked.nextAllowedAtMs,
+                "actual_http_dispatched" to false,
+                "broker_rejection" to false
+            ))
+            GrowwHttpTraceLedger.localBlock(auditLogger, "ALPHA", category.name, path, blocked.reason)
+        }
     }
 
     /** Reserve the exact same per-second/per-minute budget *before* network dispatch. */
