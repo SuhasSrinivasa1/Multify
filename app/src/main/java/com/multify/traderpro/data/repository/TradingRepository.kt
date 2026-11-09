@@ -1491,8 +1491,13 @@ class TradingRepository @Inject constructor(
     }
 
     /** A read-only check: never send doomed live-data or non-trading calls during broker cooldowns. */
-    private fun buyApiCooldownOrNull(): GrowwRecoveryGate.LocallyBlocked? {
-        for (category in listOf(GrowwApiUsageLedger.Category.LIVE_DATA, GrowwApiUsageLedger.Category.NON_TRADING)) {
+    private fun buyApiCooldownOrNull(
+        vararg categories: GrowwApiUsageLedger.Category
+    ): GrowwRecoveryGate.LocallyBlocked? {
+        val checked = if (categories.isEmpty())
+            listOf(GrowwApiUsageLedger.Category.LIVE_DATA, GrowwApiUsageLedger.Category.NON_TRADING)
+        else categories.toList()
+        for (category in checked) {
             try {
                 recoveryGate.checkRequestAllowed(category)
             } catch (blocked: GrowwRecoveryGate.LocallyBlocked) {
@@ -4304,6 +4309,8 @@ class TradingRepository @Inject constructor(
                 chunks, windowStart
             ) { index, chunk ->
                 val useBeta = betaToken != null && !betaStopped.get() &&
+                    !com.multify.traderpro.data.network.GrowwSharedMarketDataBudget.isCoolingDown(
+                        com.multify.traderpro.data.network.GrowwSharedMarketDataBudget.Lane.LIVE) &&
                     com.multify.traderpro.engine.FixedDualAccountPolicy.betaDiscoveryBatch(index, true)
                 if (useBeta) {
                     try {
@@ -4311,15 +4318,23 @@ class TradingRepository @Inject constructor(
                     } catch (cancelled: CancellationException) {
                         throw cancelled
                     } catch (failed: Throwable) {
-                        // Stop the Beta lane on any unexpected failure/429/401. The
-                        // specific missing batch is retried on original Alpha pacing.
+                        // A Beta 429 or shared-quota exhaustion must NOT be retried
+                        // against Alpha to circumvent a possibly shared broker quota.
+                        // A non-quota Beta failure may use normal Alpha fallback.
                         betaStopped.set(true)
-                        auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "BETA_LTP_FALLBACK_ALPHA", mapOf(
-                            "batch_index" to index, "error" to failed.javaClass.simpleName,
-                            "beta_paused_for_rest_of_sweep" to true
-                        ))
-                        fetchFixedDiscoveryLtpBatch(token, chunk, index)
-                            ?.also { alphaSuccess.incrementAndGet() }
+                        val sharedLimited = (failed as? HttpException)?.code() == 429 ||
+                            failed.message.orEmpty().contains("SHARED_GROWW_") ||
+                            failed.message.orEmpty().contains("BETA_FIXED_RATE_BUDGET_OR_COOLDOWN") ||
+                            com.multify.traderpro.data.network.GrowwSharedMarketDataBudget.isCoolingDown(
+                                com.multify.traderpro.data.network.GrowwSharedMarketDataBudget.Lane.LIVE)
+                        auditLogger.logAsync("FIXED_DUAL_ACCOUNT",
+                            if (sharedLimited) "BETA_SHARED_QUOTA_NO_ALPHA_FALLBACK" else "BETA_LTP_FALLBACK_ALPHA",
+                            mapOf("batch_index" to index, "error" to failed.javaClass.simpleName,
+                                "beta_paused_for_rest_of_sweep" to true,
+                                "shared_budget_protected" to sharedLimited))
+                        if (sharedLimited) null else
+                            fetchFixedDiscoveryLtpBatch(token, chunk, index)
+                                ?.also { alphaSuccess.incrementAndGet() }
                     }
                 } else {
                     fetchFixedDiscoveryLtpBatch(token, chunk, index)
@@ -4356,7 +4371,9 @@ class TradingRepository @Inject constructor(
             "valid_symbols" to current.size,
             "batch_errors" to errors,
             "aborted" to aborted,
-            "alpha_order_account_unchanged" to true
+            "alpha_order_account_unchanged" to true,
+            "shared_live_budget" to com.multify.traderpro.data.network.GrowwSharedMarketDataBudget
+                .snapshot(com.multify.traderpro.data.network.GrowwSharedMarketDataBudget.Lane.LIVE).toString()
         ))
         return PrecomputedFixedSweep(current, errors, aborted, System.currentTimeMillis(), chunks.size)
     }
@@ -6882,7 +6899,7 @@ class TradingRepository @Inject constructor(
         // An activation with only previously published recommendations should not
         // trigger a broker token refresh or any order-preparation API traffic.
         if (rows.isEmpty()) return 0
-        val preflightCooldown = buyApiCooldownOrNull()
+        val preflightCooldown = buyApiCooldownOrNull(GrowwApiUsageLedger.Category.LIVE_DATA)
         if (preflightCooldown != null) {
             auditAutoBuyBlocked("FIXED_AUTO_BUY", preflightCooldown)
             return 0
@@ -6921,7 +6938,7 @@ class TradingRepository @Inject constructor(
                 ))
                 continue
             }
-            val cooldown = buyApiCooldownOrNull()
+            val cooldown = buyApiCooldownOrNull(GrowwApiUsageLedger.Category.LIVE_DATA)
             if (cooldown != null) {
                 auditAutoBuyBlocked("FIXED_AUTO_BUY", cooldown)
                 break
@@ -6955,7 +6972,7 @@ class TradingRepository @Inject constructor(
                 ))
             }.getOrNull()
             if (quote == null) {
-                val cooldown = buyApiCooldownOrNull()
+                val cooldown = buyApiCooldownOrNull(GrowwApiUsageLedger.Category.LIVE_DATA)
                 if (cooldown != null) {
                     auditAutoBuyBlocked("FIXED_AUTO_BUY", cooldown)
                     break
@@ -7015,9 +7032,16 @@ class TradingRepository @Inject constructor(
                 continue
             }
 
-            val marginCooldown = buyApiCooldownOrNull()
-            if (marginCooldown != null) {
-                auditAutoBuyBlocked("FIXED_AUTO_BUY", marginCooldown)
+            // A previously acquired fresh execution quote remains valid even if
+            // unrelated live-data scanning subsequently enters cooldown.
+            // Inventory verification still needs NON_TRADING, and broker orders
+            // remain subject to the independent ORDERS category.
+            val executionCooldown = buyApiCooldownOrNull(
+                GrowwApiUsageLedger.Category.NON_TRADING,
+                GrowwApiUsageLedger.Category.ORDERS
+            )
+            if (executionCooldown != null) {
+                auditAutoBuyBlocked("FIXED_AUTO_BUY", executionCooldown)
                 break
             }
             val sizing = com.multify.traderpro.engine.BudgetOnlyCncSizing.size(
