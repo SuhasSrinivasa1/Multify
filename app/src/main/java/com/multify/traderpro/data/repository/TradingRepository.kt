@@ -2296,7 +2296,7 @@ class TradingRepository @Inject constructor(
             "retry_at_ms" to retryAt,
             "remaining_cooldown_ms" to (retryAt - now).coerceAtLeast(0L),
             "last_completed_fixed_scan_at_ms" to lastFixedScanAtMs,
-            "last_completed_fixed_scan_age_ms" to lastFixedScanAtMs.takeIf { it > 0L }?.let { (now - it).coerceAtLeast(0L) },
+            "last_completed_fixed_scan_age_ms" to (if (lastFixedScanAtMs > 0L) (now - lastFixedScanAtMs).coerceAtLeast(0L) else -1L),
             "stale_snapshot_never_used_as_fresh_live_data" to true,
             "retry_after_broker_cooldown_not_an_extra_fixed_scan" to true,
             "reconnect_required" to state.reconnectRequired
