@@ -7105,7 +7105,8 @@ class TradingRepository @Inject constructor(
                     trailingLastRatchetPrice = 0.0,
                     smartOrderMode = HoldingSmartOrderPolicy.MODE_NONE
                 ),
-                allowFreshPostFillProof = true
+                allowFreshPostFillProof = true,
+                deferProtectionRetryToMonitor = true
             )
             brokerInventorySnapshot = null
             auditLogger.logAsync("FIXED_AUTO_BUY", "ENTRY_LATENCY_PROFILE", mapOf(
@@ -8758,7 +8759,8 @@ class TradingRepository @Inject constructor(
      */
     private suspend fun registerBoughtPositionAndProtect(
         position: ManagedPositionEntity,
-        allowFreshPostFillProof: Boolean = false
+        allowFreshPostFillProof: Boolean = false,
+        deferProtectionRetryToMonitor: Boolean = false
     ): Long {
         val lifecycleMutex = positionLifecycleMutexes.computeIfAbsent(position.symbol.uppercase(Locale.US)) { Mutex() }
         return lifecycleMutex.withLock {
@@ -8777,7 +8779,10 @@ class TradingRepository @Inject constructor(
             return@withLock id
         }
         var lastFailure = "BROKER_PROTECTION_NOT_VERIFIED"
-        for (attempt in 1..3) {
+        // Fixed Auto Buy makes one immediate protection attempt, then hands any
+        // broker-visibility delay to the independent 1-second position-monitor worker.
+        val maxImmediateProtectionAttempts = if (deferProtectionRetryToMonitor) 1 else 3
+        for (attempt in 1..maxImmediateProtectionAttempts) {
             try {
                 val current = managedDao.openPositionById(id) ?: return@withLock id
                 val protected = if (!current.smartOrderId.isNullOrBlank()) {
@@ -8811,8 +8816,14 @@ class TradingRepository @Inject constructor(
                     "new_buy_allowed_before_protection" to false
                 ))
             }
-            if (attempt < 3) delay(700L * attempt)
+            if (attempt < maxImmediateProtectionAttempts) delay(700L * attempt)
         }
+        if (deferProtectionRetryToMonitor) auditLogger.log("PROTECTION",
+            "POST_FILL_PROTECTION_HANDED_TO_BACKGROUND_MONITOR", mapOf(
+                "symbol" to position.symbol, "engine" to position.engine,
+                "position_id" to id, "immediate_attempts" to maxImmediateProtectionAttempts,
+                "portfolio_monitor_retry_interval_ms" to 1_000L
+            ))
         reportCriticalUnprotected(position, id, lastFailure)
         id
         }
