@@ -1285,7 +1285,7 @@ private fun SettingsScreen(
                         Column(Modifier.weight(1f)) {
                             Text("Auto-buy Fixed recommendations", fontWeight = FontWeight.SemiBold)
                             Text(
-                                "When enabled, every new PRIMARY recommendation from the immutable Fixed engine gets its own Groww CNC MARKET BUY. This toggle is independent from Multify ARM; available CNC cash, broker readiness and safety checks still apply.",
+                                "Only NEW PRIMARY recommendations published AFTER you switch this ON can trigger a Groww CNC MARKET BUY. Existing ACTIVE recommendations are never bought automatically. Multify ARM is independent; broker readiness and safety checks still apply.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -1297,7 +1297,7 @@ private fun SettingsScreen(
                     }
                     KeyValueRow(
                         "Fixed auto-buy",
-                        if (state.settings.fixedAutoBuyEnabled) "ON · entries require fresh call and broker readiness" else "OFF · manual BUY only"
+                        if (state.settings.fixedAutoBuyEnabled) "ON · waiting for a new recommendation" else "OFF · manual BUY only"
                     )
                     Text(
                         "Fixed remains immutable. Forecast may read prior positive Fixed outcomes, but can never write into Fixed or change its v7.4.1 rules. Every app-owned Multify, Fixed and Forecast LONG uses the same sell protection: hard -2% loss floor, then the existing +0.55% arm → +0.50% protected gain → +0.10% ratchet when profitable. No averaging down.",
