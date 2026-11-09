@@ -11102,7 +11102,7 @@ class TradingRepository @Inject constructor(
         private const val BULK_MARKET_DATA_MIN_GAP_MS = 210L
         private const val BULK_MARKET_DATA_429_COOLDOWN_MS = 1_500L
         private const val BROKER_INVENTORY_REFRESH_MS = 5_000L
-        private const val EMPTY_PORTFOLIO_BROKER_RECHECK_MS = 45_000L
+        private const val EMPTY_PORTFOLIO_BROKER_RECHECK_MS = 5L * 60_000L
         private const val ACTIVE_GTT_REFRESH_MS = 30_000L
         private const val ACTIVE_GTT_PAGE_SIZE = 50
         private const val MAX_ACTIVE_GTT_PAGES = 20
