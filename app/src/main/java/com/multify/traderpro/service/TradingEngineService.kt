@@ -202,6 +202,10 @@ class TradingEngineService : Service() {
                             "average_pass_ms" to if (positionProfilePasses > 0) positionProfileElapsedMs / positionProfilePasses else 0L,
                             "max_pass_ms" to positionProfileMaxMs,
                             "last_known_managed_count" to lastKnownManagedCount,
+                            // Ledger is process-wide, including Fixed and other readers.
+                            // These are NOT position-monitor-owned HTTP calls.
+                            "api_request_count_scope" to "PROCESS_WIDE_ALPHA_NOT_TRAILING_OWNED",
+                            "no_app_owned_positions_at_profile_time" to (lastKnownManagedCount == 0),
                             "live_network_requests" to delta(GrowwApiUsageLedger.Category.LIVE_DATA) { it.totalRequests },
                             "order_network_requests" to delta(GrowwApiUsageLedger.Category.ORDERS) { it.totalRequests },
                             "non_trading_network_requests" to delta(GrowwApiUsageLedger.Category.NON_TRADING) { it.totalRequests },
