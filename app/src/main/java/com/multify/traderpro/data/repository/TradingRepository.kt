@@ -6800,6 +6800,15 @@ class TradingRepository @Inject constructor(
             error("Fixed target already reached for $symbol; BUY disabled")
         }
         val sizing = CashAwareCncSizing.sizeConfiguredBudget(settings.holdingBudgetRupees.toDouble(), ltp)
+        auditLogger.logAsync("FIXED_BUY", "CONFIGURED_BUDGET_ORDER_SIZED", mapOf(
+            "symbol" to row.symbol,
+            "per_order_cap_rupees" to settings.holdingBudgetRupees,
+            "requested_quantity" to sizing.quantity,
+            "wallet_balance_prechecked" to false,
+            "wallet_api_calls" to 0,
+            "daily_budget_limit_applied" to false,
+            "broker_rejects_if_funds_insufficient" to true
+        ))
         require(sizing.quantity > 0) { "Fixed BUY skipped: configured per-order budget is too small for ${row.symbol}" }
 
         require(com.multify.traderpro.engine.NseEquitySessionCalendar.isFixedNewEntryWindow(ZonedDateTime.now(INDIA)) && marketSession() == "OPEN") {
