@@ -19,7 +19,10 @@ import com.multify.traderpro.R
 import com.multify.traderpro.data.logging.AuditLogger
 import com.multify.traderpro.data.network.ForecastDto
 import com.multify.traderpro.data.network.GrowwApiUsageLedger
+import com.multify.traderpro.data.network.GrowwHttpTraceLedger
+import com.multify.traderpro.data.network.FixedScanTrendStore
 import com.multify.traderpro.data.network.GrowwRecoveryGate
+import com.multify.traderpro.data.network.BetaResearchGate
 import com.multify.traderpro.engine.FixedDataPipelinePolicy
 import com.multify.traderpro.engine.FixedPublicationTimingPolicy
 import com.multify.traderpro.engine.MobileEngineHealthPolicy
@@ -48,6 +51,7 @@ class TradingEngineService : Service() {
     @Inject lateinit var repository: TradingRepository
     @Inject lateinit var auditLogger: AuditLogger
     @Inject lateinit var recoveryGate: GrowwRecoveryGate
+    @Inject lateinit var betaResearchGate: BetaResearchGate
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var engineJob: Job? = null
@@ -276,6 +280,12 @@ class TradingEngineService : Service() {
                             "cache_hits_total" to GrowwApiUsageLedger.cacheHitCount(),
                             "cache_misses_total" to GrowwApiUsageLedger.cacheMissCount(),
                             "async_audit_dropped_total" to auditLogger.asyncDroppedCount()
+                        ))
+                        auditLogger.logAsync("API_HTTP_TRACE", "ACCOUNT_MINUTE_SUMMARY", mapOf(
+                            "source" to "ACTUAL_NETWORK_DISPATCH_AFTER_CACHE_AND_ADMISSION",
+                            "account_usage" to GrowwHttpTraceLedger.summary(),
+                            "beta_gate_usage" to betaResearchGate.snapshot().toString(),
+                            "audit_dropped_total" to auditLogger.asyncDroppedCount()
                         ))
                     }
 
@@ -573,9 +583,14 @@ class TradingEngineService : Service() {
                                     "live_ltp_cooldown_until_ms" to liveCooldownUntilMs,
                                     "remaining_cooldown_ms" to (cooldownUntilMs - nowMs).coerceAtLeast(0L),
                                     "scan_outcome" to "DEFERRED_NOT_FAILED",
+                                    "scan_attempt_id" to ("FX-DEFER-" + nowMs),
+                                    "account_http_usage" to GrowwHttpTraceLedger.summary(),
                                     "forecast_formula_unchanged" to true,
                                     "existing_fixed_recommendations_preserved" to true
                                 ))
+                                FixedScanTrendStore.record(this@TradingEngineService,
+                                    FixedScanTrendStore.Point("FX-DEFER-" + nowMs, nowMs, 0L,
+                                        "DEFERRED_" + readiness.name, 0L, 0L, 0L, 0L, 0L, 0L))
                                 lastFixedPauseAuditMs = nowMs
                             }
                             previousFixedPause = readiness
@@ -592,17 +607,59 @@ class TradingEngineService : Service() {
                             ))
                             previousFixedPause = null
                         }
+                        val scanId = "FX-" + System.currentTimeMillis()
+                        val alphaLiveBefore = GrowwHttpTraceLedger.counters("ALPHA", "LIVE_DATA")
+                        val betaLiveBefore = GrowwHttpTraceLedger.counters("BETA", "LIVE_DATA")
+                        val alphaHistBefore = GrowwHttpTraceLedger.counters("ALPHA", "HISTORICAL")
+                        val betaHistBefore = GrowwHttpTraceLedger.counters("BETA", "HISTORICAL")
                         val usageBefore = GrowwApiUsageLedger.snapshot()
                         val cacheHitsBefore = GrowwApiUsageLedger.cacheHitCount()
                         val historicalBefore = repository.fixedHistoricalRequestCounters()
                         val startedAt = System.currentTimeMillis()
-                        val scanned = runCatching { repository.runFixedPriorityCycle() }
-                            .onFailure {
-                                if (it !is CancellationException) {
-                                    auditLogger.log("RUNTIME", "FIXED_SCAN_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName)))
-                                }
-                            }.getOrDefault(false)
+                        GrowwHttpTraceLedger.beginFixedScan(scanId)
+                        val scanned = try {
+                            runCatching { repository.runFixedPriorityCycle() }
+                                .onFailure {
+                                    if (it !is CancellationException) {
+                                        auditLogger.log("RUNTIME", "FIXED_SCAN_ERROR", mapOf(
+                                            "scan_id" to scanId,
+                                            "type" to it.javaClass.simpleName,
+                                            "message" to (it.message ?: it.javaClass.simpleName).take(160)))
+                                    }
+                                }.getOrDefault(false)
+                        } finally {
+                            GrowwHttpTraceLedger.endFixedScan(scanId)
+                        }
                         val elapsed = System.currentTimeMillis() - startedAt
+                        val alphaLiveAfter = GrowwHttpTraceLedger.counters("ALPHA", "LIVE_DATA")
+                        val betaLiveAfter = GrowwHttpTraceLedger.counters("BETA", "LIVE_DATA")
+                        val alphaHistAfter = GrowwHttpTraceLedger.counters("ALPHA", "HISTORICAL")
+                        val betaHistAfter = GrowwHttpTraceLedger.counters("BETA", "HISTORICAL")
+                        fun increase(start: Long, end: Long) = (end - start).coerceAtLeast(0L)
+                        val scanPoint = FixedScanTrendStore.Point(
+                            scanId, startedAt, elapsed, if (scanned) "COMPLETED" else "FAILED_OR_SKIPPED",
+                            increase(alphaLiveBefore.requests, alphaLiveAfter.requests),
+                            increase(betaLiveBefore.requests, betaLiveAfter.requests),
+                            increase(alphaHistBefore.requests, alphaHistAfter.requests),
+                            increase(betaHistBefore.requests, betaHistAfter.requests),
+                            increase(alphaLiveBefore.rateLimits + alphaHistBefore.rateLimits,
+                                alphaLiveAfter.rateLimits + alphaHistAfter.rateLimits),
+                            increase(betaLiveBefore.rateLimits + betaHistBefore.rateLimits,
+                                betaLiveAfter.rateLimits + betaHistAfter.rateLimits)
+                        )
+                        FixedScanTrendStore.record(this@TradingEngineService, scanPoint)
+                        auditLogger.logAsync("FIXED_PERFORMANCE", "EVERY_SCAN_ATTEMPT", mapOf(
+                            "scan_id" to scanId, "result" to scanPoint.result,
+                            "start_at_ms" to startedAt, "duration_ms" to elapsed,
+                            "alpha_live_http" to scanPoint.alphaLive,
+                            "beta_live_http" to scanPoint.betaLive,
+                            "alpha_historical_http" to scanPoint.alphaHistorical,
+                            "beta_historical_http" to scanPoint.betaHistorical,
+                            "alpha_429" to scanPoint.alpha429,
+                            "beta_429" to scanPoint.beta429,
+                            "request_attribution" to "TIME_WINDOW_INCLUDES_OVERLAPPING_WORKERS",
+                            "strategy_changed" to false
+                        ))
                         // Diagnostic-only measured start-to-start cadence.
                         val actualStartSpacingMs = if (scanned && lastSuccessfulFixedScanStartedAtMs > 0L)
                             (startedAt - lastSuccessfulFixedScanStartedAtMs).coerceAtLeast(0L) else null
@@ -617,6 +674,7 @@ class TradingEngineService : Service() {
                             val historicalAfter = repository.fixedHistoricalRequestCounters()
                             auditLogger.logAsync("RUNTIME", "FIXED_SCAN_PROFILE", mapOf(
                                 "elapsed_ms" to elapsed,
+                                "scan_id" to scanId,
                                 "scan_started_at_ms" to startedAt,
                                 "scan_completed_at_ms" to (startedAt + elapsed),
                                 "target_scan_start_spacing_ms" to 90_000L,
