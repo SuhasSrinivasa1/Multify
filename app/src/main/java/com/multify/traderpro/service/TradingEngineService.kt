@@ -273,6 +273,12 @@ class TradingEngineService : Service() {
                             "alpha_historical_total" to alphaHistorical.totalRequests,
                             "beta_historical_total" to betaUsage.historicalRequests,
                             "combined_historical_total" to (alphaHistorical.totalRequests + betaUsage.historicalRequests),
+                            "alpha_live_last_minute" to alphaLive.usedLastMinute,
+                            "beta_live_last_minute" to betaUsage.liveRequestsLastMinute,
+                            "combined_live_last_minute" to (alphaLive.usedLastMinute + betaUsage.liveRequestsLastMinute),
+                            "alpha_historical_last_minute" to alphaHistorical.usedLastMinute,
+                            "beta_historical_last_minute" to betaUsage.historicalRequestsLastMinute,
+                            "combined_historical_last_minute" to (alphaHistorical.usedLastMinute + betaUsage.historicalRequestsLastMinute),
                             "beta_live_429s" to betaUsage.liveRateLimits,
                             "beta_historical_429s" to betaUsage.historicalRateLimits,
                             "categories" to usage.categories.associate { row ->
