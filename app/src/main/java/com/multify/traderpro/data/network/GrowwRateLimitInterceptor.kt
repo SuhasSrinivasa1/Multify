@@ -109,6 +109,9 @@ internal class GrowwRateLimitInterceptor(
                 "used_60s" to row.usedLastMinute,
                 "app_limit_1s" to row.appPerSecondLimit,
                 "app_limit_60s" to row.appPerMinuteLimit,
+                "effective_alpha_live_endpoint_limit_60s" to AlphaLiveDataPacingPolicy.MAX_PER_MINUTE,
+                "effective_alpha_research_limit_with_holdings_60s" to AlphaLiveDataPacingPolicy.MAX_RESEARCH_WITH_HOLDINGS_PER_MINUTE,
+                "effective_alpha_protection_reserve_with_holdings_60s" to (AlphaLiveDataPacingPolicy.MAX_PER_MINUTE - AlphaLiveDataPacingPolicy.MAX_RESEARCH_WITH_HOLDINGS_PER_MINUTE),
                 "hard_limit_1s" to row.hardPerSecondLimit,
                 "hard_limit_60s" to row.hardPerMinuteLimit,
                 "category_429_total" to row.rateLimitResponses,
@@ -226,6 +229,9 @@ internal class GrowwRateLimitInterceptor(
                             "used_60s" to row.usedLastMinute,
                             "app_limit_1s" to row.appPerSecondLimit,
                             "app_limit_60s" to row.appPerMinuteLimit,
+                            "effective_alpha_live_endpoint_limit_60s" to AlphaLiveDataPacingPolicy.MAX_PER_MINUTE,
+                            "effective_alpha_research_limit_with_holdings_60s" to AlphaLiveDataPacingPolicy.MAX_RESEARCH_WITH_HOLDINGS_PER_MINUTE,
+                            "effective_alpha_protection_reserve_with_holdings_60s" to (AlphaLiveDataPacingPolicy.MAX_PER_MINUTE - AlphaLiveDataPacingPolicy.MAX_RESEARCH_WITH_HOLDINGS_PER_MINUTE),
                             "hard_limit_1s" to row.hardPerSecondLimit,
                             "hard_limit_60s" to row.hardPerMinuteLimit
                         ))
