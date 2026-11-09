@@ -12,7 +12,7 @@ import java.io.IOException
 import com.multify.traderpro.engine.GrowwApiBudgetPolicy
 import com.multify.traderpro.engine.MarketDataPriorityAdmissionPolicy
 import com.multify.traderpro.engine.GrowwRetryAfterPolicy
-import com.multify.traderpro.engine.AlphaLtpPacingPolicy
+import com.multify.traderpro.engine.AlphaLiveDataPacingPolicy
 import okhttp3.Interceptor
 import okhttp3.Response
 import java.util.ArrayDeque
@@ -35,12 +35,13 @@ internal class GrowwRateLimitInterceptor(
     internal class PreAdmitted
 
     private val lock = Any()
-    // Local per-endpoint Alpha /ltp pacing: shared generic LIVE_DATA budget alone
-    // did not prevent HTTP 429 at 2 requests/second and 18/minute in the broker logs.
-    // This never changes Fixed scoring, SELL stop triggers or order dispatch.
-    private val alphaLtpMinute = ArrayDeque<Long>()
+    // Shared Alpha LIVE_DATA pacing covers quote, LTP and OHLC, not just /ltp.
+    // The latest log received a quote 429 at 45 requests/minute and 3 requests/second,
+    // below the published category ceiling. Smooth all Alpha live-data calls together.
+    // This is transport-only; Fixed scoring, SELL stop triggers and order dispatch are unchanged.
+    private val alphaLiveDataMinute = ArrayDeque<Long>()
     private val pendingProtectionLtps = AtomicInteger(0)
-    private var lastAlphaLtpGrantedAtMs = 0L
+    private var lastAlphaLiveDataGrantedAtMs = 0L
     private val lastBlockedAuditMs = EnumMap<GrowwApiUsageLedger.Category, Long>(GrowwApiUsageLedger.Category::class.java)
     private val states = EnumMap<GrowwApiUsageLedger.Category, State>(GrowwApiUsageLedger.Category::class.java).apply {
         GrowwApiUsageLedger.Category.values().forEach { put(it, State()) }
@@ -178,19 +179,20 @@ internal class GrowwRateLimitInterceptor(
                     (state.second.peekFirst() + 1_000L - now).coerceAtLeast(1L) else 0L
                 val minuteWait = if (state.minute.size >= limits.perMinute)
                     (state.minute.peekFirst() + 60_000L - now).coerceAtLeast(1L) else 0L
+                val isAlphaLiveData = category == GrowwApiUsageLedger.Category.LIVE_DATA
                 val isAlphaLtp = path == "/v1/live-data/ltp"
-                if (isAlphaLtp) prune(alphaLtpMinute, now - 60_000L)
-                val ltpWait = if (isAlphaLtp) AlphaLtpPacingPolicy.waitMs(
-                    now, lastAlphaLtpGrantedAtMs,
-                    alphaLtpMinute.peekFirst(), alphaLtpMinute.size
+                if (isAlphaLiveData) prune(alphaLiveDataMinute, now - 60_000L)
+                val liveDataWait = if (isAlphaLiveData) AlphaLiveDataPacingPolicy.waitMs(
+                    now, lastAlphaLiveDataGrantedAtMs,
+                    alphaLiveDataMinute.peekFirst(), alphaLiveDataMinute.size
                 ) else 0L
                 val protectionYield = MarketDataPriorityAdmissionPolicy.ltpPriorityYieldMs(
                     isAlphaLtp, protection, pendingProtectionLtps.get())
-                val wait = maxOf(cooldownWait, secondWait, minuteWait, ltpWait, protectionYield)
+                val wait = maxOf(cooldownWait, secondWait, minuteWait, liveDataWait, protectionYield)
                 reason = when {
                     protectionYield > 0L && wait == protectionYield -> "YIELD_TO_HOLDING_PROTECTION"
                     cooldownWait > 0L && wait == cooldownWait -> "429_COOLDOWN"
-                    ltpWait > 0L && wait == ltpWait -> "ALPHA_LTP_ENDPOINT_PACING"
+                    liveDataWait > 0L && wait == liveDataWait -> "ALPHA_LIVE_DATA_ENDPOINT_PACING"
                     minuteWait > 0L && wait == minuteWait -> "APP_PER_MINUTE"
                     secondWait > 0L && wait == secondWait -> "APP_PER_SECOND"
                     else -> "NONE"
@@ -198,9 +200,9 @@ internal class GrowwRateLimitInterceptor(
                 if (wait <= 0L) {
                     state.second.addLast(now)
                     state.minute.addLast(now)
-                    if (isAlphaLtp) {
-                        alphaLtpMinute.addLast(now)
-                        lastAlphaLtpGrantedAtMs = now
+                    if (isAlphaLiveData) {
+                        alphaLiveDataMinute.addLast(now)
+                        lastAlphaLiveDataGrantedAtMs = now
                     }
                     0L
                 } else wait
