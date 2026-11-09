@@ -8,6 +8,17 @@ package com.multify.traderpro.engine
  * portfolio rows rebased to an aggregate Groww holding are permanently excluded.
  */
 object AppPositionOwnershipPolicy {
+    const val POST_FILL_INVENTORY_LAG_WINDOW_MS = 120_000L
+
+    /**
+     * A just-confirmed app BUY can precede visibility in Groww holdings/positions.
+     * This proof is usable only briefly and only when the caller verified zero broker
+     * quantity immediately before submitting the app-owned BUY.
+     */
+    fun freshPostFillInventoryLagAllowed(openedAtMs: Long, nowMs: Long): Boolean =
+        openedAtMs > 0L && nowMs >= openedAtMs &&
+            nowMs - openedAtMs <= POST_FILL_INVENTORY_LAG_WINDOW_MS
+
     private val enginePrefixes = mapOf(
         "MULTIFY_HOLDING" to setOf("MLH"),
         "FORECAST_HOLDING" to setOf("FLH"),
