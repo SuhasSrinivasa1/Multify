@@ -1072,7 +1072,7 @@ class TradingRepository @Inject constructor(
             ).requirePayload("Fixed Beta NSE LTP")
         },
         priority = BetaResearchGate.Priority.FIXED,
-        maxWaitMs = if (preparing) 90_000L else 75_000L
+        maxWaitMs = if (preparing) 90_000L else 10_000L
     )
 
     private suspend fun forecastMarketToken(): String? {
