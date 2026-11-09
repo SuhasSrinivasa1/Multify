@@ -7083,12 +7083,12 @@ class TradingRepository @Inject constructor(
                 "recommendation_generated_at_ms" to row.generatedAtMs,
                 "recommendation_age_at_auto_buy_start_ms" to recommendationAgeAtStartMs,
                 "quote_ms" to quoteElapsedMs,
-                "margin_ms" to marginElapsedMs,
+                "wallet_api_calls" to 0,
                 "order_to_fill_ms" to orderElapsedMs,
                 "symbol_total_ms" to (System.currentTimeMillis() - symbolStartedAtMs).coerceAtLeast(0L),
                 "notification_before_order" to false,
                 "fresh_quote_preserved" to true,
-                "fresh_margin_preserved" to true,
+                "broker_funds_verdict_deferred_to_order" to true,
                 "fixed_formula_changed" to false
             ))
             auditLogger.logAsync("FIXED_AUTO_BUY", "ENTRY_MARKET_FILLED", mapOf(
