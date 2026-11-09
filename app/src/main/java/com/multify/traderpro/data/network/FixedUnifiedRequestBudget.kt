@@ -47,6 +47,8 @@ internal object FixedUnifiedRequestBudget {
     private var betaHistoricalPressureUntilMs = 0L
     private var sharedHistoricalPressureUntilMs = 0L
     private var alphaLastLtpPermitAtMs = 0L
+    private var alphaLastLivePermitAtMs = 0L
+    private var alphaLastHistoricalPermitAtMs = 0L
     private var betaLastLivePermitAtMs = 0L
     private var betaLastHistoricalPermitAtMs = 0L
 
@@ -175,9 +177,17 @@ internal object FixedUnifiedRequestBudget {
                             alpha.ltp.peekFirstOrNull()
                         )
                     } else 0L
+                    val alphaLiveGapMs = (1_000L + FixedUnifiedRequestBudgetPolicy.ALPHA_LIVE_PER_SECOND - 1) /
+                        FixedUnifiedRequestBudgetPolicy.ALPHA_LIVE_PER_SECOND
+                    val alphaHistoricalGapMs = (1_000L + FixedUnifiedRequestBudgetPolicy.ALPHA_HISTORICAL_PER_SECOND - 1) /
+                        FixedUnifiedRequestBudgetPolicy.ALPHA_HISTORICAL_PER_SECOND
                     val spacingWait = when {
                         account == Account.ALPHA && isLtp && !isProtection && alphaLastLtpPermitAtMs > 0L ->
                             (alphaLastLtpPermitAtMs + 1_200L - now).coerceAtLeast(0L)
+                        account == Account.ALPHA && category == Category.LIVE && alphaLastLivePermitAtMs > 0L ->
+                            (alphaLastLivePermitAtMs + alphaLiveGapMs - now).coerceAtLeast(0L)
+                        account == Account.ALPHA && category == Category.HISTORICAL && alphaLastHistoricalPermitAtMs > 0L ->
+                            (alphaLastHistoricalPermitAtMs + alphaHistoricalGapMs - now).coerceAtLeast(0L)
                         account == Account.BETA && category == Category.LIVE && betaLastLivePermitAtMs > 0L ->
                             (betaLastLivePermitAtMs + 1_200L - now).coerceAtLeast(0L)
                         account == Account.BETA && category == Category.HISTORICAL && betaLastHistoricalPermitAtMs > 0L ->
@@ -196,6 +206,8 @@ internal object FixedUnifiedRequestBudget {
                             alpha.ltp.addLast(now)
                             alphaLastLtpPermitAtMs = now
                         }
+                        if (account == Account.ALPHA && category == Category.LIVE) alphaLastLivePermitAtMs = now
+                        if (account == Account.ALPHA && category == Category.HISTORICAL) alphaLastHistoricalPermitAtMs = now
                         if (account == Account.BETA && category == Category.LIVE) betaLastLivePermitAtMs = now
                         if (account == Account.BETA && category == Category.HISTORICAL) betaLastHistoricalPermitAtMs = now
                         0L
