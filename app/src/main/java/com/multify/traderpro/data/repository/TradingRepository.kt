@@ -2596,6 +2596,9 @@ class TradingRepository @Inject constructor(
                 "multi_day_15m_window_high_distance_pct_NOT_day_high" to verdict.multiDayWindowHighDistancePct,
                 "vwap_atr_source" to "FROZEN_MULTI_DAY_15M_WINDOW",
                 "distance_above_vwap_in_atr" to verdict.vwapAtrExtension,
+                "distance_above_ema20_in_atr" to verdict.ema20AtrExtension,
+                "recent_15m_impulse_atr" to verdict.recentImpulseAtr,
+                "late_entry_guard_version" to "FIXED_MULTI_DAY_15M_LATE_ENTRY_V1",
                 "first_primary_runup_minus_target_pct" to verdict.firstPrimaryRunupBeyondTargetPct,
                 "fixed_scoring_changed" to false, "fixed_stored_recommendation_changed" to false,
                 "buy_guard_enabled" to true))
@@ -6991,6 +6994,10 @@ class TradingRepository @Inject constructor(
                     "symbol" to row.symbol, "reasons" to entryActionability.reasons,
                     "first_primary_to_entry_pct" to entryActionability.firstPrimaryRunupPct,
                     "distance_from_day_high_pct" to entryActionability.distanceFromQuoteHighPct,
+                    "multi_day_window_high_distance_pct_NOT_day_high" to entryActionability.multiDayWindowHighDistancePct,
+                    "vwap_extension_atr" to entryActionability.vwapAtrExtension,
+                    "ema20_extension_atr" to entryActionability.ema20AtrExtension,
+                    "recent_15m_impulse_atr" to entryActionability.recentImpulseAtr,
                     "fixed_model_unchanged" to true))
                 continue
             }
@@ -10838,6 +10845,9 @@ class TradingRepository @Inject constructor(
                     "fixed_early_watch_file" to "fixed_early_watch.json",
                     "fixed_early_watch_read_only" to true,
                     "fixed_quality_shadow_no_buy_filter" to true,
+                    "fixed_multi_day_late_entry_guard_enabled" to true,
+                    "fixed_multi_day_late_entry_guard_version" to "FIXED_MULTI_DAY_15M_LATE_ENTRY_V1",
+                    "fixed_multi_day_window_is_not_today_high" to true,
                     "quote_http_timing_exchange_age_unknown" to true,
                     "fixed_peak_research_feed_enabled" to false,
                     "fixed_scan_profile_event" to "FIXED_SCAN_PROFILE",

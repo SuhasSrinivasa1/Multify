@@ -35,6 +35,8 @@ object FixedEntryActionabilityPolicy {
         val highEvidenceSource: String,
         val multiDayWindowHighDistancePct: Double?,
         val vwapAtrExtension: Double?,
+        val ema20AtrExtension: Double?,
+        val recentImpulseAtr: Double?,
         val firstPrimaryRunupBeyondTargetPct: Double?
     )
 
@@ -70,9 +72,17 @@ object FixedEntryActionabilityPolicy {
         }
         val distance = if (price != null && usedHigh != null && usedHigh > 0.0)
             (usedHigh - price) / usedHigh * 100.0 else null
-        val vwapAtr = if (price != null && snapshot?.vwap != null &&
-            snapshot.atr14 != null && snapshot.atr14.isFinite() && snapshot.atr14 > 0.0)
-            (price - snapshot.vwap) / snapshot.atr14 else null
+        val atr = snapshot?.atr14?.takeIf { it.isFinite() && it > 0.0 }
+        val vwap = snapshot?.vwap?.takeIf { it.isFinite() && it > 0.0 }
+        val ema20 = snapshot?.ema20?.takeIf { it.isFinite() && it > 0.0 }
+        val lastClose = snapshot?.lastClose?.takeIf { it.isFinite() && it > 0.0 }
+        val prevClose = snapshot?.prevClose?.takeIf { it.isFinite() && it > 0.0 }
+        val vwapAtr = if (price != null && vwap != null && atr != null)
+            (price - vwap) / atr else null
+        val ema20Atr = if (price != null && ema20 != null && atr != null)
+            (price - ema20) / atr else null
+        val recentImpulseAtr = if (lastClose != null && prevClose != null && atr != null)
+            (lastClose - prevClose) / atr else null
         val firstPrice = referencePrice?.takeIf { it.isFinite() && it > 0.0 }
         val runup = if (firstPrice != null && price != null)
             (price / firstPrice - 1.0) * 100.0 else null
@@ -106,6 +116,9 @@ object FixedEntryActionabilityPolicy {
         if (FixedMultiDayExhaustionProxyPolicy.risky(
                 extendedSinceFirst, dayStrong, historicalWindowHighDistance, vwapAtr))
             reasons += "MULTIDAY_15M_WINDOW_HIGH_WITH_EXTENDED_FIRST_PRIMARY_RUNUP"
+        if (FixedMultiDayExhaustionProxyPolicy.lateBreakoutRisk(
+                historicalWindowHighDistance, vwapAtr, ema20Atr, recentImpulseAtr))
+            reasons += "LATE_BREAKOUT_NEAR_MULTI_DAY_15M_HIGH"
 
         val cautions = buildList {
             if (dayStrong) add("ALREADY_UP_5PCT")
@@ -122,6 +135,8 @@ object FixedEntryActionabilityPolicy {
             highEvidenceSource = highSource,
             multiDayWindowHighDistancePct = historicalWindowHighDistance,
             vwapAtrExtension = vwapAtr,
+            ema20AtrExtension = ema20Atr,
+            recentImpulseAtr = recentImpulseAtr,
             firstPrimaryRunupBeyondTargetPct =
                 if (runup != null && fixedTargetPct.isFinite())
                     runup - fixedTargetPct else null

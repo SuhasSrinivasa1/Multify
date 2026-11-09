@@ -1,0 +1,109 @@
+name: Multify v8.3.12 Final Fixed Late-Entry Guard
+on:
+  push:
+    branches: [v8312-final-fixed-late-entry-guard]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Android SDK 35
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
+      - name: Verify frozen Fixed, protection and anti-chase invariants
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+          base = '55766c85d2e01e24e4f3b5f62e0841796ac10932'
+          root = 'app/src/main/java/com/multify/traderpro/'
+          immutable = [
+            'engine/FixedLocalStrategyEngine.kt',
+            'engine/FixedForecastQualityPolicy.kt',
+            'engine/FixedFinalContract.kt',
+            'engine/FixedMarketDiscoveryPolicy.kt',
+            'engine/SteppedTrailingPolicy.kt',
+            'engine/HardStopLossPolicy.kt',
+            'engine/HoldingSmartOrderPolicy.kt',
+            'engine/FixedDualAccountPolicy.kt',
+            'data/network/GrowwApi.kt',
+            'engine/GttExitReconciliationPolicy.kt',
+            'engine/CircuitAwareBuyPolicy.kt',
+            'engine/CashAwareCncSizing.kt',
+            'engine/FixedDataPipelinePolicy.kt',
+          ]
+          for item in immutable:
+              path = root + item
+              assert Path(path).read_bytes() == subprocess.check_output(['git','show',f'{base}:{path}']), path
+          repo = Path(root + 'data/repository/TradingRepository.kt').read_text()
+          policy = Path(root + 'engine/FixedEntryActionabilityPolicy.kt').read_text()
+          proxy = Path(root + 'engine/FixedMultiDayExhaustionProxyPolicy.kt').read_text()
+          tests = Path('app/src/test/java/com/multify/traderpro/engine/FixedMultiDayExhaustionProxyPolicyTest.kt').read_text()
+          assert 'fixedAutoBuyActivatedAtMs' in repo
+          assert 'preFixedAutoBuyExecutionGuard(settings)' in repo
+          assert 'allowOtherSymbolProtectionRecovery = true' in repo
+          assert 'allowFreshPostFillProof = true' in repo
+          assert 'deferProtectionRetryToMonitor = true' in repo
+          assert 'LATE_BREAKOUT_NEAR_MULTI_DAY_15M_HIGH' in policy
+          assert 'lateBreakoutRisk(' in policy
+          assert 'MIN_WINDOW_VWAP_EXTENSION_ATR = 3.0' in proxy
+          assert 'MIN_EMA20_EXTENSION_ATR = 2.0' in proxy
+          assert 'MIN_RECENT_IMPULSE_ATR = 1.2' in proxy
+          assert 'lateBreakoutGuardBlocksFourWayExtensionConfluence' in tests
+          assert 'lateBreakoutGuardDoesNotRejectMomentumAwayFromWindowHigh' in tests
+          assert 'versionCode = 8393' in Path('app/build.gradle.kts').read_text()
+          print('Frozen Fixed, SELL/GTT, activation and late-entry invariants passed')
+          PY
+      - name: Backend tests
+        run: |
+          python -m pip install -r backend/requirements.txt
+          PYTHONPATH="$GITHUB_WORKSPACE" PHONE_HMAC_SECRET=test-secret-test-secret-test-secret GROWW_API_KEY=test-api-key GROWW_TOTP_SECRET=JBSWY3DPEHPK3PXP python -m pytest -q backend/tests
+      - name: Android unit tests
+        run: gradle --no-daemon testDebugUnitTest
+      - name: Build debug APK
+        run: gradle --no-daemon assembleDebug
+      - name: Verify APK and package exact source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v8.3.12-fixed-late-entry-guard-debug.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/*.apk > dist/APK-SIGNATURE.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/*.apk | head -n 2 > dist/PACKAGE.txt
+          grep -q "versionCode='8393'" dist/PACKAGE.txt
+          sha256sum dist/*.apk > dist/SHA256SUMS.txt
+          git rev-parse HEAD > dist/SOURCE-COMMIT.txt
+          echo "CI debug signing identity; may not update a differently signed installation." > dist/INSTALLATION-SIGNING-STATUS.txt
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile, ZIP_DEFLATED
+          with ZipFile('dist/Multify-TraderPro-v8.3.12-exact-source.zip','w',ZIP_DEFLATED) as z:
+              for p in Path('.').rglob('*'):
+                  if p.is_file() and not any(x in {'.git','.gradle','build','dist'} for x in p.parts) and p.suffix.lower() != '.jks':
+                      z.write(p,p.as_posix())
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: multify-v8312-final-fixed-late-entry-guard
+          path: dist/
+          if-no-files-found: warn
