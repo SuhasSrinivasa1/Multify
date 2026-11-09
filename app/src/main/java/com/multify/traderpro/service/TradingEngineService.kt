@@ -550,7 +550,10 @@ class TradingEngineService : Service() {
                         val cooldownUntilMs = maxOf(historicalCooldownUntilMs, liveCooldownUntilMs)
                         val nowMs = System.currentTimeMillis()
                         val readiness = FixedDataPipelinePolicy.readiness(
-                            gateState.reconnectRequired, cooldownUntilMs, nowMs
+                            gateState.reconnectRequired,
+                            historicalCooldownUntilMs,
+                            liveCooldownUntilMs,
+                            nowMs
                         )
                         if (readiness != FixedDataPipelinePolicy.Readiness.READY) {
                             if (FixedDataPipelinePolicy.shouldAuditSuppression(
@@ -565,6 +568,7 @@ class TradingEngineService : Service() {
                                     "historical_cooldown_until_ms" to historicalCooldownUntilMs,
                                     "live_ltp_cooldown_until_ms" to liveCooldownUntilMs,
                                     "remaining_cooldown_ms" to (cooldownUntilMs - nowMs).coerceAtLeast(0L),
+                                    "scan_outcome" to "DEFERRED_NOT_FAILED",
                                     "forecast_formula_unchanged" to true,
                                     "existing_fixed_recommendations_preserved" to true
                                 ))

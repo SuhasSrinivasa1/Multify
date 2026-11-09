@@ -2274,6 +2274,28 @@ class TradingRepository @Inject constructor(
         recoveryGate.checkRequestAllowed(GrowwApiUsageLedger.Category.HISTORICAL)
     }.isSuccess
 
+    private fun fixedBrokerCooldownAuditDetails(): Map<String, Any> {
+        val state = recoveryGate.status()
+        val now = System.currentTimeMillis()
+        val historicalUntil = state.categoryCooldownUntilMs[GrowwApiUsageLedger.Category.HISTORICAL] ?: 0L
+        val liveUntil = state.categoryCooldownUntilMs[GrowwApiUsageLedger.Category.LIVE_DATA] ?: 0L
+        val blocked = buildList {
+            if (liveUntil > now) add("LIVE_DATA")
+            if (historicalUntil > now) add("HISTORICAL")
+            if (state.reconnectRequired) add("AUTH_RECONNECT_REQUIRED")
+        }
+        val retryAt = maxOf(historicalUntil, liveUntil)
+        return mapOf(
+            "scan_outcome" to "DEFERRED_NOT_FAILED",
+            "blocked_api_categories" to blocked,
+            "live_data_cooldown_until_ms" to liveUntil,
+            "historical_cooldown_until_ms" to historicalUntil,
+            "retry_at_ms" to retryAt,
+            "remaining_cooldown_ms" to (retryAt - now).coerceAtLeast(0L),
+            "reconnect_required" to state.reconnectRequired
+        )
+    }
+
     suspend fun runFixedPriorityCycle(): Boolean {
         fixedApiPriorityRequested = true
         return scanApiCycleMutex.withLock {
@@ -2286,7 +2308,7 @@ class TradingRepository @Inject constructor(
                         "reason" to "LIVE_OR_HISTORICAL_CATEGORY_UNAVAILABLE",
                         "next_fixed_due_unchanged" to true,
                         "complete_scan_count_incremented" to false
-                    ))
+                    ) + fixedBrokerCooldownAuditDetails())
                     return@withLock false
                 }
                 val previousScanAtMs = lastFixedScanAtMs
@@ -3749,7 +3771,7 @@ class TradingRepository @Inject constructor(
             auditLogger.logAsync("FIXED_PERFORMANCE", "SCAN_DEFERRED_BROKER", mapOf(
                 "reason" to "BROKER_COOLDOWN_DURING_DISCOVERY",
                 "published_from_incomplete_scan" to false
-            ))
+            ) + fixedBrokerCooldownAuditDetails())
             return existing.map { it.toDto() }
         }
 
@@ -3798,7 +3820,7 @@ class TradingRepository @Inject constructor(
                     "evaluated_before_pause" to evaluatedBySymbol.size,
                     "required_candidates" to universe.size,
                     "published_from_incomplete_scan" to false
-                ))
+                ) + fixedBrokerCooldownAuditDetails())
                 return existing.map { it.toDto() }
             }
             delay(FIXED_V741_FORECAST_SYMBOL_PACING_MS)

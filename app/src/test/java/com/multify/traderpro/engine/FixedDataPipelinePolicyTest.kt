@@ -4,18 +4,22 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class FixedDataPipelinePolicyTest {
-    @Test fun cooldownPreventsUnproductiveScans() {
+    @Test fun liveAndHistoricalCooldownsAreReportedSeparately() {
+        assertEquals(FixedDataPipelinePolicy.Readiness.LIVE_DATA_COOLDOWN,
+            FixedDataPipelinePolicy.readiness(false, 0L, 1_500L, 1_000L))
         assertEquals(FixedDataPipelinePolicy.Readiness.HISTORICAL_COOLDOWN,
-            FixedDataPipelinePolicy.readiness(false, 1_500L, 1_000L))
+            FixedDataPipelinePolicy.readiness(false, 1_500L, 0L, 1_000L))
+        assertEquals(FixedDataPipelinePolicy.Readiness.MULTIPLE_API_COOLDOWNS,
+            FixedDataPipelinePolicy.readiness(false, 1_500L, 2_000L, 1_000L))
         assertEquals(FixedDataPipelinePolicy.Readiness.READY,
-            FixedDataPipelinePolicy.readiness(false, 1_500L, 1_500L))
+            FixedDataPipelinePolicy.readiness(false, 1_500L, 2_000L, 2_000L))
     }
 
     @Test fun authenticationIsAnIndependentHigherPriorityBlocker() {
         assertEquals(FixedDataPipelinePolicy.Readiness.AUTH_RECONNECT_REQUIRED,
-            FixedDataPipelinePolicy.readiness(true, 0L, 100L))
+            FixedDataPipelinePolicy.readiness(true, 0L, 100L, 1_000L))
         assertEquals(FixedDataPipelinePolicy.Readiness.AUTH_RECONNECT_REQUIRED,
-            FixedDataPipelinePolicy.readiness(true, 5_000L, 100L))
+            FixedDataPipelinePolicy.readiness(true, 5_000L, 100L, 1_000L))
     }
 
     @Test fun avoidSpammingTheAuditLedgerEverySecond() {
