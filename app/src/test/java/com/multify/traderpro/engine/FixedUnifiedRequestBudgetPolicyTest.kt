@@ -9,6 +9,7 @@ class FixedUnifiedRequestBudgetPolicyTest {
         assertEquals(55, p.effectiveAlphaLiveLimit(false))
         assertEquals(35, p.effectiveBetaLiveLimit(false))
         assertEquals(90, p.effectiveSharedLiveLimit(false))
+        assertEquals(18, p.ALPHA_LTP_PER_MINUTE)
         assertEquals(45, p.effectiveAlphaHistoricalLimit(false))
         assertEquals(8, p.effectiveBetaHistoricalLimit(false))
         assertEquals(53, p.effectiveSharedHistoricalLimit(false))
