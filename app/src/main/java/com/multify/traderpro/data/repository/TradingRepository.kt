@@ -4923,10 +4923,14 @@ class TradingRepository @Inject constructor(
             val from = t.minusMinutes(3).toLocalDateTime().format(HIST_FORMAT)
             val until = t.plusMinutes(4).toLocalDateTime().format(HIST_FORMAT)
             val history = runCatching {
-                apiFactory.betaGroww.historicalCandles(
-                    bearer(token), growwSymbol = "NSE-${record.symbol}",
-                    startTime = from, endTime = until, candleInterval = "1minute"
-                ).requirePayload("Univest exit market evidence")
+                betaMarketRead(token, BetaResearchGate.Type.HISTORICAL,
+                    alphaCall = { error("Univest Beta history cannot borrow Alpha credentials") },
+                    betaCall = {
+                        apiFactory.betaGroww.historicalCandles(
+                            bearer(token), growwSymbol = "NSE-${record.symbol}",
+                            startTime = from, endTime = until, candleInterval = "1minute"
+                        ).requirePayload("Univest exit market evidence")
+                    })
             }.getOrNull() ?: continue
             val estimate = history.candles.mapNotNull { c ->
                 if (c.size < 5) return@mapNotNull null
