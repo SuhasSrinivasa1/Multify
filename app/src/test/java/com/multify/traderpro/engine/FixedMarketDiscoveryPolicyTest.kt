@@ -18,4 +18,14 @@ class FixedMarketDiscoveryPolicyTest {
     @Test fun noCandidatesWhenLimitZero() {
         assertTrue(FixedMarketDiscoveryPolicy.rank(mapOf("ONE" to 101.0), mapOf("ONE" to 100.0), emptyMap(), 0).isEmpty())
     }
+
+    @Test fun positiveSubTenPricesCanBeCountedForCoverageButNeverEnterDiscoveryRanking() {
+        val ranked = FixedMarketDiscoveryPolicy.rank(
+            currentLtps = mapOf("LOWPRICE" to 8.5, "ELIGIBLE" to 250.0),
+            previousLtps = mapOf("LOWPRICE" to 8.0, "ELIGIBLE" to 240.0),
+            sessionOpenLtps = mapOf("LOWPRICE" to 8.0, "ELIGIBLE" to 240.0),
+            limit = 10
+        )
+        assertEquals(listOf("ELIGIBLE"), ranked.map { it.symbol })
+    }
 }

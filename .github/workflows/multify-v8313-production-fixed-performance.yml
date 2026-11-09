@@ -1,0 +1,178 @@
+name: Multify v8.3.13 Production Unified API Performance
+on:
+  push:
+    branches: [v8313-production-fixed-performance]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Android SDK 35
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
+      - name: Verify frozen Fixed, protection and transport-only changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          import subprocess
+
+          base = '55766c85d2e01e24e4f3b5f62e0841796ac10932'
+          root = 'app/src/main/java/com/multify/traderpro/'
+          immutable = [
+            'engine/FixedLocalStrategyEngine.kt',
+            'engine/FixedForecastQualityPolicy.kt',
+            'engine/FixedFinalContract.kt',
+            'engine/FixedMarketDiscoveryPolicy.kt',
+            'engine/SteppedTrailingPolicy.kt',
+            'engine/HardStopLossPolicy.kt',
+            'engine/HoldingSmartOrderPolicy.kt',
+            'engine/FixedDualAccountPolicy.kt',
+            'engine/GttExitReconciliationPolicy.kt',
+            'engine/CircuitAwareBuyPolicy.kt',
+            'engine/CashAwareCncSizing.kt',
+            'engine/FixedDataPipelinePolicy.kt',
+          ]
+          for item in immutable:
+              path = root + item
+              assert Path(path).read_bytes() == subprocess.check_output(['git','show',f'{base}:{path}']), path
+
+          # Groww endpoints and parameters are byte-for-byte unchanged after removing
+          # only the newly added internal priority metadata parameters.
+          api_path = root + 'data/network/GrowwApi.kt'
+          current_api = Path(api_path).read_text()
+          base_api = subprocess.check_output(['git','show',f'{base}:{api_path}']).decode()
+          def normalize_api(text):
+              return re.sub(
+                  r',\s*@Header\("X-Multify-Request-Priority"\) trafficPriority: String\? = null',
+                  '',
+                  text
+              )
+          assert normalize_api(current_api) == normalize_api(base_api)
+          assert current_api.count('@Header("X-Multify-Request-Priority") trafficPriority: String? = null') == 3
+
+          repo = Path(root + 'data/repository/TradingRepository.kt').read_text()
+          budget = Path(root + 'data/network/FixedUnifiedRequestBudget.kt').read_text()
+          beta = Path(root + 'data/network/BetaResearchGate.kt').read_text()
+          alpha = Path(root + 'data/network/GrowwRateLimitInterceptor.kt').read_text()
+          api_budget = Path(root + 'engine/FixedUnifiedRequestBudgetPolicy.kt').read_text()
+          routing = Path(root + 'engine/FixedDualAccountTransportPolicy.kt').read_text()
+          cooldown = Path(root + 'engine/FixedAutoBuyCooldownStagePolicy.kt').read_text()
+          ltp = Path(root + 'engine/AlphaLtpPacingPolicy.kt').read_text()
+          beta_interceptor = Path(root + 'data/network/BetaReadOnlyInterceptor.kt').read_text()
+          tests = Path('app/src/test/java/com/multify/traderpro/engine/FixedDualAccountTransportPolicyTest.kt').read_text()
+
+          assert 'FixedUnifiedRequestBudget.acquireAlpha(' in alpha
+          assert 'FixedUnifiedRequestBudget.acquireBeta(' in beta
+          assert 'FixedUnifiedRequestBudget.on429(' in alpha
+          assert 'FixedUnifiedRequestBudget.on429(' in beta
+          assert 'YIELD_TO_FIXED' in alpha
+          assert 'maxWaitMs: Long' in beta
+          assert 'BETA_FIXED_RATE_BUDGET_OR_COOLDOWN' in beta
+          assert 'removeHeader(MarketDataPriorityAdmissionPolicy.HEADER)' in beta_interceptor
+          assert 'ALPHA_LIVE_PER_MINUTE = 55' in api_budget
+          assert 'BETA_LIVE_PER_MINUTE = 35' in api_budget
+          assert 'SHARED_LIVE_PER_MINUTE = 90' in api_budget
+          assert 'ALPHA_LTP_PER_MINUTE = 18' in api_budget
+          assert 'BETA_DISCOVERY_BATCH_CAP_PER_MINUTE = 35' in routing
+          assert 'FixedDualAccountTransportPolicy.betaDiscoveryBatch' in repo
+          assert 'FixedDualAccountTransportPolicy.betaDetailedEvaluation' in repo
+          assert 'targeted_retry_batches' in repo
+          assert 'broker_response_missing_symbols' in repo
+          assert 'value > 0.0' in repo
+          assert 'FixedUnifiedRequestBudget.snapshot()' in repo
+          assert 'FixedAutoBuyCooldownStagePolicy.Stage.BEFORE_QUOTE' in repo
+          assert 'FixedAutoBuyCooldownStagePolicy.Stage.AFTER_QUOTE_FAILURE' in repo
+          assert 'FixedAutoBuyCooldownStagePolicy.Stage.BEFORE_ORDER' in repo
+          assert 'LIVE_DATA' not in cooldown.split('Stage.BEFORE_ORDER')[1].split('}')[0]
+          assert 'MAX_PER_MINUTE = 18' in ltp
+          assert 'fullNseSweepUsesThirtyFiveBetaAndEighteenAlphaBatches' in tests
+          assert 'versionCode = 8394' in Path('app/build.gradle.kts').read_text()
+          assert 'versionName = "8.3.13-unified-api-performance-final"' in Path('app/build.gradle.kts').read_text()
+          print('Frozen Fixed/SELL/GTT and transport-only invariants passed')
+          PY
+      - name: Configure stable production signing (optional)
+        shell: bash
+        env:
+          MULTIFY_KEYSTORE_BASE64: ${{ secrets.MULTIFY_KEYSTORE_BASE64 }}
+          MULTIFY_KEYSTORE_PASSWORD: ${{ secrets.MULTIFY_KEYSTORE_PASSWORD }}
+          MULTIFY_KEY_ALIAS: ${{ secrets.MULTIFY_KEY_ALIAS }}
+          MULTIFY_KEY_PASSWORD: ${{ secrets.MULTIFY_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -n "${MULTIFY_KEYSTORE_BASE64:-}" ] && [ -n "${MULTIFY_KEYSTORE_PASSWORD:-}" ]; then
+            printf '%s' "$MULTIFY_KEYSTORE_BASE64" | base64 --decode > app/multify-v4-stable.jks
+            {
+              echo "MULTIFY_KEYSTORE_PASSWORD=$MULTIFY_KEYSTORE_PASSWORD"
+              echo "MULTIFY_KEY_ALIAS=${MULTIFY_KEY_ALIAS:-multifyv4}"
+              echo "MULTIFY_KEY_PASSWORD=${MULTIFY_KEY_PASSWORD:-$MULTIFY_KEYSTORE_PASSWORD}"
+              echo "MULTIFY_STABLE_SIGNING_READY=true"
+            } >> "$GITHUB_ENV"
+          else
+            echo "MULTIFY_STABLE_SIGNING_READY=false" >> "$GITHUB_ENV"
+          fi
+      - name: Backend tests
+        run: |
+          python -m pip install -r backend/requirements.txt
+          PYTHONPATH="$GITHUB_WORKSPACE" PHONE_HMAC_SECRET=test-secret-test-secret-test-secret GROWW_API_KEY=test-api-key GROWW_TOTP_SECRET=JBSWY3DPEHPK3PXP python -m pytest -q backend/tests
+      - name: Android unit tests
+        run: gradle --no-daemon testDebugUnitTest
+      - name: Build production APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${MULTIFY_STABLE_SIGNING_READY:-false}" = "true" ]; then
+            gradle --no-daemon assembleRelease
+            mkdir -p dist
+            cp app/build/outputs/apk/release/app-release.apk dist/Multify-TraderPro-v8.3.13.apk
+            echo "Stable release keystore supplied through GitHub Actions secrets." > dist/INSTALLATION-SIGNING-STATUS.txt
+          else
+            gradle --no-daemon assembleDebug
+            mkdir -p dist
+            cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v8.3.13-debug.apk
+            echo "CI debug signing identity; may not update a differently signed installation. Configure MULTIFY_KEYSTORE_BASE64, MULTIFY_KEYSTORE_PASSWORD, MULTIFY_KEY_ALIAS and MULTIFY_KEY_PASSWORD with the original installed-app signing key for an in-place production update." > dist/INSTALLATION-SIGNING-STATUS.txt
+          fi
+      - name: Verify APK and package exact source
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK_PATH="$(find dist -maxdepth 1 -name '*.apk' -print -quit)"
+          test -n "$APK_PATH"
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$APK_PATH" > dist/APK-SIGNATURE.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$APK_PATH" | head -n 2 > dist/PACKAGE.txt
+          grep -q "versionCode='8394'" dist/PACKAGE.txt
+          sha256sum "$APK_PATH" > dist/SHA256SUMS.txt
+          git rev-parse HEAD > dist/SOURCE-COMMIT.txt
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile, ZIP_DEFLATED
+          with ZipFile('dist/Multify-TraderPro-v8.3.13-exact-source.zip','w',ZIP_DEFLATED) as z:
+              for p in Path('.').rglob('*'):
+                  if p.is_file() and not any(x in {'.git','.gradle','build','dist'} for x in p.parts) and p.suffix.lower() != '.jks':
+                      z.write(p,p.as_posix())
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: multify-v8313-production-fixed-performance
+          path: dist/
+          if-no-files-found: warn

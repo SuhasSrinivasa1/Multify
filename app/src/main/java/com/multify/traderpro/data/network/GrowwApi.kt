@@ -42,7 +42,8 @@ interface GrowwApi {
         @Header("Authorization") authorization: String,
         @Query("exchange") exchange: String = "NSE",
         @Query("segment") segment: String = "CASH",
-        @Query("trading_symbol") tradingSymbol: String
+        @Query("trading_symbol") tradingSymbol: String,
+        @Header("X-Multify-Request-Priority") trafficPriority: String? = null
     ): ApiEnvelope<QuotePayload>
 
     @GET("v1/live-data/ltp")
@@ -61,7 +62,8 @@ interface GrowwApi {
         @Query("groww_symbol") growwSymbol: String,
         @Query("start_time") startTime: String,
         @Query("end_time") endTime: String,
-        @Query("candle_interval") candleInterval: String = "5minute"
+        @Query("candle_interval") candleInterval: String = "5minute",
+        @Header("X-Multify-Request-Priority") trafficPriority: String? = null
     ): ApiEnvelope<HistoricalPayload>
 
     @POST("v1/order/create")

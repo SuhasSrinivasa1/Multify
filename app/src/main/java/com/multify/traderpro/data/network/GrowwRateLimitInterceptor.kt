@@ -40,6 +40,7 @@ internal class GrowwRateLimitInterceptor(
     // This never changes Fixed scoring, SELL stop triggers or order dispatch.
     private val alphaLtpMinute = ArrayDeque<Long>()
     private val pendingProtectionLtps = AtomicInteger(0)
+    private val pendingFixedLiveRequests = AtomicInteger(0)
     private var lastAlphaLtpGrantedAtMs = 0L
     private val lastBlockedAuditMs = EnumMap<GrowwApiUsageLedger.Category, Long>(GrowwApiUsageLedger.Category::class.java)
     private val states = EnumMap<GrowwApiUsageLedger.Category, State>(GrowwApiUsageLedger.Category::class.java).apply {
@@ -90,6 +91,15 @@ internal class GrowwRateLimitInterceptor(
             val rawRetryAfter = response.header("Retry-After")
             val retryAfterMs = GrowwRetryAfterPolicy.retryAfterMs(rawRetryAfter, System.currentTimeMillis())
             val appliedCooldownMs = recoveryGate.on429(category, retryAfterMs)
+            when (category) {
+                GrowwApiUsageLedger.Category.LIVE_DATA ->
+                    FixedUnifiedRequestBudget.on429(FixedUnifiedRequestBudget.Account.ALPHA,
+                        FixedUnifiedRequestBudget.Category.LIVE, appliedCooldownMs)
+                GrowwApiUsageLedger.Category.HISTORICAL ->
+                    FixedUnifiedRequestBudget.on429(FixedUnifiedRequestBudget.Account.ALPHA,
+                        FixedUnifiedRequestBudget.Category.HISTORICAL, appliedCooldownMs)
+                else -> Unit
+            }
             synchronized(lock) {
                 val state = states.getValue(category)
                 state.cooldownUntilMs = maxOf(state.cooldownUntilMs, SystemClock.elapsedRealtime() + appliedCooldownMs)
@@ -152,7 +162,13 @@ internal class GrowwRateLimitInterceptor(
             MarketDataPriorityAdmissionPolicy.isProtectionHeader(
                 request.header(MarketDataPriorityAdmissionPolicy.HEADER))
         val protectionLtp = protection && path == "/v1/live-data/ltp"
+        val fixedPriority = MarketDataPriorityAdmissionPolicy.isFixedHeader(
+            request.header(MarketDataPriorityAdmissionPolicy.HEADER))
         if (protectionLtp) pendingProtectionLtps.incrementAndGet()
+        if (fixedPriority && category in setOf(
+                GrowwApiUsageLedger.Category.LIVE_DATA,
+                GrowwApiUsageLedger.Category.HISTORICAL
+            )) pendingFixedLiveRequests.incrementAndGet()
         var totalWaitMs = 0L
         var dominantReason = "NONE"
         try {
@@ -189,9 +205,12 @@ internal class GrowwRateLimitInterceptor(
                 ) else 0L
                 val protectionYield = MarketDataPriorityAdmissionPolicy.ltpPriorityYieldMs(
                     isAlphaLtp, protection, pendingProtectionLtps.get())
-                val wait = maxOf(cooldownWait, secondWait, minuteWait, ltpWait, protectionYield)
+                val fixedYield = if (!fixedPriority && !protection && pendingFixedLiveRequests.get() > 0)
+                    com.multify.traderpro.engine.FixedUnifiedRequestBudgetPolicy.BACKGROUND_YIELD_MS else 0L
+                val wait = maxOf(cooldownWait, secondWait, minuteWait, ltpWait, protectionYield, fixedYield)
                 reason = when {
                     protectionYield > 0L && wait == protectionYield -> "YIELD_TO_HOLDING_PROTECTION"
+                    fixedYield > 0L && wait == fixedYield -> "YIELD_TO_FIXED"
                     cooldownWait > 0L && wait == cooldownWait -> "429_COOLDOWN"
                     ltpWait > 0L && wait == ltpWait -> "ALPHA_LTP_ENDPOINT_PACING"
                     minuteWait > 0L && wait == minuteWait -> "APP_PER_MINUTE"
@@ -225,6 +244,12 @@ internal class GrowwRateLimitInterceptor(
                         ))
                     }
                 }
+                FixedUnifiedRequestBudget.acquireAlpha(
+                    category = category,
+                    path = path,
+                    isProtection = protection,
+                    isFixed = fixedPriority
+                )
                 return
             }
             dominantReason = reason
@@ -234,6 +259,10 @@ internal class GrowwRateLimitInterceptor(
         }
         } finally {
             if (protectionLtp) pendingProtectionLtps.decrementAndGet()
+            if (fixedPriority && category in setOf(
+                    GrowwApiUsageLedger.Category.LIVE_DATA,
+                    GrowwApiUsageLedger.Category.HISTORICAL
+                )) pendingFixedLiveRequests.decrementAndGet()
         }
     }
 

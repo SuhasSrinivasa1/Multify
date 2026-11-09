@@ -7,6 +7,7 @@ import kotlinx.coroutines.sync.withLock
 import retrofit2.HttpException
 import java.util.ArrayDeque
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicInteger
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -14,6 +15,7 @@ import javax.inject.Singleton
 @Singleton
 class BetaResearchGate @Inject constructor() {
     enum class Type { LIVE, HISTORICAL }
+    enum class Priority { FIXED, BACKGROUND }
     data class UsageSnapshot(
         val liveRequests: Long, val historicalRequests: Long,
         val liveFailures: Long, val historicalFailures: Long,
@@ -37,6 +39,7 @@ class BetaResearchGate @Inject constructor() {
     private val histMinute = com.multify.traderpro.engine.FixedDualAccountPolicy.BETA_HISTORICAL_PER_MINUTE
     private val liveGapMs = com.multify.traderpro.engine.FixedDualAccountPolicy.BETA_LTP_MIN_GAP_MS
 
+    private val pendingFixed = AtomicInteger()
     private val liveRequests = AtomicLong()
     private val historicalRequests = AtomicLong()
     private val liveFailures = AtomicLong()
@@ -45,62 +48,109 @@ class BetaResearchGate @Inject constructor() {
     private val historicalRateLimits = AtomicLong()
     private val lastLatencyMs = AtomicLong()
 
-    suspend fun <T> read(type: Type, block: suspend () -> T): T =
-        if (type == Type.HISTORICAL) historicalInFlight.withLock { readRateLimited(type, block) }
-        else readRateLimited(type, block)
+    suspend fun <T> read(
+        type: Type,
+        priority: Priority = Priority.BACKGROUND,
+        maxWaitMs: Long = 10_000L,
+        block: suspend () -> T
+    ): T =
+        if (type == Type.HISTORICAL) historicalInFlight.withLock {
+            readRateLimited(type, priority, maxWaitMs, block)
+        } else readRateLimited(type, priority, maxWaitMs, block)
 
-    private suspend fun <T> readRateLimited(type: Type, block: suspend () -> T): T {
-        while (true) {
-            val waitMs = lock.withLock {
-                val w = windows.getValue(type)
-                val now = SystemClock.elapsedRealtime()
-                while (w.second.isNotEmpty() && w.second.first() <= now - 1_000L) w.second.removeFirst()
-                while (w.minute.isNotEmpty() && w.minute.first() <= now - 60_000L) w.minute.removeFirst()
-                val perSecond = if (type == Type.LIVE) liveSec else histSec
-                val perMinute = if (type == Type.LIVE) liveMinute else histMinute
-                val spacingWait = if (w.lastGrantedAt > 0L)
-                    (w.lastGrantedAt + (if (type == Type.LIVE) liveGapMs else 1_500L) - now)
-                        .coerceAtLeast(0L) else 0L
-                val wait = maxOf(
-                    spacingWait,
-                    (w.cooldownUntil - now).coerceAtLeast(0L),
-                    if (w.second.size >= perSecond) (w.second.first() + 1_000L - now).coerceAtLeast(1L) else 0L,
-                    if (w.minute.size >= perMinute) (w.minute.first() + 60_000L - now).coerceAtLeast(1L) else 0L
+    private suspend fun <T> readRateLimited(
+        type: Type,
+        priority: Priority,
+        maxWaitMs: Long,
+        block: suspend () -> T
+    ): T {
+        val admissionStartedAt = SystemClock.elapsedRealtime()
+        if (priority == Priority.FIXED) pendingFixed.incrementAndGet()
+        try {
+            var halfOpenProbeUsed = false
+            while (true) {
+                while (true) {
+                    val waitMs = lock.withLock {
+                        val w = windows.getValue(type)
+                        val now = SystemClock.elapsedRealtime()
+                        while (w.second.isNotEmpty() && w.second.first() <= now - 1_000L) w.second.removeFirst()
+                        while (w.minute.isNotEmpty() && w.minute.first() <= now - 60_000L) w.minute.removeFirst()
+                        val perSecond = if (type == Type.LIVE) liveSec else histSec
+                        val perMinute = if (type == Type.LIVE) liveMinute else histMinute
+                        val spacingWait = if (w.lastGrantedAt > 0L)
+                            (w.lastGrantedAt + (if (type == Type.LIVE) liveGapMs else 1_500L) - now)
+                                .coerceAtLeast(0L) else 0L
+                        val fixedYield = if (priority == Priority.BACKGROUND && pendingFixed.get() > 0)
+                            com.multify.traderpro.engine.FixedUnifiedRequestBudgetPolicy.BACKGROUND_YIELD_MS else 0L
+                        val wait = maxOf(
+                            spacingWait,
+                            (w.cooldownUntil - now).coerceAtLeast(0L),
+                            if (w.second.size >= perSecond) (w.second.first() + 1_000L - now).coerceAtLeast(1L) else 0L,
+                            if (w.minute.size >= perMinute) (w.minute.first() + 60_000L - now).coerceAtLeast(1L) else 0L,
+                            fixedYield
+                        )
+                        if (wait == 0L) {
+                            w.second.addLast(now)
+                            w.minute.addLast(now)
+                            w.lastGrantedAt = now
+                        }
+                        wait
+                    }
+                    if (waitMs <= 0L) break
+                    val elapsed = (SystemClock.elapsedRealtime() - admissionStartedAt).coerceAtLeast(0L)
+                    val remaining = (maxWaitMs - elapsed).coerceAtLeast(0L)
+                    if (waitMs > remaining) {
+                        throw java.io.IOException("BETA_FIXED_RATE_BUDGET_OR_COOLDOWN")
+                    }
+                    delay(waitMs.coerceAtLeast(5L))
+                }
+
+                val elapsed = (SystemClock.elapsedRealtime() - admissionStartedAt).coerceAtLeast(0L)
+                FixedUnifiedRequestBudget.acquireBeta(
+                    type = type,
+                    isFixed = priority == Priority.FIXED,
+                    maxWaitMs = (maxWaitMs - elapsed).coerceAtLeast(0L)
                 )
-                if (wait == 0L) {
-                    w.second.addLast(now)
-                    w.minute.addLast(now)
-                    w.lastGrantedAt = now
+
+                val requestStarted = SystemClock.elapsedRealtime()
+                if (type == Type.LIVE) liveRequests.incrementAndGet() else historicalRequests.incrementAndGet()
+                try {
+                    val result = block()
+                    lastLatencyMs.set((SystemClock.elapsedRealtime() - requestStarted).coerceAtLeast(0L))
+                    return result
+                } catch (failure: Throwable) {
+                    if (type == Type.LIVE) liveFailures.incrementAndGet() else historicalFailures.incrementAndGet()
+                    if (failure is HttpException && failure.code() == 429) {
+                        if (type == Type.LIVE) liveRateLimits.incrementAndGet() else historicalRateLimits.incrementAndGet()
+                        val retryAfterMs = failure.response()?.headers()?.get("Retry-After")?.toLongOrNull()?.times(1_000L) ?: 0L
+                        val cooldownMs = maxOf(60_000L, retryAfterMs)
+                        lock.withLock {
+                            val w = windows.getValue(type)
+                            w.cooldownUntil = maxOf(w.cooldownUntil, SystemClock.elapsedRealtime() + cooldownMs)
+                        }
+                        FixedUnifiedRequestBudget.on429(
+                            account = FixedUnifiedRequestBudget.Account.BETA,
+                            category = if (type == Type.LIVE) FixedUnifiedRequestBudget.Category.LIVE
+                                else FixedUnifiedRequestBudget.Category.HISTORICAL,
+                            cooldownMs = cooldownMs
+                        )
+                        val elapsedAfter429 = (SystemClock.elapsedRealtime() - admissionStartedAt).coerceAtLeast(0L)
+                        val remaining = (maxWaitMs - elapsedAfter429).coerceAtLeast(0L)
+                        // Exactly one paced half-open probe after a Fixed 429, only when the
+                        // caller's bounded recovery window can contain the broker cooldown.
+                        if (priority == Priority.FIXED && !halfOpenProbeUsed && cooldownMs <= remaining) {
+                            halfOpenProbeUsed = true
+                            delay(cooldownMs)
+                            continue
+                        }
+                    }
+                    throw failure
+                } finally {
+                    lastLatencyMs.set((SystemClock.elapsedRealtime() - requestStarted).coerceAtLeast(0L))
                 }
-                wait
             }
-            if (waitMs <= 0L) break
-            // Fixed has a 150-second cadence. Never let an unavailable Beta lane
-            // stall an entire official scan for a 60-second broker cooldown.
-            // Caller falls back to Alpha using the existing Alpha governor.
-            if (waitMs > 10_000L) {
-                throw java.io.IOException("BETA_FIXED_RATE_BUDGET_OR_COOLDOWN")
-            }
-            delay(waitMs.coerceAtLeast(5L))
-        }
-        val requestStarted = SystemClock.elapsedRealtime()
-        if (type == Type.LIVE) liveRequests.incrementAndGet() else historicalRequests.incrementAndGet()
-        return try {
-            block()
-        } catch (failure: Throwable) {
-            if (type == Type.LIVE) liveFailures.incrementAndGet() else historicalFailures.incrementAndGet()
-            if (failure is HttpException && failure.code() == 429) {
-                if (type == Type.LIVE) liveRateLimits.incrementAndGet() else historicalRateLimits.incrementAndGet()
-                val retryAfterMs = failure.response()?.headers()?.get("Retry-After")?.toLongOrNull()?.times(1_000L) ?: 0L
-                val cooldownMs = maxOf(60_000L, retryAfterMs)
-                lock.withLock {
-                    val w = windows.getValue(type)
-                    w.cooldownUntil = maxOf(w.cooldownUntil, SystemClock.elapsedRealtime() + cooldownMs)
-                }
-            }
-            throw failure
         } finally {
-            lastLatencyMs.set((SystemClock.elapsedRealtime() - requestStarted).coerceAtLeast(0L))
+            if (priority == Priority.FIXED) pendingFixed.decrementAndGet()
         }
     }
 

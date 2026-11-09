@@ -1,5 +1,6 @@
 package com.multify.traderpro.data.network
 
+import com.multify.traderpro.engine.MarketDataPriorityAdmissionPolicy
 import okhttp3.Interceptor
 import okhttp3.Response
 import java.io.IOException
@@ -10,7 +11,11 @@ internal class BetaReadOnlyInterceptor : Interceptor {
         val request = chain.request()
         val path = request.url.encodedPath
         if (!permits(request.method, path)) throw IOException("BETA_READ_ONLY_DENIED: ${request.method} $path")
-        return chain.proceed(request)
+        // Internal scheduler metadata must never be forwarded to Groww.
+        val sanitized = request.newBuilder()
+            .removeHeader(MarketDataPriorityAdmissionPolicy.HEADER)
+            .build()
+        return chain.proceed(sanitized)
     }
     companion object {
         fun permits(method: String, path: String): Boolean =
