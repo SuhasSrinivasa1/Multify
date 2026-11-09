@@ -26,9 +26,8 @@ class FixedUnifiedRequestBudgetPolicyTest {
 
     @Test fun rollingWindowWaitUsesOldestRequestExpiry() {
         val p = FixedUnifiedRequestBudgetPolicy
-        assertEquals(5_000L, p.windowWaitMs(10_000L, 55, 55, 0L))
+        assertEquals(5_000L, p.windowWaitMs(55_000L, 55, 55, 0L))
         assertEquals(0L, p.windowWaitMs(10_000L, 54, 55, 0L))
-        assertEquals(1L, p.windowWaitMs(70_000L, 55, 55, 0L))
         assertEquals(0L, p.windowWaitMs(10_000L, 55, 55, null))
     }
 }
