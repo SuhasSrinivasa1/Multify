@@ -110,26 +110,58 @@ jobs:
           assert 'versionName = "8.3.13-unified-api-performance-final"' in Path('app/build.gradle.kts').read_text()
           print('Frozen Fixed/SELL/GTT and transport-only invariants passed')
           PY
+      - name: Configure stable production signing (optional)
+        shell: bash
+        env:
+          MULTIFY_KEYSTORE_BASE64: ${{ secrets.MULTIFY_KEYSTORE_BASE64 }}
+          MULTIFY_KEYSTORE_PASSWORD: ${{ secrets.MULTIFY_KEYSTORE_PASSWORD }}
+          MULTIFY_KEY_ALIAS: ${{ secrets.MULTIFY_KEY_ALIAS }}
+          MULTIFY_KEY_PASSWORD: ${{ secrets.MULTIFY_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -n "${MULTIFY_KEYSTORE_BASE64:-}" ] && [ -n "${MULTIFY_KEYSTORE_PASSWORD:-}" ]; then
+            printf '%s' "$MULTIFY_KEYSTORE_BASE64" | base64 --decode > app/multify-v4-stable.jks
+            {
+              echo "MULTIFY_KEYSTORE_PASSWORD=$MULTIFY_KEYSTORE_PASSWORD"
+              echo "MULTIFY_KEY_ALIAS=${MULTIFY_KEY_ALIAS:-multifyv4}"
+              echo "MULTIFY_KEY_PASSWORD=${MULTIFY_KEY_PASSWORD:-$MULTIFY_KEYSTORE_PASSWORD}"
+              echo "MULTIFY_STABLE_SIGNING_READY=true"
+            } >> "$GITHUB_ENV"
+          else
+            echo "MULTIFY_STABLE_SIGNING_READY=false" >> "$GITHUB_ENV"
+          fi
       - name: Backend tests
         run: |
           python -m pip install -r backend/requirements.txt
           PYTHONPATH="$GITHUB_WORKSPACE" PHONE_HMAC_SECRET=test-secret-test-secret-test-secret GROWW_API_KEY=test-api-key GROWW_TOTP_SECRET=JBSWY3DPEHPK3PXP python -m pytest -q backend/tests
       - name: Android unit tests
         run: gradle --no-daemon testDebugUnitTest
-      - name: Build production-candidate APK
-        run: gradle --no-daemon assembleDebug
+      - name: Build production APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${MULTIFY_STABLE_SIGNING_READY:-false}" = "true" ]; then
+            gradle --no-daemon assembleRelease
+            mkdir -p dist
+            cp app/build/outputs/apk/release/app-release.apk dist/Multify-TraderPro-v8.3.13.apk
+            echo "Stable release keystore supplied through GitHub Actions secrets." > dist/INSTALLATION-SIGNING-STATUS.txt
+          else
+            gradle --no-daemon assembleDebug
+            mkdir -p dist
+            cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v8.3.13-debug.apk
+            echo "CI debug signing identity; may not update a differently signed installation. Configure MULTIFY_KEYSTORE_BASE64, MULTIFY_KEYSTORE_PASSWORD, MULTIFY_KEY_ALIAS and MULTIFY_KEY_PASSWORD with the original installed-app signing key for an in-place production update." > dist/INSTALLATION-SIGNING-STATUS.txt
+          fi
       - name: Verify APK and package exact source
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v8.3.13-unified-api-performance-debug.apk
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/*.apk > dist/APK-SIGNATURE.txt
-          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/*.apk | head -n 2 > dist/PACKAGE.txt
+          APK_PATH="$(find dist -maxdepth 1 -name '*.apk' -print -quit)"
+          test -n "$APK_PATH"
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$APK_PATH" > dist/APK-SIGNATURE.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$APK_PATH" | head -n 2 > dist/PACKAGE.txt
           grep -q "versionCode='8394'" dist/PACKAGE.txt
-          sha256sum dist/*.apk > dist/SHA256SUMS.txt
+          sha256sum "$APK_PATH" > dist/SHA256SUMS.txt
           git rev-parse HEAD > dist/SOURCE-COMMIT.txt
-          echo "CI debug signing identity; may not update a differently signed installation. A stable release keystore was not included in the source branch." > dist/INSTALLATION-SIGNING-STATUS.txt
           python - <<'PY'
           from pathlib import Path
           from zipfile import ZipFile, ZIP_DEFLATED
