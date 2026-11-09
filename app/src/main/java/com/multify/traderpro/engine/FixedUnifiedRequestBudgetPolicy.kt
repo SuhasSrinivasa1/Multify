@@ -9,6 +9,13 @@ package com.multify.traderpro.engine
  */
 object FixedUnifiedRequestBudgetPolicy {
     const val WINDOW_MS = 60_000L
+    const val SECOND_WINDOW_MS = 1_000L
+    const val ALPHA_LIVE_PER_SECOND = 7
+    const val BETA_LIVE_PER_SECOND = 1
+    const val SHARED_LIVE_PER_SECOND = 8
+    const val ALPHA_HISTORICAL_PER_SECOND = 4
+    const val BETA_HISTORICAL_PER_SECOND = 1
+    const val SHARED_HISTORICAL_PER_SECOND = 5
     const val ALPHA_LIVE_PER_MINUTE = 55
     const val BETA_LIVE_PER_MINUTE = 35
     const val SHARED_LIVE_PER_MINUTE = 90
@@ -51,4 +58,12 @@ object FixedUnifiedRequestBudgetPolicy {
         oldestAtMs: Long?
     ): Long = if (used >= limit && oldestAtMs != null)
         (oldestAtMs + WINDOW_MS - nowMs).coerceAtLeast(1L) else 0L
+
+    fun secondWindowWaitMs(
+        nowMs: Long,
+        used: Int,
+        limit: Int,
+        oldestAtMs: Long?
+    ): Long = if (used >= limit && oldestAtMs != null)
+        (oldestAtMs + SECOND_WINDOW_MS - nowMs).coerceAtLeast(1L) else 0L
 }
