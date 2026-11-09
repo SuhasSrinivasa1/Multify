@@ -1,0 +1,163 @@
+name: Multify v8.3.8 Fixed-Isolated Execution, Cooldown & Performance Verified APK
+on:
+  push:
+    branches: [v838-execution-cooldown-performance]
+  workflow_dispatch:
+  pull_request:
+    branches: [v837-fixed-scan-diagnostics]
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  verify-and-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Publish PR run link
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: 'v8.3.8 APK build started: https://github.com/' + context.repo.owner + '/' + context.repo.repo + '/actions/runs/' + context.runId
+            })
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Install Android SDK 35
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
+      - name: Strict v8.3.7 frozen Fixed source and execution safety lock
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+          base='06c2e296d09d47c7d01f0cd3f9ac632e65f6fa08'
+          root='app/src/main/java/com/multify/traderpro/'
+          # Fixed selection, 40 factors, candles, filtering, target, protective
+          # trailing and -5% stop are byte-identical to the tested v8.3.7 baseline.
+          protected=[
+            root+'engine/FixedLocalStrategyEngine.kt',
+            root+'engine/FixedForecastQualityPolicy.kt',
+            root+'engine/FixedFinalContract.kt',
+            root+'engine/FixedMarketDiscoveryPolicy.kt',
+            root+'engine/SteppedTrailingPolicy.kt',
+            root+'engine/HardStopLossPolicy.kt',
+            root+'engine/HoldingSmartOrderPolicy.kt',
+            root+'engine/FixedDualAccountPolicy.kt',
+            root+'data/network/GrowwApi.kt',
+            root+'engine/GttExitReconciliationPolicy.kt',
+            root+'engine/CircuitAwareBuyPolicy.kt',
+            root+'engine/CashAwareCncSizing.kt',
+            root+'engine/FixedDataPipelinePolicy.kt',
+            'app/src/main/java/com/multify/traderpro/service/TradingEngineService.kt',
+          ]
+          for path in protected:
+            assert Path(path).read_bytes()==subprocess.check_output(['git','show',f'{base}:{path}']),path
+          changed=set(subprocess.check_output(['git','diff','--name-only',base,'HEAD'],text=True).splitlines())
+          expected={
+            'app/build.gradle.kts',
+            root+'data/repository/TradingRepository.kt',
+            root+'engine/ExecutionFillQuantityPolicy.kt',
+            root+'engine/FixedScanBuyIsolationPolicy.kt',
+            root+'engine/IdleBrokerPollingPolicy.kt',
+            'app/src/test/java/com/multify/traderpro/engine/ExecutionFillQuantityPolicyTest.kt',
+            'app/src/test/java/com/multify/traderpro/engine/FixedScanBuyIsolationPolicyTest.kt',
+            'app/src/test/java/com/multify/traderpro/engine/IdleBrokerPollingPolicyTest.kt',
+            '.github/workflows/multify-v838-execution-cooldown-performance.yml',
+          }
+          assert changed==expected, f'Unexpected file changes: {changed ^ expected}'
+          repo=Path(root+'data/repository/TradingRepository.kt').read_text()
+          original=subprocess.check_output(['git','show',f'{base}:{root}data/repository/TradingRepository.kt'],text=True)
+          for start,stop in [
+            ('suspend fun generateFixedForecasts(', 'private fun fixedSnapshotMultifyMfeAverage('),
+            ('private suspend fun fixedForecastEvaluationUsingAccount(', 'suspend fun prepareNextFixedDiscoverySweep('),
+            ('private suspend fun fetchFixedDiscoveryLtpBatch(', '// FIXED_FINAL_LOCK_END:'),
+          ]:
+            def part(x): return x[x.index(start):x.index(stop,x.index(start))]
+            assert part(repo)==part(original), f'Immutable Fixed section modified: {start}'
+          assert 'FIXED_V741_FORECAST_SCAN_INTERVAL_MS = 90_000L' in repo
+          assert 'CashAwareCncSizing.sizeFixedAvailable' in repo
+          assert 'CIRCUIT_SAFE_LIMIT_BUY' in repo
+          assert 'GttExitReconciliationPolicy.resolveConfirmedTriggeredExit' in repo
+          assert 'ExecutionFillQuantityPolicy.confirmedFilledQuantity' in repo
+          assert 'FixedScanBuyIsolationPolicy.execute' in repo
+          assert 'IdleBrokerPollingPolicy.maySkip' in repo
+          assert 'WALLET_PER_ORDER_SIZED' in repo
+          assert 'BROKER_RECOVERY_PENDING' in repo
+          assert 'const val MAX_LOSS_PCT = 5.0' in Path(root+'engine/HardStopLossPolicy.kt').read_text()
+          assert 'versionCode = 8380' in Path('app/build.gradle.kts').read_text()
+          print('v8.3.8 only improves execution isolation, partial-fill accounting, idle broker capacity and diagnostic freshness. Fixed and SELL unchanged.')
+          PY
+      - name: Backend tests
+        run: |
+          python -m pip install -r backend/requirements.txt
+          PYTHONPATH="$GITHUB_WORKSPACE" PHONE_HMAC_SECRET=test-secret-test-secret-test-secret GROWW_API_KEY=test-api-key GROWW_TOTP_SECRET=JBSWY3DPEHPK3PXP python -m pytest -q backend/tests
+      - name: Android unit tests
+        run: gradle --no-daemon testDebugUnitTest
+      - name: Configure stable signing when provided
+        shell: bash
+        env:
+          MULTIFY_KEYSTORE_BASE64: ${{ secrets.MULTIFY_KEYSTORE_BASE64 }}
+          MULTIFY_KEYSTORE_PASSWORD: ${{ secrets.MULTIFY_KEYSTORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${MULTIFY_KEYSTORE_BASE64:-}" && -n "${MULTIFY_KEYSTORE_PASSWORD:-}" ]]; then
+            printf '%s' "$MULTIFY_KEYSTORE_BASE64" | base64 --decode > app/multify-v4-stable.jks
+            actual="$(keytool -list -v -keystore app/multify-v4-stable.jks -storepass "$MULTIFY_KEYSTORE_PASSWORD" -alias multifyv4 | awk -F': ' '/SHA256:/{print $2; exit}' | tr -d ':' | tr '[:upper:]' '[:lower:]')"
+            expected="3f72d5c24e676c712d9e7e9feaa829960bfca9cdffc9ea4da6738372824e8755"
+            test "$actual" = "$expected"
+            echo "MULTIFY_KEYSTORE_PASSWORD=$MULTIFY_KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+            echo "STABLE_SIGNING_READY=true" >> "$GITHUB_ENV"
+          else
+            echo "::warning::Stable keystore secret unavailable; build uses a new CI debug certificate."
+            echo "STABLE_SIGNING_READY=false" >> "$GITHUB_ENV"
+          fi
+      - name: Compile debug APK
+        run: gradle --no-daemon assembleDebug
+      - name: Verify APK and package exact source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v8.3.8-execution-cooldown-performance-debug.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/*.apk > dist/APK-SIGNATURE.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/*.apk | head -n 2 > dist/PACKAGE.txt
+          grep -q "versionCode='8380'" dist/PACKAGE.txt
+          sha256sum dist/*.apk > dist/SHA256SUMS.txt
+          git rev-parse HEAD > dist/SOURCE-COMMIT.txt
+          if [[ "${STABLE_SIGNING_READY:-false}" == "true" ]]; then
+            echo "Stable v4 signing identity verified." > dist/INSTALLATION-SIGNING-STATUS.txt
+          else
+            echo "CI debug signing identity; cannot update a differently signed existing installation." > dist/INSTALLATION-SIGNING-STATUS.txt
+          fi
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile, ZIP_DEFLATED
+          with ZipFile('dist/Multify-TraderPro-v8.3.8-exact-source.zip','w',ZIP_DEFLATED) as z:
+            for p in Path('.').rglob('*'):
+              if p.is_file() and not any(part in {'.git','.gradle','build','dist'} for part in p.parts) and p.suffix.lower()!='.jks':
+                z.write(p,p.as_posix())
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: multify-v838-execution-cooldown-performance
+          path: dist/
+          if-no-files-found: warn
