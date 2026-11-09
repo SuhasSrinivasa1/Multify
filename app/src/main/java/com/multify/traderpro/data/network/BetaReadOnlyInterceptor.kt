@@ -8,7 +8,7 @@ import java.io.IOException
 
 /** Defense in depth: Beta client cannot access any trading or broker inventory endpoint. */
 internal class BetaReadOnlyInterceptor(
-    private val auditLogger: AuditLogger
+    private val auditLogger: AuditLogger? = null
 ) : Interceptor {
     override fun intercept(chain: Interceptor.Chain): Response {
         val request = chain.request()
@@ -18,7 +18,7 @@ internal class BetaReadOnlyInterceptor(
         val response = chain.proceed(request)
         val elapsedMs = (SystemClock.elapsedRealtime() - started).coerceAtLeast(0L)
         if (response.code == 429) {
-            auditLogger.logAsync("BETA_API", "HTTP_429", mapOf(
+            auditLogger?.logAsync("BETA_API", "HTTP_429", mapOf(
                 "method" to request.method,
                 "path" to path,
                 "network_ms" to elapsedMs,
