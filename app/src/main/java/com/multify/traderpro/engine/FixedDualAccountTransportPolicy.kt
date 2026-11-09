@@ -18,9 +18,6 @@ object FixedDualAccountTransportPolicy {
     }
 
     /** Beta's 35/min live lane is reserved for full-universe discovery, not detail quotes. */
-    fun betaDetailedEvaluation(symbol: String, betaReady: Boolean): Boolean {
-        @Suppress("UNUSED_VARIABLE")
-        val stableSymbol = symbol
-        return false && betaReady
-    }
+    @Suppress("UNUSED_PARAMETER")
+    fun betaDetailedEvaluation(symbol: String, betaReady: Boolean): Boolean = false
 }
