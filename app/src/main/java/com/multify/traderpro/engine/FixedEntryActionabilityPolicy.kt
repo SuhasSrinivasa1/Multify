@@ -73,14 +73,16 @@ object FixedEntryActionabilityPolicy {
         val distance = if (price != null && usedHigh != null && usedHigh > 0.0)
             (usedHigh - price) / usedHigh * 100.0 else null
         val atr = snapshot?.atr14?.takeIf { it.isFinite() && it > 0.0 }
-        val vwapAtr = if (price != null && snapshot?.vwap != null && atr != null)
-            (price - snapshot.vwap) / atr else null
-        val ema20Atr = if (price != null && snapshot?.ema20?.isFinite() == true &&
-            snapshot.ema20 > 0.0 && atr != null)
-            (price - snapshot.ema20) / atr else null
-        val recentImpulseAtr = if (snapshot?.lastClose?.isFinite() == true &&
-            snapshot.prevClose?.isFinite() == true && atr != null)
-            (snapshot.lastClose - snapshot.prevClose) / atr else null
+        val vwap = snapshot?.vwap?.takeIf { it.isFinite() && it > 0.0 }
+        val ema20 = snapshot?.ema20?.takeIf { it.isFinite() && it > 0.0 }
+        val lastClose = snapshot?.lastClose?.takeIf { it.isFinite() && it > 0.0 }
+        val prevClose = snapshot?.prevClose?.takeIf { it.isFinite() && it > 0.0 }
+        val vwapAtr = if (price != null && vwap != null && atr != null)
+            (price - vwap) / atr else null
+        val ema20Atr = if (price != null && ema20 != null && atr != null)
+            (price - ema20) / atr else null
+        val recentImpulseAtr = if (lastClose != null && prevClose != null && atr != null)
+            (lastClose - prevClose) / atr else null
         val firstPrice = referencePrice?.takeIf { it.isFinite() && it > 0.0 }
         val runup = if (firstPrice != null && price != null)
             (price / firstPrice - 1.0) * 100.0 else null
