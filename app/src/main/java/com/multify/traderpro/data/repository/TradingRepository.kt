@@ -4287,6 +4287,22 @@ class TradingRepository @Inject constructor(
         return sweep
     }
 
+    /** Non-scoring diagnostics only: count missing and invalid broker LTP responses
+     * without an additional market API call or a change to publication criteria. */
+    private fun alphaCanTakeBetaDiscoveryFallback(): Boolean {
+        val ready = runCatching {
+            recoveryGate.checkRequestAllowed(GrowwApiUsageLedger.Category.LIVE_DATA)
+        }.isSuccess
+        val used = GrowwApiUsageLedger.snapshot().categories
+            .first { it.category == GrowwApiUsageLedger.Category.LIVE_DATA }.usedLastMinute
+        val appLimit = com.multify.traderpro.engine.GrowwApiBudgetPolicy
+            .fixedLiveDataPerMinute(
+                com.multify.traderpro.engine.MarketDataPriorityAdmissionPolicy.hasManagedHoldings
+            )
+        return com.multify.traderpro.engine.FixedAccountTransportAdmissionPolicy
+            .allowAlphaFallback(ready, used, appLimit)
+    }
+
     private suspend fun collectFixedWideLtp(
         token: String, master: List<String>, preparing: Boolean = false
     ): PrecomputedFixedSweep {
@@ -4299,6 +4315,10 @@ class TradingRepository @Inject constructor(
         val betaStopped = AtomicBoolean(false)
         val betaSuccess = AtomicInteger(0)
         val alphaSuccess = AtomicInteger(0)
+        val alphaFallbackBatches = AtomicInteger(0)
+        var missingFromBroker = 0
+        var invalidBrokerPrices = 0
+        val missingSample = mutableListOf<String>()
         for (windowStart in chunks.indices step FixedDiscoveryWindowScheduler.WINDOW_SIZE) {
             if (preparing && (marketCriticalTradeInFlight || !marketDataAvailableForFixed() ||
                 !com.multify.traderpro.engine.NseEquitySessionCalendar.mayContinuePreparedFixedSweep(ZonedDateTime.now(INDIA)))) {
@@ -4308,37 +4328,47 @@ class TradingRepository @Inject constructor(
             val results = FixedDiscoveryWindowScheduler.fetchOrdered(
                 chunks, windowStart
             ) { index, chunk ->
-                val useBeta = betaToken != null && !betaStopped.get() &&
-                    !com.multify.traderpro.data.network.GrowwSharedMarketDataBudget.isCoolingDown(
-                        com.multify.traderpro.data.network.GrowwSharedMarketDataBudget.Lane.LIVE) &&
+                val betaAssigned = betaToken != null &&
                     com.multify.traderpro.engine.FixedDualAccountPolicy.betaDiscoveryBatch(index, true)
+                val useBeta = betaAssigned && !betaStopped.get() &&
+                    betaResearchGate.healthyForFixed(BetaResearchGate.Type.LIVE)
                 if (useBeta) {
                     try {
                         fixedBetaLtp(betaToken!!, chunk).also { betaSuccess.incrementAndGet() }
                     } catch (cancelled: CancellationException) {
                         throw cancelled
                     } catch (failed: Throwable) {
-                        // A Beta 429 or shared-quota exhaustion must NOT be retried
-                        // against Alpha to circumvent a possibly shared broker quota.
-                        // A non-quota Beta failure may use normal Alpha fallback.
+                        // Beta's independent 429 must NOT pause Alpha. Switch
+                        // only if Alpha is ready and has protected category headroom.
+                        // Never issue an unbounded immediate retry burst.
                         betaStopped.set(true)
-                        val sharedLimited = (failed as? HttpException)?.code() == 429 ||
-                            failed.message.orEmpty().contains("SHARED_GROWW_") ||
-                            failed.message.orEmpty().contains("BETA_FIXED_RATE_BUDGET_OR_COOLDOWN") ||
-                            com.multify.traderpro.data.network.GrowwSharedMarketDataBudget.isCoolingDown(
-                                com.multify.traderpro.data.network.GrowwSharedMarketDataBudget.Lane.LIVE)
+                        val allowFallback = alphaCanTakeBetaDiscoveryFallback()
                         auditLogger.logAsync("FIXED_DUAL_ACCOUNT",
-                            if (sharedLimited) "BETA_SHARED_QUOTA_NO_ALPHA_FALLBACK" else "BETA_LTP_FALLBACK_ALPHA",
-                            mapOf("batch_index" to index, "error" to failed.javaClass.simpleName,
-                                "beta_paused_for_rest_of_sweep" to true,
-                                "shared_budget_protected" to sharedLimited))
-                        if (sharedLimited) null else
+                            if (allowFallback) "BETA_INDEPENDENT_ALPHA_FALLBACK"
+                            else "BETA_FALLBACK_SKIPPED_ALPHA_HEADROOM",
+                            mapOf("batch_index" to index,
+                                "beta_http_429" to ((failed as? HttpException)?.code() == 429),
+                                "beta_error" to failed.javaClass.simpleName,
+                                "alpha_ready_with_headroom" to allowFallback,
+                                "beta_paused_for_rest_of_sweep" to true))
+                        if (!allowFallback) null else
                             fetchFixedDiscoveryLtpBatch(token, chunk, index)
-                                ?.also { alphaSuccess.incrementAndGet() }
+                                ?.also {
+                                    alphaSuccess.incrementAndGet()
+                                    alphaFallbackBatches.incrementAndGet()
+                                }
                     }
                 } else {
-                    fetchFixedDiscoveryLtpBatch(token, chunk, index)
-                        ?.also { alphaSuccess.incrementAndGet() }
+                    // A Beta-owned batch uses Alpha only when Alpha has real
+                    // spare capacity. Original Alpha-owned batches never need
+                    // to consult Beta or acquire Beta permits.
+                    val fallback = betaAssigned
+                    if (fallback && !alphaCanTakeBetaDiscoveryFallback()) null
+                    else fetchFixedDiscoveryLtpBatch(token, chunk, index)
+                        ?.also {
+                            alphaSuccess.incrementAndGet()
+                            if (fallback) alphaFallbackBatches.incrementAndGet()
+                        }
                 }
             }
             for ((index, payload) in results) {
@@ -4351,9 +4381,20 @@ class TradingRepository @Inject constructor(
                     }
                 } else {
                     failures = 0
+                    val returned = payload.keys.map {
+                        it.removePrefix("NSE_").uppercase(Locale.US)
+                    }.toHashSet()
+                    for (symbol in chunks[index]) {
+                        if (symbol.uppercase(Locale.US) !in returned) {
+                            missingFromBroker++
+                            if (missingSample.size < 20) missingSample.add(symbol)
+                        }
+                    }
                     payload.forEach { (key, value) ->
                         if (value.isFinite() && value >= 10.0) {
                             current[key.removePrefix("NSE_").uppercase(Locale.US)] = value
+                        } else {
+                            invalidBrokerPrices++
                         }
                     }
                 }
@@ -4366,14 +4407,19 @@ class TradingRepository @Inject constructor(
             "total_batches" to chunks.size,
             "alpha_success_batches" to alphaSuccess.get(),
             "beta_success_batches" to betaSuccess.get(),
+            "alpha_fallback_batches" to alphaFallbackBatches.get(),
+            "broker_omitted_symbols" to missingFromBroker,
+            "broker_invalid_ltp_values" to invalidBrokerPrices,
+            "broker_omission_examples" to missingSample,
+            "extra_ltp_requests_for_diagnostics" to 0,
             "beta_authenticated" to (betaToken != null),
             "beta_disabled_during_sweep" to betaStopped.get(),
             "valid_symbols" to current.size,
             "batch_errors" to errors,
             "aborted" to aborted,
             "alpha_order_account_unchanged" to true,
-            "shared_live_budget" to com.multify.traderpro.data.network.GrowwSharedMarketDataBudget
-                .snapshot(com.multify.traderpro.data.network.GrowwSharedMarketDataBudget.Lane.LIVE).toString()
+            "alpha_and_beta_quota_independent" to true,
+            "beta_429_does_not_pause_alpha" to true
         ))
         return PrecomputedFixedSweep(current, errors, aborted, System.currentTimeMillis(), chunks.size)
     }
