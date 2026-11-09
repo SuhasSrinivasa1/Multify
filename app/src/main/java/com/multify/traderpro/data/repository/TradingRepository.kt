@@ -4324,6 +4324,10 @@ class TradingRepository @Inject constructor(
         token: String, master: List<String>, preparing: Boolean = false
     ): PrecomputedFixedSweep {
         val current = linkedMapOf<String, Double>()
+        val masterSymbols = master.map { it.uppercase(Locale.US) }.toSet()
+        val rawReturnedSymbols = linkedSetOf<String>()
+        val belowDiscoveryFloorSymbols = linkedSetOf<String>()
+        val responseMissingSymbols = linkedSetOf<String>()
         var errors = 0
         var failures = 0
         var aborted = false
@@ -4366,6 +4370,7 @@ class TradingRepository @Inject constructor(
             }
             for ((index, payload) in results) {
                 if (payload == null) {
+                    responseMissingSymbols += chunks.getOrNull(index).orEmpty().map { it.uppercase(Locale.US) }
                     errors++
                     failures++
                     if (failures >= FIXED_V741_DISCOVERY_CONSECUTIVE_FAILURE_ABORT) {
@@ -4374,9 +4379,19 @@ class TradingRepository @Inject constructor(
                     }
                 } else {
                     failures = 0
+                    val returned = payload.keys.map { it.removePrefix("NSE_").uppercase(Locale.US) }
+                        .filter { it in masterSymbols }.toSet()
+                    rawReturnedSymbols += returned
+                    responseMissingSymbols += chunks.getOrNull(index).orEmpty()
+                        .map { it.uppercase(Locale.US) }.filterNot { it in returned }
                     payload.forEach { (key, value) ->
-                        if (value.isFinite() && value >= 10.0) {
-                            current[key.removePrefix("NSE_").uppercase(Locale.US)] = value
+                        val symbol = key.removePrefix("NSE_").uppercase(Locale.US)
+                        // Coverage measures valid broker prices across the complete master.
+                        // The unchanged discovery ranker still applies its existing ₹10 floor,
+                        // and Fixed's production entry band remains strictly ₹200–₹5,000.
+                        if (symbol in masterSymbols && value.isFinite() && value > 0.0) {
+                            current[symbol] = value
+                            if (value < 10.0) belowDiscoveryFloorSymbols += symbol
                         }
                     }
                 }
@@ -4392,6 +4407,10 @@ class TradingRepository @Inject constructor(
             "beta_authenticated" to (betaToken != null),
             "beta_disabled_during_sweep" to betaStopped.get(),
             "valid_symbols" to current.size,
+            "raw_returned_master_symbols" to rawReturnedSymbols.size,
+            "below_10_ltp_symbols_counted_for_coverage_only" to belowDiscoveryFloorSymbols.size,
+            "broker_response_missing_symbols" to responseMissingSymbols.size,
+            "coverage_basis" to "POSITIVE_LTP_FROM_FULL_NSE_MASTER; DISCOVERY_RANKER_PRICE_FLOOR_UNCHANGED",
             "batch_errors" to errors,
             "aborted" to aborted,
             "alpha_order_account_unchanged" to true
