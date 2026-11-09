@@ -4,18 +4,38 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class AlphaLiveDataPacingPolicyTest {
+    private fun wait(
+        now: Long, last: Long = 0L, totalOldest: Long? = null, total: Int = 0,
+        researchOldest: Long? = null, research: Int = 0,
+        protection: Boolean = false, holdings: Boolean = false
+    ) = AlphaLiveDataPacingPolicy.waitMs(
+        now, last, totalOldest, total, researchOldest, research, protection, holdings
+    )
+
     @Test fun firstLiveDataRequestDoesNotWait() {
-        assertEquals(0L, AlphaLiveDataPacingPolicy.waitMs(10_000L, 0L, null, 0))
+        assertEquals(0L, wait(10_000L))
     }
 
     @Test fun quoteAndLtpShareTheSameMinimumGap() {
-        assertEquals(1_200L, AlphaLiveDataPacingPolicy.waitMs(10_000L, 10_000L, 9_000L, 5))
-        assertEquals(0L, AlphaLiveDataPacingPolicy.waitMs(11_200L, 10_000L, 9_000L, 5))
+        assertEquals(1_200L, wait(10_000L, last = 10_000L, totalOldest = 9_000L, total = 5))
+        assertEquals(0L, wait(11_200L, last = 10_000L, totalOldest = 9_000L, total = 5))
     }
 
-    @Test fun everyLiveEndpointSharesFortyPerMinuteCeiling() {
-        assertEquals(45_000L, AlphaLiveDataPacingPolicy.waitMs(15_000L, 10_000L, 0L, 40))
-        assertEquals(1_000L, AlphaLiveDataPacingPolicy.waitMs(59_000L, 10_000L, 0L, 40))
-        assertEquals(0L, AlphaLiveDataPacingPolicy.waitMs(60_000L, 10_000L, 0L, 39))
+    @Test fun allAlphaLiveEndpointsShareFortyPerMinuteCeiling() {
+        assertEquals(45_000L, wait(15_000L, last = 10_000L, totalOldest = 0L, total = 40))
+        assertEquals(1_000L, wait(59_000L, last = 10_000L, totalOldest = 0L, total = 40))
+    }
+
+    @Test fun twelveRequestsRemainReservedForProtectionWhenHoldingsExist() {
+        assertEquals(45_000L, wait(15_000L, researchOldest = 0L, research = 28, holdings = true))
+        assertEquals(0L, wait(15_000L, totalOldest = 0L, total = 28,
+            researchOldest = 0L, research = 28, protection = true, holdings = true))
+        assertEquals(0L, wait(15_000L, totalOldest = 0L, total = 28,
+            researchOldest = 0L, research = 28, holdings = false))
+    }
+
+    @Test fun protectionStillObeysTheOverallFortyPerMinuteCeiling() {
+        assertEquals(1_000L, wait(59_000L, totalOldest = 0L, total = 40,
+            protection = true, holdings = true))
     }
 }
