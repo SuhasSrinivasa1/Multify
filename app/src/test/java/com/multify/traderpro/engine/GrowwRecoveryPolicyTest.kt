@@ -4,14 +4,15 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class GrowwRecoveryPolicyTest {
-    @Test fun firstRateLimitPausesAtLeastTenMinutes() {
-        assertEquals(600_000L, GrowwRecoveryPolicy.cooldownMs(1, 0L))
-        assertEquals(600_000L, GrowwRecoveryPolicy.cooldownMs(1, 5_000L))
+    @Test fun firstIsolatedRateLimitHasNinetySecondGuardedCooldown() {
+        assertEquals(90_000L, GrowwRecoveryPolicy.cooldownMs(1, 0L))
+        assertEquals(90_000L, GrowwRecoveryPolicy.cooldownMs(1, 5_000L))
     }
 
-    @Test fun repeatedRateLimitsEscalateToThirtyAndSixtyMinutes() {
-        assertEquals(1_800_000L, GrowwRecoveryPolicy.cooldownMs(2, 0L))
-        assertEquals(3_600_000L, GrowwRecoveryPolicy.cooldownMs(3, 0L))
+    @Test fun repeatedRateLimitsEscalateConservatively() {
+        assertEquals(300_000L, GrowwRecoveryPolicy.cooldownMs(2, 0L))
+        assertEquals(900_000L, GrowwRecoveryPolicy.cooldownMs(3, 0L))
+        assertEquals(3_600_000L, GrowwRecoveryPolicy.cooldownMs(4, 0L))
         assertEquals(3_600_000L, GrowwRecoveryPolicy.cooldownMs(9, 0L))
     }
 
