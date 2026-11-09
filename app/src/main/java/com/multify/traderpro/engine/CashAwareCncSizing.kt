@@ -49,6 +49,23 @@ object CashAwareCncSizing {
         return CncSizingResult(qty, deployable, 0.0, bufferedPrice)
     }
 
+    /**
+     * Configured per-order budget sizing. Wallet/margin is deliberately NOT queried:
+     * Groww is the final authority and rejects the order if the account lacks funds.
+     * A 2% execution buffer remains so market-order slippage is less likely to exceed
+     * the user's per-stock cap. There is no daily aggregate budget.
+     */
+    fun sizeConfiguredBudget(configuredBudget: Double, referencePrice: Double): CncSizingResult {
+        if (!configuredBudget.isFinite() || !referencePrice.isFinite() ||
+            configuredBudget <= 0.0 || referencePrice <= 0.0
+        ) {
+            return CncSizingResult(0, 0.0, 0.0, referencePrice.coerceAtLeast(0.0))
+        }
+        val bufferedPrice = referencePrice * EXECUTION_PRICE_BUFFER
+        val qty = floor(configuredBudget / bufferedPrice).toInt().coerceAtLeast(0)
+        return CncSizingResult(qty, if (qty > 0) configuredBudget else 0.0, 0.0, bufferedPrice)
+    }
+
     // Compatibility alias for older callers; Fixed-style flexible sizing is explicit at new call sites.
     fun size(configuredBudget: Double, availableCash: Double, referencePrice: Double): CncSizingResult =
         sizeFixedAvailable(configuredBudget, availableCash, referencePrice)

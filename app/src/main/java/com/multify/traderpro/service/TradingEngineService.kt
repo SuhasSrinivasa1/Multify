@@ -19,6 +19,7 @@ import com.multify.traderpro.R
 import com.multify.traderpro.data.logging.AuditLogger
 import com.multify.traderpro.data.network.ForecastDto
 import com.multify.traderpro.data.network.GrowwApiUsageLedger
+import com.multify.traderpro.data.network.BetaResearchGate
 import com.multify.traderpro.data.network.GrowwRecoveryGate
 import com.multify.traderpro.engine.FixedDataPipelinePolicy
 import com.multify.traderpro.engine.FixedPublicationTimingPolicy
@@ -48,6 +49,7 @@ class TradingEngineService : Service() {
     @Inject lateinit var repository: TradingRepository
     @Inject lateinit var auditLogger: AuditLogger
     @Inject lateinit var recoveryGate: GrowwRecoveryGate
+    @Inject lateinit var betaResearchGate: BetaResearchGate
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var engineJob: Job? = null
@@ -71,6 +73,7 @@ class TradingEngineService : Service() {
     private var positionProfileElapsedMs = 0L
     private var positionProfileMaxMs = 0L
     private var positionProfileUsageBaseline: GrowwApiUsageLedger.Snapshot? = null
+    private var positionProfileBetaBaseline: BetaResearchGate.UsageSnapshot? = null
     @Volatile private var lastForecastOutcomeCount = 0
     @Volatile private var lastFixedOutcomeCount = 0
     @Volatile private var lastFixedCycleCompletedAtMs = 0L
@@ -189,12 +192,18 @@ class TradingEngineService : Service() {
                     if (profileNowMs - positionProfileWindowStartedAtMs >= POSITION_PROFILE_INTERVAL_MS) {
                         val before = positionProfileUsageBaseline
                         val after = GrowwApiUsageLedger.snapshot()
+                        val betaBefore = positionProfileBetaBaseline
+                        val betaAfter = betaResearchGate.snapshot()
                         fun delta(category: GrowwApiUsageLedger.Category, selector: (GrowwApiUsageLedger.CategorySnapshot) -> Long): Long {
                             if (before == null) return 0L
                             val b = before.categories.first { it.category == category }
                             val a = after.categories.first { it.category == category }
                             return (selector(a) - selector(b)).coerceAtLeast(0L)
                         }
+                        val betaLiveDelta = (betaAfter.liveRequests - (betaBefore?.liveRequests ?: betaAfter.liveRequests)).coerceAtLeast(0L)
+                        val betaHistoricalDelta = (betaAfter.historicalRequests - (betaBefore?.historicalRequests ?: betaAfter.historicalRequests)).coerceAtLeast(0L)
+                        val betaLive429Delta = (betaAfter.liveRateLimits - (betaBefore?.liveRateLimits ?: betaAfter.liveRateLimits)).coerceAtLeast(0L)
+                        val betaHistorical429Delta = (betaAfter.historicalRateLimits - (betaBefore?.historicalRateLimits ?: betaAfter.historicalRateLimits)).coerceAtLeast(0L)
                         auditLogger.logAsync("RUNTIME", "TRAILING_MONITOR_PROFILE", mapOf(
                             "window_ms" to (profileNowMs - positionProfileWindowStartedAtMs),
                             "passes" to positionProfilePasses,
@@ -203,6 +212,13 @@ class TradingEngineService : Service() {
                             "max_pass_ms" to positionProfileMaxMs,
                             "last_known_managed_count" to lastKnownManagedCount,
                             "live_network_requests" to delta(GrowwApiUsageLedger.Category.LIVE_DATA) { it.totalRequests },
+                            "beta_live_network_requests" to betaLiveDelta,
+                            "combined_live_network_requests" to (delta(GrowwApiUsageLedger.Category.LIVE_DATA) { it.totalRequests } + betaLiveDelta),
+                            "historical_network_requests" to delta(GrowwApiUsageLedger.Category.HISTORICAL) { it.totalRequests },
+                            "beta_historical_network_requests" to betaHistoricalDelta,
+                            "combined_historical_network_requests" to (delta(GrowwApiUsageLedger.Category.HISTORICAL) { it.totalRequests } + betaHistoricalDelta),
+                            "beta_live_429s" to betaLive429Delta,
+                            "beta_historical_429s" to betaHistorical429Delta,
                             "order_network_requests" to delta(GrowwApiUsageLedger.Category.ORDERS) { it.totalRequests },
                             "non_trading_network_requests" to delta(GrowwApiUsageLedger.Category.NON_TRADING) { it.totalRequests },
                             "live_429s" to delta(GrowwApiUsageLedger.Category.LIVE_DATA) { it.rateLimitResponses },
@@ -220,6 +236,7 @@ class TradingEngineService : Service() {
                         positionProfileElapsedMs = 0L
                         positionProfileMaxMs = 0L
                         positionProfileUsageBaseline = after
+                        positionProfileBetaBaseline = betaAfter
                     }
 
                     val now = ZonedDateTime.now(INDIA)
@@ -251,8 +268,29 @@ class TradingEngineService : Service() {
                     if (nowMs - lastApiUsageAuditAtMs >= API_USAGE_AUDIT_INTERVAL_MS) {
                         lastApiUsageAuditAtMs = nowMs
                         val usage = GrowwApiUsageLedger.snapshot()
+                        val betaUsage = betaResearchGate.snapshot()
+                        val alphaLive = usage.categories.first { it.category == GrowwApiUsageLedger.Category.LIVE_DATA }
+                        val alphaHistorical = usage.categories.first { it.category == GrowwApiUsageLedger.Category.HISTORICAL }
                         auditLogger.logAsync("API_BUDGET", "ROLLING_USAGE", mapOf(
                             "summary" to usage.compact(),
+                            "alpha_live_total" to alphaLive.totalRequests,
+                            "beta_live_total" to betaUsage.liveRequests,
+                            "combined_live_total" to (alphaLive.totalRequests + betaUsage.liveRequests),
+                            "alpha_historical_total" to alphaHistorical.totalRequests,
+                            "beta_historical_total" to betaUsage.historicalRequests,
+                            "combined_historical_total" to (alphaHistorical.totalRequests + betaUsage.historicalRequests),
+                            "alpha_live_last_minute" to alphaLive.usedLastMinute,
+                            "beta_live_last_minute" to betaUsage.liveRequestsLastMinute,
+                            "combined_live_last_minute" to (alphaLive.usedLastMinute + betaUsage.liveRequestsLastMinute),
+                            "alpha_historical_last_minute" to alphaHistorical.usedLastMinute,
+                            "beta_historical_last_minute" to betaUsage.historicalRequestsLastMinute,
+                            "combined_historical_last_minute" to (alphaHistorical.usedLastMinute + betaUsage.historicalRequestsLastMinute),
+                            "alpha_live_effective_limit_per_minute" to com.multify.traderpro.engine.AlphaLiveDataPacingPolicy.MAX_PER_MINUTE,
+                            "alpha_live_research_limit_with_holdings_per_minute" to com.multify.traderpro.engine.AlphaLiveDataPacingPolicy.MAX_RESEARCH_WITH_HOLDINGS_PER_MINUTE,
+                            "beta_live_effective_limit_per_minute" to betaResearchGate.configuredLiveLimitPerMinute(),
+                            "beta_historical_effective_limit_per_minute" to betaResearchGate.configuredHistoricalLimitPerMinute(),
+                            "beta_live_429s" to betaUsage.liveRateLimits,
+                            "beta_historical_429s" to betaUsage.historicalRateLimits,
                             "categories" to usage.categories.associate { row ->
                                 row.category.name to mapOf(
                                     "used_1s" to row.usedLastSecond,
@@ -408,6 +446,7 @@ class TradingEngineService : Service() {
                     if (positionProfileWindowStartedAtMs <= 0L) {
                         positionProfileWindowStartedAtMs = passStartedAtMs
                         positionProfileUsageBaseline = GrowwApiUsageLedger.snapshot()
+                        positionProfileBetaBaseline = betaResearchGate.snapshot()
                     }
                     val result = runCatching { repository.monitorManagedPositions() }
                     val passElapsedMs = (System.currentTimeMillis() - passStartedAtMs).coerceAtLeast(0L)
@@ -589,6 +628,7 @@ class TradingEngineService : Service() {
                             previousFixedPause = null
                         }
                         val usageBefore = GrowwApiUsageLedger.snapshot()
+                        val betaUsageBefore = betaResearchGate.snapshot()
                         val cacheHitsBefore = GrowwApiUsageLedger.cacheHitCount()
                         val historicalBefore = repository.fixedHistoricalRequestCounters()
                         val startedAt = System.currentTimeMillis()
@@ -605,6 +645,9 @@ class TradingEngineService : Service() {
                         if (scanned) {
                             lastSuccessfulFixedScanStartedAtMs = startedAt
                             val usageAfter = GrowwApiUsageLedger.snapshot()
+                            val betaUsageAfter = betaResearchGate.snapshot()
+                            val betaLiveDelta = (betaUsageAfter.liveRequests - betaUsageBefore.liveRequests).coerceAtLeast(0L)
+                            val betaHistoricalDelta = (betaUsageAfter.historicalRequests - betaUsageBefore.historicalRequests).coerceAtLeast(0L)
                             fun requestDelta(category: GrowwApiUsageLedger.Category): Long {
                                 val before = usageBefore.categories.first { it.category == category }.totalRequests
                                 val after = usageAfter.categories.first { it.category == category }.totalRequests
@@ -623,7 +666,16 @@ class TradingEngineService : Service() {
                                 "previous_successful_scan_age_unknown_after_service_restart" to
                                     (actualStartSpacingMs == null),
                                 "live_network_requests" to requestDelta(GrowwApiUsageLedger.Category.LIVE_DATA),
+                                "beta_live_network_requests" to betaLiveDelta,
+                                "combined_live_network_requests" to (requestDelta(GrowwApiUsageLedger.Category.LIVE_DATA) + betaLiveDelta),
                                 "historical_network_requests" to requestDelta(GrowwApiUsageLedger.Category.HISTORICAL),
+                                "beta_historical_network_requests" to betaHistoricalDelta,
+                                "combined_historical_network_requests" to (requestDelta(GrowwApiUsageLedger.Category.HISTORICAL) + betaHistoricalDelta),
+                                "alpha_live_effective_limit_per_minute" to com.multify.traderpro.engine.AlphaLiveDataPacingPolicy.MAX_PER_MINUTE,
+                                "alpha_live_research_limit_with_holdings_per_minute" to com.multify.traderpro.engine.AlphaLiveDataPacingPolicy.MAX_RESEARCH_WITH_HOLDINGS_PER_MINUTE,
+                                "alpha_live_protection_reserve_with_holdings_per_minute" to (com.multify.traderpro.engine.AlphaLiveDataPacingPolicy.MAX_PER_MINUTE - com.multify.traderpro.engine.AlphaLiveDataPacingPolicy.MAX_RESEARCH_WITH_HOLDINGS_PER_MINUTE),
+                                "beta_live_effective_limit_per_minute" to betaResearchGate.configuredLiveLimitPerMinute(),
+                                "beta_historical_effective_limit_per_minute" to betaResearchGate.configuredHistoricalLimitPerMinute(),
                                 "non_trading_network_requests" to requestDelta(GrowwApiUsageLedger.Category.NON_TRADING),
                                 "live_429s" to (
                                     usageAfter.categories.first { it.category == GrowwApiUsageLedger.Category.LIVE_DATA }.rateLimitResponses -
@@ -664,7 +716,7 @@ class TradingEngineService : Service() {
                                 "elapsed_ms" to elapsed,
                                 "order_path_completed" to true,
                                 "fixed_rest_batch_window" to com.multify.traderpro.engine.FixedDiscoveryWindowScheduler.WINDOW_SIZE,
-                                "groww_ltp_min_gap_ms" to com.multify.traderpro.engine.AlphaLtpPacingPolicy.MIN_GAP_MS,
+                                "groww_ltp_min_gap_ms" to com.multify.traderpro.engine.AlphaLiveDataPacingPolicy.MIN_GAP_MS,
                                 "groww_ltp_app_max_per_minute" to com.multify.traderpro.engine.AlphaLtpPacingPolicy.MAX_PER_MINUTE,
                                 "fixed_model_changed" to false
                             ))
@@ -734,6 +786,7 @@ class TradingEngineService : Service() {
                         now.toLocalTime() <= LocalTime.of(15, 0)
                     ) {
                         val usageBefore = GrowwApiUsageLedger.snapshot()
+                        val betaUsageBefore = betaResearchGate.snapshot()
                         val cacheHitsBefore = GrowwApiUsageLedger.cacheHitCount()
                         val startedAt = System.currentTimeMillis()
                         val scanned = runCatching { repository.runForecastOpportunisticCycle() }
@@ -745,6 +798,9 @@ class TradingEngineService : Service() {
                         val elapsed = System.currentTimeMillis() - startedAt
                         if (scanned) {
                             val usageAfter = GrowwApiUsageLedger.snapshot()
+                            val betaUsageAfter = betaResearchGate.snapshot()
+                            val betaLiveDelta = (betaUsageAfter.liveRequests - betaUsageBefore.liveRequests).coerceAtLeast(0L)
+                            val betaHistoricalDelta = (betaUsageAfter.historicalRequests - betaUsageBefore.historicalRequests).coerceAtLeast(0L)
                             fun delta(category: GrowwApiUsageLedger.Category, selector: (GrowwApiUsageLedger.CategorySnapshot) -> Long): Long {
                                 val before = usageBefore.categories.first { it.category == category }
                                 val after = usageAfter.categories.first { it.category == category }
@@ -753,7 +809,11 @@ class TradingEngineService : Service() {
                             auditLogger.logAsync("RUNTIME", "FORECAST_SCAN_PROFILE", mapOf(
                                 "elapsed_ms" to elapsed,
                                 "live_network_requests" to delta(GrowwApiUsageLedger.Category.LIVE_DATA) { it.totalRequests },
+                                "beta_live_network_requests" to betaLiveDelta,
+                                "combined_live_network_requests" to (delta(GrowwApiUsageLedger.Category.LIVE_DATA) { it.totalRequests } + betaLiveDelta),
                                 "historical_network_requests" to delta(GrowwApiUsageLedger.Category.HISTORICAL) { it.totalRequests },
+                                "beta_historical_network_requests" to betaHistoricalDelta,
+                                "combined_historical_network_requests" to (delta(GrowwApiUsageLedger.Category.HISTORICAL) { it.totalRequests } + betaHistoricalDelta),
                                 "non_trading_network_requests" to delta(GrowwApiUsageLedger.Category.NON_TRADING) { it.totalRequests },
                                 "live_429s" to delta(GrowwApiUsageLedger.Category.LIVE_DATA) { it.rateLimitResponses },
                                 "historical_429s" to delta(GrowwApiUsageLedger.Category.HISTORICAL) { it.rateLimitResponses },
