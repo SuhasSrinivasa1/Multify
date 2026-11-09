@@ -83,20 +83,29 @@ class BetaResearchGate @Inject constructor() {
             }
             delay(waitMs.coerceAtLeast(5L))
         }
+        // Apply the same aggregate allowance as Alpha; Beta has no independent
+        // right to double the broker's possibly shared upstream quota.
+        val sharedLane = if (type == Type.LIVE)
+            GrowwSharedMarketDataBudget.Lane.LIVE else GrowwSharedMarketDataBudget.Lane.HISTORICAL
+        GrowwSharedMarketDataBudget.acquire(sharedLane, "BETA")
         val requestStarted = SystemClock.elapsedRealtime()
         if (type == Type.LIVE) liveRequests.incrementAndGet() else historicalRequests.incrementAndGet()
         return try {
-            block()
+            block().also { GrowwSharedMarketDataBudget.completed(sharedLane, 200) }
         } catch (failure: Throwable) {
             if (type == Type.LIVE) liveFailures.incrementAndGet() else historicalFailures.incrementAndGet()
             if (failure is HttpException && failure.code() == 429) {
                 if (type == Type.LIVE) liveRateLimits.incrementAndGet() else historicalRateLimits.incrementAndGet()
                 val retryAfterMs = failure.response()?.headers()?.get("Retry-After")?.toLongOrNull()?.times(1_000L) ?: 0L
                 val cooldownMs = maxOf(60_000L, retryAfterMs)
+                GrowwSharedMarketDataBudget.on429(sharedLane, cooldownMs)
                 lock.withLock {
                     val w = windows.getValue(type)
                     w.cooldownUntil = maxOf(w.cooldownUntil, SystemClock.elapsedRealtime() + cooldownMs)
                 }
+            }
+            if (failure !is HttpException || failure.code() != 429) {
+                GrowwSharedMarketDataBudget.completed(sharedLane, (failure as? HttpException)?.code() ?: 0)
             }
             throw failure
         } finally {
