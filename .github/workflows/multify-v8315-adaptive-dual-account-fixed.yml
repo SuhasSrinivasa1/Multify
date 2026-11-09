@@ -93,8 +93,8 @@ jobs:
           beta_account = Path(root + 'engine/FixedDualAccountPolicy.kt').read_text()
           assert 'BETA_LIVE_PER_MINUTE = 270' in beta_account
           assert 'BETA_HISTORICAL_PER_MINUTE = 8' in beta_account
-          assert 'LtpAdaptivePacingPolicy.on429' in alpha
-          assert 'LtpAdaptivePacingPolicy.on429' in beta
+          assert 'LtpAdaptivePacingPolicy.on429' in Path(root + 'data/network/GrowwRateLimitInterceptor.kt').read_text()
+          assert 'LtpAdaptivePacingPolicy.on429' in Path(root + 'data/network/BetaResearchGate.kt').read_text()
           assert 'versionCode = 8396' in Path('app/build.gradle.kts').read_text()
           alpha = Path(root + 'data/network/GrowwRateLimitInterceptor.kt').read_text()
           beta = Path(root + 'data/network/BetaResearchGate.kt').read_text()
