@@ -40,6 +40,7 @@ internal class GrowwRateLimitInterceptor(
     // below the published category ceiling. Smooth all Alpha live-data calls together.
     // This is transport-only; Fixed scoring, SELL stop triggers and order dispatch are unchanged.
     private val alphaLiveDataMinute = ArrayDeque<Long>()
+    private val alphaResearchLiveMinute = ArrayDeque<Long>()
     private val pendingProtectionLtps = AtomicInteger(0)
     private var lastAlphaLiveDataGrantedAtMs = 0L
     private val lastBlockedAuditMs = EnumMap<GrowwApiUsageLedger.Category, Long>(GrowwApiUsageLedger.Category::class.java)
@@ -164,9 +165,9 @@ internal class GrowwRateLimitInterceptor(
             val waitMs = synchronized(lock) {
                 val now = SystemClock.elapsedRealtime()
                 val state = states.getValue(category)
-                // Centralized quota: protect one live request/second and sixty/minute
-                // for existing holdings. Ordinary Fixed/Forecast research uses only
-                // the residual allowance; protection still obeys Groww's hard budget.
+                // Generic category quota plus shared quote/LTP/OHLC pacing. When app-owned
+                // holdings exist, the endpoint lane reserves 12 of 40 requests/minute
+                // for protection; Fixed research is limited to the other 28.
                 val limits = if (category == GrowwApiUsageLedger.Category.LIVE_DATA) {
                     val admission = MarketDataPriorityAdmissionPolicy.allowedLiveTraffic(
                         MarketDataPriorityAdmissionPolicy.hasManagedHoldings, protection)
@@ -181,10 +182,15 @@ internal class GrowwRateLimitInterceptor(
                     (state.minute.peekFirst() + 60_000L - now).coerceAtLeast(1L) else 0L
                 val isAlphaLiveData = category == GrowwApiUsageLedger.Category.LIVE_DATA
                 val isAlphaLtp = path == "/v1/live-data/ltp"
-                if (isAlphaLiveData) prune(alphaLiveDataMinute, now - 60_000L)
+                if (isAlphaLiveData) {
+                    prune(alphaLiveDataMinute, now - 60_000L)
+                    prune(alphaResearchLiveMinute, now - 60_000L)
+                }
                 val liveDataWait = if (isAlphaLiveData) AlphaLiveDataPacingPolicy.waitMs(
                     now, lastAlphaLiveDataGrantedAtMs,
-                    alphaLiveDataMinute.peekFirst(), alphaLiveDataMinute.size
+                    alphaLiveDataMinute.peekFirst(), alphaLiveDataMinute.size,
+                    alphaResearchLiveMinute.peekFirst(), alphaResearchLiveMinute.size,
+                    protectionLtp, MarketDataPriorityAdmissionPolicy.hasManagedHoldings
                 ) else 0L
                 val protectionYield = MarketDataPriorityAdmissionPolicy.ltpPriorityYieldMs(
                     isAlphaLtp, protection, pendingProtectionLtps.get())
@@ -202,6 +208,7 @@ internal class GrowwRateLimitInterceptor(
                     state.minute.addLast(now)
                     if (isAlphaLiveData) {
                         alphaLiveDataMinute.addLast(now)
+                        if (!protectionLtp) alphaResearchLiveMinute.addLast(now)
                         lastAlphaLiveDataGrantedAtMs = now
                     }
                     0L
