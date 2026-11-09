@@ -90,6 +90,15 @@ internal class GrowwRateLimitInterceptor(
             val rawRetryAfter = response.header("Retry-After")
             val retryAfterMs = GrowwRetryAfterPolicy.retryAfterMs(rawRetryAfter, System.currentTimeMillis())
             val appliedCooldownMs = recoveryGate.on429(category, retryAfterMs)
+            when (category) {
+                GrowwApiUsageLedger.Category.LIVE_DATA ->
+                    FixedUnifiedRequestBudget.on429(FixedUnifiedRequestBudget.Account.ALPHA,
+                        FixedUnifiedRequestBudget.Category.LIVE, appliedCooldownMs)
+                GrowwApiUsageLedger.Category.HISTORICAL ->
+                    FixedUnifiedRequestBudget.on429(FixedUnifiedRequestBudget.Account.ALPHA,
+                        FixedUnifiedRequestBudget.Category.HISTORICAL, appliedCooldownMs)
+                else -> Unit
+            }
             synchronized(lock) {
                 val state = states.getValue(category)
                 state.cooldownUntilMs = maxOf(state.cooldownUntilMs, SystemClock.elapsedRealtime() + appliedCooldownMs)
@@ -152,6 +161,8 @@ internal class GrowwRateLimitInterceptor(
             MarketDataPriorityAdmissionPolicy.isProtectionHeader(
                 request.header(MarketDataPriorityAdmissionPolicy.HEADER))
         val protectionLtp = protection && path == "/v1/live-data/ltp"
+        val fixedPriority = MarketDataPriorityAdmissionPolicy.isFixedHeader(
+            request.header(MarketDataPriorityAdmissionPolicy.HEADER))
         if (protectionLtp) pendingProtectionLtps.incrementAndGet()
         var totalWaitMs = 0L
         var dominantReason = "NONE"
@@ -225,6 +236,12 @@ internal class GrowwRateLimitInterceptor(
                         ))
                     }
                 }
+                FixedUnifiedRequestBudget.acquireAlpha(
+                    category = category,
+                    path = path,
+                    isProtection = protection,
+                    isFixed = fixedPriority
+                )
                 return
             }
             dominantReason = reason
