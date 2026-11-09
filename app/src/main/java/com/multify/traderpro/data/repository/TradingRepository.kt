@@ -6994,6 +6994,10 @@ class TradingRepository @Inject constructor(
                     "symbol" to row.symbol, "reasons" to entryActionability.reasons,
                     "first_primary_to_entry_pct" to entryActionability.firstPrimaryRunupPct,
                     "distance_from_day_high_pct" to entryActionability.distanceFromQuoteHighPct,
+                    "multi_day_window_high_distance_pct_NOT_day_high" to entryActionability.multiDayWindowHighDistancePct,
+                    "vwap_extension_atr" to entryActionability.vwapAtrExtension,
+                    "ema20_extension_atr" to entryActionability.ema20AtrExtension,
+                    "recent_15m_impulse_atr" to entryActionability.recentImpulseAtr,
                     "fixed_model_unchanged" to true))
                 continue
             }
