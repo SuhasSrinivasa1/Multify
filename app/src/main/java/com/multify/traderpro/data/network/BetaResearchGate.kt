@@ -5,6 +5,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import retrofit2.HttpException
+import com.multify.traderpro.engine.GrowwRetryAfterPolicy
 import java.util.ArrayDeque
 import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
@@ -24,7 +25,8 @@ class BetaResearchGate @Inject constructor() {
         val second: ArrayDeque<Long> = ArrayDeque(),
         val minute: ArrayDeque<Long> = ArrayDeque(),
         var cooldownUntil: Long = 0L,
-        var lastGrantedAt: Long = 0L
+        var lastGrantedAt: Long = 0L,
+        val rateLimitTimes: ArrayDeque<Long> = ArrayDeque()
     )
     private val lock = Mutex()
     private val historicalInFlight = Mutex()
@@ -91,11 +93,24 @@ class BetaResearchGate @Inject constructor() {
             if (type == Type.LIVE) liveFailures.incrementAndGet() else historicalFailures.incrementAndGet()
             if (failure is HttpException && failure.code() == 429) {
                 if (type == Type.LIVE) liveRateLimits.incrementAndGet() else historicalRateLimits.incrementAndGet()
-                val retryAfterMs = failure.response()?.headers()?.get("Retry-After")?.toLongOrNull()?.times(1_000L) ?: 0L
-                val cooldownMs = maxOf(60_000L, retryAfterMs)
+                val retryAfterRaw = failure.response()?.headers()?.get("Retry-After")
+                val retryAfterMs = GrowwRetryAfterPolicy.retryAfterMs(retryAfterRaw, System.currentTimeMillis())
                 lock.withLock {
                     val w = windows.getValue(type)
-                    w.cooldownUntil = maxOf(w.cooldownUntil, SystemClock.elapsedRealtime() + cooldownMs)
+                    val now = SystemClock.elapsedRealtime()
+                    while (w.rateLimitTimes.isNotEmpty() && w.rateLimitTimes.first() <= now - 60L * 60_000L) {
+                        w.rateLimitTimes.removeFirst()
+                    }
+                    val sameIncident = w.rateLimitTimes.lastOrNull()?.let { now - it < 5_000L } == true
+                    if (!sameIncident) w.rateLimitTimes.addLast(now)
+                    val cooldownFloor = when {
+                        w.rateLimitTimes.size >= 4 -> 30L * 60_000L
+                        w.rateLimitTimes.size == 3 -> 10L * 60_000L
+                        w.rateLimitTimes.size == 2 -> 3L * 60_000L
+                        else -> 60_000L
+                    }
+                    val cooldownMs = maxOf(cooldownFloor, retryAfterMs.coerceIn(0L, 6L * 60L * 60_000L))
+                    w.cooldownUntil = maxOf(w.cooldownUntil, now + cooldownMs)
                 }
             }
             throw failure
