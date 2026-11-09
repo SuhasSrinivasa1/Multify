@@ -76,7 +76,7 @@ object GrowwHttpTraceLedger {
         val key = account + "/" + category
         Counters(totals[key] ?: 0L, failures[key] ?: 0L, rateLimits[key] ?: 0L)
     }
-    fun summary(): Map<String, Any> = synchronized(lock) {
+    fun summary(): Map<String, Map<String, Any>> = synchronized(lock) {
         val now = SystemClock.elapsedRealtime()
         listOf("ALPHA", "BETA").associateWith { account ->
             val a = snapshot(byAccount[account], now)
