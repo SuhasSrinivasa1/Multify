@@ -9402,7 +9402,7 @@ class TradingRepository @Inject constructor(
             auditLogger.log("HOLDING", "GTT_BROKER_SELL_RECONCILED", mapOf(
                 "symbol" to confirmed.symbol,
                 "parent_gtt_id" to confirmed.smartOrderId,
-                "gtt_reference_id" to expectedReference,
+                "gtt_reference_id" to parent.referenceId,
                 "sell_order_id" to full.growwOrderId,
                 "broker_average_fill" to price,
                 "quantity" to confirmed.quantity,
