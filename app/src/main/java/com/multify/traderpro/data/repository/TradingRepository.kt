@@ -8365,12 +8365,12 @@ class TradingRepository @Inject constructor(
         // The Fixed Auto Buy caller can supply this proof only after placeCncBuy has
         // just verified zero pre-existing broker quantity for this symbol and received
         // a confirmed app BUY fill. Groww's holdings/positions endpoints may lag that fill.
+        val key = position.symbol.uppercase(Locale.US)
         val freshPostFillProof = inventory == null && allowFreshPostFillProof &&
             AppPositionOwnershipPolicy.freshPostFillInventoryLagAllowed(
                 position.openedAtMs, System.currentTimeMillis())
         if (!freshPostFillProof) {
             val broker = inventory ?: brokerInventory(token, force = true)
-            val key = position.symbol.uppercase(Locale.US)
             val demat = broker.holdings[key]?.quantity ?: 0
             val cnc = broker.positions[key]?.quantity ?: 0
             if (!AppPositionOwnershipPolicy.exclusiveBrokerQuantity(position.quantity, demat, cnc)) return false
