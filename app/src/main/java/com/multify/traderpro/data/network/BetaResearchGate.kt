@@ -20,7 +20,8 @@ class BetaResearchGate @Inject constructor() {
         val liveRequests: Long, val historicalRequests: Long,
         val liveFailures: Long, val historicalFailures: Long,
         val liveRateLimits: Long, val historicalRateLimits: Long,
-        val lastLatencyMs: Long
+        val lastLatencyMs: Long,
+        val liveRequestsLastMinute: Int, val historicalRequestsLastMinute: Int
     )
     private data class Window(
         val second: ArrayDeque<Long> = ArrayDeque(),
@@ -42,6 +43,9 @@ class BetaResearchGate @Inject constructor() {
 
     private val liveRequests = AtomicLong()
     private val historicalRequests = AtomicLong()
+    private val usageLock = Any()
+    private val liveRequestTimes = ArrayDeque<Long>()
+    private val historicalRequestTimes = ArrayDeque<Long>()
     private val liveFailures = AtomicLong()
     private val historicalFailures = AtomicLong()
     private val liveRateLimits = AtomicLong()
@@ -87,6 +91,11 @@ class BetaResearchGate @Inject constructor() {
             delay(waitMs.coerceAtLeast(5L))
         }
         val requestStarted = SystemClock.elapsedRealtime()
+        synchronized(usageLock) {
+            val times = if (type == Type.LIVE) liveRequestTimes else historicalRequestTimes
+            while (times.isNotEmpty() && times.first() <= requestStarted - 60_000L) times.removeFirst()
+            times.addLast(requestStarted)
+        }
         if (type == Type.LIVE) liveRequests.incrementAndGet() else historicalRequests.incrementAndGet()
         return try {
             block()
@@ -121,10 +130,18 @@ class BetaResearchGate @Inject constructor() {
         windows.getValue(type).cooldownUntil <= SystemClock.elapsedRealtime()
     }
 
-    fun snapshot() = UsageSnapshot(
-        liveRequests.get(), historicalRequests.get(), liveFailures.get(), historicalFailures.get(),
-        liveRateLimits.get(), historicalRateLimits.get(), lastLatencyMs.get()
-    )
+    fun snapshot(): UsageSnapshot {
+        val now = SystemClock.elapsedRealtime()
+        val rolling = synchronized(usageLock) {
+            while (liveRequestTimes.isNotEmpty() && liveRequestTimes.first() <= now - 60_000L) liveRequestTimes.removeFirst()
+            while (historicalRequestTimes.isNotEmpty() && historicalRequestTimes.first() <= now - 60_000L) historicalRequestTimes.removeFirst()
+            liveRequestTimes.size to historicalRequestTimes.size
+        }
+        return UsageSnapshot(
+            liveRequests.get(), historicalRequests.get(), liveFailures.get(), historicalFailures.get(),
+            liveRateLimits.get(), historicalRateLimits.get(), lastLatencyMs.get(), rolling.first, rolling.second
+        )
+    }
     fun configuredLiveLimitPerMinute() = liveMinute
     fun configuredHistoricalLimitPerMinute() = histMinute
 }
