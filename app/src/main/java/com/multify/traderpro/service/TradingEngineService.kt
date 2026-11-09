@@ -279,6 +279,10 @@ class TradingEngineService : Service() {
                             "alpha_historical_last_minute" to alphaHistorical.usedLastMinute,
                             "beta_historical_last_minute" to betaUsage.historicalRequestsLastMinute,
                             "combined_historical_last_minute" to (alphaHistorical.usedLastMinute + betaUsage.historicalRequestsLastMinute),
+                            "alpha_live_effective_limit_per_minute" to com.multify.traderpro.engine.AlphaLiveDataPacingPolicy.MAX_PER_MINUTE,
+                            "alpha_live_research_limit_with_holdings_per_minute" to com.multify.traderpro.engine.AlphaLiveDataPacingPolicy.MAX_RESEARCH_WITH_HOLDINGS_PER_MINUTE,
+                            "beta_live_effective_limit_per_minute" to betaResearchGate.configuredLiveLimitPerMinute(),
+                            "beta_historical_effective_limit_per_minute" to betaResearchGate.configuredHistoricalLimitPerMinute(),
                             "beta_live_429s" to betaUsage.liveRateLimits,
                             "beta_historical_429s" to betaUsage.historicalRateLimits,
                             "categories" to usage.categories.associate { row ->
@@ -661,6 +665,11 @@ class TradingEngineService : Service() {
                                 "historical_network_requests" to requestDelta(GrowwApiUsageLedger.Category.HISTORICAL),
                                 "beta_historical_network_requests" to betaHistoricalDelta,
                                 "combined_historical_network_requests" to (requestDelta(GrowwApiUsageLedger.Category.HISTORICAL) + betaHistoricalDelta),
+                                "alpha_live_effective_limit_per_minute" to com.multify.traderpro.engine.AlphaLiveDataPacingPolicy.MAX_PER_MINUTE,
+                                "alpha_live_research_limit_with_holdings_per_minute" to com.multify.traderpro.engine.AlphaLiveDataPacingPolicy.MAX_RESEARCH_WITH_HOLDINGS_PER_MINUTE,
+                                "alpha_live_protection_reserve_with_holdings_per_minute" to (com.multify.traderpro.engine.AlphaLiveDataPacingPolicy.MAX_PER_MINUTE - com.multify.traderpro.engine.AlphaLiveDataPacingPolicy.MAX_RESEARCH_WITH_HOLDINGS_PER_MINUTE),
+                                "beta_live_effective_limit_per_minute" to betaResearchGate.configuredLiveLimitPerMinute(),
+                                "beta_historical_effective_limit_per_minute" to betaResearchGate.configuredHistoricalLimitPerMinute(),
                                 "non_trading_network_requests" to requestDelta(GrowwApiUsageLedger.Category.NON_TRADING),
                                 "live_429s" to (
                                     usageAfter.categories.first { it.category == GrowwApiUsageLedger.Category.LIVE_DATA }.rateLimitResponses -
