@@ -72,8 +72,18 @@ internal class GrowwRateLimitInterceptor(
         val started = SystemClock.elapsedRealtime()
         val requestStartedAtMs = System.currentTimeMillis()
         // Request priority is internal scheduler metadata, never a Groww API header.
-        val response = chain.proceed(request.newBuilder()
-            .removeHeader(MarketDataPriorityAdmissionPolicy.HEADER).build())
+        val permitLane = when (category) {
+            GrowwApiUsageLedger.Category.LIVE_DATA -> GrowwSharedMarketDataBudget.Lane.LIVE
+            GrowwApiUsageLedger.Category.HISTORICAL -> GrowwSharedMarketDataBudget.Lane.HISTORICAL
+            else -> null
+        }
+        val response = try {
+            chain.proceed(request.newBuilder()
+                .removeHeader(MarketDataPriorityAdmissionPolicy.HEADER).build())
+        } catch (failure: Throwable) {
+            if (permitLane != null) GrowwSharedMarketDataBudget.completed(permitLane, 0)
+            throw failure
+        }
         val networkMs = (SystemClock.elapsedRealtime() - started).coerceAtLeast(0L)
         if (path == "/v1/live-data/quote" &&
             request.url.queryParameter("exchange").equals("NSE", ignoreCase = true) &&
