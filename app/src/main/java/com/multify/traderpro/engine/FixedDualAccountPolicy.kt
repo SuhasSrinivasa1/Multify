@@ -18,7 +18,7 @@ object FixedDualAccountPolicy {
         !aborted && master > 0 && valid.toDouble() / master >= .85
 
     const val FULL_NSE_LTP_BATCH_LIMIT = 50
-    const val BETA_LTP_MIN_GAP_MS = 1_200L
-    const val BETA_LIVE_PER_MINUTE = 35
+    const val BETA_LTP_MIN_GAP_MS = LtpAdaptivePacingPolicy.MIN_GAP_MS
+    const val BETA_LIVE_PER_MINUTE = 270
     const val BETA_HISTORICAL_PER_MINUTE = 8
 }
