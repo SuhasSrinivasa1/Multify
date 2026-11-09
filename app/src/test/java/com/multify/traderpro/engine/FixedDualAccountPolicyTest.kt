@@ -28,7 +28,8 @@ class FixedDualAccountPolicyTest {
     }
     @Test fun betaReadOnlyBudgetsConservativeAndBatchSizeFrozen() {
         assertEquals(50, FixedDualAccountPolicy.FULL_NSE_LTP_BATCH_LIMIT)
-        assertTrue(FixedDualAccountPolicy.BETA_LIVE_PER_MINUTE < 300)
+        assertEquals(270, FixedDualAccountPolicy.BETA_LIVE_PER_MINUTE)
+        assertEquals(220L, FixedDualAccountPolicy.BETA_LTP_MIN_GAP_MS)
         assertTrue(FixedDualAccountPolicy.BETA_HISTORICAL_PER_MINUTE <= 8)
     }
 }
