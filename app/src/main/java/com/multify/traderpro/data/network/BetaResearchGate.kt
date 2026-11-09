@@ -38,7 +38,7 @@ class BetaResearchGate @Inject constructor() {
     private val liveSec = 1
     private val liveMinute = com.multify.traderpro.engine.FixedDualAccountPolicy.BETA_LIVE_PER_MINUTE
     private val histSec = 1
-    private val histMinute = com.multify.traderpro.engine.FixedDualAccountPolicy.BETA_HISTORICAL_PER_MINUTE
+    private val histMinute = com.multify.traderpro.engine.FixedBetaDetailRoutingPolicy.BETA_HISTORICAL_PER_MINUTE
     private val liveGapMs = com.multify.traderpro.engine.FixedDualAccountPolicy.BETA_LTP_MIN_GAP_MS
 
     private val liveRequests = AtomicLong()
