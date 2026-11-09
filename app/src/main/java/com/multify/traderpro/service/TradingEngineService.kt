@@ -664,7 +664,7 @@ class TradingEngineService : Service() {
                                 "elapsed_ms" to elapsed,
                                 "order_path_completed" to true,
                                 "fixed_rest_batch_window" to com.multify.traderpro.engine.FixedDiscoveryWindowScheduler.WINDOW_SIZE,
-                                "groww_ltp_min_gap_ms" to com.multify.traderpro.engine.AlphaLtpPacingPolicy.MIN_GAP_MS,
+                                "groww_ltp_min_gap_ms" to com.multify.traderpro.engine.AlphaLiveDataPacingPolicy.MIN_GAP_MS,
                                 "groww_ltp_app_max_per_minute" to com.multify.traderpro.engine.AlphaLtpPacingPolicy.MAX_PER_MINUTE,
                                 "fixed_model_changed" to false
                             ))
