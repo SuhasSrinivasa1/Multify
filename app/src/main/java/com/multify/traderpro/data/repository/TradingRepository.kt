@@ -78,6 +78,7 @@ import com.multify.traderpro.engine.FixedScanBuyIsolationPolicy
 import com.multify.traderpro.engine.IdleBrokerPollingPolicy
 import com.multify.traderpro.engine.BrokerInventorySymbolPolicy
 import com.multify.traderpro.engine.AutoBuyEntrySafetyPolicy
+import com.multify.traderpro.engine.FixedAutoBuyCooldownStagePolicy
 import com.multify.traderpro.engine.ExecutionTelemetryMath
 import com.multify.traderpro.engine.ForecastAutoBuyPolicy
 import com.multify.traderpro.engine.ForecastAdaptiveSelectionPolicy
@@ -1503,16 +1504,18 @@ class TradingRepository @Inject constructor(
 
     /** A read-only check: never send doomed live-data or non-trading calls during broker cooldowns. */
     private fun buyApiCooldownOrNull(): GrowwRecoveryGate.LocallyBlocked? =
-        fixedAutoBuyCooldownOrNull(
-            GrowwApiUsageLedger.Category.LIVE_DATA,
-            GrowwApiUsageLedger.Category.NON_TRADING
-        )
+        fixedAutoBuyCooldownOrNull(FixedAutoBuyCooldownStagePolicy.Stage.BEFORE_QUOTE)
 
-    /** Check only the endpoint categories needed at the current Fixed BUY stage. */
+    /** Check only the endpoint categories required at the current Fixed BUY stage. */
     private fun fixedAutoBuyCooldownOrNull(
-        vararg categories: GrowwApiUsageLedger.Category
+        stage: FixedAutoBuyCooldownStagePolicy.Stage
     ): GrowwRecoveryGate.LocallyBlocked? {
-        for (category in categories) {
+        for (required in FixedAutoBuyCooldownStagePolicy.requiredCategories(stage)) {
+            val category = when (required) {
+                FixedAutoBuyCooldownStagePolicy.ApiCategory.LIVE_DATA -> GrowwApiUsageLedger.Category.LIVE_DATA
+                FixedAutoBuyCooldownStagePolicy.ApiCategory.NON_TRADING -> GrowwApiUsageLedger.Category.NON_TRADING
+                FixedAutoBuyCooldownStagePolicy.ApiCategory.ORDERS -> GrowwApiUsageLedger.Category.ORDERS
+            }
             try {
                 recoveryGate.checkRequestAllowed(category)
             } catch (blocked: GrowwRecoveryGate.LocallyBlocked) {
@@ -6944,10 +6947,7 @@ class TradingRepository @Inject constructor(
         // An activation with only previously published recommendations should not
         // trigger a broker token refresh or any order-preparation API traffic.
         if (rows.isEmpty()) return 0
-        val preflightCooldown = fixedAutoBuyCooldownOrNull(
-            GrowwApiUsageLedger.Category.LIVE_DATA,
-            GrowwApiUsageLedger.Category.NON_TRADING
-        )
+        val preflightCooldown = fixedAutoBuyCooldownOrNull(FixedAutoBuyCooldownStagePolicy.Stage.BEFORE_QUOTE)
         if (preflightCooldown != null) {
             auditAutoBuyBlocked("FIXED_AUTO_BUY", preflightCooldown)
             return 0
@@ -6986,10 +6986,7 @@ class TradingRepository @Inject constructor(
                 ))
                 continue
             }
-            val cooldown = fixedAutoBuyCooldownOrNull(
-                GrowwApiUsageLedger.Category.LIVE_DATA,
-                GrowwApiUsageLedger.Category.NON_TRADING
-            )
+            val cooldown = fixedAutoBuyCooldownOrNull(FixedAutoBuyCooldownStagePolicy.Stage.BEFORE_QUOTE)
             if (cooldown != null) {
                 auditAutoBuyBlocked("FIXED_AUTO_BUY", cooldown)
                 break
@@ -7024,9 +7021,7 @@ class TradingRepository @Inject constructor(
                 ))
             }.getOrNull()
             if (quote == null) {
-                val cooldown = fixedAutoBuyCooldownOrNull(
-                    GrowwApiUsageLedger.Category.LIVE_DATA
-                )
+                val cooldown = fixedAutoBuyCooldownOrNull(FixedAutoBuyCooldownStagePolicy.Stage.AFTER_QUOTE_FAILURE)
                 if (cooldown != null) {
                     auditAutoBuyBlocked("FIXED_AUTO_BUY", cooldown)
                     break
@@ -7090,10 +7085,7 @@ class TradingRepository @Inject constructor(
                 continue
             }
 
-            val marginCooldown = fixedAutoBuyCooldownOrNull(
-                GrowwApiUsageLedger.Category.NON_TRADING,
-                GrowwApiUsageLedger.Category.ORDERS
-            )
+            val marginCooldown = fixedAutoBuyCooldownOrNull(FixedAutoBuyCooldownStagePolicy.Stage.BEFORE_ORDER)
             if (marginCooldown != null) {
                 auditAutoBuyBlocked("FIXED_AUTO_BUY", marginCooldown)
                 break
