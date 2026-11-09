@@ -8,6 +8,8 @@ package com.multify.traderpro.engine
 object MarketDataPriorityAdmissionPolicy {
     const val HEADER = "X-Multify-Request-Priority"
     const val PROTECTION = "PROTECTION"
+    const val FIXED = "FIXED"
+    const val EXECUTION = "EXECUTION"
 
     @Volatile var hasManagedHoldings: Boolean = false
         private set
@@ -35,4 +37,6 @@ object MarketDataPriorityAdmissionPolicy {
         if (isLtp && !isProtection && pendingProtectionLtps > 0) 125L else 0L
 
     fun isProtectionHeader(value: String?): Boolean = value == PROTECTION
+
+    fun isFixedHeader(value: String?): Boolean = value == FIXED || value == EXECUTION
 }
