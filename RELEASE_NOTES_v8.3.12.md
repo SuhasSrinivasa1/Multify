@@ -22,7 +22,7 @@ A candidate is marked RESEARCH_ONLY / BUY BLOCKED only when all four are present
 3. Price is at least 2.0 ATR above EMA20.
 4. The latest 15-minute impulse is at least 1.2 ATR.
 
-Missing evidence does not fabricate a peak and does not trigger this rule. No extra broker requests are made.
+Missing evidence does not fabricate a peak and does not trigger this rule. No extra broker requests are made. The broader FixedEntrySafetyOverlay remains shadow-only; this release activates only the narrow four-way confluence guard.
 
 ## Unchanged
 
