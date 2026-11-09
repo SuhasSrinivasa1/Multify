@@ -27,15 +27,15 @@ class AlphaLiveDataPacingPolicyTest {
     }
 
     @Test fun twelveRequestsRemainReservedForProtectionWhenHoldingsExist() {
-        assertEquals(45_000L, wait(15_000L, researchOldest = 0L, research = 28, holdings = true))
-        assertEquals(0L, wait(15_000L, totalOldest = 0L, total = 28,
+        assertEquals(45_000L, expectedWaitMs(15_000L, researchOldest = 0L, research = 28, holdings = true))
+        assertEquals(0L, expectedWaitMs(15_000L, totalOldest = 0L, total = 28,
             researchOldest = 0L, research = 28, protection = true, holdings = true))
-        assertEquals(0L, wait(15_000L, totalOldest = 0L, total = 28,
+        assertEquals(0L, expectedWaitMs(15_000L, totalOldest = 0L, total = 28,
             researchOldest = 0L, research = 28, holdings = false))
     }
 
     @Test fun protectionStillObeysTheOverallFortyPerMinuteCeiling() {
-        assertEquals(1_000L, wait(59_000L, totalOldest = 0L, total = 40,
+        assertEquals(1_000L, expectedWaitMs(59_000L, totalOldest = 0L, total = 40,
             protection = true, holdings = true))
     }
 }
