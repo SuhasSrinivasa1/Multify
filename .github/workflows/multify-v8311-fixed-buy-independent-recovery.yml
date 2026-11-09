@@ -72,6 +72,8 @@ jobs:
           assert 'preFixedAutoBuyExecutionGuard(settings)' in now
           assert 'allowOtherSymbolProtectionRecovery = true' in now
           assert 'allowFreshPostFillProof = true' in now
+          assert 'deferProtectionRetryToMonitor = true' in now
+          assert 'POST_FILL_PROTECTION_HANDED_TO_BACKGROUND_MONITOR' in now
           assert 'FIXED_BUY_CONTINUED_DURING_OTHER_SYMBOL_PROTECTION_RECOVERY' in now
           assert 'POST_FILL_INVENTORY_LAG_PROOF_USED' in now
           assert 'versionCode = 8392' in Path('app/build.gradle.kts').read_text()
