@@ -84,6 +84,11 @@ internal object GrowwSharedMarketDataBudget {
                 waitMs
             }
             if (wait <= 0L) return
+            // Fixed scans should fail quickly and retry on the next scheduled cycle
+            // rather than block an entire 90-second cycle behind one upstream 429.
+            if (wait > 10_000L && !protection) {
+                throw java.io.IOException("SHARED_GROWW_${lane.name}_COOLDOWN_OR_QUOTA")
+            }
             delay(wait.coerceAtLeast(5L))
         }
     }
