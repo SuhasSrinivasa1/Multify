@@ -10753,7 +10753,27 @@ class TradingRepository @Inject constructor(
                 add("fixed_auto_buy_orders.json", fixedAutoBuyOrders)
                 fixedFactorTelemetry.appendExportEntry(zip)
                 fixedMarketPathTelemetry.appendExportEntry(zip)
-                add("api_usage_snapshot.json", GrowwApiUsageLedger.snapshot())
+                val alphaApiUsage = GrowwApiUsageLedger.snapshot()
+                val betaApiUsage = betaResearchGate.snapshot()
+                val alphaLiveUsage = alphaApiUsage.categories.first { it.category == GrowwApiUsageLedger.Category.LIVE_DATA }
+                val alphaHistoricalUsage = alphaApiUsage.categories.first { it.category == GrowwApiUsageLedger.Category.HISTORICAL }
+                add("api_usage_snapshot.json", alphaApiUsage)
+                add("beta_api_usage_snapshot.json", betaApiUsage)
+                add("combined_api_usage_snapshot.json", mapOf(
+                    "schema_version" to 2,
+                    "alpha_live_requests" to alphaLiveUsage.totalRequests,
+                    "beta_live_requests" to betaApiUsage.liveRequests,
+                    "combined_live_requests" to (alphaLiveUsage.totalRequests + betaApiUsage.liveRequests),
+                    "alpha_historical_requests" to alphaHistoricalUsage.totalRequests,
+                    "beta_historical_requests" to betaApiUsage.historicalRequests,
+                    "combined_historical_requests" to (alphaHistoricalUsage.totalRequests + betaApiUsage.historicalRequests),
+                    "alpha_live_429s" to alphaLiveUsage.rateLimitResponses,
+                    "beta_live_429s" to betaApiUsage.liveRateLimits,
+                    "alpha_historical_429s" to alphaHistoricalUsage.rateLimitResponses,
+                    "beta_historical_429s" to betaApiUsage.historicalRateLimits,
+                    "beta_is_read_only" to true,
+                    "account_traffic_is_reported_separately" to true
+                ))
                 add("groww_recovery_state.json", recoveryGate.status())
                 add("telemetry_metadata.json", mapOf(
                     "exported_at_ms" to System.currentTimeMillis(),
@@ -10787,6 +10807,11 @@ class TradingRepository @Inject constructor(
                     "multify_pipeline_event" to "MULTIFY_PIPELINE_PROFILE",
                     "broker_rate_limit_event" to "HTTP_429",
                     "client_governor_wait_event" to "CLIENT_GOVERNOR_WAIT",
+                    "api_usage_alpha_snapshot" to "api_usage_snapshot.json",
+                    "api_usage_beta_snapshot" to "beta_api_usage_snapshot.json",
+                    "api_usage_combined_snapshot" to "combined_api_usage_snapshot.json",
+                    "api_usage_combined_schema" to 2,
+                    "wallet_margin_api_calls_enabled" to false,
                     "forecast_replay_event" to "UNIVERSAL_POSITIVE_EVIDENCE_REFRESH",
                     "positive_evidence_file" to "forecast_positive_evidence.json",
                     "forecast_news_file" to "forecast_news_events.jsonl",
