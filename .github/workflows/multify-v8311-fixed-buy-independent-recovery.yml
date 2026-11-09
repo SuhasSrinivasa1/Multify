@@ -76,6 +76,11 @@ jobs:
           assert 'POST_FILL_PROTECTION_HANDED_TO_BACKGROUND_MONITOR' in now
           assert 'FIXED_BUY_CONTINUED_DURING_OTHER_SYMBOL_PROTECTION_RECOVERY' in now
           assert 'POST_FILL_INVENTORY_LAG_PROOF_USED' in now
+          guard_start = now.index('private fun preFixedAutoBuyExecutionGuard')
+          guard_end = now.index('private suspend fun placeCncBuy', guard_start)
+          assert 'tradingRecoveryReady' not in now[guard_start:guard_end]
+          assert 'require(allowOtherSymbolProtectionRecovery || unprotected.isEmpty())' in now
+          assert 'demat <= 0 && cnc <= 0 && managedDao.openPositions().none' in now
           assert 'versionCode = 8392' in Path('app/build.gradle.kts').read_text()
           print('Frozen Fixed, SELL/GTT, and post-toggle activation checks passed')
           PY
