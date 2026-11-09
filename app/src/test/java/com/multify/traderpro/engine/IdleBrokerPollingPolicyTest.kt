@@ -7,7 +7,7 @@ class IdleBrokerPollingPolicyTest {
     private fun skip(positions: Int = 0, pending: Boolean = false, inFlight: Boolean = false,
         inventoryMs: Long? = 1000, gttMs: Long? = 1000, nowMs: Long = 2000
     ) = IdleBrokerPollingPolicy.maySkip(true, positions, pending, inFlight,
-        inventoryMs, gttMs, nowMs, 45_000)
+        inventoryMs, gttMs, nowMs, 300_000)
 
     @Test fun confirmedRecentSnapshotsSuppressOnlyIdlePolling() {
         assertTrue(skip()) // external/manual holdings are not app-owned
@@ -18,10 +18,15 @@ class IdleBrokerPollingPolicyTest {
         assertFalse(skip(gttMs = null))
     }
 
+    @Test fun emptyPortfolioCanReuseVerifiedSnapshotsForFiveMinutes() {
+        assertTrue(skip(inventoryMs = 1000, gttMs = 1000, nowMs = 300_999))
+        assertFalse(skip(inventoryMs = 1000, gttMs = 1000, nowMs = 301_000))
+    }
+
     @Test fun staleOrFutureSnapshotsRequireAnotherBrokerPoll() {
-        assertFalse(skip(inventoryMs = 1000, nowMs = 50_000))
-        assertFalse(skip(gttMs = 1000, nowMs = 50_000))
+        assertFalse(skip(inventoryMs = 1000, nowMs = 301_000))
+        assertFalse(skip(gttMs = 1000, nowMs = 301_000))
         assertFalse(skip(inventoryMs = 5000, nowMs = 2000))
-        assertFalse(IdleBrokerPollingPolicy.maySkip(false, 0, false, false, 1000, 1000, 2000, 45_000))
+        assertFalse(IdleBrokerPollingPolicy.maySkip(false, 0, false, false, 1000, 1000, 2000, 300_000))
     }
 }
