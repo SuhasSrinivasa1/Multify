@@ -1521,20 +1521,18 @@ class TradingRepository @Inject constructor(
                 "independent_execution_toggle" to true,
                 "snapshot_id" to FixedEngineSnapshotStore.SNAPSHOT_ID,
                 "entry_gtt" to false,
-                "entry_order_type" to "MARKET"
+                "entry_order_type" to "MARKET",
+                "activated_at_ms" to preferences.settings.first().fixedAutoBuyActivatedAtMs,
+                "pre_activation_recommendations_ineligible" to true
             )
         )
         if (enabled) {
             ensureFixedEngineSnapshot()
+            // Never sweep today's already published ACTIVE recommendations on enable.
+            // The next newly published Fixed event is handled by the ordinary scan path.
             val s = preferences.settings.first()
             if (!s.safetyHalt && marketSession() == "OPEN") {
                 runCatching { prepareArmHotPath(force = false) }
-                runCatching { autoBuyFixedRecommendations() }
-                    .onFailure {
-                        auditLogger.log("FIXED_AUTO_BUY", "ENABLE_SWEEP_ERROR", mapOf(
-                            "message" to (it.message ?: it.javaClass.simpleName)
-                        ))
-                    }
             }
         } else {
             runCatching { reconcileFixedAutoBuyOrders(forceCancel = true, cancelReason = "AUTO_BUY_DISABLED") }
@@ -6858,14 +6856,11 @@ class TradingRepository @Inject constructor(
         if (!com.multify.traderpro.engine.NseEquitySessionCalendar.isFixedNewEntryWindow(now) || marketSession() != "OPEN") return 0
         val settings = preferences.settings.first()
         if (!settings.fixedAutoBuyEnabled || settings.safetyHalt) return 0
-        val preflightCooldown = buyApiCooldownOrNull()
-        if (preflightCooldown != null) {
-            auditAutoBuyBlocked("FIXED_AUTO_BUY", preflightCooldown)
-            return 0
-        }
-        preIndependentExecutionGuard(settings)
-        val token = ensureToken() ?: run {
-            auditLogger.logAsync("FIXED_AUTO_BUY", "BUY_BLOCKED_BROKER_NOT_READY", mapOf("reason" to "TOKEN_NOT_READY"))
+        // Old installations can contain ON=true without the new activation timestamp.
+        // Fail closed until the user explicitly switches OFF and then ON again.
+        if (settings.fixedAutoBuyActivatedAtMs <= 0L) {
+            auditLogger.logAsync("FIXED_AUTO_BUY", "BUY_BLOCKED_ACTIVATION_TIMESTAMP_MISSING",
+                mapOf("action" to "TOGGLE_OFF_THEN_ON", "old_recommendations_ineligible" to true))
             return 0
         }
         val today = now.toLocalDate().toString()
@@ -6876,11 +6871,27 @@ class TradingRepository @Inject constructor(
                 it.status == "ACTIVE" &&
                     it.executionEligible &&
                     it.qualityTier == "PRIMARY" &&
-                    RecommendationPriceBandPolicy.eligible(it.entryPrice)
+                    RecommendationPriceBandPolicy.eligible(it.entryPrice) &&
+                    AutoBuyEntrySafetyPolicy.isPublishedAfterFixedAutoBuyEnabled(
+                        it.generatedAtMs, settings.fixedAutoBuyActivatedAtMs)
             }
             .groupBy { it.symbol.uppercase(Locale.US) }
             .values.mapNotNull { events -> events.maxByOrNull { it.generatedAtMs } }
             .sortedBy { it.generatedAtMs }
+
+        // An activation with only previously published recommendations should not
+        // trigger a broker token refresh or any order-preparation API traffic.
+        if (rows.isEmpty()) return 0
+        val preflightCooldown = buyApiCooldownOrNull()
+        if (preflightCooldown != null) {
+            auditAutoBuyBlocked("FIXED_AUTO_BUY", preflightCooldown)
+            return 0
+        }
+        preIndependentExecutionGuard(settings)
+        val token = ensureToken() ?: run {
+            auditLogger.logAsync("FIXED_AUTO_BUY", "BUY_BLOCKED_BROKER_NOT_READY", mapOf("reason" to "TOKEN_NOT_READY"))
+            return 0
+        }
 
         var submitted = 0
         for (row in rows) {
@@ -6888,6 +6899,13 @@ class TradingRepository @Inject constructor(
             val recommendationAgeAtStartMs = (symbolStartedAtMs - row.generatedAtMs).coerceAtLeast(0L)
             val liveSettings = preferences.settings.first()
             if (!liveSettings.fixedAutoBuyEnabled || liveSettings.safetyHalt || marketSession() != "OPEN") break
+            if (!AutoBuyEntrySafetyPolicy.isPublishedAfterFixedAutoBuyEnabled(
+                    row.generatedAtMs, liveSettings.fixedAutoBuyActivatedAtMs)) {
+                auditLogger.logAsync("FIXED_AUTO_BUY", "ENTRY_SKIPPED_PRE_ACTIVATION", mapOf(
+                    "symbol" to row.symbol, "recommendation_at_ms" to row.generatedAtMs,
+                    "activated_at_ms" to liveSettings.fixedAutoBuyActivatedAtMs))
+                continue
+            }
             val preEntryVerdict = fixedEntryVerdict(row, null, symbolStartedAtMs)
             if (!preEntryVerdict.actionable) {
                 auditLogger.logAsync("FIXED_AUTO_BUY", "ENTRY_QUALITY_BLOCKED_BEFORE_QUOTE",
@@ -7027,6 +7045,15 @@ class TradingRepository @Inject constructor(
             if (!executionSettings.fixedAutoBuyEnabled || executionSettings.safetyHalt ||
                 !com.multify.traderpro.engine.NseEquitySessionCalendar.isFixedNewEntryWindow(ZonedDateTime.now(INDIA)) ||
                 marketSession() != "OPEN") break
+            // Recheck immediately before the order: toggling OFF/ON while quotes load
+            // must never make a previously published call newly executable.
+            if (!AutoBuyEntrySafetyPolicy.isPublishedAfterFixedAutoBuyEnabled(
+                    row.generatedAtMs, executionSettings.fixedAutoBuyActivatedAtMs)) {
+                auditLogger.logAsync("FIXED_AUTO_BUY", "ENTRY_SKIPPED_ACTIVATION_CHANGED", mapOf(
+                    "symbol" to row.symbol, "recommendation_at_ms" to row.generatedAtMs,
+                    "activated_at_ms" to executionSettings.fixedAutoBuyActivatedAtMs))
+                continue
+            }
             if (!AutoBuyEntrySafetyPolicy.isFreshFixedEntry(row.generatedAtMs, System.currentTimeMillis())) {
                 auditLogger.logAsync("FIXED_AUTO_BUY", "ENTRY_SKIPPED_EXPIRED_DURING_PREP", mapOf("symbol" to row.symbol))
                 continue
