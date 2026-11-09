@@ -6989,6 +6989,17 @@ class TradingRepository @Inject constructor(
                 available,
                 ltp
             )
+            // Per-stock, per-order budget; this is the freshly returned Groww CNC balance.
+            // No daily cumulative allocation, wallet cache, or reservation is applied.
+            auditLogger.logAsync("FIXED_AUTO_BUY", "WALLET_PER_ORDER_SIZED", mapOf(
+                "symbol" to row.symbol,
+                "per_order_cap_rupees" to liveSettings.holdingBudgetRupees,
+                "fresh_available_cnc_rupees" to available,
+                "deployable_rupees" to sizing.deployableCash,
+                "requested_quantity" to sizing.quantity,
+                "daily_budget_limit_applied" to false,
+                "margin_elapsed_ms" to marginElapsedMs
+            ))
             if (sizing.quantity <= 0) {
                 auditLogger.log("FIXED_AUTO_BUY", "SKIPPED_NO_CASH", mapOf(
                     "symbol" to row.symbol,
@@ -9321,17 +9332,24 @@ class TradingRepository @Inject constructor(
                 ))
                 return@withLock false
             }
-            // Do not guess from symbol + quantity alone: an unrelated manual SELL must not
-            // close an app-owned position. Groww's child order must carry this exact GTT reference.
-            val expectedReference = parent.referenceId
-                ?.takeIf { AppPositionOwnershipPolicy.isAppProtectionReference(it) }
-            if (expectedReference.isNullOrBlank()) {
-                auditLogger.log("GTT", "PARENT_REFERENCE_UNVERIFIED_MANUAL_REVIEW", mapOf(
-                    "symbol" to confirmed.symbol,
-                    "gtt_id" to confirmed.smartOrderId,
-                    "parent_status" to parentStatus,
-                    "reference_available" to !parent.referenceId.isNullOrBlank(),
-                    "no_close_booked" to true,
+            // Groww's GTT status can omit reference_id even when the child SELL executes.
+            // Match the deterministic app reference when present; otherwise require a
+            // uniquely executed time-linked broker SELL plus confirmed zero inventory.
+            // This is read-only: never send a second SELL or infer fill from trigger alone.
+            if (parent.tradingSymbol.isNotBlank() && !parent.tradingSymbol.equals(confirmed.symbol, true) ||
+                parent.quantity > 0 && parent.quantity != confirmed.quantity ||
+                parent.productType.isNotBlank() && !parent.productType.equals("CNC", true) ||
+                parent.order != null && !parent.order.transactionType.equals("SELL", true)) {
+                auditLogger.log("GTT", "PARENT_IDENTITY_UNVERIFIED_MANUAL_REVIEW", mapOf(
+                    "symbol" to confirmed.symbol, "gtt_id" to confirmed.smartOrderId,
+                    "broker_quantity" to brokerQuantity, "duplicate_sell_allowed" to false
+                ))
+                return@withLock false
+            }
+            if (brokerQuantity != 0) {
+                auditLogger.log("GTT", "BROKER_FILL_PENDING_OR_PARTIAL_QUARANTINE", mapOf(
+                    "symbol" to confirmed.symbol, "parent_status" to parentStatus,
+                    "broker_quantity" to brokerQuantity, "tracked_quantity" to confirmed.quantity,
                     "duplicate_sell_allowed" to false
                 ))
                 return@withLock false
@@ -9343,36 +9361,28 @@ class TradingRepository @Inject constructor(
                 brokerOrders.addAll(pageRows)
                 if (pageRows.size < 100) break
             }
-            val full = GttExitReconciliationPolicy.uniqueConfirmedFullSell(
-                brokerOrders, confirmed.symbol, confirmed.quantity, confirmed.openOrderId, expectedReference
+            val match = GttExitReconciliationPolicy.resolveConfirmedTriggeredExit(
+                orders = brokerOrders, symbol = confirmed.symbol, quantity = confirmed.quantity,
+                openingOrderId = confirmed.openOrderId, positionId = confirmed.id,
+                openedAtMs = confirmed.openedAtMs, parentReferenceId = parent.referenceId,
+                parentTriggeredAt = parent.triggeredAt, brokerQuantity = brokerQuantity,
+                observedAtMs = System.currentTimeMillis()
             )
-            val partial = GttExitReconciliationPolicy.identifiedPartialFills(
-                brokerOrders, confirmed.symbol, confirmed.quantity, confirmed.openOrderId, expectedReference
-            )
-            if (full == null || brokerQuantity != 0) {
-                auditLogger.log("GTT", "BROKER_FILL_PENDING_OR_PARTIAL_QUARANTINE", mapOf(
-                    "symbol" to confirmed.symbol,
-                    "parent_status" to parentStatus,
-                    "gtt_id" to confirmed.smartOrderId,
-                    "gtt_reference_id" to expectedReference,
-                    "broker_quantity" to brokerQuantity,
-                    "tracked_quantity" to confirmed.quantity,
-                    "partial_fill_qty_observed" to partial.sumOf { it.filledQuantity },
-                    "same_symbol_sell_order_count" to brokerOrders.count {
+            if (match == null) {
+                auditLogger.log("GTT", "BROKER_FILL_UNVERIFIED_MANUAL_REVIEW", mapOf(
+                    "symbol" to confirmed.symbol, "parent_status" to parentStatus,
+                    "gtt_id" to confirmed.smartOrderId, "parent_reference_present" to !parent.referenceId.isNullOrBlank(),
+                    "triggered_at_present" to !parent.triggeredAt.isNullOrBlank(),
+                    "broker_quantity" to brokerQuantity, "tracked_quantity" to confirmed.quantity,
+                    "same_symbol_sell_count" to brokerOrders.count {
                         it.tradingSymbol.equals(confirmed.symbol, true) &&
                             it.transactionType.equals("SELL", true) && it.product.equals("CNC", true)
                     },
-                    "same_symbol_sell_reference_ids" to brokerOrders.filter {
-                        it.tradingSymbol.equals(confirmed.symbol, true) &&
-                            it.transactionType.equals("SELL", true) && it.product.equals("CNC", true)
-                    }.map { it.orderReferenceId }.distinct().take(8),
-                    "expected_gtt_reference_id" to expectedReference,
-                    "unique_full_order_match" to (full != null),
-                    "manual_review_if_persistent" to true,
-                    "duplicate_sell_allowed" to false
+                    "manual_review_if_persistent" to true, "duplicate_sell_allowed" to false
                 ))
                 return@withLock false
             }
+            val full = match.order
             val price = full.averageFillPrice ?: return@withLock false
             val exitReason = when (confirmed.smartOrderMode) {
                 HoldingSmartOrderPolicy.MODE_TRAILING_GTT -> "TRAILING_GTT_CONFIRMED_BROKER_FILL"
@@ -9392,7 +9402,7 @@ class TradingRepository @Inject constructor(
             auditLogger.log("HOLDING", "GTT_BROKER_SELL_RECONCILED", mapOf(
                 "symbol" to confirmed.symbol,
                 "parent_gtt_id" to confirmed.smartOrderId,
-                "gtt_reference_id" to expectedReference,
+                "gtt_reference_id" to parent.referenceId,
                 "sell_order_id" to full.growwOrderId,
                 "broker_average_fill" to price,
                 "quantity" to confirmed.quantity,
@@ -9402,7 +9412,7 @@ class TradingRepository @Inject constructor(
                 "estimated_net_pnl" to GrowwDeliveryCostPolicy.estimatedNetProfit(
                     confirmed.entryPrice, price, confirmed.quantity
                 ),
-                "broker_order_match_note" to "exact order_reference_id match to app GTT parent reference",
+                "broker_order_match_note" to match.evidence,
                 "duplicate_sell_sent" to false
             ))
             true

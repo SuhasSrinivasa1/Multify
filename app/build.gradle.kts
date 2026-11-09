@@ -30,8 +30,8 @@ android {
         applicationId = "com.multify.traderpro.vivoy73final"
         minSdk = 26
         targetSdk = 35
-        versionCode = 8350
-        versionName = "8.3.5-circuit-aware-buy"
+        versionCode = 8360
+        versionName = "8.3.6-gtt-reconciliation-wallet"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
     }
