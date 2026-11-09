@@ -13,7 +13,7 @@ class AlphaLtpPacingPolicyTest {
         assertEquals(0L, AlphaLtpPacingPolicy.waitMs(11200L, 10000L, 9000L, 5))
     }
     @Test fun sustainedBatchCallsCannotExceedWindowBudget() {
-        assertEquals(45000L, AlphaLtpPacingPolicy.waitMs(15000L, 10000L, 0L, 40))
-        assertEquals(1000L, AlphaLtpPacingPolicy.waitMs(59000L, 10000L, 0L, 40))
+        assertEquals(45000L, AlphaLtpPacingPolicy.waitMs(15000L, 10000L, 0L, AlphaLtpPacingPolicy.MAX_PER_MINUTE))
+        assertEquals(1000L, AlphaLtpPacingPolicy.waitMs(59000L, 10000L, 0L, AlphaLtpPacingPolicy.MAX_PER_MINUTE))
     }
 }
