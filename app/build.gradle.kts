@@ -13,7 +13,12 @@ android {
     val stableDebugKeystore = file("multify-v4-stable.jks")
     val stableSigningPassword = providers.gradleProperty("MULTIFY_KEYSTORE_PASSWORD").orNull
         ?: System.getenv("MULTIFY_KEYSTORE_PASSWORD")
-    val stableSigningReady = stableDebugKeystore.exists() && !stableSigningPassword.isNullOrBlank()
+    val stableSigningAlias = providers.gradleProperty("MULTIFY_KEY_ALIAS").orNull
+        ?: System.getenv("MULTIFY_KEY_ALIAS") ?: "multifyv4"
+    val stableSigningKeyPassword = providers.gradleProperty("MULTIFY_KEY_PASSWORD").orNull
+        ?: System.getenv("MULTIFY_KEY_PASSWORD") ?: stableSigningPassword
+    val stableSigningReady = stableDebugKeystore.exists() &&
+        !stableSigningPassword.isNullOrBlank() && !stableSigningKeyPassword.isNullOrBlank()
 
     signingConfigs {
         create("stableDebug") {
