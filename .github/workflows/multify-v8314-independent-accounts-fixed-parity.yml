@@ -1,0 +1,182 @@
+name: Multify v8.3.14 Independent Accounts and Fixed Parity
+on:
+  push:
+    branches: [v8314-independent-accounts-fixed-compat-production-candidate]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Android SDK 35
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
+      - name: Verify frozen Fixed selection, stop, trailing, and GTT source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+          base = '55766c85d2e01e24e4f3b5f62e0841796ac10932'
+          root = 'app/src/main/java/com/multify/traderpro/'
+          immutable = [
+            'engine/FixedLocalStrategyEngine.kt',
+            'engine/FixedForecastQualityPolicy.kt',
+            'engine/FixedFinalContract.kt',
+            'engine/FixedMarketDiscoveryPolicy.kt',
+            'engine/SteppedTrailingPolicy.kt',
+            'engine/HardStopLossPolicy.kt',
+            'engine/HoldingSmartOrderPolicy.kt',
+            'engine/FixedDualAccountPolicy.kt',
+            'data/network/GrowwApi.kt',
+            'engine/GttExitReconciliationPolicy.kt',
+            'engine/CircuitAwareBuyPolicy.kt',
+            'engine/CashAwareCncSizing.kt',
+            'engine/FixedDataPipelinePolicy.kt',
+          ]
+          for item in immutable:
+              path = root + item
+              assert Path(path).read_bytes() == subprocess.check_output(['git','show',f'{base}:{path}']), path
+          path = root + 'data/repository/TradingRepository.kt'
+          now = Path(path).read_text()
+          before = subprocess.check_output(['git','show',f'{base}:{path}'], text=True)
+          for start,stop in [
+            ('suspend fun generateFixedForecasts(', 'private fun fixedSnapshotMultifyMfeAverage('),
+            ('private suspend fun fixedForecastEvaluationUsingAccount(', 'suspend fun prepareNextFixedDiscoverySweep('),
+            ('private suspend fun fetchFixedDiscoveryLtpBatch(', '// FIXED_FINAL_LOCK_END:'),
+          ]:
+              def piece(src):
+                  return src[src.index(start):src.index(stop, src.index(start))]
+              assert piece(now) == piece(before), f'Frozen Fixed model modified: {start}'
+          assert 'FixedAutoBuyActivatedAtMs' not in now
+          assert 'fixedAutoBuyActivatedAtMs' in now
+          assert 'ENTRY_SKIPPED_ACTIVATION_CHANGED' in now
+          assert 'if (rows.isEmpty()) return 0' in now
+          assert 'preFixedAutoBuyExecutionGuard(settings)' in now
+          assert 'allowOtherSymbolProtectionRecovery = true' in now
+          assert 'allowFreshPostFillProof = true' in now
+          assert 'deferProtectionRetryToMonitor = true' in now
+          assert 'POST_FILL_PROTECTION_HANDED_TO_BACKGROUND_MONITOR' in now
+          assert 'FIXED_BUY_CONTINUED_DURING_OTHER_SYMBOL_PROTECTION_RECOVERY' in now
+          assert 'POST_FILL_INVENTORY_LAG_PROOF_USED' in now
+          guard_start = now.index('private fun preFixedAutoBuyExecutionGuard')
+          guard_end = now.index('private suspend fun placeCncBuy', guard_start)
+          assert 'tradingRecoveryReady' not in now[guard_start:guard_end]
+          assert 'require(allowOtherSymbolProtectionRecovery || unprotected.isEmpty())' in now
+          assert 'demat <= 0 && cnc <= 0 && managedDao.openPositions().none' in now
+          assert 'versionCode = 8395' in Path('app/build.gradle.kts').read_text()
+          alpha = Path(root + 'data/network/GrowwRateLimitInterceptor.kt').read_text()
+          beta = Path(root + 'data/network/BetaResearchGate.kt').read_text()
+          ui = Path(root + 'ui/screens/TraderApp.kt').read_text()
+          assert not Path(root + 'data/network/GrowwSharedMarketDataBudget.kt').exists()
+          for content in [alpha,beta,now,ui]:
+              assert 'GrowwSharedMarketDataBudget' not in content
+          assert 'GrowwRecoveryPolicy.cooldownMs' in beta
+          assert 'probeInFlight' in beta
+          assert 'alphaCanTakeBetaDiscoveryFallback' in now
+          assert 'BETA_FALLBACK_SKIPPED_ALPHA_HEADROOM' in now
+          assert 'broker_omitted_symbols' in now
+          assert 'GrowwApiUsageLedger.Category.ORDERS' in now
+          assert 'hard -5% loss floor' in ui
+          assert 'hard -2% loss floor' not in ui
+          assert 'versionName = "8.3.14-independent-accounts-fixed-parity"' in Path('app/build.gradle.kts').read_text()
+          # Source baseline parity: selection, filter/target, 107 references, hard-stop, trailing.
+          fixed834 = 'e506db984f225a56852cf28a963ba4d463b62308'
+          immutable834 = [
+              'engine/FixedFinalContract.kt', 'engine/FixedLocalStrategyEngine.kt',
+              'engine/FixedForecastQualityPolicy.kt', 'engine/FixedMarketDiscoveryPolicy.kt',
+              'engine/FixedDualAccountPolicy.kt', 'engine/FixedMultifyFactorFamilies.kt',
+              'engine/FixedForecastPublicationPolicy.kt',
+              'engine/FixedEntryActionabilityPolicy.kt',
+              'data/repository/FixedEngineSnapshotStore.kt',
+              'data/repository/FixedRecommendationStore.kt',
+              'engine/ExecutionQuoteLiquidityPolicy.kt',
+              'engine/FixedExecutionThinLiquidityPolicy.kt',
+              'engine/ExecutionEntryPriceGuardPolicy.kt',
+              'engine/SteppedTrailingPolicy.kt',
+              'engine/HardStopLossPolicy.kt',
+          ]
+          for item in immutable834:
+              path834 = root + item
+              assert Path(path834).read_bytes() == subprocess.check_output(
+                  ['git', 'show', f'{fixed834}:{path834}']), 'v8.3.4 strategy drift: ' + item
+          final_contract = Path(root + 'engine/FixedFinalContract.kt').read_text()
+          assert 'CANONICAL_LEARNING_CALLS = 107' in final_contract
+          assert 'CANONICAL_MULTIFY_MFE_AVG_PCT = 1.1161043030113955' in final_contract
+          assert 'FIXED-V741-20261021-190239-FINAL' in final_contract
+          assert '8.3.12' not in Path('app/build.gradle.kts').read_text()
+          print('PASS: v8.3.4 Fixed/107 reference parity, SELL formulas, per-account 429, no extra shared permit, BUY readiness')
+          PY
+      - name: Backend tests
+        run: |
+          python -m pip install -r backend/requirements.txt
+          PYTHONPATH="$GITHUB_WORKSPACE" PHONE_HMAC_SECRET=test-secret-test-secret-test-secret GROWW_API_KEY=test-api-key GROWW_TOTP_SECRET=JBSWY3DPEHPK3PXP python -m pytest -q backend/tests
+      - name: Android unit tests
+        run: gradle --no-daemon testDebugUnitTest
+      - name: Configure stable signing when available
+        shell: bash
+        env:
+          MULTIFY_KEYSTORE_BASE64: ${{ secrets.MULTIFY_KEYSTORE_BASE64 }}
+          MULTIFY_KEYSTORE_PASSWORD: ${{ secrets.MULTIFY_KEYSTORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${MULTIFY_KEYSTORE_BASE64:-}" && -n "${MULTIFY_KEYSTORE_PASSWORD:-}" ]]; then
+            printf '%s' "$MULTIFY_KEYSTORE_BASE64" | base64 --decode > app/multify-v4-stable.jks
+            actual="$(keytool -list -v -keystore app/multify-v4-stable.jks -storepass "$MULTIFY_KEYSTORE_PASSWORD" -alias multifyv4 | awk -F': ' '/SHA256:/{print $2; exit}' | tr -d ':' | tr '[:upper:]' '[:lower:]')"
+            expected="3f72d5c24e676c712d9e7e9feaa829960bfca9cdffc9ea4da6738372824e8755"
+            test "$actual" = "$expected"
+            echo "MULTIFY_KEYSTORE_PASSWORD=$MULTIFY_KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+            echo "STABLE_SIGNING_READY=true" >> "$GITHUB_ENV"
+          else
+            echo "::warning::Stable signing unavailable; new CI debug certificate cannot upgrade a differently signed installation."
+            echo "STABLE_SIGNING_READY=false" >> "$GITHUB_ENV"
+          fi
+      - name: Build debug APK
+        run: gradle --no-daemon assembleDebug
+      - name: Verify APK and package artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v8.3.14-independent-accounts-fixed-parity-debug.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/*.apk > dist/APK-SIGNATURE.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/*.apk | head -n 2 > dist/PACKAGE.txt
+          grep -q "versionCode='8394'" dist/PACKAGE.txt
+          sha256sum dist/*.apk > dist/SHA256SUMS.txt
+          git rev-parse HEAD > dist/SOURCE-COMMIT.txt
+          if [[ "${STABLE_SIGNING_READY:-false}" == "true" ]]; then
+            echo "Stable v4 signing identity verified." > dist/INSTALLATION-SIGNING-STATUS.txt
+          else
+            echo "CI debug signing identity; cannot update a differently signed existing installation." > dist/INSTALLATION-SIGNING-STATUS.txt
+          fi
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile, ZIP_DEFLATED
+          with ZipFile('dist/Multify-TraderPro-v8.3.14-exact-source.zip','w',ZIP_DEFLATED) as z:
+              for p in Path('.').rglob('*'):
+                  if p.is_file() and not any(x in {'.git','.gradle','build','dist'} for x in p.parts) and p.suffix.lower() != '.jks':
+                      z.write(p,p.as_posix())
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: multify-v8314-independent-accounts-fixed-parity
+          path: dist/
+          if-no-files-found: warn
