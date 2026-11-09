@@ -67,75 +67,90 @@ class BetaResearchGate @Inject constructor() {
         val admissionStartedAt = SystemClock.elapsedRealtime()
         if (priority == Priority.FIXED) pendingFixed.incrementAndGet()
         try {
+            var halfOpenProbeUsed = false
             while (true) {
-                val waitMs = lock.withLock {
-                    val w = windows.getValue(type)
-                    val now = SystemClock.elapsedRealtime()
-                    while (w.second.isNotEmpty() && w.second.first() <= now - 1_000L) w.second.removeFirst()
-                    while (w.minute.isNotEmpty() && w.minute.first() <= now - 60_000L) w.minute.removeFirst()
-                    val perSecond = if (type == Type.LIVE) liveSec else histSec
-                    val perMinute = if (type == Type.LIVE) liveMinute else histMinute
-                    val spacingWait = if (w.lastGrantedAt > 0L)
-                        (w.lastGrantedAt + (if (type == Type.LIVE) liveGapMs else 1_500L) - now)
-                            .coerceAtLeast(0L) else 0L
-                    val fixedYield = if (priority == Priority.BACKGROUND && pendingFixed.get() > 0)
-                        com.multify.traderpro.engine.FixedUnifiedRequestBudgetPolicy.BACKGROUND_YIELD_MS else 0L
-                    val wait = maxOf(
-                        spacingWait,
-                        (w.cooldownUntil - now).coerceAtLeast(0L),
-                        if (w.second.size >= perSecond) (w.second.first() + 1_000L - now).coerceAtLeast(1L) else 0L,
-                        if (w.minute.size >= perMinute) (w.minute.first() + 60_000L - now).coerceAtLeast(1L) else 0L,
-                        fixedYield
-                    )
-                    if (wait == 0L) {
-                        w.second.addLast(now)
-                        w.minute.addLast(now)
-                        w.lastGrantedAt = now
+                while (true) {
+                    val waitMs = lock.withLock {
+                        val w = windows.getValue(type)
+                        val now = SystemClock.elapsedRealtime()
+                        while (w.second.isNotEmpty() && w.second.first() <= now - 1_000L) w.second.removeFirst()
+                        while (w.minute.isNotEmpty() && w.minute.first() <= now - 60_000L) w.minute.removeFirst()
+                        val perSecond = if (type == Type.LIVE) liveSec else histSec
+                        val perMinute = if (type == Type.LIVE) liveMinute else histMinute
+                        val spacingWait = if (w.lastGrantedAt > 0L)
+                            (w.lastGrantedAt + (if (type == Type.LIVE) liveGapMs else 1_500L) - now)
+                                .coerceAtLeast(0L) else 0L
+                        val fixedYield = if (priority == Priority.BACKGROUND && pendingFixed.get() > 0)
+                            com.multify.traderpro.engine.FixedUnifiedRequestBudgetPolicy.BACKGROUND_YIELD_MS else 0L
+                        val wait = maxOf(
+                            spacingWait,
+                            (w.cooldownUntil - now).coerceAtLeast(0L),
+                            if (w.second.size >= perSecond) (w.second.first() + 1_000L - now).coerceAtLeast(1L) else 0L,
+                            if (w.minute.size >= perMinute) (w.minute.first() + 60_000L - now).coerceAtLeast(1L) else 0L,
+                            fixedYield
+                        )
+                        if (wait == 0L) {
+                            w.second.addLast(now)
+                            w.minute.addLast(now)
+                            w.lastGrantedAt = now
+                        }
+                        wait
                     }
-                    wait
+                    if (waitMs <= 0L) break
+                    val elapsed = (SystemClock.elapsedRealtime() - admissionStartedAt).coerceAtLeast(0L)
+                    val remaining = (maxWaitMs - elapsed).coerceAtLeast(0L)
+                    if (waitMs > remaining) {
+                        throw java.io.IOException("BETA_FIXED_RATE_BUDGET_OR_COOLDOWN")
+                    }
+                    delay(waitMs.coerceAtLeast(5L))
                 }
-                if (waitMs <= 0L) break
+
                 val elapsed = (SystemClock.elapsedRealtime() - admissionStartedAt).coerceAtLeast(0L)
-                val remaining = (maxWaitMs - elapsed).coerceAtLeast(0L)
-                if (waitMs > remaining) {
-                    throw java.io.IOException("BETA_FIXED_RATE_BUDGET_OR_COOLDOWN")
+                FixedUnifiedRequestBudget.acquireBeta(
+                    type = type,
+                    isFixed = priority == Priority.FIXED,
+                    maxWaitMs = (maxWaitMs - elapsed).coerceAtLeast(0L)
+                )
+
+                val requestStarted = SystemClock.elapsedRealtime()
+                if (type == Type.LIVE) liveRequests.incrementAndGet() else historicalRequests.incrementAndGet()
+                try {
+                    val result = block()
+                    lastLatencyMs.set((SystemClock.elapsedRealtime() - requestStarted).coerceAtLeast(0L))
+                    return result
+                } catch (failure: Throwable) {
+                    if (type == Type.LIVE) liveFailures.incrementAndGet() else historicalFailures.incrementAndGet()
+                    if (failure is HttpException && failure.code() == 429) {
+                        if (type == Type.LIVE) liveRateLimits.incrementAndGet() else historicalRateLimits.incrementAndGet()
+                        val retryAfterMs = failure.response()?.headers()?.get("Retry-After")?.toLongOrNull()?.times(1_000L) ?: 0L
+                        val cooldownMs = maxOf(60_000L, retryAfterMs)
+                        lock.withLock {
+                            val w = windows.getValue(type)
+                            w.cooldownUntil = maxOf(w.cooldownUntil, SystemClock.elapsedRealtime() + cooldownMs)
+                        }
+                        FixedUnifiedRequestBudget.on429(
+                            account = FixedUnifiedRequestBudget.Account.BETA,
+                            category = if (type == Type.LIVE) FixedUnifiedRequestBudget.Category.LIVE
+                                else FixedUnifiedRequestBudget.Category.HISTORICAL,
+                            cooldownMs = cooldownMs
+                        )
+                        val elapsedAfter429 = (SystemClock.elapsedRealtime() - admissionStartedAt).coerceAtLeast(0L)
+                        val remaining = (maxWaitMs - elapsedAfter429).coerceAtLeast(0L)
+                        // Exactly one paced half-open probe after a Fixed 429, only when the
+                        // caller's bounded recovery window can contain the broker cooldown.
+                        if (priority == Priority.FIXED && !halfOpenProbeUsed && cooldownMs <= remaining) {
+                            halfOpenProbeUsed = true
+                            delay(cooldownMs)
+                            continue
+                        }
+                    }
+                    throw failure
+                } finally {
+                    lastLatencyMs.set((SystemClock.elapsedRealtime() - requestStarted).coerceAtLeast(0L))
                 }
-                delay(waitMs.coerceAtLeast(5L))
             }
-            val elapsed = (SystemClock.elapsedRealtime() - admissionStartedAt).coerceAtLeast(0L)
-            FixedUnifiedRequestBudget.acquireBeta(
-                type = type,
-                isFixed = priority == Priority.FIXED,
-                maxWaitMs = (maxWaitMs - elapsed).coerceAtLeast(0L)
-            )
         } finally {
             if (priority == Priority.FIXED) pendingFixed.decrementAndGet()
-        }
-
-        val requestStarted = SystemClock.elapsedRealtime()
-        if (type == Type.LIVE) liveRequests.incrementAndGet() else historicalRequests.incrementAndGet()
-        return try {
-            block()
-        } catch (failure: Throwable) {
-            if (type == Type.LIVE) liveFailures.incrementAndGet() else historicalFailures.incrementAndGet()
-            if (failure is HttpException && failure.code() == 429) {
-                if (type == Type.LIVE) liveRateLimits.incrementAndGet() else historicalRateLimits.incrementAndGet()
-                val retryAfterMs = failure.response()?.headers()?.get("Retry-After")?.toLongOrNull()?.times(1_000L) ?: 0L
-                val cooldownMs = maxOf(60_000L, retryAfterMs)
-                lock.withLock {
-                    val w = windows.getValue(type)
-                    w.cooldownUntil = maxOf(w.cooldownUntil, SystemClock.elapsedRealtime() + cooldownMs)
-                }
-                FixedUnifiedRequestBudget.on429(
-                    account = FixedUnifiedRequestBudget.Account.BETA,
-                    category = if (type == Type.LIVE) FixedUnifiedRequestBudget.Category.LIVE
-                        else FixedUnifiedRequestBudget.Category.HISTORICAL,
-                    cooldownMs = cooldownMs
-                )
-            }
-            throw failure
-        } finally {
-            lastLatencyMs.set((SystemClock.elapsedRealtime() - requestStarted).coerceAtLeast(0L))
         }
     }
 
