@@ -54,7 +54,7 @@ object GrowwHttpTraceLedger {
     fun classify(path: String): String = when {
         path.startsWith("/v1/live-data/") -> "LIVE_DATA"
         path.startsWith("/v1/historical/") -> "HISTORICAL"
-        path.startsWith("/v1/order/") || path.contains("/orders") || path.contains("/gtt") -> "ORDERS"
+        path.startsWith("/v1/order") || path.contains("/orders") || path.contains("/gtt") -> "ORDERS"
         path.contains("/token/") -> "AUTH"
         else -> "NON_TRADING"
     }
