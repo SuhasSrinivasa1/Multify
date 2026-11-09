@@ -4,7 +4,7 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class AlphaLiveDataPacingPolicyTest {
-    private fun wait(
+    private fun expectedWaitMs(
         now: Long, last: Long = 0L, totalOldest: Long? = null, total: Int = 0,
         researchOldest: Long? = null, research: Int = 0,
         protection: Boolean = false, holdings: Boolean = false
@@ -13,17 +13,17 @@ class AlphaLiveDataPacingPolicyTest {
     )
 
     @Test fun firstLiveDataRequestDoesNotWait() {
-        assertEquals(0L, wait(10_000L))
+        assertEquals(0L, expectedWaitMs(10_000L))
     }
 
     @Test fun quoteAndLtpShareTheSameMinimumGap() {
-        assertEquals(1_200L, wait(10_000L, last = 10_000L, totalOldest = 9_000L, total = 5))
-        assertEquals(0L, wait(11_200L, last = 10_000L, totalOldest = 9_000L, total = 5))
+        assertEquals(1_200L, expectedWaitMs(10_000L, last = 10_000L, totalOldest = 9_000L, total = 5))
+        assertEquals(0L, expectedWaitMs(11_200L, last = 10_000L, totalOldest = 9_000L, total = 5))
     }
 
     @Test fun allAlphaLiveEndpointsShareFortyPerMinuteCeiling() {
-        assertEquals(45_000L, wait(15_000L, last = 10_000L, totalOldest = 0L, total = 40))
-        assertEquals(1_000L, wait(59_000L, last = 10_000L, totalOldest = 0L, total = 40))
+        assertEquals(45_000L, expectedWaitMs(15_000L, last = 10_000L, totalOldest = 0L, total = 40))
+        assertEquals(1_000L, expectedWaitMs(59_000L, last = 10_000L, totalOldest = 0L, total = 40))
     }
 
     @Test fun twelveRequestsRemainReservedForProtectionWhenHoldingsExist() {
