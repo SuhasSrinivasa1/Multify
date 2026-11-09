@@ -915,10 +915,18 @@ private fun FixedScreen(
             ) {
                 Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
                     Text("Market discovery · ${health.discovery}", fontWeight = FontWeight.SemiBold)
-                    val liveBudget = com.multify.traderpro.data.network.GrowwSharedMarketDataBudget
-                        .snapshot(com.multify.traderpro.data.network.GrowwSharedMarketDataBudget.Lane.LIVE)
-                    Text("Shared Alpha/Beta live API: ${liveBudget.state} · ${liveBudget.usedLastMinute}/${liveBudget.minuteLimit} requests/min" +
-                        if (liveBudget.cooldownRemainingMs > 0) " · retry in ${(liveBudget.cooldownRemainingMs + 999) / 1000}s" else "",
+                    val alphaLive = com.multify.traderpro.data.network.GrowwApiUsageLedger
+                        .snapshot().categories.first {
+                            it.category == com.multify.traderpro.data.network.GrowwApiUsageLedger.Category.LIVE_DATA
+                        }
+                    val betaLive = com.multify.traderpro.data.network.BetaResearchGate.latestLiveStatus()
+                    Text("ALPHA independent LIVE: ${alphaLive.usedLastMinute}/${alphaLive.appPerMinuteLimit} app requests/min · broker published ceiling 300/min",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("BETA independent LIVE: ${betaLive.usedLastMinute}/${betaLive.endpointLimitPerMinute} conservative endpoint requests/min" +
+                        if (betaLive.cooldownRemainingMs > 0)
+                            " · Beta retry in ${(betaLive.cooldownRemainingMs + 999) / 1000}s"
+                        else if (betaLive.halfOpenProbeInFlight) " · recovery probe" else "",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Text(
@@ -1306,7 +1314,7 @@ private fun SettingsScreen(
                         if (state.settings.fixedAutoBuyEnabled) "ON · waiting for a new recommendation" else "OFF · manual BUY only"
                     )
                     Text(
-                        "Fixed remains immutable. Forecast may read prior positive Fixed outcomes, but can never write into Fixed or change its v7.4.1 rules. Every app-owned Multify, Fixed and Forecast LONG uses the same sell protection: hard -2% loss floor, then the existing +0.55% arm → +0.50% protected gain → +0.10% ratchet when profitable. No averaging down.",
+                        "Fixed remains immutable. Forecast may read prior positive Fixed outcomes, but can never write into Fixed or change its v7.4.1 rules. Every app-owned Multify, Fixed and Forecast LONG uses the same sell protection: hard -5% loss floor, then the existing +0.55% arm → +0.50% protected gain → +0.10% ratchet when profitable. No averaging down.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
