@@ -182,7 +182,7 @@ internal object FixedUnifiedRequestBudget {
                     val alphaHistoricalGapMs = (1_000L + FixedUnifiedRequestBudgetPolicy.ALPHA_HISTORICAL_PER_SECOND - 1) /
                         FixedUnifiedRequestBudgetPolicy.ALPHA_HISTORICAL_PER_SECOND
                     val spacingWait = when {
-                        account == Account.ALPHA && isLtp && !isProtection && alphaLastLtpPermitAtMs > 0L ->
+                        account == Account.ALPHA && isLtp && alphaLastLtpPermitAtMs > 0L ->
                             (alphaLastLtpPermitAtMs + 1_200L - now).coerceAtLeast(0L)
                         account == Account.ALPHA && category == Category.LIVE && alphaLastLivePermitAtMs > 0L ->
                             (alphaLastLivePermitAtMs + alphaLiveGapMs - now).coerceAtLeast(0L)
