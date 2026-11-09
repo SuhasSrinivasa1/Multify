@@ -12,7 +12,7 @@ object FixedUnifiedRequestBudgetPolicy {
     const val ALPHA_LIVE_PER_MINUTE = 55
     const val BETA_LIVE_PER_MINUTE = 35
     const val SHARED_LIVE_PER_MINUTE = 90
-    const val ALPHA_LTP_PER_MINUTE = 40
+    const val ALPHA_LTP_PER_MINUTE = 18
     const val ALPHA_HISTORICAL_PER_MINUTE = 45
     const val BETA_HISTORICAL_PER_MINUTE = 8
     const val SHARED_HISTORICAL_PER_MINUTE = 53
