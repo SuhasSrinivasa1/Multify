@@ -10133,63 +10133,6 @@ class TradingRepository @Inject constructor(
         )
     }
 
-    private suspend fun managedSnapshot(token: String): Snapshot {
-        val open = managedDao.openPositions().filter { it.side == "LONG" && appOwned(it) }
-        val positions = open.map { p ->
-            val ltp = runCatching {
-                apiFactory.groww.quote(bearer(token), tradingSymbol = p.symbol)
-                    .requirePayload("Quote ${p.symbol}").lastPrice
-            }.getOrNull() ?: p.lastPrice
-            val pnl = (ltp - p.entryPrice) * p.quantity
-            PositionDto(
-                symbol = p.symbol,
-                engine = p.engine,
-                quantity = p.quantity,
-                averagePrice = p.entryPrice,
-                ltp = ltp,
-                pnl = pnl,
-                stopPrice = p.stopPrice,
-                targetPrice = p.targetPrice,
-                highWaterPrice = p.maxFavourablePrice,
-                trailingLastRatchetPrice = p.trailingLastRatchetPrice.takeIf { it > 0.0 },
-                trailDistance = if (p.stopPrice != null && p.stopPrice > p.entryPrice)
-                    (p.maxFavourablePrice - p.stopPrice).coerceAtLeast(0.0) else null,
-                trailArmPct = p.trailingArmPct.takeIf { it.isFinite() && it > 0.0 },
-                trailArmed = p.smartOrderMode == HoldingSmartOrderPolicy.MODE_TRAILING_GTT ||
-                    (p.stopPrice?.let { it > p.entryPrice } == true),
-                smartOrderId = p.smartOrderId,
-                smartOrderMode = p.smartOrderMode,
-                smartOrderTriggerPrice = p.smartOrderTriggerPrice,
-                smartOrderDirection = p.smartOrderDirection,
-                smartOrderStatus = p.smartOrderStatus,
-                strategy = p.strategy,
-                product = "CNC"
-            )
-        }
-        val recent = managedDao.tradesSince(startOfIndiaDayMs())
-            .filter { it.side == "LONG" }
-            .take(6)
-            .map { t ->
-                RecentDecisionDto(
-                    formatEventTime(t.closedAtMs),
-                    t.symbol,
-                    "LONG_CLOSED",
-                    t.exitReason,
-                    t.strategy,
-                    t.quantity
-                )
-            }
-        return Snapshot(
-            summary = DaySummaryDto(
-                unrealisedPnl = positions.sumOf { it.pnl },
-                grossExposure = positions.sumOf { it.quantity * (it.ltp ?: it.averagePrice) },
-                openPositions = positions.size
-            ),
-            positions = positions,
-            recentDecisions = recent
-        )
-    }
-
     suspend fun sampleSignal(eventId: Long) {
         val event = dao.byId(eventId) ?: return
         val symbol = event.symbol ?: return
