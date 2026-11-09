@@ -24,6 +24,7 @@ data class AppSettings(
     val forecastScannerEnabled: Boolean = false,
     val forecastAutoBuyEnabled: Boolean = false,
     val fixedAutoBuyEnabled: Boolean = false,
+    val fixedAutoBuyActivatedAtMs: Long = 0L,
     val onboardingComplete: Boolean = false,
     val brokerAuthenticated: Boolean = false,
     val authenticatedAtMs: Long = 0L,
@@ -61,6 +62,7 @@ class AppPreferences @Inject constructor(
         val forecastEarlyEntryMigration = booleanPreferencesKey("forecast_early_entry_v788_enabled")
         val forecastAutoBuyEnabled = booleanPreferencesKey("forecast_auto_buy_enabled")
         val fixedAutoBuyEnabled = booleanPreferencesKey("fixed_auto_buy_enabled")
+        val fixedAutoBuyActivatedAtMs = longPreferencesKey("fixed_auto_buy_activated_at_ms")
         val v7931EntryToggleReset = booleanPreferencesKey("v7931_entry_toggles_off_once")
         val onboardingComplete = booleanPreferencesKey("onboarding_complete")
         val brokerAuthenticated = booleanPreferencesKey("broker_authenticated")
@@ -157,13 +159,29 @@ class AppPreferences @Inject constructor(
             it[Keys.armEnabled] = false
             it[Keys.armedDate] = ""
             it[Keys.fixedAutoBuyEnabled] = false
+            it[Keys.fixedAutoBuyActivatedAtMs] = 0L
             it[Keys.forecastAutoBuyEnabled] = false
             it[Keys.v7931EntryToggleReset] = true
         }
     }
 
+    /** A new ON session is a time boundary for eligible Fixed recommendation events.
+     * Persist this atomically with the toggle so a restarted service cannot re-buy
+     * previously published ACTIVE recommendations. Legacy ON without a timestamp
+     * is intentionally non-executable until the user toggles OFF then ON again.
+     */
     suspend fun setFixedAutoBuy(value: Boolean) {
-        context.dataStore.edit { it[Keys.fixedAutoBuyEnabled] = value }
+        context.dataStore.edit {
+            if (value) {
+                if (it[Keys.fixedAutoBuyEnabled] != true) {
+                    it[Keys.fixedAutoBuyActivatedAtMs] = System.currentTimeMillis().coerceAtLeast(1L)
+                }
+                it[Keys.fixedAutoBuyEnabled] = true
+            } else {
+                it[Keys.fixedAutoBuyEnabled] = false
+                it[Keys.fixedAutoBuyActivatedAtMs] = 0L
+            }
+        }
     }
 
     suspend fun setSafetyHalt(value: Boolean) {
@@ -218,6 +236,7 @@ class AppPreferences @Inject constructor(
         forecastScannerEnabled = this[Keys.forecastScannerEnabled] ?: false,
         forecastAutoBuyEnabled = this[Keys.forecastAutoBuyEnabled] ?: false,
         fixedAutoBuyEnabled = this[Keys.fixedAutoBuyEnabled] ?: false,
+        fixedAutoBuyActivatedAtMs = this[Keys.fixedAutoBuyActivatedAtMs] ?: 0L,
         onboardingComplete = this[Keys.onboardingComplete] ?: false,
         brokerAuthenticated = this[Keys.brokerAuthenticated] ?: false,
         authenticatedAtMs = this[Keys.authenticatedAtMs] ?: 0L,
