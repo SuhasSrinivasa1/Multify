@@ -4352,6 +4352,7 @@ class TradingRepository @Inject constructor(
         val rawReturnedSymbols = linkedSetOf<String>()
         val belowDiscoveryFloorSymbols = linkedSetOf<String>()
         val responseMissingSymbols = linkedSetOf<String>()
+        val invalidLtpSymbols = linkedSetOf<String>()
         var errors = 0
         var failures = 0
         var aborted = false
@@ -4410,12 +4411,14 @@ class TradingRepository @Inject constructor(
                         .map { it.uppercase(Locale.US) }.filterNot { it in returned }
                     payload.forEach { (key, value) ->
                         val symbol = key.removePrefix("NSE_").uppercase(Locale.US)
-                        // Coverage measures valid broker prices across the complete master.
-                        // The unchanged discovery ranker still applies its existing ₹10 floor,
-                        // and Fixed's production entry band remains strictly ₹200–₹5,000.
-                        if (symbol in masterSymbols && value.isFinite() && value > 0.0) {
-                            current[symbol] = value
-                            if (value < 10.0) belowDiscoveryFloorSymbols += symbol
+                        if (symbol in masterSymbols) {
+                            if (value.isFinite() && value > 0.0) {
+                                current[symbol] = value
+                                invalidLtpSymbols.remove(symbol)
+                                if (value < 10.0) belowDiscoveryFloorSymbols += symbol
+                            } else {
+                                invalidLtpSymbols += symbol
+                            }
                         }
                     }
                 }
@@ -4423,6 +4426,61 @@ class TradingRepository @Inject constructor(
             }
             if (aborted) break
         }
+
+        // Retry only symbols omitted or returned with invalid prices. Successful 50-symbol
+        // batches are never repeated, so transient payload gaps do not trigger a second full sweep.
+        var targetedRetryBatches = 0
+        var targetedRetryRecoveredSymbols = 0
+        if (!aborted) {
+            val retrySymbols = (responseMissingSymbols + invalidLtpSymbols).toList()
+            for ((retryIndex, retryChunk) in retrySymbols.chunked(50).withIndex()) {
+                if (preparing && (marketCriticalTradeInFlight || !marketDataAvailableForFixed() ||
+                    !com.multify.traderpro.engine.NseEquitySessionCalendar.mayContinuePreparedFixedSweep(ZonedDateTime.now(INDIA)))) {
+                    aborted = true
+                    break
+                }
+                var retryPayload: Map<String, Double>? = null
+                if (betaToken != null && !betaStopped.get()) {
+                    retryPayload = runCatching {
+                        fixedBetaLtp(betaToken, retryChunk, preparing).also { betaSuccess.incrementAndGet() }
+                    }.onFailure {
+                        betaStopped.set(true)
+                        auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "BETA_TARGETED_RETRY_DEFERRED_TO_ALPHA", mapOf(
+                            "retry_batch_index" to retryIndex,
+                            "error" to it.javaClass.simpleName,
+                            "shared_budget_enforced" to true
+                        ))
+                    }.getOrNull()
+                }
+                if (retryPayload == null) {
+                    retryPayload = fetchFixedDiscoveryLtpBatch(token, retryChunk, chunks.size + retryIndex)
+                        ?.also { alphaSuccess.incrementAndGet() }
+                }
+                targetedRetryBatches++
+                if (retryPayload == null) {
+                    errors++
+                    continue
+                }
+                val returned = retryPayload.keys.map { it.removePrefix("NSE_").uppercase(Locale.US) }
+                    .filter { it in masterSymbols }.toSet()
+                rawReturnedSymbols += returned
+                responseMissingSymbols.removeAll(returned)
+                invalidLtpSymbols.removeAll(returned)
+                val beforeCount = current.size
+                retryPayload.forEach { (key, value) ->
+                    val symbol = key.removePrefix("NSE_").uppercase(Locale.US)
+                    if (symbol in masterSymbols && value.isFinite() && value > 0.0) {
+                        current[symbol] = value
+                        if (value < 10.0) belowDiscoveryFloorSymbols += symbol
+                    } else if (symbol in masterSymbols) {
+                        invalidLtpSymbols += symbol
+                    }
+                }
+                targetedRetryRecoveredSymbols += (current.size - beforeCount).coerceAtLeast(0)
+                if (retryIndex + 1 < retrySymbols.chunked(50).size) delay(FIXED_V741_DISCOVERY_BATCH_PACING_MS)
+            }
+        }
+
         auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "FULL_NSE_SWEEP_ACCOUNT_PROFILE", mapOf(
             "master_symbols" to master.size,
             "total_batches" to chunks.size,
@@ -4434,12 +4492,15 @@ class TradingRepository @Inject constructor(
             "raw_returned_master_symbols" to rawReturnedSymbols.size,
             "below_10_ltp_symbols_counted_for_coverage_only" to belowDiscoveryFloorSymbols.size,
             "broker_response_missing_symbols" to responseMissingSymbols.size,
+            "invalid_ltp_symbols" to invalidLtpSymbols.size,
+            "targeted_retry_batches" to targetedRetryBatches,
+            "targeted_retry_recovered_symbols" to targetedRetryRecoveredSymbols,
             "coverage_basis" to "POSITIVE_LTP_FROM_FULL_NSE_MASTER; DISCOVERY_RANKER_PRICE_FLOOR_UNCHANGED",
             "batch_errors" to errors,
             "aborted" to aborted,
             "alpha_order_account_unchanged" to true
         ))
-        return PrecomputedFixedSweep(current, errors, aborted, System.currentTimeMillis(), chunks.size)
+        return PrecomputedFixedSweep(current, errors, aborted, System.currentTimeMillis(), chunks.size + targetedRetryBatches)
     }
 
     private suspend fun discoverFixedMarketWideCandidates(
