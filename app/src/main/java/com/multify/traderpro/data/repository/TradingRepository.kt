@@ -4463,9 +4463,12 @@ class TradingRepository @Inject constructor(
         val baselineReady = previousCoverageRatio >= FIXED_V741_MIN_DISCOVERY_COVERAGE_RATIO &&
             coverageRatio >= FIXED_V741_MIN_DISCOVERY_COVERAGE_RATIO && !abortedForNetwork
 
+        // Apply the documented Fixed >₹100 and <₹5,000 current-price band BEFORE
+        // selecting the dynamic discovery top-N, so ineligible names cannot consume slots.
+        val priceBandCurrent = current.filterValues { RecommendationPriceBandPolicy.eligible(it) }
         val ranked = if (baselineReady) {
             FixedMarketDiscoveryPolicy.rank(
-                currentLtps = current,
+                currentLtps = priceBandCurrent,
                 previousLtps = previous,
                 sessionOpenLtps = sessionOpen,
                 limit = FIXED_V741_DISCOVERY_DYNAMIC_LIMIT
@@ -4493,6 +4496,10 @@ class TradingRepository @Inject constructor(
             "snapshot_id" to FixedEngineSnapshotStore.SNAPSHOT_ID,
             "master_count" to distinctMaster.size,
             "ltp_coverage" to current.size,
+            "price_band_eligible_count" to priceBandCurrent.size,
+            "price_band_excluded_count" to (current.size - priceBandCurrent.size),
+            "price_band_min_exclusive_rupees" to RecommendationPriceBandPolicy.MIN_EXCLUSIVE_RUPEES,
+            "price_band_max_exclusive_rupees" to RecommendationPriceBandPolicy.MAX_EXCLUSIVE_RUPEES,
             "coverage_pct" to coverageRatio * 100.0,
             "batch_errors" to batchErrors,
             "aborted_for_network" to abortedForNetwork,
