@@ -116,6 +116,7 @@ import com.multify.traderpro.engine.FixedEarlyWatchPolicy
 import com.multify.traderpro.engine.FixedFinalContract
 import com.multify.traderpro.engine.RecommendationPriceBandPolicy
 import com.multify.traderpro.engine.FixedPriceBandPolicy
+import com.multify.traderpro.engine.FixedFiveMinuteEntryPolicy
 import com.multify.traderpro.engine.CircuitAwareBuyPolicy
 import com.multify.traderpro.engine.ExecutionQuoteLiquidityPolicy
 import com.multify.traderpro.engine.FixedExecutionThinLiquidityPolicy
