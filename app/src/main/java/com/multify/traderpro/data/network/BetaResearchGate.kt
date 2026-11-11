@@ -205,6 +205,7 @@ class BetaResearchGate @Inject constructor() {
                 "used_60s" to w.minute.size,
                 "in_flight" to w.inFlight,
                 "cooldown_remaining_ms" to (w.cooldownUntil - now).coerceAtLeast(0L),
+                "cooldown_until_elapsed_ms" to w.cooldownUntil,
                 "probe_required" to w.probeRequired,
                 "probe_in_flight" to w.probeInFlight,
                 "last_granted_ago_ms" to if (w.lastGrantedAt > 0L) (now - w.lastGrantedAt).coerceAtLeast(0L) else -1L
