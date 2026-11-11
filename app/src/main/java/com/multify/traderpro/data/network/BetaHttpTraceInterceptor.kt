@@ -9,7 +9,7 @@ internal class BetaHttpTraceInterceptor(private val audit: AuditLogger) : Interc
     override fun intercept(chain: Interceptor.Chain): Response {
         val request = chain.request()
         val ticket = GrowwHttpTraceLedger.start(
-            "BETA", request.method, request.url.encodedPath)
+            "BETA", request.method, request.url.encodedPath, audit)
         return try {
             val response = chain.proceed(request)
             GrowwHttpTraceLedger.finish(ticket, audit, response.code, response.header("Retry-After"))
