@@ -86,7 +86,7 @@ class FixedLocalStrategyEngineTest {
         )
         val strong = base.copy(
             ltp = 107.0, vwap = 106.8, ema9 = 108.0, ema20 = 106.5,
-            atr14 = 1.0, rsi14 = 80.0, rsiSlope = 2.0, rvol = 1.2
+            atr14 = 1.0, rsi14 = 80.0, rsiSlope = 2.0, macdHistogramSlope = .2, rvol = 1.2
         )
         val signal = ParsedSignal(SignalType.TRADE_RELEASE, symbol = "TEST",
             rawText = "unit-test", confidence = 1.0)
