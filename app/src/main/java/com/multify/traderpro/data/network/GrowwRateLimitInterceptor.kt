@@ -73,7 +73,7 @@ internal class GrowwRateLimitInterceptor(
         GrowwApiUsageLedger.recordRequest(category)
         val started = SystemClock.elapsedRealtime()
         val requestStartedAtMs = System.currentTimeMillis()
-        val trace = GrowwHttpTraceLedger.start("ALPHA", request.method, path)
+        val trace = GrowwHttpTraceLedger.start("ALPHA", request.method, path, auditLogger)
         // Request priority is internal scheduler metadata, never a Groww API header.
         val response = try {
             chain.proceed(request.newBuilder()
