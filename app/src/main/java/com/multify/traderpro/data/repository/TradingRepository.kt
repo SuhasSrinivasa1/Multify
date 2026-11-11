@@ -4287,10 +4287,18 @@ class TradingRepository @Inject constructor(
             sweep.completedAtMs, System.currentTimeMillis(), sweep.prices.size,
             master.size, sweep.aborted
         )) {
-            auditLogger.logAsync("FIXED_PERFORMANCE", "PREFETCH_INVALID_NORMAL_SCAN_FALLBACK",
-                mapOf("reason" to "FAILED_STALE_OR_INCOMPLETE", "waited_ms" to waitedMs,
-                    "fixed_recommendation_rules_unchanged" to true))
-            return null
+            auditLogger.logAsync("FIXED_PERFORMANCE", "PREFETCH_INVALID_SCAN_DEFERRED_NO_DUPLICATE_SWEEP",
+                mapOf("reason" to if (sweep == null) "PREFETCH_TIMEOUT" else "STALE_INCOMPLETE_OR_ABORTED",
+                    "waited_ms" to waitedMs,
+                    "prefetch_requests_already_spent" to true,
+                    "second_full_nse_sweep_attempted" to false,
+                    "publication_from_partial_data" to false))
+            // The prefetch already consumed broker capacity. Do not immediately repeat
+            // all 53 batches in the critical scan; defer and retain the last valid baseline.
+            return PrecomputedFixedSweep(
+                prices = emptyMap(), errors = 1, aborted = true,
+                completedAtMs = System.currentTimeMillis(), requestCount = 0
+            )
         }
         auditLogger.logAsync("FIXED_PERFORMANCE", "PREFETCHED_SWEEP_CONSUMED", mapOf(
             "blocking_wait_ms" to waitedMs,
