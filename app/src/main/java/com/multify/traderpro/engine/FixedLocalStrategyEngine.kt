@@ -235,7 +235,7 @@ object FixedLocalStrategyEngine {
             timestampInvalidCandleCount = invalidTimestampCount,
             invalidOhlcCandleCount = invalidOhlcCount,
             incompleteCandleCount = incompleteCount,
-            latestCompletedCandleAtMs = candles.lastOrNull()?.ts
+            latestCompletedCandleAtMs = candles.lastOrNull()?.let { it.ts + intervalMs }
         )
     }
 
