@@ -58,10 +58,10 @@ jobs:
           current = Path(repo_path).read_text()
           previous = subprocess.check_output(['git','show',f'{base}:{repo_path}'], text=True)
           def method(src, name):
-              match = re.search(r'(?m)^\\s*(?:private\\s+)?(?:suspend\\s+)?fun\\s+' + re.escape(name) + r'\\s*\\(', src)
+              match = re.search(r'(?m)^\s*(?:private\s+)?(?:suspend\s+)?fun\s+' + re.escape(name) + r'\s*\\(', src)
               assert match, 'Missing protected method: ' + name
               tail = src[match.start():]
-              nxt = re.search(r'(?m)^\\s*(?:private\\s+)?(?:suspend\\s+)?fun\\s+', tail[match.end()-match.start():])
+              nxt = re.search(r'(?m)^\s*(?:private\s+)?(?:suspend\s+)?fun\s+', tail[match.end()-match.start():])
               return tail if not nxt else tail[:match.end()-match.start()+nxt.start()]
           for name in ['submitMarketOrder','submitFixedEntryGtt','preFixedAutoBuyExecutionGuard','placeCncBuy']:
               assert method(current,name) == method(previous,name), 'Protected order path changed: ' + name
