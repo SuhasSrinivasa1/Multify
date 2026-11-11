@@ -28,7 +28,7 @@ class GrowwApiFactory @Inject constructor(
             .connectTimeout(8, TimeUnit.SECONDS)
             .readTimeout(12, TimeUnit.SECONDS)
             .writeTimeout(12, TimeUnit.SECONDS)
-            .retryOnConnectionFailure(true)
+            .retryOnConnectionFailure(false)
             .addInterceptor(alphaHotCache)
             .addInterceptor(alphaGovernor)
             .addInterceptor { chain ->
@@ -61,7 +61,7 @@ class GrowwApiFactory @Inject constructor(
             .connectTimeout(8, TimeUnit.SECONDS)
             .readTimeout(12, TimeUnit.SECONDS)
             .writeTimeout(12, TimeUnit.SECONDS)
-            .retryOnConnectionFailure(true)
+            .retryOnConnectionFailure(false)
             .addInterceptor(GrowwHotDataCacheInterceptor(account = "BETA", recordAlphaStats = false))
             .addInterceptor(BetaReadOnlyInterceptor())
             .addInterceptor(BetaHttpTraceInterceptor(auditLogger))
