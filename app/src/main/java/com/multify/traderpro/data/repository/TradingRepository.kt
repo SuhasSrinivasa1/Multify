@@ -2602,6 +2602,25 @@ class TradingRepository @Inject constructor(
             it.generatedAtMs > 0L && nowMs - it.generatedAtMs in 0L..300_000L
         }.forEach { row ->
             val verdict = fixedEntryVerdict(row, fixedPublishedQuote(row, nowMs), nowMs)
+            val accuracy = fixedShadowReferences[row.symbol.uppercase(Locale.US)]?.takeIf {
+                it.quoteCapturedAtMs >= row.generatedAtMs &&
+                    nowMs - it.quoteCapturedAtMs in 0L..300_000L
+            }?.evaluation?.features?.let {
+                com.multify.traderpro.engine.FixedAccuracyChallengerPolicy.assess(it)
+            }
+            auditLogger.logAsync("FIXED_ACCURACY_SHADOW", "ENTRY_COMBINATION_AT_PUBLICATION", mapOf(
+                "symbol" to row.symbol, "recommendation_id" to row.id,
+                "macd_slope" to accuracy?.macdSlope,
+                "rsi_slope" to accuracy?.rsiSlope,
+                "book_imbalance" to accuracy?.orderBookImbalance,
+                "session_vwap_extension_atr" to accuracy?.vwapExtensionAtr,
+                "three_factor_pass" to accuracy?.threeFactorConfirmed,
+                "peak_extension_warning" to accuracy?.extendedFromSessionVwap,
+                "rsi_momentum_exhaustion" to accuracy?.rsiMomentumExhaustion,
+                "verified_inputs_available" to accuracy?.dataReady,
+                "validation_status" to "SHADOW_NOT_FOR_EXECUTION",
+                "added_api_requests" to 0
+            ))
             auditLogger.logAsync("FIXED_ENTRY_QUALITY", "PUBLICATION_ACTIONABILITY", mapOf(
                 "symbol" to row.symbol, "scan_started_at_ms" to row.generatedAtMs,
                 "actual_evaluated_at_ms" to nowMs, "status" to verdict.status,
@@ -2609,7 +2628,7 @@ class TradingRepository @Inject constructor(
                 "distance_from_broker_or_15m_candle_high_pct" to verdict.distanceFromQuoteHighPct,
                 "day_high_evidence_source" to verdict.highEvidenceSource,
                 "multi_day_15m_window_high_distance_pct_NOT_day_high" to verdict.multiDayWindowHighDistancePct,
-                "vwap_atr_source" to "FROZEN_MULTI_DAY_15M_WINDOW",
+                "vwap_atr_source" to "VERIFIED_CURRENT_SESSION_COMPLETED_BARS",
                 "distance_above_vwap_in_atr" to verdict.vwapAtrExtension,
                 "first_primary_runup_minus_target_pct" to verdict.firstPrimaryRunupBeyondTargetPct,
                 "fixed_scoring_changed" to false, "fixed_stored_recommendation_changed" to false,
