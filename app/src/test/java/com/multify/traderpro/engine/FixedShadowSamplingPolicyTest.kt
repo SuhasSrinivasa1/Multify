@@ -12,23 +12,23 @@ class FixedShadowSamplingPolicyTest {
         trade: Boolean = false,
         untilFixed: Long = 8_000L,
         liveUsed: Int = 10,
-        historicalUsed: Int = 10,
+        historicalUsed: Int = 4,
         brokerReady: Boolean = true
     ): Boolean = FixedShadowSamplingPolicy.canCollect(
         nowMs = now, lastSuccessfulAtMs = last, fixedPriority = fixed,
         criticalTrade = trade, millisUntilNextFixed = untilFixed,
-        liveUsedLastMinute = liveUsed, livePerMinuteLimit = 210,
-        historicalUsedLastMinute = historicalUsed, historicalPerMinuteLimit = 45,
+        liveUsedLastMinute = liveUsed, livePerMinuteLimit = 40,
+        historicalUsedLastMinute = historicalUsed, historicalPerMinuteLimit = 8,
         brokerReady = brokerReady
     )
 
-    @Test fun onlySpareAlphaCapacity() {
+    @Test fun onlySpareBetaResearchCapacity() {
         assertTrue(allowed())
         assertFalse(allowed(fixed = true))
         assertFalse(allowed(trade = true))
         assertFalse(allowed(untilFixed = 3_000))
-        assertFalse(allowed(liveUsed = 85))
-        assertFalse(allowed(historicalUsed = 19))
+        assertFalse(allowed(liveUsed = 30))
+        assertFalse(allowed(historicalUsed = 6))
         assertFalse(allowed(brokerReady = false))
     }
 
