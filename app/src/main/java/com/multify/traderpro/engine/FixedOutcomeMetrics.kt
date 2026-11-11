@@ -32,7 +32,7 @@ data class FixedOutcomeSummary(
 
 object FixedOutcomeMetrics {
     fun calculate(samples: List<FixedOutcomeSample>): FixedOutcomeSummary {
-        val unique = samples.distinctBy { "${it.date}|${it.symbol.uppercase()}" }
+        val unique = samples.distinctBy { "${it.date}|${it.symbol.uppercase()}|${it.publishedAtMs}" }
         val eligible = unique.filter { it.observed && it.maxFavourablePct.isFinite() && it.maxFavourablePct >= 0.0 }
         fun hitCount(condition: (FixedOutcomeSample) -> Boolean) = eligible.count(condition)
         fun hitMean(condition: (FixedOutcomeSample) -> Boolean): Double? = eligible.filter(condition)
