@@ -1512,7 +1512,13 @@ class TradingRepository @Inject constructor(
         else categories.toList()
         for (category in checked) {
             try {
-                recoveryGate.checkRequestAllowed(category)
+                when (category) {
+                    GrowwApiUsageLedger.Category.LIVE_DATA ->
+                        recoveryGate.checkRequestAllowed(category, "/v1/live-data/quote")
+                    GrowwApiUsageLedger.Category.HISTORICAL ->
+                        recoveryGate.checkRequestAllowed(category, "/v1/historical/candles")
+                    else -> recoveryGate.checkRequestAllowed(category)
+                }
             } catch (blocked: GrowwRecoveryGate.LocallyBlocked) {
                 return blocked
             }
@@ -2284,18 +2290,28 @@ class TradingRepository @Inject constructor(
     // Only broker availability preflight. Never delays the configured 90s Fixed cadence
     // or bypasses trading controls. A deferred attempt is NOT a completed Fixed scan.
     private fun marketDataAvailableForFixed(): Boolean = runCatching {
-        recoveryGate.checkRequestAllowed(GrowwApiUsageLedger.Category.LIVE_DATA)
-        recoveryGate.checkRequestAllowed(GrowwApiUsageLedger.Category.HISTORICAL)
+        recoveryGate.checkRequestAllowed(
+            GrowwApiUsageLedger.Category.LIVE_DATA, "/v1/live-data/ltp")
+        recoveryGate.checkRequestAllowed(
+            GrowwApiUsageLedger.Category.HISTORICAL, "/v1/historical/candles")
     }.isSuccess
 
     private fun fixedBrokerCooldownAuditDetails(): Map<String, Any> {
         val state = recoveryGate.status()
         val now = System.currentTimeMillis()
-        val historicalUntil = state.categoryCooldownUntilMs[GrowwApiUsageLedger.Category.HISTORICAL] ?: 0L
-        val liveUntil = state.categoryCooldownUntilMs[GrowwApiUsageLedger.Category.LIVE_DATA] ?: 0L
+        val historicalCategoryUntil = state.categoryCooldownUntilMs[GrowwApiUsageLedger.Category.HISTORICAL] ?: 0L
+        val liveCategoryUntil = state.categoryCooldownUntilMs[GrowwApiUsageLedger.Category.LIVE_DATA] ?: 0L
+        val historicalEndpointUntil = recoveryGate.endpointCooldownUntilMs(
+            GrowwApiUsageLedger.Category.HISTORICAL, "/v1/historical/candles")
+        val liveLtpEndpointUntil = recoveryGate.endpointCooldownUntilMs(
+            GrowwApiUsageLedger.Category.LIVE_DATA, "/v1/live-data/ltp")
+        val historicalUntil = maxOf(historicalCategoryUntil, historicalEndpointUntil)
+        val liveUntil = maxOf(liveCategoryUntil, liveLtpEndpointUntil)
         val blocked = buildList {
-            if (liveUntil > now) add("LIVE_DATA")
-            if (historicalUntil > now) add("HISTORICAL")
+            if (liveCategoryUntil > now) add("LIVE_DATA_CATEGORY")
+            if (liveLtpEndpointUntil > now) add("LIVE_DATA_LTP_ENDPOINT")
+            if (historicalCategoryUntil > now) add("HISTORICAL_CATEGORY")
+            if (historicalEndpointUntil > now) add("HISTORICAL_CANDLES_ENDPOINT")
             if (state.reconnectRequired) add("AUTH_RECONNECT_REQUIRED")
         }
         val retryAt = maxOf(historicalUntil, liveUntil)
@@ -2303,7 +2319,10 @@ class TradingRepository @Inject constructor(
             "scan_outcome" to "DEFERRED_NOT_FAILED",
             "blocked_api_categories" to blocked,
             "live_data_cooldown_until_ms" to liveUntil,
+            "live_ltp_endpoint_cooldown_until_ms" to liveLtpEndpointUntil,
             "historical_cooldown_until_ms" to historicalUntil,
+            "historical_endpoint_cooldown_until_ms" to historicalEndpointUntil,
+            "endpoint_scoped_cooldown" to true,
             "retry_at_ms" to retryAt,
             "remaining_cooldown_ms" to (retryAt - now).coerceAtLeast(0L),
             "last_completed_fixed_scan_at_ms" to lastFixedScanAtMs,
@@ -2740,9 +2759,13 @@ class TradingRepository @Inject constructor(
         val status = recoveryGate.status()
         if (status.reconnectRequired) return 30_000L
         val now = System.currentTimeMillis()
-        val until = listOf(GrowwApiUsageLedger.Category.LIVE_DATA,
-            GrowwApiUsageLedger.Category.HISTORICAL, GrowwApiUsageLedger.Category.NON_TRADING)
-            .maxOf { status.categoryCooldownUntilMs[it] ?: 0L }
+        val until = maxOf(
+            status.categoryCooldownUntilMs[GrowwApiUsageLedger.Category.LIVE_DATA] ?: 0L,
+            status.categoryCooldownUntilMs[GrowwApiUsageLedger.Category.HISTORICAL] ?: 0L,
+            status.categoryCooldownUntilMs[GrowwApiUsageLedger.Category.NON_TRADING] ?: 0L,
+            recoveryGate.endpointCooldownUntilMs(GrowwApiUsageLedger.Category.LIVE_DATA, "/v1/live-data/quote"),
+            recoveryGate.endpointCooldownUntilMs(GrowwApiUsageLedger.Category.HISTORICAL, "/v1/historical/candles")
+        )
         return (until - now).coerceAtLeast(0L)
     }
 
@@ -2770,8 +2793,8 @@ class TradingRepository @Inject constructor(
         ForecastResearchWindowPolicy.isBoostWindow(ZonedDateTime.now(INDIA).toLocalTime())
 
     private fun forecastBrokerHealthyForResearch(): Boolean = runCatching {
-        recoveryGate.checkRequestAllowed(GrowwApiUsageLedger.Category.LIVE_DATA)
-        recoveryGate.checkRequestAllowed(GrowwApiUsageLedger.Category.HISTORICAL)
+        recoveryGate.checkRequestAllowed(GrowwApiUsageLedger.Category.LIVE_DATA, "/v1/live-data/quote")
+        recoveryGate.checkRequestAllowed(GrowwApiUsageLedger.Category.HISTORICAL, "/v1/historical/candles")
         recoveryGate.checkRequestAllowed(GrowwApiUsageLedger.Category.NON_TRADING)
     }.isSuccess
 
