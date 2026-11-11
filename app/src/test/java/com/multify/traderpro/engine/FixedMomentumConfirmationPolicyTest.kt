@@ -12,7 +12,7 @@ class FixedMomentumConfirmationPolicyTest {
         rvol: Double? = 1.2,
         vwap: Double? = 99.0,
         lastOpen: Double? = 100.0,
-        lastClose: Double? = 101.0,
+        lastClose: Double? = 101.6,
         prevOpen: Double? = 101.0,
         prevClose: Double? = 100.0,
         prevHigh: Double? = 101.5,
