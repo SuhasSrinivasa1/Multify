@@ -48,6 +48,15 @@ object FixedEntryActionabilityPolicy {
         val local = Instant.ofEpochMilli(nowMs).atZone(IST)
         val clock = local.toLocalTime()
         val reasons = mutableListOf<String>()
+        if (snapshot == null) {
+            reasons += "VERIFIED_CURRENT_SESSION_FEATURES_UNAVAILABLE"
+        } else {
+            val candleAt = snapshot.latestCompletedCandleAtMs
+            if (candleAt == null || nowMs < candleAt || nowMs - candleAt > 20L * 60_000L)
+                reasons += "LATEST_COMPLETED_15M_CANDLE_MISSING_OR_STALE"
+            val safety = FixedEntrySafetyOverlay.assess(snapshot)
+            if (!safety.eligible) reasons += safety.reasons
+        }
         if (!NseEquitySessionCalendar.isFixedScanWindow(local))
             reasons += "OUTSIDE_NSE_CASH_SESSION"
         else if (!NseEquitySessionCalendar.isFixedNewEntryWindow(local))
