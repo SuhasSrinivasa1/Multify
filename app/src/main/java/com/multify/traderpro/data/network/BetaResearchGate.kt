@@ -34,7 +34,8 @@ class BetaResearchGate @Inject constructor() {
         val usedLastMinute: Int = 0,
         val usedLastSecond: Int = 0,
         val inFlight: Int = 0,
-        val endpointLimitPerMinute: Int = FixedDualAccountPolicy.BETA_LIVE_PER_MINUTE,
+        val endpointLimitPerMinute: Int = FixedDualAccountPolicy.BETA_LIVE_ENDPOINT_PER_MINUTE,
+        val accountBudgetPerMinute: Int = FixedDualAccountPolicy.BETA_LIVE_PER_MINUTE,
         val cooldownRemainingMs: Long = 0L,
         val halfOpenProbeInFlight: Boolean = false,
         val rateLimitResponses: Long = 0L,
@@ -57,7 +58,7 @@ class BetaResearchGate @Inject constructor() {
     // documents 300 LIVE category requests/min per account; that is not a
     // promise that one /ltp endpoint can safely sustain 300 requests/min.
     private val liveSec = 2
-    private val liveMinute = FixedDualAccountPolicy.BETA_LIVE_PER_MINUTE
+    private val liveMinute = FixedDualAccountPolicy.BETA_LIVE_ENDPOINT_PER_MINUTE
     private val histSec = 1
     private val histMinute = FixedDualAccountPolicy.BETA_HISTORICAL_PER_MINUTE
     private var livePace = LtpAdaptivePacingPolicy.State(LtpAdaptivePacingPolicy.START_GAP_MS, SystemClock.elapsedRealtime())
@@ -103,7 +104,7 @@ class BetaResearchGate @Inject constructor() {
                     spacingWait,
                     (w.cooldownUntil - now).coerceAtLeast(0L),
                     if (w.probeRequired && w.probeInFlight) 100L else 0L,
-                    if (w.inFlight >= if (type == Type.LIVE) 2 else 1) 100L else 0L,
+                    if (w.inFlight >= (if (type == Type.LIVE) 2 else 1)) 100L else 0L,
                     if (w.second.size >= perSecond) (w.second.first() + 1_000L - now).coerceAtLeast(1L) else 0L,
                     if (w.minute.size >= perMinute) (w.minute.first() + 60_000L - now).coerceAtLeast(1L) else 0L
                 )
