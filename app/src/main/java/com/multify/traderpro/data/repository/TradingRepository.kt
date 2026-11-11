@@ -7721,8 +7721,14 @@ class TradingRepository @Inject constructor(
         // Outcome monitoring is research traffic. Prefer Beta so Alpha's reserved
         // execution headroom remains available for BUY/SELL/GTT. If Beta is configured
         // but cooling down, skip this sample rather than transferring it to Alpha.
+        val betaConfigured = secretStore.hasBetaCredentials()
         val betaMonitorToken = fixedBetaMarketTokenOrNull()
-        val alphaMonitorToken = if (betaMonitorToken == null) {
+        if (betaConfigured && betaMonitorToken == null) {
+            auditLogger.logAsync("FIXED_OUTCOME", "BETA_MONITOR_SKIPPED_SESSION_UNAVAILABLE_NO_ALPHA_FALLBACK",
+                mapOf("alpha_fallback_attempted" to false, "alpha_execution_reserve_preserved" to true))
+            return fixedRecommendationStore.recommendations(today).count { it.status == "ACTIVE" }
+        }
+        val alphaMonitorToken = if (!betaConfigured) {
             val liveUsage = GrowwApiUsageLedger.snapshot().categories
                 .firstOrNull { it.category == GrowwApiUsageLedger.Category.LIVE_DATA }
             if (liveUsage == null || liveUsage.minuteHeadroom <= 5) {
