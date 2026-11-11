@@ -7,8 +7,8 @@ class FixedMarketPulsePolicyTest {
     private val p = FixedMarketPulsePolicy
 
     @Test fun ranksOnlyNewMarketPulsesWithinPriceBand() {
-        val prior = mapOf("ABC" to 1_000.0, "XYZ" to 250.0, "BAD" to 100.0)
-        val current = mapOf("ABC" to 1_004.0, "XYZ" to 252.0, "BAD" to 101.0)
+        val prior = mapOf("ABC" to 1_000.0, "XYZ" to 250.0, "BAD" to 99.0)
+        val current = mapOf("ABC" to 1_004.0, "XYZ" to 252.0, "BAD" to 99.5)
         val pulses = p.rank(prior, current, 1_000_000L, 1_120_000L)
         assertEquals(listOf("XYZ", "ABC"), pulses.map { it.symbol })
         assertEquals(0.8, pulses.first().increasePct, 0.00001)
