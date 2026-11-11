@@ -9,7 +9,7 @@ import org.junit.Test
 class FixedRepeatQualificationPolicyTest {
     private val date = "2026-11-04"
     private val t0 = 1_000_000_000L
-    private fun record(at: Long, symbol: String = "ABC") = FixedRecommendationRecord(
+    private fun record(at: Long, symbol: String = "ABC", status: String = "ACTIVE") = FixedRecommendationRecord(
         id = FixedRecommendationStore.fixedEventId(date, symbol, at),
         recommendationDate = date, rank = 1, symbol = symbol,
         entryPrice = 400.0, targetPct = 1.1161043, targetPrice = 404.4644,
@@ -78,6 +78,25 @@ class FixedRepeatQualificationPolicyTest {
         assertTrue(FixedRepeatQualificationPolicy.qualifiedForNewEvent(
             "ABC",t0+2_100_000L,emptyList(),resetAndConfirmation,
             importedLastEventAtMs=importedLastAtMs))
+    }
+
+
+    @Test fun targetHitReentryRequiresObservedHalfPercentPullbackFromTarget() {
+        val targetHit = record(t0, status = "TARGET_HIT")
+        val noPullback = listOf(
+            scan(t0 + 1_900_000, false, price = 403.0),
+            scan(t0 + 1_990_000, true)
+        )
+        assertFalse(FixedRepeatQualificationPolicy.qualifiedForNewEvent(
+            "ABC", t0 + 2_100_000, listOf(targetHit), noPullback))
+
+        val withPullback = listOf(
+            scan(t0 + 1_900_000, false, price = 403.0),
+            scan(t0 + 1_920_000, false, price = 402.0),
+            scan(t0 + 1_990_000, true)
+        )
+        assertTrue(FixedRepeatQualificationPolicy.qualifiedForNewEvent(
+            "ABC", t0 + 2_100_000, listOf(targetHit), withPullback))
     }
 
     @Test fun noAssumedResetFromMissingResearch() {
