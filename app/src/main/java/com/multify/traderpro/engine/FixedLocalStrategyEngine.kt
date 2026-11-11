@@ -236,8 +236,10 @@ object FixedLocalStrategyEngine {
         if (f.prevLow != null && f.lastLow != null && f.lastClose != null && f.lastLow < f.prevLow && f.lastClose > f.prevLow)
             votes += FixedStrategyVote("Failed breakdown / bear trap", .65, "prior low swept then reclaimed")
         f.rsi14?.let { rsi ->
-            if (regime == "TREND" && rsi > 55) votes += FixedStrategyVote("RSI trend regime", .28, "RSI ${fmt(rsi)}")
-            else if (rsi > 75) votes += FixedStrategyVote("RSI exhaustion filter", -.18, "RSI ${fmt(rsi)}")
+            if (rsi > 75 && (f.rsiSlope ?: 0.0) <= 0.0)
+                votes += FixedStrategyVote("RSI exhaustion filter", -.30, "RSI ${fmt(rsi)} with non-rising slope")
+            else if (regime == "TREND" && rsi > 55)
+                votes += FixedStrategyVote("RSI trend regime", .28, "RSI ${fmt(rsi)}")
             else if (rsi < 28) votes += FixedStrategyVote("RSI exhaustion reversal", .22, "RSI ${fmt(rsi)}")
         }
         f.macdHistogram?.let { h ->
