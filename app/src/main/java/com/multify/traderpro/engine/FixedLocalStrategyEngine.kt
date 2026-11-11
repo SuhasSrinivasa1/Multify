@@ -185,7 +185,8 @@ object FixedLocalStrategyEngine {
         val recentTen = sessionCandles.takeLast(10)
         val greenVol = recentTen.filter { it.close >= it.open }.sumOf { it.volume }
         val redVol = recentTen.filter { it.close < it.open }.sumOf { it.volume }
-        val greenShare = if (greenVol + redVol > 0.0) greenVol / (greenVol + redVol) else null
+        val greenShare = if (recentTen.size >= 3 && greenVol + redVol > 0.0)
+            greenVol / (greenVol + redVol) else null
         val sessionHigh = sessionCandles.maxOfOrNull { it.high }
         val sessionLow = sessionCandles.minOfOrNull { it.low }
         // Candle-pattern confirmation must come from today's completed session, not yesterday's close.
