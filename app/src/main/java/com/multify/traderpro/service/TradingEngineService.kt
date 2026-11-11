@@ -617,27 +617,36 @@ class TradingEngineService : Service() {
                         val historicalBefore = repository.fixedHistoricalRequestCounters()
                         val startedAt = System.currentTimeMillis()
                         GrowwHttpTraceLedger.beginFixedScan(scanId)
+                        var scanFailure: Throwable? = null
                         val scanned = try {
-                            runCatching { repository.runFixedPriorityCycle() }
-                                .onFailure {
-                                    if (it !is CancellationException) {
-                                        auditLogger.log("RUNTIME", "FIXED_SCAN_ERROR", mapOf(
-                                            "scan_id" to scanId,
-                                            "type" to it.javaClass.simpleName,
-                                            "message" to (it.message ?: it.javaClass.simpleName).take(160)))
-                                    }
-                                }.getOrDefault(false)
+                            try {
+                                repository.runFixedPriorityCycle()
+                            } catch (cancelled: CancellationException) {
+                                throw cancelled
+                            } catch (failure: Throwable) {
+                                scanFailure = failure
+                                auditLogger.log("RUNTIME", "FIXED_SCAN_ERROR", mapOf(
+                                    "scan_id" to scanId,
+                                    "type" to failure.javaClass.simpleName,
+                                    "message" to (failure.message ?: failure.javaClass.simpleName).take(160)))
+                                false
+                            }
                         } finally {
                             GrowwHttpTraceLedger.endFixedScan(scanId)
                         }
                         val elapsed = System.currentTimeMillis() - startedAt
+                        val scanResult = when {
+                            scanned -> "COMPLETED"
+                            scanFailure != null -> "FAILED"
+                            else -> "DEFERRED_NOT_COMPLETED"
+                        }
                         val alphaLiveAfter = GrowwHttpTraceLedger.counters("ALPHA", "LIVE_DATA")
                         val betaLiveAfter = GrowwHttpTraceLedger.counters("BETA", "LIVE_DATA")
                         val alphaHistAfter = GrowwHttpTraceLedger.counters("ALPHA", "HISTORICAL")
                         val betaHistAfter = GrowwHttpTraceLedger.counters("BETA", "HISTORICAL")
                         fun increase(start: Long, end: Long) = (end - start).coerceAtLeast(0L)
                         val scanPoint = FixedScanTrendStore.Point(
-                            scanId, startedAt, elapsed, if (scanned) "COMPLETED" else "FAILED_OR_SKIPPED",
+                            scanId, startedAt, elapsed, scanResult,
                             increase(alphaLiveBefore.requests, alphaLiveAfter.requests),
                             increase(betaLiveBefore.requests, betaLiveAfter.requests),
                             increase(alphaHistBefore.requests, alphaHistAfter.requests),
@@ -650,6 +659,8 @@ class TradingEngineService : Service() {
                         FixedScanTrendStore.record(this@TradingEngineService, scanPoint)
                         auditLogger.logAsync("FIXED_PERFORMANCE", "EVERY_SCAN_ATTEMPT", mapOf(
                             "scan_id" to scanId, "result" to scanPoint.result,
+                            "failure_type" to scanFailure?.javaClass?.simpleName,
+                            "failure_message" to scanFailure?.message?.take(160),
                             "start_at_ms" to startedAt, "duration_ms" to elapsed,
                             "alpha_live_http" to scanPoint.alphaLive,
                             "beta_live_http" to scanPoint.betaLive,
