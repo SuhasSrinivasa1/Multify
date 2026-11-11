@@ -167,9 +167,13 @@ object FixedLocalStrategyEngine {
         val macdPrev = macdHistogram(closes.dropLast(1))
         val rsiNow = rsi(closes, 14)
         val rsiPrev = rsi(closes.dropLast(1), 14)
-        val recentVols = vols.dropLast(1).takeLast(3)
-        val volAccel = recentVols.takeIf { it.isNotEmpty() && it.average() > 0.0 }?.let { (vols.last() / it.average()) - 1.0 }
-        val recentStructure = candles.takeLast(4)
+        // Session participation/structure features must not borrow prior-day candles.
+        val recentSessionVols = sessionCandles.dropLast(1).takeLast(3).map { it.volume }
+        val volAccel = if (sessionCandles.size >= 4 && recentSessionVols.isNotEmpty() &&
+            recentSessionVols.average() > 0.0) {
+            (sessionCandles.last().volume / recentSessionVols.average()) - 1.0
+        } else null
+        val recentStructure = sessionCandles.takeLast(4)
         val structure = if (recentStructure.size >= 3) {
             var up = 0; var down = 0
             for (i in 1 until recentStructure.size) {
@@ -178,7 +182,7 @@ object FixedLocalStrategyEngine {
             }
             (up - down).toDouble() / (2.0 * (recentStructure.size - 1))
         } else null
-        val recentTen = candles.takeLast(10)
+        val recentTen = sessionCandles.takeLast(10)
         val greenVol = recentTen.filter { it.close >= it.open }.sumOf { it.volume }
         val redVol = recentTen.filter { it.close < it.open }.sumOf { it.volume }
         val greenShare = if (greenVol + redVol > 0.0) greenVol / (greenVol + redVol) else null
