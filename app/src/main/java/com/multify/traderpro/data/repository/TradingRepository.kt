@@ -4510,14 +4510,26 @@ class TradingRepository @Inject constructor(
                 }
             } catch (t: Throwable) {
                 lastFailure = t
-                val transient = t is IOException || (t is HttpException && (t.code() == 429 || t.code() >= 500))
+                val broker429 = (t as? HttpException)?.code() == 429
+                val localCooldown = t is IOException && (
+                    t.message.orEmpty().contains("locally paused", ignoreCase = true) ||
+                    t.message.orEmpty().contains("cooldown", ignoreCase = true)
+                )
+                // A 429 has already opened a persisted broker cooldown. Retrying this
+                // batch only creates local suppressions and more log noise; never retry it.
+                if (broker429 || localCooldown) break
+                val transient = t is IOException || (t is HttpException && t.code() >= 500)
                 if (!transient || attempt + 1 >= FIXED_V741_DISCOVERY_BATCH_ATTEMPTS) break
-                delay(if (t is HttpException && t.code() == 429) 1_250L else FIXED_V741_DISCOVERY_RETRY_BACKOFF_MS)
+                delay(FIXED_V741_DISCOVERY_RETRY_BACKOFF_MS)
             }
         }
         auditLogger.log("FIXED_DISCOVERY", "LTP_BATCH_ERROR", mapOf(
             "batch_index" to batchIndex,
             "batch_size" to chunk.size,
+            "http_code" to ((lastFailure as? HttpException)?.code() ?: 0),
+            "local_cooldown" to (lastFailure is IOException &&
+                lastFailure.message.orEmpty().contains("cooldown", ignoreCase = true)),
+            "attempts_configured" to FIXED_V741_DISCOVERY_BATCH_ATTEMPTS,
             "message" to (lastFailure?.message ?: lastFailure?.javaClass?.simpleName ?: "unknown")
         ))
         return null
