@@ -42,9 +42,10 @@ internal object FixedRepeatQualificationPolicy {
         val pullbackAt = if (previousRecord?.status == "TARGET_HIT") {
             val pullbackFloor = previousRecord.targetPrice *
                 (1.0 - MIN_TARGET_REENTRY_PULLBACK_PCT / 100.0)
+            val targetHitAt = previousRecord.targetHitAtMs ?: previousAtMs
             observations.asSequence().filter {
                 it.symbol.equals(symbol, ignoreCase = true) &&
-                    it.scanAtMs > previousAtMs && it.scanAtMs < nowMs &&
+                    it.scanAtMs > targetHitAt && it.scanAtMs < nowMs &&
                     it.observedPrice?.isFinite() == true && it.observedPrice > 0.0 &&
                     it.observedPrice <= pullbackFloor
             }.maxOfOrNull { it.scanAtMs } ?: return false
