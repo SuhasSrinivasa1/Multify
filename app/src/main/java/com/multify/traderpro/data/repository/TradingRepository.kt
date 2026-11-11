@@ -1110,9 +1110,11 @@ class TradingRepository @Inject constructor(
         } catch (t: Throwable) {
             val code = (t as? HttpException)?.code()
             val usage = betaResearchGate.snapshot()
+            val gateStatus = runCatching { betaResearchGate.diagnosticStatus() }.getOrDefault(emptyMap())
             auditLogger.logAsync("BETA_API", "REQUEST_PROFILE", mapOf(
                 "account" to "BETA", "category" to type.name, "outcome" to "FAILURE",
                 "http_code" to (code ?: 0),
+                "gate_status_after_failure" to gateStatus,
                 "origin" to (if (code != null) "BROKER_HTTP_RESPONSE" else if (
                     t is IOException && t.message.orEmpty().startsWith("BETA_")
                 ) "LOCAL_ADMISSION" else "TRANSPORT_OR_PRE_DISPATCH"),
