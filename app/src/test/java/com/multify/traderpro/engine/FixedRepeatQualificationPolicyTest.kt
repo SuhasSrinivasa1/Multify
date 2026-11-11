@@ -15,13 +15,14 @@ class FixedRepeatQualificationPolicyTest {
         entryPrice = 400.0, targetPct = 1.1161043, targetPrice = 404.4644,
         confidence = 0.93, score = 0.94, strategy = "FIXED",
         regime = "TREND", marketRegime = "BREADTH_BULL",
-        championKey = "", reason = "test", generatedAtMs = at,
+        championKey = "", reason = "test", generatedAtMs = at, status = status,
         lastPrice = 400.0, lastObservedAtMs = at
     )
-    private fun scan(at: Long, qualified: Boolean, symbol: String = "ABC") =
+    private fun scan(at: Long, qualified: Boolean, symbol: String = "ABC",
+                     price: Double = if (qualified) 420.0 else 390.0) =
         FixedScanObservation(date, at, symbol,
             if (qualified) "PRIMARY" else "SECONDARY",
-            qualified, qualified, observedPrice = if (qualified) 420.0 else 390.0
+            qualified, qualified, observedPrice = price
         )
 
     @Test fun firstEverQualifiedSetupIsNotSuppressed() {
