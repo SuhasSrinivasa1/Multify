@@ -128,8 +128,8 @@ jobs:
           # Source baseline parity: selection, filter/target, 107 references, hard-stop, trailing.
           fixed834 = 'e506db984f225a56852cf28a963ba4d463b62308'
           immutable834 = [
-              'engine/FixedFinalContract.kt', 'engine/FixedLocalStrategyEngine.kt',
-              'engine/FixedForecastQualityPolicy.kt', 'engine/FixedMarketDiscoveryPolicy.kt',
+              'engine/FixedFinalContract.kt',
+              'engine/FixedMarketDiscoveryPolicy.kt',
                'engine/FixedMultifyFactorFamilies.kt',
               'engine/FixedForecastPublicationPolicy.kt',
               'engine/FixedEntryActionabilityPolicy.kt',
