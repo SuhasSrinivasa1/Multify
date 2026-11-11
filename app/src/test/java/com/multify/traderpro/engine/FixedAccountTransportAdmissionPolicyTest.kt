@@ -4,10 +4,8 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class FixedAccountTransportAdmissionPolicyTest {
-    @Test fun independentBeta429NeverAutomaticallyClosesAlphaLane() {
-        // Alpha's own state is the only gate; Beta's state is deliberately
-        // absent from this transport-only function.
-        assertTrue(FixedAccountTransportAdmissionPolicy.allowAlphaFallback(
+    @Test fun betaCooldownNeverBorrowsAlphaCapacity() {
+        assertFalse(FixedAccountTransportAdmissionPolicy.allowAlphaFallback(
             alphaLiveReady = true, alphaLiveUsed60s = 20, alphaAppLimit60s = 120))
         assertFalse(FixedAccountTransportAdmissionPolicy.allowAlphaFallback(
             alphaLiveReady = false, alphaLiveUsed60s = 20, alphaAppLimit60s = 120))
@@ -15,7 +13,7 @@ class FixedAccountTransportAdmissionPolicyTest {
 
     @Test fun reserveProtectsAlphaQuoteAndSellCapacity() {
         val reserve = FixedAccountTransportAdmissionPolicy.RESERVED_ALPHA_LIVE_REQUESTS
-        assertTrue(FixedAccountTransportAdmissionPolicy.allowAlphaFallback(true, 120 - reserve - 1, 120))
+        assertFalse(FixedAccountTransportAdmissionPolicy.allowAlphaFallback(true, 120 - reserve - 1, 120))
         assertFalse(FixedAccountTransportAdmissionPolicy.allowAlphaFallback(true, 120 - reserve, 120))
         assertFalse(FixedAccountTransportAdmissionPolicy.allowAlphaFallback(true, 210, 210))
         assertFalse(FixedAccountTransportAdmissionPolicy.allowAlphaFallback(true, -1, 120))
