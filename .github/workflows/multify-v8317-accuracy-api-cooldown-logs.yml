@@ -123,6 +123,10 @@ jobs:
           assert 'MIN_EXCLUSIVE_RUPEES = 200.0' in Path(root + 'engine/RecommendationPriceBandPolicy.kt').read_text()
           assert 'MIN_TARGET_REENTRY_PULLBACK_PCT = 0.50' in Path(root + 'engine/FixedRepeatQualificationPolicy.kt').read_text()
           assert 'FixedFiveMinuteEntryPolicy.evaluate' in current
+          assert 'sampleFixedFiveMinuteShadow(scanId.hashCode())' in Path(root + 'service/TradingEngineService.kt').read_text()
+          assert 'cooldown_until_elapsed_ms' in Path(root + 'data/network/BetaResearchGate.kt').read_text()
+          assert 'MAX_UTILIZATION_PERCENT = 75' in Path(root + 'engine/FixedShadowSamplingPolicy.kt').read_text()
+          assert 'Fixed 5m Beta shadow cannot borrow Alpha' in current
           assert 'THREE_FACTOR_MOMENTUM_SHADOW' in current
           assert 'scanResult = when' in Path(root + 'service/TradingEngineService.kt').read_text()
           assert 'FixedScanTrendChart()' in Path(root + 'ui/screens/TraderApp.kt').read_text()
