@@ -672,6 +672,16 @@ class TradingEngineService : Service() {
                             "request_attribution" to "TIME_WINDOW_INCLUDES_OVERLAPPING_WORKERS",
                             "strategy_changed" to false
                         ))
+                        if (scanned) {
+                            repository.updateFixedFiveMinuteShadowOutcomes()
+                            val shadowScanId = "FX5M-" + scanId
+                            GrowwHttpTraceLedger.beginFixedScan(shadowScanId)
+                            try {
+                                repository.sampleFixedFiveMinuteShadow(scanId.hashCode())
+                            } finally {
+                                GrowwHttpTraceLedger.endFixedScan(shadowScanId)
+                            }
+                        }
                         // Diagnostic-only measured start-to-start cadence.
                         val actualStartSpacingMs = if (scanned && lastSuccessfulFixedScanStartedAtMs > 0L)
                             (startedAt - lastSuccessfulFixedScanStartedAtMs).coerceAtLeast(0L) else null
