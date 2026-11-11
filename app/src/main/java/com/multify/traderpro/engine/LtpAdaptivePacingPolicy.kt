@@ -7,11 +7,11 @@ package com.multify.traderpro.engine
  * Per-account instances are managed by their own network governors.
  */
 object LtpAdaptivePacingPolicy {
-    const val START_GAP_MS = 850L
-    const val MIN_GAP_MS = 220L
-    const val MAX_GAP_MS = 3_000L
-    const val CLEAN_WINDOW_MS = 60_000L
-    private const val CLEAN_STEP_MS = 100L
+    const val START_GAP_MS = 1_250L
+    const val MIN_GAP_MS = 1_000L
+    const val MAX_GAP_MS = 5_000L
+    const val CLEAN_WINDOW_MS = 300_000L
+    private const val CLEAN_STEP_MS = 50L
 
     data class State(val gapMs: Long, val lastAdjustmentAtMs: Long)
 
