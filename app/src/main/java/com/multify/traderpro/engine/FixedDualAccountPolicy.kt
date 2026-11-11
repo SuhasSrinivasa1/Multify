@@ -12,13 +12,13 @@ object FixedDualAccountPolicy {
 
     // Keep the Beta 15m history budget below its independently throttled limit.
     fun betaDetailedEvaluation(symbol: String, betaReady: Boolean): Boolean =
-        betaReady && symbol.isNotBlank() && Math.floorMod(symbol.hashCode(), 6) == 0
+        betaReady && symbol.isNotBlank() && Math.floorMod(symbol.hashCode(), 4) == 0
 
     fun acceptableCoverage(valid: Int, master: Int, aborted: Boolean): Boolean =
         !aborted && master > 0 && valid.toDouble() / master >= .85
 
     const val FULL_NSE_LTP_BATCH_LIMIT = 50
     const val BETA_LTP_MIN_GAP_MS = LtpAdaptivePacingPolicy.MIN_GAP_MS
-    const val BETA_LIVE_PER_MINUTE = 270
+    const val BETA_LIVE_PER_MINUTE = 40
     const val BETA_HISTORICAL_PER_MINUTE = 8
 }
