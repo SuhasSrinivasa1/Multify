@@ -53,7 +53,7 @@ internal class GrowwRateLimitInterceptor(
         val path = request.url.encodedPath
         val category = classify(request.method, path)
         // Block locally rather than letting each worker retry Groww during a cooldown.
-        try { recoveryGate.checkRequestAllowed(category) }
+        try { recoveryGate.checkRequestAllowed(category, path) }
         catch (blocked: GrowwRecoveryGate.LocallyBlocked) {
             auditBlocked(category, path, blocked)
             throw blocked
@@ -65,7 +65,7 @@ internal class GrowwRateLimitInterceptor(
             throw IOException("Alpha call missing asynchronous API admission")
         }
 
-        try { recoveryGate.reserveRequest(category) }
+        try { recoveryGate.reserveRequest(category, path) }
         catch (blocked: GrowwRecoveryGate.LocallyBlocked) {
             auditBlocked(category, path, blocked)
             throw blocked
@@ -99,7 +99,7 @@ internal class GrowwRateLimitInterceptor(
         if (response.code == 429) {
             val rawRetryAfter = response.header("Retry-After")
             val retryAfterMs = GrowwRetryAfterPolicy.retryAfterMs(rawRetryAfter, System.currentTimeMillis())
-            val appliedCooldownMs = recoveryGate.on429(category, retryAfterMs)
+            val appliedCooldownMs = recoveryGate.on429(category, retryAfterMs, path)
             synchronized(lock) {
                 val state = states.getValue(category)
                 state.cooldownUntilMs = maxOf(state.cooldownUntilMs, SystemClock.elapsedRealtime() + appliedCooldownMs)
