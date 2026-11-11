@@ -2603,6 +2603,21 @@ class TradingRepository @Inject constructor(
             it.generatedAtMs > 0L && nowMs - it.generatedAtMs in 0L..300_000L
         }.forEach { row ->
             val verdict = fixedEntryVerdict(row, fixedPublishedQuote(row, nowMs), nowMs)
+            val shadowEvaluation = fixedShadowReferences[row.symbol.uppercase(Locale.US)]?.evaluation
+            val momentumShadow = shadowEvaluation?.let {
+                com.multify.traderpro.engine.FixedMomentumConfirmationPolicy.evaluate(it.features)
+            }
+            auditLogger.logAsync("FIXED_CHALLENGER", "THREE_FACTOR_MOMENTUM_SHADOW", mapOf(
+                "symbol" to row.symbol, "scan_started_at_ms" to row.generatedAtMs,
+                "macd_slope_threshold" to com.multify.traderpro.engine.FixedMomentumConfirmationPolicy.MIN_MACD_HISTOGRAM_SLOPE_ATR,
+                "confirmed" to momentumShadow?.confirmed,
+                "macd_confirmed" to momentumShadow?.macdSlopeConfirmed,
+                "order_book_confirmed" to momentumShadow?.orderBookConfirmed,
+                "rsi_slope_confirmed" to momentumShadow?.rsiSlopeConfirmed,
+                "reasons" to momentumShadow?.reasons,
+                "shadow_only" to true, "production_publication_changed" to false,
+                "additional_api_requests" to 0
+            ))
             auditLogger.logAsync("FIXED_ENTRY_QUALITY", "PUBLICATION_ACTIONABILITY", mapOf(
                 "symbol" to row.symbol, "scan_started_at_ms" to row.generatedAtMs,
                 "actual_evaluated_at_ms" to nowMs, "status" to verdict.status,
@@ -2610,7 +2625,7 @@ class TradingRepository @Inject constructor(
                 "distance_from_broker_or_15m_candle_high_pct" to verdict.distanceFromQuoteHighPct,
                 "day_high_evidence_source" to verdict.highEvidenceSource,
                 "multi_day_15m_window_high_distance_pct_NOT_day_high" to verdict.multiDayWindowHighDistancePct,
-                "vwap_atr_source" to "FROZEN_MULTI_DAY_15M_WINDOW",
+                "vwap_atr_source" to "VERIFIED_CURRENT_SESSION_15M_BARS",
                 "distance_above_vwap_in_atr" to verdict.vwapAtrExtension,
                 "first_primary_runup_minus_target_pct" to verdict.firstPrimaryRunupBeyondTargetPct,
                 "fixed_scoring_changed" to false, "fixed_stored_recommendation_changed" to false,
@@ -4209,6 +4224,22 @@ class TradingRepository @Inject constructor(
         }
         // Diagnostic-only, O(1) non-blocking queue offer. All 40 factor calculations and disk
         // writes execute later on a low-priority worker; never delay Fixed recommendations.
+        val candleFeatures = evaluation.features
+        auditLogger.logAsync("FIXED_CANDLE_QUALITY", "COMPLETED_BAR_EVALUATION", mapOf(
+            "symbol" to symbol, "account" to if (useBeta) "BETA" else "ALPHA",
+            "interval_minutes" to 15,
+            "valid_completed_bars" to candleFeatures.timestampValidCandleCount,
+            "invalid_timestamp_bars" to candleFeatures.timestampInvalidCandleCount,
+            "invalid_ohlc_bars" to candleFeatures.invalidOhlcCandleCount,
+            "incomplete_bars_excluded" to candleFeatures.incompleteCandleCount,
+            "current_session_bars" to candleFeatures.sessionCandleCount,
+            "latest_completed_bar_close_at_ms" to candleFeatures.latestCompletedCandleAtMs,
+            "current_session_vwap_available" to (candleFeatures.vwap != null),
+            "orb5_available_from_15m_data" to (candleFeatures.orb5High != null),
+            "orb15_available" to (candleFeatures.orb15High != null),
+            "timestamp_fallback_used" to false,
+            "partial_candle_used" to false
+        ))
         val referenceAt = System.currentTimeMillis()
         fixedShadowReferences[symbol] = FixedShadowReference(quote, evaluation, referenceAt)
         fixedFactorTelemetry.tryRecord(symbol, evaluation, lastFixedScanAtMs, quote, referenceAt)
