@@ -8,9 +8,9 @@ class AlphaLtpPacingPolicyTest {
         assertEquals(0L, AlphaLtpPacingPolicy.waitMs(10000L, 0L, null, 0))
     }
     @Test fun adaptiveSpacingStartsConservatively() {
-        assertEquals(850L, AlphaLtpPacingPolicy.waitMs(10000L,10000L,9000L,5))
-        assertEquals(100L, AlphaLtpPacingPolicy.waitMs(10750L,10000L,9000L,5))
-        assertEquals(0L, AlphaLtpPacingPolicy.waitMs(10850L,10000L,9000L,5))
+        assertEquals(1300L, AlphaLtpPacingPolicy.waitMs(10000L,10000L,9000L,5))
+        assertEquals(550L, AlphaLtpPacingPolicy.waitMs(10750L,10000L,9000L,5))
+        assertEquals(0L, AlphaLtpPacingPolicy.waitMs(11300L,10000L,9000L,5))
         assertEquals(250L, AlphaLtpPacingPolicy.waitMs(10000L,10000L,9000L,5,220L))
     }
     @Test fun alphaLtpCapIs240RequestsPerMinute() {
