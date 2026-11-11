@@ -34,7 +34,7 @@ class FixedSessionFeatureTest {
         assertNull(f.orb5High)
         assertEquals(106.0, f.candles.last().high, 0.0001)
         assertEquals(6, f.candles.size)
-        assertEquals(1.0, (f.sessionHighDistancePct ?: 0.0).let { 1.0 }, 0.0001)
+        assertEquals((106.0-104.0)/106.0*100.0, f.sessionHighDistancePct!!, 0.0001)
     }
 
     @Test fun actualFiveMinuteBarsGiveIndependentFiveAndFifteenMinuteOpeningRanges() {
