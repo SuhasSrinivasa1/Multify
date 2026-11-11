@@ -115,6 +115,7 @@ import com.multify.traderpro.engine.FixedEntryActionabilityPolicy
 import com.multify.traderpro.engine.FixedEarlyWatchPolicy
 import com.multify.traderpro.engine.FixedFinalContract
 import com.multify.traderpro.engine.RecommendationPriceBandPolicy
+import com.multify.traderpro.engine.FixedPriceBandPolicy
 import com.multify.traderpro.engine.CircuitAwareBuyPolicy
 import com.multify.traderpro.engine.ExecutionQuoteLiquidityPolicy
 import com.multify.traderpro.engine.FixedExecutionThinLiquidityPolicy
@@ -1225,7 +1226,7 @@ class TradingRepository @Inject constructor(
             apiFactory.groww.quote(bearer(alphaToken), tradingSymbol = symbol)
                 .requirePayload("Preopen quote $symbol")
         }
-        require(RecommendationPriceBandPolicy.eligible(quote.lastPrice)) { "FIXED_PRICE_BAND_OUTSIDE" }
+        require(FixedPriceBandPolicy.eligible(quote.lastPrice)) { "FIXED_PRICE_BAND_OUTSIDE" }
         val now = ZonedDateTime.now(INDIA)
         val start = now.minusDays(4).toLocalDate().atTime(9, 15).format(HIST_FORMAT)
         val end = now.toLocalDateTime().format(HIST_FORMAT)
@@ -1662,7 +1663,7 @@ class TradingRepository @Inject constructor(
         val forecasts = learningDao.longForecastsForDate(today)
             .filter { RecommendationPriceBandPolicy.eligible(it.entryPrice) }.map { it.toForecastDto() }
         val fixedRecords = fixedRecommendationStore.recommendations(today)
-            .filter { RecommendationPriceBandPolicy.eligible(it.entryPrice) }
+            .filter { FixedPriceBandPolicy.eligible(it.entryPrice) }
         fixedOutcomePerformanceStore.record(fixedRecords)
         fixedHistoricalEvidenceArchive.capture(fixedRecords)
         val fixedHistoricalSummary = fixedHistoricalEvidenceArchive.summary()
@@ -1869,7 +1870,7 @@ class TradingRepository @Inject constructor(
             val forecasts = learningDao.longForecastsForDate(today)
             .filter { RecommendationPriceBandPolicy.eligible(it.entryPrice) }.map { it.toForecastDto() }
             val fixedForecasts = fixedRecommendationStore.recommendations(today)
-                .filter { RecommendationPriceBandPolicy.eligible(it.entryPrice) }
+                .filter { FixedPriceBandPolicy.eligible(it.entryPrice) }
                 .map { it.toDto() }
             val champions = learningDao.allForecastChampions()
                 .map { ForecastChampionDto(it.marketRegime, it.regime, it.strategy, it.wins, it.losses, it.sampleCount, it.distinctDays, it.distinctSymbols, it.frozen) }
@@ -2678,7 +2679,7 @@ class TradingRepository @Inject constructor(
                 it.status == "ACTIVE" &&
                     it.executionEligible &&
                     it.qualityTier == "PRIMARY" &&
-                    RecommendationPriceBandPolicy.eligible(it.entryPrice) &&
+                    FixedPriceBandPolicy.eligible(it.entryPrice) &&
                     !fixedImportedSameDayDedupJournal.contains(today, it.symbol, it.generatedAtMs)
             }
             .sortedBy { it.generatedAtMs }
@@ -3813,7 +3814,7 @@ class TradingRepository @Inject constructor(
         val now = ZonedDateTime.now(INDIA)
         val today = now.toLocalDate().toString()
         val existing = fixedRecommendationStore.recommendations(today)
-            .filter { RecommendationPriceBandPolicy.eligible(it.entryPrice) }
+            .filter { FixedPriceBandPolicy.eligible(it.entryPrice) }
         if (!com.multify.traderpro.engine.NseEquitySessionCalendar.isFixedScanWindow(now)) {
             return existing.map { it.toDto() }
         }
@@ -4039,7 +4040,7 @@ class TradingRepository @Inject constructor(
         val publishable = unseen.filter { item ->
             // User-requested Fixed-only overlay. Apply it here, after the full v7.4.1 universe,
             // breadth and ranking have been calculated, so the underlying model remains 1:1.
-            if (!RecommendationPriceBandPolicy.eligible(item.evaluation.features.ltp)) return@filter false
+            if (!FixedPriceBandPolicy.eligible(item.evaluation.features.ltp)) return@filter false
             val currentPrimary = item.quality.tier == "PRIMARY" &&
                 item.quality.publishEligible && item.quality.executionEligible
             FixedForecastPublicationPolicy.isReady(
@@ -4081,7 +4082,7 @@ class TradingRepository @Inject constructor(
         }
 
         val all = fixedRecommendationStore.recommendations(today)
-            .filter { RecommendationPriceBandPolicy.eligible(it.entryPrice) }
+            .filter { FixedPriceBandPolicy.eligible(it.entryPrice) }
         val tierCounts = ranked.groupingBy { it.quality.tier }.eachCount()
         auditLogger.log("FIXED_ENGINE", "LONG_SCAN_TIERED", mapOf(
             "snapshot_id" to snapshot.payload.snapshotId,
@@ -4181,7 +4182,7 @@ class TradingRepository @Inject constructor(
         } else withFixedLiveDataSlot {
             apiFactory.groww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Fixed quote $symbol")
         }
-        require(RecommendationPriceBandPolicy.eligible(quote.lastPrice)) { "FIXED_PRICE_BAND_OUTSIDE" }
+        require(FixedPriceBandPolicy.eligible(quote.lastPrice)) { "FIXED_PRICE_BAND_OUTSIDE" }
         // Token-scope the RAM snapshot so a reconnect or account change cannot reuse candles.
         val historyKey = sha256(token).take(12) + ":" + symbol
         val incremental = fixedHistoricalWindowStore.request(historyKey, start, SystemClock.elapsedRealtime())
@@ -4540,7 +4541,7 @@ class TradingRepository @Inject constructor(
 
         // Apply the documented Fixed >₹100 and <₹5,000 current-price band BEFORE
         // selecting the dynamic discovery top-N, so ineligible names cannot consume slots.
-        val priceBandCurrent = current.filterValues { RecommendationPriceBandPolicy.eligible(it) }
+        val priceBandCurrent = current.filterValues { FixedPriceBandPolicy.eligible(it) }
         val ranked = if (baselineReady) {
             FixedMarketDiscoveryPolicy.rank(
                 currentLtps = priceBandCurrent,
@@ -4573,8 +4574,8 @@ class TradingRepository @Inject constructor(
             "ltp_coverage" to current.size,
             "price_band_eligible_count" to priceBandCurrent.size,
             "price_band_excluded_count" to (current.size - priceBandCurrent.size),
-            "price_band_min_exclusive_rupees" to RecommendationPriceBandPolicy.MIN_EXCLUSIVE_RUPEES,
-            "price_band_max_exclusive_rupees" to RecommendationPriceBandPolicy.MAX_EXCLUSIVE_RUPEES,
+            "price_band_min_exclusive_rupees" to FixedPriceBandPolicy.MIN_EXCLUSIVE_RUPEES,
+            "price_band_max_exclusive_rupees" to FixedPriceBandPolicy.MAX_EXCLUSIVE_RUPEES,
             "coverage_pct" to coverageRatio * 100.0,
             "batch_errors" to batchErrors,
             "aborted_for_network" to abortedForNetwork,
@@ -4676,7 +4677,7 @@ class TradingRepository @Inject constructor(
             val preferred = fixedRecommendationStore.recommendations(today).map { it.symbol }
             val candidates = (preferred + fixedShadowReferences.keys.sorted()).distinct().mapNotNull { symbol ->
                 fixedShadowReferences[symbol]?.takeIf {
-                    RecommendationPriceBandPolicy.eligible(it.quote.lastPrice) &&
+                    FixedPriceBandPolicy.eligible(it.quote.lastPrice) &&
                         (nowMs - it.quoteCapturedAtMs) in 0L..FixedShadowSamplingPolicy.MAX_REFERENCE_AGE_MS
                 }?.let { symbol to it }
             }
@@ -6921,7 +6922,7 @@ class TradingRepository @Inject constructor(
         require(fixedEntryVerdict(row, null).actionable) {
             "Fixed BUY blocked: late session or imported earlier recommendation"
         }
-        require(RecommendationPriceBandPolicy.eligible(row.entryPrice)) { "Fixed executes only stocks strictly between ₹200 and ₹5,000" }
+        require(FixedPriceBandPolicy.eligible(row.entryPrice)) { "Fixed executes only stocks strictly between ₹100 and ₹5,000" }
         require(row.executionEligible && row.qualityTier == "PRIMARY") { "Only PRIMARY Fixed recommendations can place a real BUY" }
         if (managedDao.openPosition(ENGINE_FIXED_HOLDING, row.symbol) != null) {
             return "${row.symbol} already has a Fixed holding; duplicate Fixed BUY blocked"
@@ -6933,7 +6934,7 @@ class TradingRepository @Inject constructor(
         }
         val quoteRequestElapsedMs = System.currentTimeMillis() - quoteRequestStartedAtMs
         val ltp = quote.lastPrice ?: error("Groww quote has no LTP")
-        require(RecommendationPriceBandPolicy.eligible(ltp)) { "Fixed BUY requires fresh price >₹200 and <₹5,000" }
+        require(FixedPriceBandPolicy.eligible(ltp)) { "Fixed BUY requires fresh price >₹100 and <₹5,000" }
         val fixedLiquidityReject = ExecutionQuoteLiquidityPolicy.rejectionReason(quote)
         if (fixedLiquidityReject != null) {
             auditLogger.logAsync("FIXED_BUY", "ENTRY_LIQUIDITY_UNVERIFIED", mapOf(
@@ -7058,7 +7059,7 @@ class TradingRepository @Inject constructor(
                 it.status == "ACTIVE" &&
                     it.executionEligible &&
                     it.qualityTier == "PRIMARY" &&
-                    RecommendationPriceBandPolicy.eligible(it.entryPrice) &&
+                    FixedPriceBandPolicy.eligible(it.entryPrice) &&
                     AutoBuyEntrySafetyPolicy.isPublishedAfterFixedAutoBuyEnabled(
                         it.generatedAtMs, settings.fixedAutoBuyActivatedAtMs)
             }
@@ -7151,7 +7152,7 @@ class TradingRepository @Inject constructor(
             }
             val quoteElapsedMs = (System.currentTimeMillis() - quoteStartedAtMs).coerceAtLeast(0L)
             val ltp = quote.lastPrice?.takeIf { it.isFinite() && it > 0.0 } ?: continue
-            if (!RecommendationPriceBandPolicy.eligible(ltp)) {
+            if (!FixedPriceBandPolicy.eligible(ltp)) {
                 auditLogger.logAsync("FIXED_AUTO_BUY", "PRICE_BAND_REJECTED", mapOf("symbol" to row.symbol, "fresh_ltp" to ltp))
                 continue
             }
