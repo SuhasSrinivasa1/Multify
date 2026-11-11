@@ -1,9 +1,9 @@
 package com.multify.traderpro.engine
 
 /**
- * Fixed production is always 15-minute. Optional five-minute research uses Alpha only
- * when there is generous LIVE_DATA and HISTORICAL headroom and no upcoming Fixed scan.
- * This policy never changes production scan cadence, trading, or broker rate limits.
+ * Fixed production is always 15-minute. Optional five-minute research prefers Beta and
+ * uses Alpha only when Beta is not configured, with spare LIVE/HISTORICAL headroom and
+ * no upcoming Fixed scan. One symbol is sampled per 12 minutes; never changes trading.
  */
 object FixedShadowSamplingPolicy {
     const val MIN_INTERVAL_MS = 12L * 60L * 1000L
