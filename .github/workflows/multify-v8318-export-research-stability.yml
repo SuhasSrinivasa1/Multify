@@ -206,10 +206,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v8.3.18-accuracy-api-stability-shadow-debug.apk
+          cp app/build/outputs/apk/debug/app-debug.apk dist/Multify-TraderPro-v8.3.18-export-research-stability-debug.apk
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs dist/*.apk > dist/APK-SIGNATURE.txt
           "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging dist/*.apk | head -n 2 > dist/PACKAGE.txt
-          grep -q "versionCode='8398'" dist/PACKAGE.txt
+          grep -q "versionCode='8399'" dist/PACKAGE.txt
           sha256sum dist/*.apk > dist/SHA256SUMS.txt
           git rev-parse HEAD > dist/SOURCE-COMMIT.txt
           if [[ "${STABLE_SIGNING_READY:-false}" == "true" ]]; then
