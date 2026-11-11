@@ -4630,8 +4630,9 @@ class TradingRepository @Inject constructor(
 
     /**
      * Research-only: an already sampled production 15m evaluation is compared to a 5m
-     * historical view ending at the SAME quote timestamp. One additional Alpha 5m
-     * history call, never an extra quote or full-market scan. No execution or ranking effect.
+     * historical view ending at the SAME quote timestamp. One additional Beta 5m
+     * history call (Alpha only if Beta is not configured), never an extra quote or
+     * full-market scan. No execution or production-ranking effect.
      */
     suspend fun sampleFixedFiveMinuteShadow(completedScanNumber: Int) {
         if (!fixedFiveMinuteShadowMutex.tryLock()) return
