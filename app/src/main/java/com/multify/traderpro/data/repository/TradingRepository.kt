@@ -7624,26 +7624,47 @@ class TradingRepository @Inject constructor(
         val token = ensureToken() ?: return fixedRecommendationStore.recommendations(today).count { it.status == "ACTIVE" }
         val symbols = rows.map { it.symbol.uppercase(Locale.US) }.distinct()
         if (symbols.isEmpty()) return 0
-        val fetched = runCatching {
-            withFixedLiveDataSlot {
-                apiFactory.groww.ltp(
-                    bearer(token), exchangeSymbols = symbols.joinToString(",") { "NSE_$it" }
-                ).requirePayload("Fixed outcome live LTP")
+        val fetched = linkedMapOf<String, Double>()
+        val chunks = symbols.chunked(com.multify.traderpro.engine.FixedDualAccountPolicy.FULL_NSE_LTP_BATCH_LIMIT)
+        for ((batchIndex, chunk) in chunks.withIndex()) {
+            if (fixedApiPriorityRequested || marketCriticalTradeInFlight) break
+            val batch = runCatching {
+                withFixedLiveDataSlot {
+                    apiFactory.groww.ltp(
+                        bearer(token), exchangeSymbols = chunk.joinToString(",") { "NSE_$it" }
+                    ).requirePayload("Fixed outcome live LTP batch")
+                }
+            }.onFailure { failure ->
+                auditLogger.logAsync("FIXED_OUTCOME", "LIVE_SAMPLE_BATCH_ERROR", mapOf(
+                    "account" to "ALPHA", "batch_index" to batchIndex,
+                    "batch_count" to chunks.size, "symbols" to chunk.size,
+                    "http_code" to ((failure as? HttpException)?.code() ?: 0),
+                    "error_type" to failure.javaClass.simpleName,
+                    "message" to (failure.message ?: failure.javaClass.simpleName).take(180),
+                    "retry_attempted" to false,
+                    "remaining_batches_skipped" to (chunks.size - batchIndex - 1)
+                ))
+            }.getOrNull() ?: break
+            batch.forEach { (key, value) ->
+                if (value.isFinite() && value > 0.0) fetched[key] = value
             }
-        }.onFailure {
-            auditLogger.log("FIXED_OUTCOME", "LIVE_SAMPLE_ERROR", mapOf(
-                "symbols" to symbols.size, "message" to (it.message ?: it.javaClass.simpleName)
-            ))
-        }.getOrNull().orEmpty()
+        }
         val observedAt = System.currentTimeMillis()
         for (row in fixedRecommendationStore.recommendations(today)) {
             val price = fetched["NSE_${row.symbol.uppercase(Locale.US)}"]
                 ?: fetched[row.symbol.uppercase(Locale.US)] ?: continue
             if (price.isFinite() && price > 0.0) {
-                updateFixedObservedOutcome(row, price, observedAt, "LIVE_LTP")
+                updateFixedObservedOutcome(row, price, observedAt, "LIVE_LTP_BATCHED")
                 observed++
             }
         }
+        auditLogger.logAsync("FIXED_OUTCOME", "LIVE_SAMPLE_BATCH_PROFILE", mapOf(
+            "account" to "ALPHA", "symbols" to symbols.size,
+            "batch_size" to com.multify.traderpro.engine.FixedDualAccountPolicy.FULL_NSE_LTP_BATCH_LIMIT,
+            "batch_count" to chunks.size, "prices_returned" to fetched.size,
+            "additional_retries" to 0,
+            "all_requests_passed_governor" to true
+        ))
         if (observed > 0) {
             if (observed > 0) fixedOutcomePerformanceStore.record(fixedRecommendationStore.recommendations(today))
             fixedHistoricalEvidenceArchive.capture(fixedRecommendationStore.recommendations(today))
