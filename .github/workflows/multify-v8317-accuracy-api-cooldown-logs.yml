@@ -97,6 +97,11 @@ jobs:
           assert 'account_10s_at_start' in Path(root + 'data/network/GrowwHttpTraceLedger.kt').read_text()
           assert 'inFlightByEndpoint' in Path(root + 'data/network/GrowwHttpTraceLedger.kt').read_text()
           assert 'diagnosticStatus()' in Path(root + 'data/network/BetaResearchGate.kt').read_text()
+          recovery = Path(root + 'data/network/GrowwRecoveryGate.kt').read_text()
+          assert 'endpointCooldownUntilMs' in recovery
+          assert 'on429(category, retryAfterMs, path)' in Path(root + 'data/network/GrowwRateLimitInterceptor.kt').read_text()
+          assert 'endpointCooldownUntilMs' in current
+          assert 'APP_PER_MINUTE = 20' in Path(root + 'data/network/GrowwHistoricalThrottlePolicy.kt').read_text()
           assert 'BETA_BATCH_SKIPPED_COOLDOWN_NO_ALPHA_FALLBACK' in current
           assert 'BETA_DETAIL_FAILED_NO_ALPHA_FALLBACK' in current
           assert 'PREFETCH_INVALID_SCAN_DEFERRED_NO_DUPLICATE_SWEEP' in current
