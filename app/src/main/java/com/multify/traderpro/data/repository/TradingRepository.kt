@@ -401,6 +401,7 @@ class TradingRepository @Inject constructor(
         val quality: FixedForecastQualityDecision,
         val factorModel: FixedMultifyFactorModel,
         val score: Double,
+        val rankScore: Double,
         val championKey: String
     )
 
@@ -3918,24 +3919,35 @@ class TradingRepository @Inject constructor(
             val qualityBonus = FixedForecastQualityPolicy.rankingBonus(row.second, quality.volatilityCapacityPct, targetPct, quality.tier)
             val researchBonus = researchEvidenceBonus(row.second)
             val familyBonus = FixedMultifyFactorFamilies.rankingBonus(factorModel)
+            val rawRankScore = row.second.confidence +
+                row.second.directionalScore.coerceAtLeast(0.0) * 0.10 +
+                championBonus + frequencyBonus + dnaBonus + qualityBonus + researchBonus + familyBonus
             FixedCandidate(
                 symbol = row.first,
                 evaluation = row.second,
                 quality = quality,
                 factorModel = factorModel,
-                score = (
-                    row.second.confidence +
-                        row.second.directionalScore.coerceAtLeast(0.0) * 0.10 +
-                        championBonus + frequencyBonus + dnaBonus + qualityBonus + researchBonus + familyBonus
-                    ).coerceIn(0.01, .99),
+                // Monotonic bounded display score; rawRankScore preserves full ordering information.
+                score = (0.5 + 0.5 * (rawRankScore / (1.0 + kotlin.math.abs(rawRankScore))))
+                    .coerceIn(0.01, .99),
+                rankScore = rawRankScore,
                 championKey = key
             )
         }.sortedWith(
             compareByDescending<FixedCandidate> {
                 when (it.quality.tier) { "PRIMARY" -> 3; "SECONDARY" -> 2; else -> 1 }
-            }.thenByDescending { it.score }
+            }.thenByDescending { it.rankScore }
         )
 
+        auditLogger.logAsync("FIXED_RANKING", "UNSATURATED_INTERNAL_SCORE_PROFILE", mapOf(
+            "candidate_count" to ranked.size,
+            "top_candidates" to ranked.take(20).map {
+                mapOf("symbol" to it.symbol, "raw_rank_score" to it.rankScore,
+                    "display_score" to it.score, "tier" to it.quality.tier)
+            },
+            "ranking_uses_raw_score" to true,
+            "display_score_is_not_a_probability" to true
+        ))
         fixedRecommendationStore.appendObservations(
             ranked.take(FIXED_V741_RESEARCH_CAPTURE_TOP_N).map { item ->
                 FixedScanObservation(
