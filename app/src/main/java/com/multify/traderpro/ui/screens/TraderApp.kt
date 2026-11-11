@@ -118,7 +118,7 @@ private fun FixedScanTrendChart() {
     val median = FixedScanTrendStore.percentile(durations, 0.5)
     val p90 = FixedScanTrendStore.percentile(durations, 0.9)
     val blocked = history.count { it.result.startsWith("DEFERRED") }
-    val failures = history.count { it.result == "FAILED_OR_SKIPPED" }
+    val failures = history.count { it.result == "FAILED" || it.result == "FAILED_OR_SKIPPED" }
     val stroke = MaterialTheme.colorScheme.primary
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         shape = RoundedCornerShape(20.dp)) {
