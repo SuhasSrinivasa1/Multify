@@ -6,6 +6,7 @@ package com.multify.traderpro.engine
  * cannot make the invalid Beta quote eligible.
  */
 object FixedBetaDetailFallbackPolicy {
-    fun shouldRetryOnAlpha(failure: Throwable): Boolean =
-        !(failure is IllegalArgumentException && failure.message == "FIXED_PRICE_BAND_OUTSIDE")
+    // Never amplify a Beta outage into an Alpha Live/Historical burst.
+    // Fixed must defer incomplete evaluations, not submit speculative retries.
+    fun shouldRetryOnAlpha(failure: Throwable): Boolean = false
 }
