@@ -988,7 +988,7 @@ private fun FixedScreen(
                     Text("ALPHA Live Data: ${alphaLive.usedLastMinute}/${alphaLive.appPerMinuteLimit} per minute · Fixed 80% allocation (240/min) · LTP guard 40/min · 60/min priority reserve",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text("BETA Live Data: ${betaLive.usedLastMinute}/${betaLive.endpointLimitPerMinute} endpoint/min · account allocation ${betaLive.accountBudgetPerMinute}/min (90%) · adaptive gap ${betaLive.activeGapMs}ms" +
+                    Text("BETA Live Data: ${betaLive.usedLastMinute}/${betaLive.endpointLimitPerMinute} internal live safety/min · account allocation ${betaLive.accountBudgetPerMinute}/min (90%) · adaptive gap ${betaLive.activeGapMs}ms" +
                         if (betaLive.cooldownRemainingMs > 0)
                             " · Beta retry in ${(betaLive.cooldownRemainingMs + 999) / 1000}s"
                         else if (betaLive.halfOpenProbeInFlight) " · recovery probe" else "",
