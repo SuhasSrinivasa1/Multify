@@ -109,6 +109,8 @@ jobs:
           assert 'BETA_DETAIL_FAILED_NO_ALPHA_FALLBACK' in current
           assert 'PREFETCH_INVALID_SCAN_DEFERRED_NO_DUPLICATE_SWEEP' in current
           assert 'LIVE_SAMPLE_BATCH_PROFILE' in current
+          assert 'BETA_MONITOR_SKIPPED_SESSION_UNAVAILABLE_NO_ALPHA_FALLBACK' in current
+          assert 'Fixed outcome Beta monitor cannot borrow Alpha' in current
           assert 'symbols.chunked(com.multify.traderpro.engine.FixedDualAccountPolicy.FULL_NSE_LTP_BATCH_LIMIT)' in current
           assert 'broker429 || localCooldown' in current
           assert 'FixedEntrySafetyOverlay.assess(snapshot)' in Path(root + 'engine/FixedEntryActionabilityPolicy.kt').read_text()
