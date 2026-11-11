@@ -4635,36 +4635,81 @@ class TradingRepository @Inject constructor(
      */
     suspend fun sampleFixedFiveMinuteShadow(completedScanNumber: Int) {
         if (!fixedFiveMinuteShadowMutex.tryLock()) return
+        var sampleAccount = "NONE"
         try {
             val now = ZonedDateTime.now(INDIA)
             if (now.dayOfWeek.value >= 6 || now.toLocalTime() !in LocalTime.of(9, 15)..LocalTime.of(15, 25)) return
             val nowMs = System.currentTimeMillis()
             val lastSuccess = fixedShadowPrefs.getLong("last_successful_at_ms", 0L)
+            val betaConfigured = secretStore.hasBetaCredentials()
+            val betaToken = fixedBetaMarketTokenOrNull()
+            if (betaConfigured && betaToken == null) {
+                auditLogger.logAsync("FIXED_5M_SHADOW", "BETA_UNAVAILABLE_NO_ALPHA_FALLBACK", mapOf(
+                    "scan_number" to completedScanNumber,
+                    "alpha_fallback_attempted" to false,
+                    "alpha_execution_reserve_preserved" to true
+                ))
+                return
+            }
+            val betaStatus = if (betaToken != null) betaResearchGate.diagnosticStatus() else emptyMap()
+            val betaLive = betaStatus["LIVE"] ?: emptyMap()
+            val betaHistorical = betaStatus["HISTORICAL"] ?: emptyMap()
             val api = GrowwApiUsageLedger.snapshot()
-            val live = api.categories.first { it.category == GrowwApiUsageLedger.Category.LIVE_DATA }
-            val historical = api.categories.first { it.category == GrowwApiUsageLedger.Category.HISTORICAL }
-            val brokerReady = marketDataAvailableForFixed() && !recoveryGate.requiresReconnect()
-            val status = recoveryGate.status(nowMs)
-            val latestCooldownUntilMs = maxOf(
-                status.categoryCooldownUntilMs[GrowwApiUsageLedger.Category.LIVE_DATA] ?: 0L,
-                status.categoryCooldownUntilMs[GrowwApiUsageLedger.Category.HISTORICAL] ?: 0L
-            )
-            val lastObserved429AtMs = maxOf(live.lastRateLimitAtMs, historical.lastRateLimitAtMs)
+            val alphaLive = api.categories.first { it.category == GrowwApiUsageLedger.Category.LIVE_DATA }
+            val alphaHistorical = api.categories.first { it.category == GrowwApiUsageLedger.Category.HISTORICAL }
+            val sampleAccount = if (betaToken != null) "BETA" else "ALPHA"
+            val liveUsed: Int
+            val liveLimit: Int
+            val historicalUsed: Int
+            val historicalLimit: Int
+            val latestCooldownUntilMs: Long
+            val lastObserved429AtMs: Long
+            val brokerReady: Boolean
+            if (betaToken != null) {
+                liveUsed = (betaLive["used_60s"] as? Number)?.toInt() ?: 0
+                liveLimit = betaResearchGate.configuredLiveLimitPerMinute()
+                historicalUsed = (betaHistorical["used_60s"] as? Number)?.toInt() ?: 0
+                historicalLimit = betaResearchGate.configuredHistoricalLimitPerMinute()
+                val elapsedNow = android.os.SystemClock.elapsedRealtime()
+                val cooldownElapsed = maxOf(
+                    (betaLive["cooldown_until_elapsed_ms"] as? Number)?.toLong() ?: 0L,
+                    (betaHistorical["cooldown_until_elapsed_ms"] as? Number)?.toLong() ?: 0L
+                )
+                latestCooldownUntilMs = if (cooldownElapsed > 0L)
+                    nowMs + (cooldownElapsed - elapsedNow) else 0L
+                lastObserved429AtMs = 0L // the persistent cooldown deadline carries the Beta quiet period
+                brokerReady = betaResearchGate.healthyForFixed(BetaResearchGate.Type.LIVE) &&
+                    betaResearchGate.healthyForFixed(BetaResearchGate.Type.HISTORICAL)
+            } else {
+                liveUsed = alphaLive.usedLastMinute
+                liveLimit = alphaLive.appPerMinuteLimit
+                historicalUsed = alphaHistorical.usedLastMinute
+                historicalLimit = alphaHistorical.appPerMinuteLimit
+                val recovery = recoveryGate.status(nowMs)
+                latestCooldownUntilMs = maxOf(
+                    recovery.categoryCooldownUntilMs[GrowwApiUsageLedger.Category.LIVE_DATA] ?: 0L,
+                    recovery.categoryCooldownUntilMs[GrowwApiUsageLedger.Category.HISTORICAL] ?: 0L,
+                    recoveryGate.endpointCooldownUntilMs(GrowwApiUsageLedger.Category.LIVE_DATA, "/v1/live-data/ltp"),
+                    recoveryGate.endpointCooldownUntilMs(GrowwApiUsageLedger.Category.LIVE_DATA, "/v1/live-data/quote"),
+                    recoveryGate.endpointCooldownUntilMs(GrowwApiUsageLedger.Category.HISTORICAL, "/v1/historical/candles")
+                )
+                lastObserved429AtMs = maxOf(alphaLive.lastRateLimitAtMs, alphaHistorical.lastRateLimitAtMs)
+                brokerReady = marketDataAvailableForFixed() && !recoveryGate.requiresReconnect()
+            }
             val fixedDueIn = millisUntilNextFixedScan()
             if (!FixedShadowSamplingPolicy.canCollect(
                     nowMs, lastSuccess, fixedApiPriorityRequested, marketCriticalTradeInFlight,
-                    fixedDueIn, live.usedLastMinute, live.appPerMinuteLimit,
-                    historical.usedLastMinute, historical.appPerMinuteLimit, brokerReady,
+                    fixedDueIn, liveUsed, liveLimit, historicalUsed, historicalLimit, brokerReady,
                     latestBrokerCooldownUntilMs = latestCooldownUntilMs,
                     lastObserved429AtMs = lastObserved429AtMs
                 )
             ) {
                 auditLogger.logAsync("FIXED_5M_SHADOW", "IDLE_CAPACITY_SKIPPED", mapOf(
-                    "scan_number" to completedScanNumber, "alpha_only" to true,
+                    "scan_number" to completedScanNumber, "account" to sampleAccount,
                     "fixed_due_in_ms" to fixedDueIn, "fixed_priority" to fixedApiPriorityRequested,
                     "critical_trade" to marketCriticalTradeInFlight, "broker_ready" to brokerReady,
-                    "live_minute" to live.usedLastMinute,
-                    "historical_minute" to historical.usedLastMinute,
+                    "live_minute" to liveUsed, "live_limit" to liveLimit,
+                    "historical_minute" to historicalUsed, "historical_limit" to historicalLimit,
                     "latest_cooldown_until_ms" to latestCooldownUntilMs,
                     "last_429_at_ms" to lastObserved429AtMs,
                     "research_429_quiet_period_ms" to FixedShadowSamplingPolicy.POST_429_RESEARCH_QUIET_PERIOD_MS
@@ -4672,8 +4717,7 @@ class TradingRepository @Inject constructor(
                 return
             }
             val today = now.toLocalDate().toString()
-            // Rotate across eligible evaluated symbols (including non-recommendations).
-            // Otherwise a single published symbol would dominate all shadow samples.
+            // Rotate across eligible evaluated symbols, not just already-published recommendations.
             val preferred = fixedRecommendationStore.recommendations(today).map { it.symbol }
             val candidates = (preferred + fixedShadowReferences.keys.sorted()).distinct().mapNotNull { symbol ->
                 fixedShadowReferences[symbol]?.takeIf {
@@ -4684,35 +4728,53 @@ class TradingRepository @Inject constructor(
             val candidate = if (candidates.isEmpty()) null
                 else candidates[Math.floorMod(completedScanNumber, candidates.size)]
             if (candidate == null) {
-                auditLogger.logAsync("FIXED_5M_SHADOW", "NO_FRESH_PRODUCTION_15M_REFERENCE")
+                auditLogger.logAsync("FIXED_5M_SHADOW", "NO_FRESH_PRODUCTION_15M_REFERENCE",
+                    mapOf("account" to sampleAccount))
                 return
             }
             val (symbol, reference) = candidate
-            val token = ensureToken() ?: return // Alpha only: no Beta account, no fallback.
+            val alphaToken = if (betaToken == null) ensureToken() else null
+            if (betaToken == null && alphaToken == null) return
             if (fixedApiPriorityRequested || marketCriticalTradeInFlight ||
                 millisUntilNextFixedScan() < FixedShadowSamplingPolicy.MIN_FIXED_HEADROOM_MS
             ) return
             val referenceTime = ZonedDateTime.ofInstant(
                 java.time.Instant.ofEpochMilli(reference.quoteCapturedAtMs), INDIA
             )
-            val start = referenceTime.minusDays(4).toLocalDate().atTime(9, 15).format(HIST_FORMAT)
-            val end = referenceTime.toLocalDateTime().format(HIST_FORMAT)
+            val startTime = referenceTime.minusDays(4).toLocalDate().atTime(9, 15).format(HIST_FORMAT)
+            val endTime = referenceTime.toLocalDateTime().format(HIST_FORMAT)
             val before = System.currentTimeMillis()
-            // Never occupy Fixed's request slot waiting for a full network timeout.
+            // Exactly one historical request, through the selected account's governor.
             val history = withTimeoutOrNull(
                 (millisUntilNextFixedScan() - 1_500L).coerceIn(500L, 4_000L)
             ) {
-                if (fixedApiPriorityRequested || marketCriticalTradeInFlight || !marketDataAvailableForFixed()) null
-                else apiFactory.groww.historicalCandles(
-                    bearer(token), growwSymbol = "NSE-$symbol",
-                    startTime = start, endTime = end, candleInterval = "5minute"
-                ).requirePayload("Alpha idle Fixed shadow 5m $symbol")
+                if (fixedApiPriorityRequested || marketCriticalTradeInFlight) null
+                else if (betaToken != null) {
+                    if (!betaResearchGate.healthyForFixed(BetaResearchGate.Type.HISTORICAL)) null
+                    else betaMarketRead(
+                        betaToken, BetaResearchGate.Type.HISTORICAL,
+                        alphaCall = { error("Fixed 5m Beta shadow cannot borrow Alpha") },
+                        betaCall = {
+                            apiFactory.betaGroww.historicalCandles(
+                                bearer(betaToken), growwSymbol = "NSE-$symbol",
+                                startTime = startTime, endTime = endTime, candleInterval = "5minute"
+                            ).requirePayload("Beta idle Fixed shadow 5m $symbol")
+                        }
+                    )
+                } else {
+                    if (!marketDataAvailableForFixed()) null
+                    else apiFactory.groww.historicalCandles(
+                        bearer(alphaToken!!), growwSymbol = "NSE-$symbol",
+                        startTime = startTime, endTime = endTime, candleInterval = "5minute"
+                    ).requirePayload("Alpha idle Fixed shadow 5m $symbol")
+                }
             }
             if (history == null || history.candles.size < 5) {
                 auditLogger.logAsync("FIXED_5M_SHADOW", "HISTORICAL_UNAVAILABLE_OR_TIMED_OUT", mapOf(
-                    "symbol" to symbol, "alpha_only" to true,
+                    "symbol" to symbol, "account" to sampleAccount,
                     "elapsed_ms" to (System.currentTimeMillis() - before),
-                    "extra_historical_requests_attempted" to 1
+                    "extra_historical_requests_attempted" to 1,
+                    "alpha_fallback_attempted" to false
                 ))
                 return
             }
@@ -4726,10 +4788,10 @@ class TradingRepository @Inject constructor(
             val targetPct = FixedForecastQualityPolicy.adaptiveTargetPct(
                 fixedSnapshotMultifyMfeAverage(ensureFixedEngineSnapshot()), emptyList()
             )
-            val regime = "BREADTH_NEUTRAL" // Same neutral reference for both variants.
+            val regime = "BREADTH_NEUTRAL"
             val tier15 = FixedForecastQualityPolicy.evaluate(fifteen, targetPct, regime).tier
             val tier5 = FixedForecastQualityPolicy.evaluate(five, targetPct, regime).tier
-            val entryConfirmation = com.multify.traderpro.engine.FixedFiveMinuteEntryPolicy.evaluate(
+            val entryConfirmation = FixedFiveMinuteEntryPolicy.evaluate(
                 five.features, fifteenMinutePrimary = tier15 == "PRIMARY" && fifteen.directionalScore > 0.0
             )
             val price = reference.quote.lastPrice ?: return
@@ -4744,7 +4806,7 @@ class TradingRepository @Inject constructor(
             fixedFiveMinuteShadowJournal.append(pair)
             fixedShadowPrefs.edit().putLong("last_successful_at_ms", System.currentTimeMillis()).apply()
             auditLogger.logAsync("FIXED_5M_SHADOW", "PAIRED_SIGNAL_CAPTURED", mapOf(
-                "date" to today, "symbol" to symbol,
+                "date" to today, "symbol" to symbol, "account" to sampleAccount,
                 "entry_price" to price, "reference_quote_at_ms" to reference.quoteCapturedAtMs,
                 "reference_age_ms" to (nowMs - reference.quoteCapturedAtMs),
                 "target_pct" to targetPct, "tier_15m" to tier15, "tier_5m" to tier5,
@@ -4764,25 +4826,23 @@ class TradingRepository @Inject constructor(
                 "five_minute_session_bars" to five.features.sessionCandleCount,
                 "five_minute_orb5_independently_available" to (five.features.orb5High != null),
                 "bid_price" to reference.quote.bidPrice, "ask_price" to reference.quote.offerPrice,
-                "bid_quantity" to reference.quote.bidQuantity,
-                "ask_quantity" to reference.quote.offerQuantity,
+                "bid_quantity" to reference.quote.bidQuantity, "ask_quantity" to reference.quote.offerQuantity,
                 "total_buy_quantity" to reference.quote.totalBuyQuantity,
                 "total_sell_quantity" to reference.quote.totalSellQuantity,
                 "day_traded_volume" to reference.quote.volume,
-                "account" to "ALPHA", "extra_quote_requests" to 0,
-                "extra_historical_requests" to 1,
-                "one_in_ten_sampling_removed" to true,
+                "extra_quote_requests" to 0, "extra_historical_requests" to 1,
                 "orders_allowed" to false, "production_fixed_candles" to "15minute",
-                "comparison_group" to pair.comparisonGroup,
-                "session_bucket" to pair.sessionBucket,
+                "comparison_group" to pair.comparisonGroup, "session_bucket" to pair.sessionBucket,
                 "both_variants_same_15m_reference_quote" to true,
                 "5m_research_only" to true, "same_production_quote" to true,
-                "outcomes_are_sampled_not_realised" to true
+                "outcomes_are_sampled_not_realised" to true,
+                "alpha_fallback_attempted" to false
             ))
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (err: Throwable) {
             auditLogger.logAsync("FIXED_5M_SHADOW", "SAMPLE_ERROR", mapOf(
+                "account" to sampleAccount,
                 "error_type" to err.javaClass.simpleName, "error" to (err.message ?: "")
             ))
         } finally {
