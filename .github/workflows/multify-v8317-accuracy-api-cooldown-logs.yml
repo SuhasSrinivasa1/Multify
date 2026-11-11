@@ -61,9 +61,9 @@ jobs:
               start = src.find('fun ' + name + '(')
               assert start >= 0, 'Missing protected method: ' + name
               stops = [p for p in (
-                  src.find('\\n    private ', start + 1),
-                  src.find('\\n    suspend fun ', start + 1),
-                  src.find('\\n    fun ', start + 1)
+                  src.find('\n    private ', start + 1),
+                  src.find('\n    suspend fun ', start + 1),
+                  src.find('\n    fun ', start + 1)
               ) if p >= 0]
               return src[start:min(stops)] if stops else src[start:]
           for name in ['submitMarketOrder','submitFixedEntryGtt','preFixedAutoBuyExecutionGuard','placeCncBuy']:
