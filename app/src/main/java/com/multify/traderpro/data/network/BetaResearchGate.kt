@@ -32,6 +32,8 @@ class BetaResearchGate @Inject constructor() {
     )
     data class LiveStatus(
         val usedLastMinute: Int = 0,
+        val usedLastSecond: Int = 0,
+        val inFlight: Int = 0,
         val endpointLimitPerMinute: Int = FixedDualAccountPolicy.BETA_LIVE_PER_MINUTE,
         val cooldownRemainingMs: Long = 0L,
         val halfOpenProbeInFlight: Boolean = false,
@@ -44,6 +46,7 @@ class BetaResearchGate @Inject constructor() {
         val rateLimitIncidents: ArrayDeque<Long> = ArrayDeque(),
         var cooldownUntil: Long = 0L,
         var lastGrantedAt: Long = 0L,
+        var inFlight: Int = 0,
         var probeRequired: Boolean = false,
         var probeInFlight: Boolean = false
     )
@@ -53,7 +56,7 @@ class BetaResearchGate @Inject constructor() {
     // Conservative per-endpoint limits observed necessary after 429s. Groww
     // documents 300 LIVE category requests/min per account; that is not a
     // promise that one /ltp endpoint can safely sustain 300 requests/min.
-    private val liveSec = 9
+    private val liveSec = 2
     private val liveMinute = FixedDualAccountPolicy.BETA_LIVE_PER_MINUTE
     private val histSec = 1
     private val histMinute = FixedDualAccountPolicy.BETA_HISTORICAL_PER_MINUTE
@@ -74,6 +77,8 @@ class BetaResearchGate @Inject constructor() {
     private fun updateLiveStatus(now: Long, w: Window) {
         liveStatusSnapshot = LiveStatus(
             usedLastMinute = w.minute.size,
+            usedLastSecond = w.second.size,
+            inFlight = w.inFlight,
             endpointLimitPerMinute = liveMinute,
             cooldownRemainingMs = (w.cooldownUntil - now).coerceAtLeast(0L),
             halfOpenProbeInFlight = w.probeInFlight,
@@ -98,6 +103,7 @@ class BetaResearchGate @Inject constructor() {
                     spacingWait,
                     (w.cooldownUntil - now).coerceAtLeast(0L),
                     if (w.probeRequired && w.probeInFlight) 100L else 0L,
+                    if (w.inFlight >= if (type == Type.LIVE) 2 else 1) 100L else 0L,
                     if (w.second.size >= perSecond) (w.second.first() + 1_000L - now).coerceAtLeast(1L) else 0L,
                     if (w.minute.size >= perMinute) (w.minute.first() + 60_000L - now).coerceAtLeast(1L) else 0L
                 )
@@ -105,6 +111,7 @@ class BetaResearchGate @Inject constructor() {
                     w.second.addLast(now)
                     w.minute.addLast(now)
                     w.lastGrantedAt = now
+                    w.inFlight++
                     if (w.probeRequired) w.probeInFlight = true
                 }
                 if (type == Type.LIVE) updateLiveStatus(now, w)
@@ -162,6 +169,11 @@ class BetaResearchGate @Inject constructor() {
             }
             throw failure
         } finally {
+            lock.withLock {
+                val w = windows.getValue(type)
+                w.inFlight = (w.inFlight - 1).coerceAtLeast(0)
+                if (type == Type.LIVE) updateLiveStatus(SystemClock.elapsedRealtime(), w)
+            }
             lastLatencyMs.set((SystemClock.elapsedRealtime() - started).coerceAtLeast(0L))
         }
     }
@@ -181,6 +193,24 @@ class BetaResearchGate @Inject constructor() {
         liveRequests.get(), historicalRequests.get(), liveFailures.get(), historicalFailures.get(),
         liveRateLimits.get(), historicalRateLimits.get(), lastLatencyMs.get()
     )
+    suspend fun diagnosticStatus(): Map<String, Map<String, Any>> = lock.withLock {
+        val now = SystemClock.elapsedRealtime()
+        Type.values().associate { type ->
+            val w = windows.getValue(type)
+            while (w.second.isNotEmpty() && w.second.first() <= now - 1_000L) w.second.removeFirst()
+            while (w.minute.isNotEmpty() && w.minute.first() <= now - 60_000L) w.minute.removeFirst()
+            type.name to mapOf(
+                "used_1s" to w.second.size,
+                "used_60s" to w.minute.size,
+                "in_flight" to w.inFlight,
+                "cooldown_remaining_ms" to (w.cooldownUntil - now).coerceAtLeast(0L),
+                "probe_required" to w.probeRequired,
+                "probe_in_flight" to w.probeInFlight,
+                "last_granted_ago_ms" to if (w.lastGrantedAt > 0L) (now - w.lastGrantedAt).coerceAtLeast(0L) else -1L
+            )
+        }
+    }
+
     fun configuredLiveLimitPerMinute() = liveMinute
     fun configuredHistoricalLimitPerMinute() = histMinute
 
