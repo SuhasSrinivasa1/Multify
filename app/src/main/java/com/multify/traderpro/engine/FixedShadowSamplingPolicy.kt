@@ -10,7 +10,7 @@ object FixedShadowSamplingPolicy {
     const val MIN_FIXED_HEADROOM_MS = 5_000L
     const val MAX_REFERENCE_AGE_MS = 5L * 60L * 1000L
     const val MAX_PAIRED_SYMBOLS_PER_SAMPLE = 1
-    const val MAX_UTILIZATION_PERCENT = 40
+    const val MAX_UTILIZATION_PERCENT = 75
     const val POST_429_RESEARCH_QUIET_PERIOD_MS = 30L * 60L * 1000L
 
     fun canCollect(
