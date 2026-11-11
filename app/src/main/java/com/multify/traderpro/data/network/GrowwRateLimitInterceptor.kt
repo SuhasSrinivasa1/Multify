@@ -101,8 +101,9 @@ internal class GrowwRateLimitInterceptor(
             val retryAfterMs = GrowwRetryAfterPolicy.retryAfterMs(rawRetryAfter, System.currentTimeMillis())
             val appliedCooldownMs = recoveryGate.on429(category, retryAfterMs, path)
             synchronized(lock) {
-                val state = states.getValue(category)
-                state.cooldownUntilMs = maxOf(state.cooldownUntilMs, SystemClock.elapsedRealtime() + appliedCooldownMs)
+                // RecoveryGate persists this cooldown against the exact endpoint path.
+                // Do not set the category-wide in-memory cooldown: quote traffic and
+                // other LIVE_DATA endpoints remain available when only /ltp was throttled.
                 if (path == "/v1/live-data/ltp")
                     alphaLtpPace = LtpAdaptivePacingPolicy.on429(alphaLtpPace, SystemClock.elapsedRealtime())
             }
