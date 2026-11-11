@@ -3,6 +3,9 @@ package com.multify.traderpro.engine
 import com.multify.traderpro.data.network.HistoricalPayload
 import com.multify.traderpro.data.network.QuotePayload
 import com.multify.traderpro.domain.ParsedSignal
+import java.time.Instant
+import java.time.LocalTime
+import java.time.ZoneId
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -61,7 +64,12 @@ data class FixedFeatureSnapshot(
     val prevLow: Double?,
     val prevClose: Double?,
     val candles: List<FixedCandle>,
-    val sessionCandleCount: Int = 0 // binary compatibility for unused diagnostic overlay
+    val sessionCandleCount: Int = 0,
+    val timestampValidCandleCount: Int = 0,
+    val timestampInvalidCandleCount: Int = 0,
+    val invalidOhlcCandleCount: Int = 0,
+    val incompleteCandleCount: Int = 0,
+    val latestCompletedCandleAtMs: Long? = null
 )
 
 data class FixedStrategyVote(val name: String, val score: Double, val note: String)
@@ -77,20 +85,63 @@ data class FixedStrategyEvaluation(
 )
 
 object FixedLocalStrategyEngine {
-    fun buildFeatures(quote: QuotePayload, historical: HistoricalPayload, intervalMinutes: Int = historical.intervalInMinutes ?: 5): FixedFeatureSnapshot {
-        val candles = historical.candles.mapIndexedNotNull { index, x ->
-            if (x.size < 6) null else runCatching {
-                FixedCandle(
-                    // Groww has returned both epoch-like and textual timestamps across historical APIs.
-                    // Timestamp is not used for signal math, so keep a stable fallback when it is textual.
-                    ts = x[0].takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isNumber }?.asLong ?: index.toLong(),
-                    open = x[1].asDouble,
-                    high = x[2].asDouble,
-                    low = x[3].asDouble,
-                    close = x[4].asDouble,
-                    volume = x[5].asDouble
-                )
+    private val NSE_ZONE: ZoneId = ZoneId.of("Asia/Kolkata")
+    private val NSE_OPEN: LocalTime = LocalTime.of(9, 15)
+    private val NSE_CLOSE: LocalTime = LocalTime.of(15, 30)
+
+    /**
+     * Historical EMA/MACD/RSI/ATR use valid completed bars across the multi-day window.
+     * Session VWAP, session high/low and ORB use ONLY timestamp-verified bars from today.
+     * Invalid timestamps are discarded; never manufacture an index timestamp.
+     */
+    fun buildFeatures(
+        quote: QuotePayload,
+        historical: HistoricalPayload,
+        intervalMinutes: Int = historical.intervalInMinutes ?: 5,
+        asOfMs: Long = System.currentTimeMillis()
+    ): FixedFeatureSnapshot {
+        val interval = intervalMinutes.coerceAtLeast(1)
+        val intervalMs = interval * 60_000L
+        var invalidTimestampCount = 0
+        var invalidOhlcCount = 0
+        var incompleteCount = 0
+        val decoded = mutableListOf<FixedCandle>()
+        historical.candles.forEach { row ->
+            if (row.size < 6) {
+                invalidOhlcCount++
+                return@forEach
+            }
+            val timestamp = MarketCandleTimestampParser.toEpochMillis(row[0])
+            if (timestamp == null || timestamp <= 0L) {
+                invalidTimestampCount++
+                return@forEach
+            }
+            val values = runCatching {
+                listOf(row[1].asDouble, row[2].asDouble, row[3].asDouble, row[4].asDouble, row[5].asDouble)
             }.getOrNull()
+            if (values == null || values.any { !it.isFinite() } ||
+                values[0] <= 0.0 || values[1] < max(values[0], values[3]) ||
+                values[2] > min(values[0], values[3]) || values[1] < values[2] || values[4] < 0.0) {
+                invalidOhlcCount++
+                return@forEach
+            }
+            // Groww candle timestamps are bar-open timestamps. A bar is usable only
+            // after its complete interval has elapsed; partial candles never vote.
+            if (timestamp > asOfMs || timestamp + intervalMs > asOfMs) {
+                incompleteCount++
+                return@forEach
+            }
+            decoded += FixedCandle(timestamp, values[0], values[1], values[2], values[3], values[4])
+        }
+        val candles = decoded.sortedBy { it.ts }.distinctBy { it.ts }
+        require(candles.size >= 5) {
+            "FIXED_CANDLE_DATA_QUALITY: valid_complete=${candles.size}, invalid_timestamp=$invalidTimestampCount, invalid_ohlc=$invalidOhlcCount, incomplete=$incompleteCount"
+        }
+        val today = Instant.ofEpochMilli(asOfMs).atZone(NSE_ZONE).toLocalDate()
+        val sessionCandles = candles.filter { candle ->
+            val local = Instant.ofEpochMilli(candle.ts).atZone(NSE_ZONE)
+            local.toLocalDate() == today && local.toLocalTime() >= NSE_OPEN &&
+                local.toLocalTime() < NSE_CLOSE
         }
         val ltp = quote.lastPrice ?: candles.lastOrNull()?.close ?: error("Groww quote does not contain LTP")
         val closes = candles.map { it.close }
@@ -102,8 +153,8 @@ object FixedLocalStrategyEngine {
             val base = vols.dropLast(1).takeLast(20).average().takeIf { it > 0.0 }
             base?.let { vols.last() / it }
         } else null
-        val (o5h, o5l) = openingRange(candles, 5, intervalMinutes)
-        val (o15h, o15l) = openingRange(candles, 15, intervalMinutes)
+        val (o5h, o5l) = openingRange(sessionCandles, 5, interval)
+        val (o15h, o15l) = openingRange(sessionCandles, 15, interval)
         val bid = quote.bidPrice
         val ask = quote.offerPrice
         val atrNow = atr(candles, 14)
@@ -112,8 +163,8 @@ object FixedLocalStrategyEngine {
         val ema50Now = ema(closes, 50)
         val ema9Prev = ema(closes.dropLast(1), 9)
         val ema20Prev = ema(closes.dropLast(1), 20)
-        val vwapNow = vwap(candles)
-        val vwapPrev = vwap(candles.dropLast(1))
+        val vwapNow = vwap(sessionCandles)
+        val vwapPrev = vwap(sessionCandles.dropLast(1))
         val macdNow = macdHistogram(closes)
         val macdPrev = macdHistogram(closes.dropLast(1))
         val rsiNow = rsi(closes, 14)
@@ -133,8 +184,11 @@ object FixedLocalStrategyEngine {
         val greenVol = recentTen.filter { it.close >= it.open }.sumOf { it.volume }
         val redVol = recentTen.filter { it.close < it.open }.sumOf { it.volume }
         val greenShare = if (greenVol + redVol > 0.0) greenVol / (greenVol + redVol) else null
-        val sessionHigh = candles.maxOfOrNull { it.high }
-        val sessionLow = candles.minOfOrNull { it.low }
+        val sessionHigh = sessionCandles.maxOfOrNull { it.high }
+        val sessionLow = sessionCandles.minOfOrNull { it.low }
+        // Candle-pattern confirmation must come from today's completed session, not yesterday's close.
+        val last = sessionCandles.lastOrNull()
+        val prev = sessionCandles.dropLast(1).lastOrNull()
         return FixedFeatureSnapshot(
             ltp = ltp,
             bid = bid,
@@ -177,7 +231,13 @@ object FixedLocalStrategyEngine {
             orb15High = o15h, orb15Low = o15l,
             lastOpen = last?.open, lastHigh = last?.high, lastLow = last?.low, lastClose = last?.close,
             prevOpen = prev?.open, prevHigh = prev?.high, prevLow = prev?.low, prevClose = prev?.close,
-            candles = candles
+            candles = candles,
+            sessionCandleCount = sessionCandles.size,
+            timestampValidCandleCount = candles.size,
+            timestampInvalidCandleCount = invalidTimestampCount,
+            invalidOhlcCandleCount = invalidOhlcCount,
+            incompleteCandleCount = incompleteCount,
+            latestCompletedCandleAtMs = candles.lastOrNull()?.ts
         )
     }
 
@@ -214,9 +274,19 @@ object FixedLocalStrategyEngine {
         if (f.prevLow != null && f.lastLow != null && f.lastClose != null && f.lastLow < f.prevLow && f.lastClose > f.prevLow)
             votes += FixedStrategyVote("Failed breakdown / bear trap", .65, "prior low swept then reclaimed")
         f.rsi14?.let { rsi ->
-            if (regime == "TREND" && rsi > 55) votes += FixedStrategyVote("RSI trend regime", .28, "RSI ${fmt(rsi)}")
-            else if (rsi > 75) votes += FixedStrategyVote("RSI exhaustion filter", -.18, "RSI ${fmt(rsi)}")
-            else if (rsi < 28) votes += FixedStrategyVote("RSI exhaustion reversal", .22, "RSI ${fmt(rsi)}")
+            val vwapExtension = if (f.vwap != null && atr > 0.0) (px - f.vwap) / atr else 0.0
+            val ema20Extension = if (f.ema20 != null && atr > 0.0) (px - f.ema20) / atr else 0.0
+            val momentumDecelerating = (f.rsiSlope ?: 0.0) <= 0.0
+            if (rsi >= 75.0 && (momentumDecelerating || vwapExtension >= 1.0 || ema20Extension >= 1.0)) {
+                votes += FixedStrategyVote("RSI exhaustion filter", -.18,
+                    "RSI ${fmt(rsi)} with deceleration/extension")
+            } else if (regime == "TREND" && rsi > 55.0) {
+                // High RSI with improving momentum is not automatically penalised;
+                // extension and deceleration are assessed separately.
+                votes += FixedStrategyVote("RSI trend regime", .28, "RSI ${fmt(rsi)}")
+            } else if (rsi < 28.0) {
+                votes += FixedStrategyVote("RSI exhaustion reversal", .22, "RSI ${fmt(rsi)}")
+            }
         }
         f.macdHistogram?.let { h ->
             votes += FixedStrategyVote("MACD momentum", (h / atr * .55).coerceIn(-.45, .45), "hist ${fmt(h)}")
@@ -368,10 +438,17 @@ object FixedLocalStrategyEngine {
     }
 
     private fun openingRange(c: List<FixedCandle>, minutes: Int, intervalMinutes: Int): Pair<Double?, Double?> {
-        if (c.isEmpty()) return null to null
-        val count = max(1, kotlin.math.ceil(minutes.toDouble() / max(1, intervalMinutes)).toInt())
-        val selected = c.take(count)
-        return selected.maxOfOrNull { it.high } to selected.minOfOrNull { it.low }
+        // A 15-minute bar cannot prove a 5-minute opening range. Never label it ORB5.
+        if (c.isEmpty() || intervalMinutes > minutes) return null to null
+        val expectedBars = max(1, kotlin.math.ceil(minutes.toDouble() / intervalMinutes).toInt())
+        val sessionEnd = NSE_OPEN.plusMinutes(minutes.toLong())
+        val selected = c.filter {
+            val localTime = Instant.ofEpochMilli(it.ts).atZone(NSE_ZONE).toLocalTime()
+            localTime >= NSE_OPEN && localTime < sessionEnd
+        }
+        if (selected.size < expectedBars) return null to null
+        return selected.take(expectedBars).maxOfOrNull { it.high } to
+            selected.take(expectedBars).minOfOrNull { it.low }
     }
 
     private fun fmt(x: Double) = String.format(java.util.Locale.US, "%.2f", x)
