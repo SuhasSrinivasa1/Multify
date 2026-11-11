@@ -39,8 +39,8 @@ class FixedShadowSamplingPolicyTest {
             FixedShadowSamplingPolicy.canCollect(
                 nowMs = now, lastSuccessfulAtMs = 0L, fixedPriority = false,
                 criticalTrade = false, millisUntilNextFixed = 60_000L,
-                liveUsedLastMinute = 1, livePerMinuteLimit = 210,
-                historicalUsedLastMinute = 1, historicalPerMinuteLimit = 45,
+                liveUsedLastMinute = 1, livePerMinuteLimit = 40,
+                historicalUsedLastMinute = 1, historicalPerMinuteLimit = 8,
                 brokerReady = true,
                 latestBrokerCooldownUntilMs = cooldownUntil,
                 lastObserved429AtMs = last429
