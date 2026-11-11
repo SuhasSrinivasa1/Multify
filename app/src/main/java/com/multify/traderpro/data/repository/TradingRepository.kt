@@ -2293,6 +2293,8 @@ class TradingRepository @Inject constructor(
         recoveryGate.checkRequestAllowed(
             GrowwApiUsageLedger.Category.LIVE_DATA, "/v1/live-data/ltp")
         recoveryGate.checkRequestAllowed(
+            GrowwApiUsageLedger.Category.LIVE_DATA, "/v1/live-data/quote")
+        recoveryGate.checkRequestAllowed(
             GrowwApiUsageLedger.Category.HISTORICAL, "/v1/historical/candles")
     }.isSuccess
 
@@ -2305,11 +2307,14 @@ class TradingRepository @Inject constructor(
             GrowwApiUsageLedger.Category.HISTORICAL, "/v1/historical/candles")
         val liveLtpEndpointUntil = recoveryGate.endpointCooldownUntilMs(
             GrowwApiUsageLedger.Category.LIVE_DATA, "/v1/live-data/ltp")
+        val liveQuoteEndpointUntil = recoveryGate.endpointCooldownUntilMs(
+            GrowwApiUsageLedger.Category.LIVE_DATA, "/v1/live-data/quote")
         val historicalUntil = maxOf(historicalCategoryUntil, historicalEndpointUntil)
-        val liveUntil = maxOf(liveCategoryUntil, liveLtpEndpointUntil)
+        val liveUntil = maxOf(liveCategoryUntil, liveLtpEndpointUntil, liveQuoteEndpointUntil)
         val blocked = buildList {
             if (liveCategoryUntil > now) add("LIVE_DATA_CATEGORY")
             if (liveLtpEndpointUntil > now) add("LIVE_DATA_LTP_ENDPOINT")
+            if (liveQuoteEndpointUntil > now) add("LIVE_DATA_QUOTE_ENDPOINT")
             if (historicalCategoryUntil > now) add("HISTORICAL_CATEGORY")
             if (historicalEndpointUntil > now) add("HISTORICAL_CANDLES_ENDPOINT")
             if (state.reconnectRequired) add("AUTH_RECONNECT_REQUIRED")
@@ -2320,6 +2325,7 @@ class TradingRepository @Inject constructor(
             "blocked_api_categories" to blocked,
             "live_data_cooldown_until_ms" to liveUntil,
             "live_ltp_endpoint_cooldown_until_ms" to liveLtpEndpointUntil,
+            "live_quote_endpoint_cooldown_until_ms" to liveQuoteEndpointUntil,
             "historical_cooldown_until_ms" to historicalUntil,
             "historical_endpoint_cooldown_until_ms" to historicalEndpointUntil,
             "endpoint_scoped_cooldown" to true,
@@ -2763,6 +2769,7 @@ class TradingRepository @Inject constructor(
             status.categoryCooldownUntilMs[GrowwApiUsageLedger.Category.LIVE_DATA] ?: 0L,
             status.categoryCooldownUntilMs[GrowwApiUsageLedger.Category.HISTORICAL] ?: 0L,
             status.categoryCooldownUntilMs[GrowwApiUsageLedger.Category.NON_TRADING] ?: 0L,
+            recoveryGate.endpointCooldownUntilMs(GrowwApiUsageLedger.Category.LIVE_DATA, "/v1/live-data/ltp"),
             recoveryGate.endpointCooldownUntilMs(GrowwApiUsageLedger.Category.LIVE_DATA, "/v1/live-data/quote"),
             recoveryGate.endpointCooldownUntilMs(GrowwApiUsageLedger.Category.HISTORICAL, "/v1/historical/candles")
         )
