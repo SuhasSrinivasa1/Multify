@@ -87,7 +87,7 @@ jobs:
           assert 'BETA_LIVE_ENDPOINT_PER_MINUTE = 40' in dual
           assert 'BETA_HISTORICAL_PER_MINUTE = 8' in dual
           assert 'FULL_NSE_LTP_BATCH_LIMIT = 50' in dual
-          assert 'Math.floorMod(batchIndex, 2) == 1' in dual
+          assert 'batchIndex % 2 == 1' in dual
           assert 'Math.floorMod(symbol.hashCode(), 4) == 0' in dual
           assert 'MAX_PER_MINUTE = 40' in Path(root + 'engine/AlphaLtpPacingPolicy.kt').read_text()
           assert 'MIN_GAP_MS = 1_000L' in Path(root + 'engine/AlphaLtpPacingPolicy.kt').read_text()
