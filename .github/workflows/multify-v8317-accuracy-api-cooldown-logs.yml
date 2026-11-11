@@ -185,9 +185,12 @@ jobs:
           - Shadow-only 3-factor momentum and 5-minute pullback/reclaim confirmation.
           - Fail-closed BUY eligibility when verified current-session data is missing or stale; peak-extension safety overlay.
           - 0.5% observed pullback required before same-day re-entry after a recorded target hit.
-          - Alpha/Beta LTP pacing, Beta concurrency and 40/min endpoint guards while preserving 80%/90% account allocations.
+          - Alpha/Beta LTP pacing, Beta concurrency and 40/min live safety guards while preserving 80%/90% account allocations (240/270 per minute).
+          - Endpoint-scoped Alpha 429 cooldown: an LTP rejection does not freeze unrelated quote/order endpoints.
           - No Alpha fallback for Beta cooldown; invalid prefetch defers instead of repeating a full market sweep.
-          - Fixed outcome monitoring batches at 50 symbols and stops retrying after 429/cooldown.
+          - Fixed outcome monitoring uses Beta when configured, batches at 50 symbols and stops retrying after 429/cooldown.
+          - Beta-only 5m pullback/reclaim shadow sample at most once per 12 minutes; one historical request, no extra quote/LTP, no production ranking or orders.
+          - Fixed has its own >Rs100 price band; Forecast's existing >Rs200 band is preserved.
           - Per-request start/finish traces, 1s/10s/60s counts, endpoint totals, in-flight, HTTP errors and cooldown diagnostics.
           - Existing protected SELL, GTT, hard-stop and order execution methods unchanged.
           EOF
