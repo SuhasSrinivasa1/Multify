@@ -4072,27 +4072,33 @@ class TradingRepository @Inject constructor(
             com.multify.traderpro.engine.FixedDualAccountPolicy.betaDetailedEvaluation(symbol, true)
         }
         if (beta != null) {
+            val liveReady = betaResearchGate.healthyForFixed(BetaResearchGate.Type.LIVE)
+            val historyReady = betaResearchGate.healthyForFixed(BetaResearchGate.Type.HISTORICAL)
+            if (!liveReady || !historyReady) {
+                auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "BETA_DETAIL_SKIPPED_COOLDOWN", mapOf(
+                    "symbol" to symbol, "live_ready" to liveReady, "historical_ready" to historyReady,
+                    "alpha_fallback_attempted" to false, "previous_valid_discovery_snapshot_retained" to true
+                ))
+                throw IOException("BETA_FIXED_ACCOUNT_COOLDOWN_SKIP")
+            }
             try {
                 return fixedForecastEvaluationUsingAccount(symbol, beta, useBeta = true)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failed: Throwable) {
-                // A correctly enforced Fixed price-band veto is not a Beta transport outage.
-                // Returning to Alpha here repeats a known-invalid quote and wastes requests.
-                if (!com.multify.traderpro.engine.FixedBetaDetailFallbackPolicy.shouldRetryOnAlpha(failed)) {
-                    auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "BETA_DETAIL_PRICE_BAND_SKIPPED", mapOf(
-                        "symbol" to symbol, "reason" to "FIXED_PRICE_BAND_OUTSIDE",
-                        "alpha_fallback_attempted" to false, "fixed_scoring_changed" to false
+                val priceBand = failed is IllegalArgumentException &&
+                    failed.message == "FIXED_PRICE_BAND_OUTSIDE"
+                auditLogger.logAsync("FIXED_DUAL_ACCOUNT",
+                    if (priceBand) "BETA_DETAIL_PRICE_BAND_SKIPPED" else "BETA_DETAIL_FAILED_NO_ALPHA_FALLBACK",
+                    mapOf(
+                        "symbol" to symbol,
+                        "error" to failed.javaClass.simpleName,
+                        "http_code" to ((failed as? HttpException)?.code() ?: 0),
+                        "reason" to (failed.message ?: "UNSPECIFIED").take(180),
+                        "alpha_fallback_attempted" to false,
+                        "fixed_scoring_changed" to false
                     ))
-                    throw failed
-                }
-                auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "BETA_DETAIL_FALLBACK_ALPHA", mapOf(
-                    "symbol" to symbol,
-                    "error" to failed.javaClass.simpleName,
-                    "reason" to (failed.message ?: "UNSPECIFIED").take(180),
-                    "fixed_scoring_changed" to false,
-                    "broker_execution_account" to "ALPHA"
-                ))
+                throw failed
             }
         }
         return fixedForecastEvaluationUsingAccount(symbol, token, useBeta = false)
