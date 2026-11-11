@@ -23,7 +23,7 @@ object FixedMarketPulsePolicy {
         return current.entries.asSequence().mapNotNull { (symbol, newPrice) ->
             val old = previous[symbol] ?: return@mapNotNull null
             if (!old.isFinite() || !newPrice.isFinite() || old <= 0.0 || newPrice <= 0.0 ||
-                !RecommendationPriceBandPolicy.eligible(newPrice)) return@mapNotNull null
+                !FixedPriceBandPolicy.eligible(newPrice)) return@mapNotNull null
             val pct = (newPrice / old - 1.0) * 100.0
             if (pct !in MIN_PULSE_PCT..MAX_PULSE_PCT) return@mapNotNull null
             Pulse(symbol.uppercase(), old, newPrice, pct)
