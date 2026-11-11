@@ -10862,7 +10862,12 @@ class TradingRepository @Inject constructor(
         }
     }
 
-    suspend fun exportCompleteLogs(uri: Uri): LogExportResult {
+    suspend fun exportCompleteLogs(
+        uri: Uri,
+        progress: ((String, Int) -> Unit)? = null
+    ): LogExportResult = withContext(Dispatchers.IO) {
+        // Serialization and SAF writes must not run on Android's main dispatcher.
+        // This export does not change trading or Fixed publication.
         val gson = GsonBuilder().setPrettyPrinting().create()
         val settings = preferences.settings.first()
         val signals = dao.allNow()
@@ -10906,17 +10911,31 @@ class TradingRepository @Inject constructor(
             "safety_halt" to settings.safetyHalt,
             "version" to BuildConfig.VERSION_NAME
         )
-        appContext.contentResolver.openOutputStream(uri)?.use { raw ->
-            ZipOutputStream(raw).use { zip ->
+        var fileCount = 0
+        appContext.contentResolver.openOutputStream(uri, "w")?.use { raw ->
+            ZipOutputStream(java.io.BufferedOutputStream(raw, 64 * 1024)).use { zip ->
+                fun written(name: String) {
+                    fileCount++
+                    progress?.invoke(name, fileCount)
+                }
                 fun add(name: String, value: Any) {
                     zip.putNextEntry(ZipEntry(name))
-                    zip.write(gson.toJson(value).toByteArray(Charsets.UTF_8))
+                    // Stream JSON directly to the ZIP: no giant intermediate String.
+                    val writer = java.io.BufferedWriter(
+                        java.io.OutputStreamWriter(zip, Charsets.UTF_8), 32 * 1024)
+                    gson.toJson(value, writer)
+                    writer.flush() // Do not close the writer before the ZIP entry.
                     zip.closeEntry()
+                    written(name)
                 }
                 fun addText(name: String, value: String) {
                     zip.putNextEntry(ZipEntry(name))
-                    zip.write(value.toByteArray(Charsets.UTF_8))
+                    val writer = java.io.BufferedWriter(
+                        java.io.OutputStreamWriter(zip, Charsets.UTF_8), 32 * 1024)
+                    writer.write(value)
+                    writer.flush()
                     zip.closeEntry()
+                    written(name)
                 }
                 add("settings.json", safeSettings)
                 add("signals.json", signals)
@@ -10930,7 +10949,8 @@ class TradingRepository @Inject constructor(
                 addText("forecast_univest_same_day.jsonl", forecastUnivestJournal.archive())
                 addText("research_outcome_chronology.jsonl", researchOutcomeChronologyJournal.archive())
                 addText("forecast_univest_notification_capture.jsonl", forecastSourceNotificationJournal.archive())
-                addText("decision_evidence.jsonl", decisionEvidenceJournal.archive())
+                decisionEvidenceJournal.appendExportEntry(zip)
+                written("decision_evidence.jsonl")
                 add("long_learning.json", calls)
                 add("long_forecasts.json", forecasts)
                 add("long_champions.json", champions)
@@ -10959,7 +10979,9 @@ class TradingRepository @Inject constructor(
                 ))
                 add("fixed_auto_buy_orders.json", fixedAutoBuyOrders)
                 fixedFactorTelemetry.appendExportEntry(zip)
+                written("fixed_factor_snapshots.jsonl")
                 fixedMarketPathTelemetry.appendExportEntry(zip)
+                written("fixed_market_path.jsonl")
                 add("api_usage_snapshot.json", GrowwApiUsageLedger.snapshot())
                 add("groww_recovery_state.json", recoveryGate.status())
                 add("telemetry_metadata.json", mapOf(
@@ -11021,13 +11043,29 @@ class TradingRepository @Inject constructor(
                     "news_event_outcome_label" to ">=1% measured within 60m from first observed baseline",
                     "fixed_priority_phase_event" to "FIXED_PRIORITY_PHASE_PROFILE",
                     "fixed_entry_latency_event" to "ENTRY_LATENCY_PROFILE",
-                    "fixed_notification_latency_event" to "FIXED_NOTIFICATION_POSTED"
+                    "fixed_notification_latency_event" to "FIXED_NOTIFICATION_POSTED",
+                    "research_delay_buckets" to "QUOTE_CLIENT_RESPONSE_TO_NOTIFICATION_ONLY",
+                    "research_slowness_is_not_an_entry_veto" to true,
+                    "export_streaming_json" to true,
+                    "export_runs_on_io_dispatcher" to true
                 ))
                 fixedSnapshot?.let { add("fixed_engine_snapshot.json", it.payload) }
-                addText("system_audit.jsonl", auditLogger.readAll())
+                auditLogger.appendExportEntry(zip)
+                written("system_audit.jsonl")
+                add("export_manifest.json", mapOf(
+                    "version" to BuildConfig.VERSION_NAME,
+                    "completed_at_ms" to System.currentTimeMillis(),
+                    "files_including_manifest" to (fileCount + 1),
+                    "status" to "WRITTEN_COMPLETE_ZIP_STREAM",
+                    "historical_research_only" to true,
+                    "broker_orders_not_inferred_from_prices" to true,
+                    "fixed_selection_or_trailing_changed_by_export" to false,
+                    "no_automatic_delete_or_truncate" to true
+                ))
+                zip.finish()
             }
         } ?: error("Unable to open export destination")
-        return LogExportResult(if (fixedSnapshot != null) 21 else 20, signals.size, trades.size)
+        LogExportResult(fileCount, signals.size, trades.size)
     }
 
     suspend fun shouldCapturePackage(packageName: String): Boolean {
