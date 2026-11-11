@@ -183,7 +183,7 @@ internal class GrowwRateLimitInterceptor(
         var dominantReason = "NONE"
         try {
         while (true) {
-            try { recoveryGate.checkRequestAllowed(category) }
+            try { recoveryGate.checkRequestAllowed(category, path) }
             catch (blocked: GrowwRecoveryGate.LocallyBlocked) {
                 auditBlocked(category, path, blocked)
                 throw blocked
