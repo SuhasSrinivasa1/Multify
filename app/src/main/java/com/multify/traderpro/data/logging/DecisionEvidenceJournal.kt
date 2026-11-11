@@ -9,6 +9,8 @@ import java.io.File
 import java.security.MessageDigest
 import java.time.Instant
 import java.util.concurrent.atomic.AtomicLong
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -68,6 +70,25 @@ class DecisionEvidenceJournal @Inject constructor(@ApplicationContext context: C
 
     fun archive(): String = synchronized(lock) {
         files().joinToString("") { it.readText() }
+    }
+
+    /** Stream an export snapshot without retaining every decision row in memory. */
+    fun appendExportEntry(zip: ZipOutputStream) {
+        val snapshot = synchronized(lock) { files().map { it to it.length() } }
+        zip.putNextEntry(ZipEntry("decision_evidence.jsonl"))
+        for ((source, initialLength) in snapshot) {
+            source.inputStream().buffered().use { input ->
+                var remaining = initialLength
+                val block = ByteArray(32 * 1024)
+                while (remaining > 0) {
+                    val n = input.read(block, 0, minOf(block.size.toLong(), remaining).toInt())
+                    if (n <= 0) break
+                    zip.write(block, 0, n)
+                    remaining -= n
+                }
+            }
+        }
+        zip.closeEntry()
     }
 
     fun restoreArchived(input: String): Int = synchronized(lock) {
