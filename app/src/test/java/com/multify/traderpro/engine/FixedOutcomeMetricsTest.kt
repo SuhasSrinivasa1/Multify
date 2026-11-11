@@ -25,6 +25,16 @@ class FixedOutcomeMetricsTest {
         assertEquals(.72, s.meanObservedMfePct!!, .0001)
     }
 
+    @Test fun differentNewSetupsInSameSymbolAreBothCounted() {
+        val rows = listOf(
+            FixedOutcomeSample("2026-11-11","TRIVENI",1000L,1.1161,1.3,true,true),
+            FixedOutcomeSample("2026-11-11","TRIVENI",2000L,1.1161,0.2,true,false)
+        )
+        val s = FixedOutcomeMetrics.calculate(rows)
+        assertEquals(2, s.published)
+        assertEquals(2, s.observed)
+        assertEquals(1, s.fullTargetHits)
+    }
     @Test fun noQuotesMeansLearningNotArtificialZeroHitRate() {
         val s = FixedOutcomeMetrics.calculate(listOf(FixedOutcomeSample("2026-10-27", "A", 1, 1.1161, 0.0, false, false)))
         assertNull(s.armHitRatePct)

@@ -4,19 +4,20 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class LtpAdaptivePacingPolicyTest {
-    @Test fun rampsOnlyAfterCleanMinute() {
-        var state = LtpAdaptivePacingPolicy.State(850L, 1_000L)
-        assertEquals(state, LtpAdaptivePacingPolicy.onSuccess(state, 30_000L))
-        state = LtpAdaptivePacingPolicy.onSuccess(state, 61_000L)
-        assertEquals(750L, state.gapMs)
-        repeat(8) { i -> state = LtpAdaptivePacingPolicy.onSuccess(state, 122_000L + i*61_000L) }
-        assertEquals(220L, state.gapMs)
+    @Test fun rampsOnlyAfterTwoCleanMinutesAndNeverBelowConservativeFloor() {
+        var state = LtpAdaptivePacingPolicy.State(1300L, 1000L)
+        assertEquals(state, LtpAdaptivePacingPolicy.onSuccess(state, 60000L))
+        state = LtpAdaptivePacingPolicy.onSuccess(state, 121000L)
+        assertEquals(1250L, state.gapMs)
+        repeat(8) { i -> state = LtpAdaptivePacingPolicy.onSuccess(state, 242000L + i*121000L) }
+        assertEquals(950L, state.gapMs)
     }
-    @Test fun broker429ReducesRateAndRequiresFreshCleanWindow() {
-        val slower = LtpAdaptivePacingPolicy.on429(LtpAdaptivePacingPolicy.State(300L,1_000L),31_000L)
-        assertEquals(850L, slower.gapMs)
-        assertEquals(slower, LtpAdaptivePacingPolicy.onSuccess(slower,80_000L))
-        assertEquals(750L, LtpAdaptivePacingPolicy.onSuccess(slower,91_000L).gapMs)
-        assertEquals(3_000L,LtpAdaptivePacingPolicy.on429(LtpAdaptivePacingPolicy.State(2_500L,1_000L),10_000L).gapMs)
+    @Test fun broker429ImmediatelySlowsAndRequiresNewCleanWindow() {
+        val slower = LtpAdaptivePacingPolicy.on429(LtpAdaptivePacingPolicy.State(300L,1000L),31000L)
+        assertEquals(1300L, slower.gapMs)
+        assertEquals(slower, LtpAdaptivePacingPolicy.onSuccess(slower,80000L))
+        assertEquals(1250L, LtpAdaptivePacingPolicy.onSuccess(slower,151000L).gapMs)
+        assertEquals(8000L, LtpAdaptivePacingPolicy.on429(
+            LtpAdaptivePacingPolicy.State(5000L,1000L),10000L).gapMs)
     }
 }

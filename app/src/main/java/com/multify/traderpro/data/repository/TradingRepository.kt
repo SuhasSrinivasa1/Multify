@@ -2602,6 +2602,25 @@ class TradingRepository @Inject constructor(
             it.generatedAtMs > 0L && nowMs - it.generatedAtMs in 0L..300_000L
         }.forEach { row ->
             val verdict = fixedEntryVerdict(row, fixedPublishedQuote(row, nowMs), nowMs)
+            val accuracy = fixedShadowReferences[row.symbol.uppercase(Locale.US)]?.takeIf {
+                it.quoteCapturedAtMs >= row.generatedAtMs &&
+                    nowMs - it.quoteCapturedAtMs in 0L..300_000L
+            }?.evaluation?.features?.let {
+                com.multify.traderpro.engine.FixedAccuracyChallengerPolicy.assess(it)
+            }
+            auditLogger.logAsync("FIXED_ACCURACY_SHADOW", "ENTRY_COMBINATION_AT_PUBLICATION", mapOf(
+                "symbol" to row.symbol, "recommendation_id" to row.id,
+                "macd_slope" to accuracy?.macdSlope,
+                "rsi_slope" to accuracy?.rsiSlope,
+                "book_imbalance" to accuracy?.orderBookImbalance,
+                "session_vwap_extension_atr" to accuracy?.vwapExtensionAtr,
+                "three_factor_pass" to accuracy?.threeFactorConfirmed,
+                "peak_extension_warning" to accuracy?.extendedFromSessionVwap,
+                "rsi_momentum_exhaustion" to accuracy?.rsiMomentumExhaustion,
+                "verified_inputs_available" to accuracy?.dataReady,
+                "validation_status" to "SHADOW_NOT_FOR_EXECUTION",
+                "added_api_requests" to 0
+            ))
             auditLogger.logAsync("FIXED_ENTRY_QUALITY", "PUBLICATION_ACTIONABILITY", mapOf(
                 "symbol" to row.symbol, "scan_started_at_ms" to row.generatedAtMs,
                 "actual_evaluated_at_ms" to nowMs, "status" to verdict.status,
@@ -2609,7 +2628,7 @@ class TradingRepository @Inject constructor(
                 "distance_from_broker_or_15m_candle_high_pct" to verdict.distanceFromQuoteHighPct,
                 "day_high_evidence_source" to verdict.highEvidenceSource,
                 "multi_day_15m_window_high_distance_pct_NOT_day_high" to verdict.multiDayWindowHighDistancePct,
-                "vwap_atr_source" to "FROZEN_MULTI_DAY_15M_WINDOW",
+                "vwap_atr_source" to "VERIFIED_CURRENT_SESSION_COMPLETED_BARS",
                 "distance_above_vwap_in_atr" to verdict.vwapAtrExtension,
                 "first_primary_runup_minus_target_pct" to verdict.firstPrimaryRunupBeyondTargetPct,
                 "fixed_scoring_changed" to false, "fixed_stored_recommendation_changed" to false,
@@ -4080,9 +4099,11 @@ class TradingRepository @Inject constructor(
                 // A correctly enforced Fixed price-band veto is not a Beta transport outage.
                 // Returning to Alpha here repeats a known-invalid quote and wastes requests.
                 if (!com.multify.traderpro.engine.FixedBetaDetailFallbackPolicy.shouldRetryOnAlpha(failed)) {
-                    auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "BETA_DETAIL_PRICE_BAND_SKIPPED", mapOf(
-                        "symbol" to symbol, "reason" to "FIXED_PRICE_BAND_OUTSIDE",
-                        "alpha_fallback_attempted" to false, "fixed_scoring_changed" to false
+                    auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "BETA_DETAIL_NO_ALPHA_FALLBACK", mapOf(
+                        "symbol" to symbol, "reason" to (failed.message ?: failed.javaClass.simpleName).take(120),
+                        "alpha_fallback_attempted" to false,
+                        "account_cooldown_amplification_prevented" to true,
+                        "fixed_scoring_changed" to false
                     ))
                     throw failed
                 }
@@ -4281,10 +4302,13 @@ class TradingRepository @Inject constructor(
             sweep.completedAtMs, System.currentTimeMillis(), sweep.prices.size,
             master.size, sweep.aborted
         )) {
-            auditLogger.logAsync("FIXED_PERFORMANCE", "PREFETCH_INVALID_NORMAL_SCAN_FALLBACK",
+            // Do not issue a second full market sweep following an invalid
+            // prefetch. Treat this attempt as deferred and scan anew next cycle.
+            auditLogger.logAsync("FIXED_PERFORMANCE", "PREFETCH_INVALID_SCAN_DEFERRED",
                 mapOf("reason" to "FAILED_STALE_OR_INCOMPLETE", "waited_ms" to waitedMs,
-                    "fixed_recommendation_rules_unchanged" to true))
-            return null
+                    "duplicate_full_sweep_prevented" to true, "fixed_scoring_unchanged" to true))
+            return sweep?.copy(aborted = true)
+                ?: PrecomputedFixedSweep(emptyMap(), 1, true, System.currentTimeMillis(), 0)
         }
         auditLogger.logAsync("FIXED_PERFORMANCE", "PREFETCHED_SWEEP_CONSUMED", mapOf(
             "blocking_wait_ms" to waitedMs,
@@ -4352,33 +4376,24 @@ class TradingRepository @Inject constructor(
                         // only if Alpha is ready and has protected category headroom.
                         // Never issue an unbounded immediate retry burst.
                         betaStopped.set(true)
-                        val allowFallback = alphaCanTakeBetaDiscoveryFallback()
+                        // No Alpha spillover during a Beta cooldown: incomplete
+                        // market coverage is deferred rather than repaired with a burst.
                         auditLogger.logAsync("FIXED_DUAL_ACCOUNT",
-                            if (allowFallback) "BETA_INDEPENDENT_ALPHA_FALLBACK"
-                            else "BETA_FALLBACK_SKIPPED_ALPHA_HEADROOM",
+                            "BETA_DISCOVERY_COOLDOWN_NO_ALPHA_FALLBACK",
                             mapOf("batch_index" to index,
                                 "beta_http_429" to ((failed as? HttpException)?.code() == 429),
                                 "beta_error" to failed.javaClass.simpleName,
-                                "alpha_ready_with_headroom" to allowFallback,
-                                "beta_paused_for_rest_of_sweep" to true))
-                        if (!allowFallback) null else
-                            fetchFixedDiscoveryLtpBatch(token, chunk, index)
-                                ?.also {
-                                    alphaSuccess.incrementAndGet()
-                                    alphaFallbackBatches.incrementAndGet()
-                                }
+                                "beta_paused_for_rest_of_sweep" to true,
+                                "alpha_fallback_requests" to 0,
+                                "partial_coverage_must_not_publish" to true))
+                        null
                     }
                 } else {
-                    // A Beta-owned batch uses Alpha only when Alpha has real
-                    // spare capacity. Original Alpha-owned batches never need
-                    // to consult Beta or acquire Beta permits.
-                    val fallback = betaAssigned
-                    if (fallback && !alphaCanTakeBetaDiscoveryFallback()) null
+                    // Never move Beta-owned discovery traffic onto Alpha while Beta
+                    // is paused. Alpha-owned batches still proceed independently.
+                    if (betaAssigned) null
                     else fetchFixedDiscoveryLtpBatch(token, chunk, index)
-                        ?.also {
-                            alphaSuccess.incrementAndGet()
-                            if (fallback) alphaFallbackBatches.incrementAndGet()
-                        }
+                        ?.also { alphaSuccess.incrementAndGet() }
                 }
             }
             for ((index, payload) in results) {
@@ -7614,17 +7629,34 @@ class TradingRepository @Inject constructor(
         val token = ensureToken() ?: return fixedRecommendationStore.recommendations(today).count { it.status == "ACTIVE" }
         val symbols = rows.map { it.symbol.uppercase(Locale.US) }.distinct()
         if (symbols.isEmpty()) return 0
-        val fetched = runCatching {
-            withFixedLiveDataSlot {
-                apiFactory.groww.ltp(
-                    bearer(token), exchangeSymbols = symbols.joinToString(",") { "NSE_$it" }
-                ).requirePayload("Fixed outcome live LTP")
-            }
-        }.onFailure {
-            auditLogger.log("FIXED_OUTCOME", "LIVE_SAMPLE_ERROR", mapOf(
-                "symbols" to symbols.size, "message" to (it.message ?: it.javaClass.simpleName)
-            ))
-        }.getOrNull().orEmpty()
+        // Groww accepts at most 50 NSE instruments in a single LTP call.
+        // Every chunk goes through the existing Alpha Live Data governor.
+        val fetched = linkedMapOf<String, Double>()
+        val batches = symbols.chunked(50)
+        for ((batchIndex, chunk) in batches.withIndex()) {
+            if (fixedApiPriorityRequested || marketCriticalTradeInFlight) break
+            if (buyApiCooldownOrNull(GrowwApiUsageLedger.Category.LIVE_DATA) != null) break
+            val prices = runCatching {
+                withFixedLiveDataSlot {
+                    apiFactory.groww.ltp(
+                        bearer(token), exchangeSymbols = chunk.joinToString(",") { "NSE_$it" }
+                    ).requirePayload("Fixed outcome live LTP batch")
+                }
+            }.onFailure {
+                auditLogger.log("FIXED_OUTCOME", "LIVE_SAMPLE_ERROR", mapOf(
+                    "batch_index" to batchIndex, "batch_size" to chunk.size,
+                    "total_symbols" to symbols.size,
+                    "http_code" to (it as? HttpException)?.code(),
+                    "message" to (it.message ?: it.javaClass.simpleName).take(160)
+                ))
+            }.getOrNull() ?: continue
+            fetched.putAll(prices)
+        }
+        auditLogger.logAsync("FIXED_OUTCOME", "BATCH_MONITOR_PROFILE", mapOf(
+            "distinct_symbols" to symbols.size, "batch_count" to batches.size,
+            "maximum_per_request" to 50, "prices_received" to fetched.size,
+            "extra_wallet_api_calls" to 0
+        ))
         val observedAt = System.currentTimeMillis()
         for (row in fixedRecommendationStore.recommendations(today)) {
             val price = fetched["NSE_${row.symbol.uppercase(Locale.US)}"]

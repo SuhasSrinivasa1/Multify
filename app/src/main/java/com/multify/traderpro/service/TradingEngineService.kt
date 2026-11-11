@@ -636,8 +636,18 @@ class TradingEngineService : Service() {
                         val alphaHistAfter = GrowwHttpTraceLedger.counters("ALPHA", "HISTORICAL")
                         val betaHistAfter = GrowwHttpTraceLedger.counters("BETA", "HISTORICAL")
                         fun increase(start: Long, end: Long) = (end - start).coerceAtLeast(0L)
+                        val noBrokerRequests = increase(alphaLiveBefore.requests, alphaLiveAfter.requests) +
+                            increase(betaLiveBefore.requests, betaLiveAfter.requests) +
+                            increase(alphaHistBefore.requests, alphaHistAfter.requests) +
+                            increase(betaHistBefore.requests, betaHistAfter.requests) == 0L
+                        // The 1-second worker polls are not actual failed scans.
+                        val scanResult = when {
+                            scanned -> "COMPLETED"
+                            noBrokerRequests && elapsed < 1_500L -> "NOT_DUE"
+                            else -> "FAILED_OR_DEFERRED"
+                        }
                         val scanPoint = FixedScanTrendStore.Point(
-                            scanId, startedAt, elapsed, if (scanned) "COMPLETED" else "FAILED_OR_SKIPPED",
+                            scanId, startedAt, elapsed, scanResult,
                             increase(alphaLiveBefore.requests, alphaLiveAfter.requests),
                             increase(betaLiveBefore.requests, betaLiveAfter.requests),
                             increase(alphaHistBefore.requests, alphaHistAfter.requests),
@@ -647,8 +657,9 @@ class TradingEngineService : Service() {
                             increase(betaLiveBefore.rateLimits + betaHistBefore.rateLimits,
                                 betaLiveAfter.rateLimits + betaHistAfter.rateLimits)
                         )
-                        FixedScanTrendStore.record(this@TradingEngineService, scanPoint)
-                        auditLogger.logAsync("FIXED_PERFORMANCE", "EVERY_SCAN_ATTEMPT", mapOf(
+                        if (scanResult != "NOT_DUE") {
+                            FixedScanTrendStore.record(this@TradingEngineService, scanPoint)
+                            auditLogger.logAsync("FIXED_PERFORMANCE", "EVERY_SCAN_ATTEMPT", mapOf(
                             "scan_id" to scanId, "result" to scanPoint.result,
                             "start_at_ms" to startedAt, "duration_ms" to elapsed,
                             "alpha_live_http" to scanPoint.alphaLive,
@@ -658,8 +669,10 @@ class TradingEngineService : Service() {
                             "alpha_429" to scanPoint.alpha429,
                             "beta_429" to scanPoint.beta429,
                             "request_attribution" to "TIME_WINDOW_INCLUDES_OVERLAPPING_WORKERS",
-                            "strategy_changed" to false
-                        ))
+                            "strategy_changed" to true,
+                            "intentional_change" to "VERIFIED_SESSION_CANDLE_INPUTS_ONLY"
+                            ))
+                        }
                         // Diagnostic-only measured start-to-start cadence.
                         val actualStartSpacingMs = if (scanned && lastSuccessfulFixedScanStartedAtMs > 0L)
                             (startedAt - lastSuccessfulFixedScanStartedAtMs).coerceAtLeast(0L) else null
@@ -744,6 +757,19 @@ class TradingEngineService : Service() {
                             }
                             scope.launch {
                                 notifyNewFixedRecommendationsAfterOrderPath()
+                            }
+                            // One optional real 5m candle comparison per eight completed
+                            // Fixed scans, only with spare category quota and no recent
+                            // broker 429. Shadow analysis never changes BUY decisions.
+                            val shadowOrdinal = nextFixedShadowScanOrdinal()
+                            if (shadowOrdinal % 8 == 0) {
+                                scope.launch(Dispatchers.IO) {
+                                    runCatching { repository.sampleFixedFiveMinuteShadow(shadowOrdinal) }
+                                        .onFailure { auditLogger.logAsync("FIXED_5M_SHADOW",
+                                            "COLLECTION_ERROR", mapOf(
+                                                "error_type" to it.javaClass.simpleName,
+                                                "trading_decision_changed" to false)) }
+                                }
                             }
                             // Discretionary Forecast research is not launched immediately
                             // after Fixed: broker capacity is reserved for the next sweep.
