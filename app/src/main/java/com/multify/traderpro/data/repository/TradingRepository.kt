@@ -4696,6 +4696,9 @@ class TradingRepository @Inject constructor(
             val regime = "BREADTH_NEUTRAL" // Same neutral reference for both variants.
             val tier15 = FixedForecastQualityPolicy.evaluate(fifteen, targetPct, regime).tier
             val tier5 = FixedForecastQualityPolicy.evaluate(five, targetPct, regime).tier
+            val entryConfirmation = com.multify.traderpro.engine.FixedFiveMinuteEntryPolicy.evaluate(
+                five.features, fifteenMinutePrimary = tier15 == "PRIMARY" && fifteen.directionalScore > 0.0
+            )
             val price = reference.quote.lastPrice ?: return
             val pair = FixedFiveMinuteShadowPair(
                 date = today, atMs = reference.quoteCapturedAtMs, symbol = symbol,
@@ -4716,6 +4719,17 @@ class TradingRepository @Inject constructor(
                 "direction_15m" to fifteen.directionalScore, "direction_5m" to five.directionalScore,
                 "volume_15m_last_bar" to fifteen.features.candles.lastOrNull()?.volume,
                 "volume_5m_last_bar" to five.features.candles.lastOrNull()?.volume,
+                "five_minute_entry_confirmed" to entryConfirmation.confirmed,
+                "five_minute_pullback_reclaim" to entryConfirmation.pullbackReclaim,
+                "five_minute_above_session_vwap" to entryConfirmation.aboveSessionVwap,
+                "five_minute_volume_confirmed" to entryConfirmation.volumeConfirmed,
+                "five_minute_momentum_confirmed" to entryConfirmation.momentumConfirmed,
+                "five_minute_entry_reasons" to entryConfirmation.reasons,
+                "five_minute_valid_completed_bars" to five.features.timestampValidCandleCount,
+                "five_minute_invalid_timestamp_bars" to five.features.timestampInvalidCandleCount,
+                "five_minute_incomplete_bars_excluded" to five.features.incompleteCandleCount,
+                "five_minute_session_bars" to five.features.sessionCandleCount,
+                "five_minute_orb5_independently_available" to (five.features.orb5High != null),
                 "bid_price" to reference.quote.bidPrice, "ask_price" to reference.quote.offerPrice,
                 "bid_quantity" to reference.quote.bidQuantity,
                 "ask_quantity" to reference.quote.offerQuantity,
