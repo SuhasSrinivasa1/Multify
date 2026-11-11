@@ -985,16 +985,16 @@ private fun FixedScreen(
                     val accountActual = GrowwHttpTraceLedger.summary()
                     val actualAlpha = accountActual["ALPHA"]
                     val actualBeta = accountActual["BETA"]
-                    Text("ALPHA Live Data: ${alphaLive.usedLastMinute}/${alphaLive.appPerMinuteLimit} per minute · Fixed max 240/min · 60/min reserved for priority quotes",
+                    Text("ALPHA Live Data: ${alphaLive.usedLastMinute}/${alphaLive.appPerMinuteLimit} per minute · Fixed 80% allocation (240/min) · LTP guard 40/min · 60/min priority reserve",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text("BETA Live Data: ${betaLive.usedLastMinute}/${betaLive.endpointLimitPerMinute} per minute · adaptive gap ${betaLive.activeGapMs}ms" +
+                    Text("BETA Live Data: ${betaLive.usedLastMinute}/${betaLive.endpointLimitPerMinute} endpoint/min · account allocation ${betaLive.accountBudgetPerMinute}/min (90%) · adaptive gap ${betaLive.activeGapMs}ms" +
                         if (betaLive.cooldownRemainingMs > 0)
                             " · Beta retry in ${(betaLive.cooldownRemainingMs + 999) / 1000}s"
                         else if (betaLive.halfOpenProbeInFlight) " · recovery probe" else "",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text("Actual outgoing HTTP this minute: Alpha ${actualAlpha?.get("all_requests_60s") ?: "—"} · Beta ${actualBeta?.get("all_requests_60s") ?: "—"}",
+                    Text("Actual HTTP dispatch: 10s Alpha ${actualAlpha?.get("all_requests_10s") ?: "—"} · Beta ${actualBeta?.get("all_requests_10s") ?: "—"} | 60s Alpha ${actualAlpha?.get("all_requests_60s") ?: "—"} · Beta ${actualBeta?.get("all_requests_60s") ?: "—"}",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Text(
