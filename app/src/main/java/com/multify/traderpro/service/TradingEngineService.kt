@@ -961,6 +961,11 @@ class TradingEngineService : Service() {
                 (postedAtMs - it).coerceAtLeast(0L)
             },
             "matched_quote_source" to "HTTP_CLIENT_RESPONSE_NOT_EXCHANGE_TIMESTAMP",
+            "quote_to_notification_delay_bucket_research_only" to
+                com.multify.traderpro.engine.FixedDelayResearchPolicy.bucket(
+                    clientQuoteReceivedAtMs?.let { postedAtMs - it }),
+            "delay_threshold_is_not_publication_or_buy_veto" to true,
+            "post_notification_outcome_requires_later_price_observations" to true,
             "exchange_quote_timestamp_verified" to false,
             "notification_posted_at_ms" to postedAtMs,
             // Compatibility field retains its prior value. It includes the whole scan,
