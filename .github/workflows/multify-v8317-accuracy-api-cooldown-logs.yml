@@ -117,7 +117,8 @@ jobs:
           assert 'mapIndexedNotNull' not in Path(root + 'engine/FixedLocalStrategyEngine.kt').read_text()
           assert 'val vwapNow = vwap(sessionCandles)' in Path(root + 'engine/FixedLocalStrategyEngine.kt').read_text()
           assert 'openingRange(sessionCandles, 5, interval)' in Path(root + 'engine/FixedLocalStrategyEngine.kt').read_text()
-          assert 'MIN_EXCLUSIVE_RUPEES = 100.0' in Path(root + 'engine/RecommendationPriceBandPolicy.kt').read_text()
+          assert 'MIN_EXCLUSIVE_RUPEES = 100.0' in Path(root + 'engine/FixedPriceBandPolicy.kt').read_text()
+          assert 'MIN_EXCLUSIVE_RUPEES = 200.0' in Path(root + 'engine/RecommendationPriceBandPolicy.kt').read_text()
           assert 'MIN_TARGET_REENTRY_PULLBACK_PCT = 0.50' in Path(root + 'engine/FixedRepeatQualificationPolicy.kt').read_text()
           assert 'FixedFiveMinuteEntryPolicy.evaluate' in current
           assert 'THREE_FACTOR_MOMENTUM_SHADOW' in current
