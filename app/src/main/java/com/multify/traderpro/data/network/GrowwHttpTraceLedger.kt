@@ -68,27 +68,48 @@ object GrowwHttpTraceLedger {
         path.contains("/token/") -> "AUTH"
         else -> "NON_TRADING"
     }
-    fun start(account: String, method: String, endpoint: String): Ticket = synchronized(lock) {
-        val now = SystemClock.elapsedRealtime()
-        val category = classify(endpoint)
-        val accountKey = account
-        val categoryKey = account + "/" + category
-        val endpointKey = account + "/" + endpoint
-        val a = bump(byAccount.getOrPut(accountKey) { Window() }, now)
-        val c = bump(byCategory.getOrPut(categoryKey) { Window() }, now)
-        val e = bump(byEndpoint.getOrPut(endpointKey) { Window() }, now)
-        totals[categoryKey] = (totals[categoryKey] ?: 0L) + 1L
-        endpointTotals[endpointKey] = (endpointTotals[endpointKey] ?: 0L) + 1L
-        inFlightByAccount[accountKey] = (inFlightByAccount[accountKey] ?: 0) + 1
-        inFlightByCategory[categoryKey] = (inFlightByCategory[categoryKey] ?: 0) + 1
-        inFlightByEndpoint[endpointKey] = (inFlightByEndpoint[endpointKey] ?: 0) + 1
-        Ticket(serial.incrementAndGet(), account, category, endpoint, method,
-            System.currentTimeMillis(), now,
-            a.oneSecond, a.tenSeconds, a.oneMinute,
-            c.oneSecond, c.tenSeconds, c.oneMinute,
-            e.oneSecond, e.tenSeconds, e.oneMinute,
-            inFlightByAccount[accountKey] ?: 0, inFlightByCategory[categoryKey] ?: 0,
-            currentFixedScan)
+    fun start(account: String, method: String, endpoint: String, audit: AuditLogger): Ticket {
+        val ticket = synchronized(lock) {
+            val now = SystemClock.elapsedRealtime()
+            val category = classify(endpoint)
+            val accountKey = account
+            val categoryKey = account + "/" + category
+            val endpointKey = account + "/" + endpoint
+            val a = bump(byAccount.getOrPut(accountKey) { Window() }, now)
+            val c = bump(byCategory.getOrPut(categoryKey) { Window() }, now)
+            val e = bump(byEndpoint.getOrPut(endpointKey) { Window() }, now)
+            totals[categoryKey] = (totals[categoryKey] ?: 0L) + 1L
+            endpointTotals[endpointKey] = (endpointTotals[endpointKey] ?: 0L) + 1L
+            inFlightByAccount[accountKey] = (inFlightByAccount[accountKey] ?: 0) + 1
+            inFlightByCategory[categoryKey] = (inFlightByCategory[categoryKey] ?: 0) + 1
+            inFlightByEndpoint[endpointKey] = (inFlightByEndpoint[endpointKey] ?: 0) + 1
+            Ticket(serial.incrementAndGet(), account, category, endpoint, method,
+                System.currentTimeMillis(), now,
+                a.oneSecond, a.tenSeconds, a.oneMinute,
+                c.oneSecond, c.tenSeconds, c.oneMinute,
+                e.oneSecond, e.tenSeconds, e.oneMinute,
+                inFlightByAccount[accountKey] ?: 0, inFlightByCategory[categoryKey] ?: 0,
+                currentFixedScan)
+        }
+        audit.logAsync("API_HTTP_TRACE", "REQUEST_STARTED", mapOf(
+            "request_id" to ticket.id, "account" to ticket.account,
+            "category" to ticket.category, "method" to ticket.method,
+            "endpoint" to ticket.endpoint, "started_at_ms" to ticket.startedAtMs,
+            "account_1s" to ticket.accountUsed1s,
+            "account_10s" to ticket.accountUsed10s,
+            "account_60s" to ticket.accountUsed60s,
+            "category_1s" to ticket.categoryUsed1s,
+            "category_10s" to ticket.categoryUsed10s,
+            "endpoint_1s" to ticket.endpointUsed1s,
+            "endpoint_10s" to ticket.endpointUsed10s,
+            "endpoint_60s" to ticket.endpointUsed60s,
+            "account_in_flight" to ticket.accountInFlightAtStart,
+            "category_in_flight" to ticket.categoryInFlightAtStart,
+            "fixed_scan_overlap_id" to ticket.overlappingFixedScanId,
+            "actual_http_dispatch_started" to true,
+            "query_string_and_credentials_logged" to false
+        ))
+        return ticket
     }
     fun counters(account: String, category: String): Counters = synchronized(lock) {
         val key = account + "/" + category
