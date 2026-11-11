@@ -7,8 +7,8 @@ package com.multify.traderpro.engine
  * These bounds reduce burst risk, but broker 429s remain possible.
  */
 object AlphaLtpPacingPolicy {
-    const val MIN_GAP_MS = 250L
-    const val MAX_PER_MINUTE = 240
+    const val MIN_GAP_MS = 1_000L
+    const val MAX_PER_MINUTE = 40
 
     fun waitMs(nowMs: Long, lastGrantedAtMs: Long, oldestInMinuteAtMs: Long?, usedInMinute: Int,
                activeGapMs: Long = LtpAdaptivePacingPolicy.START_GAP_MS): Long {
