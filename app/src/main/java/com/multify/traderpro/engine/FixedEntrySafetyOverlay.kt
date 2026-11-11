@@ -1,6 +1,6 @@
 package com.multify.traderpro.engine
 data class FixedEntrySafetyAssessment(val eligible:Boolean,val reasons:List<String>,val vwapExtensionAtr:Double?,val ema20ExtensionAtr:Double?,val recentImpulseAtr:Double?)
-/** Publication-only guard. Frozen Fixed scoring, targets and SELL rules are not modified. */
+/** BUY/notification actionability guard. Frozen Fixed target and SELL/GTT rules are not modified. */
 object FixedEntrySafetyOverlay {
     const val VERSION="FIXED_ENTRY_SAFETY_V1"
     const val MAX_VWAP_EXTENSION_ATR=2.25
