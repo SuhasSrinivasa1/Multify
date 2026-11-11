@@ -4346,45 +4346,37 @@ class TradingRepository @Inject constructor(
             ) { index, chunk ->
                 val betaAssigned = betaToken != null &&
                     com.multify.traderpro.engine.FixedDualAccountPolicy.betaDiscoveryBatch(index, true)
-                val useBeta = betaAssigned && !betaStopped.get() &&
-                    betaResearchGate.healthyForFixed(BetaResearchGate.Type.LIVE)
-                if (useBeta) {
-                    try {
-                        fixedBetaLtp(betaToken!!, chunk).also { betaSuccess.incrementAndGet() }
-                    } catch (cancelled: CancellationException) {
-                        throw cancelled
-                    } catch (failed: Throwable) {
-                        // Beta's independent 429 must NOT pause Alpha. Switch
-                        // only if Alpha is ready and has protected category headroom.
-                        // Never issue an unbounded immediate retry burst.
+                if (betaAssigned) {
+                    val betaHealthy = !betaStopped.get() &&
+                        betaResearchGate.healthyForFixed(BetaResearchGate.Type.LIVE)
+                    if (!betaHealthy) {
                         betaStopped.set(true)
-                        val allowFallback = alphaCanTakeBetaDiscoveryFallback()
-                        auditLogger.logAsync("FIXED_DUAL_ACCOUNT",
-                            if (allowFallback) "BETA_INDEPENDENT_ALPHA_FALLBACK"
-                            else "BETA_FALLBACK_SKIPPED_ALPHA_HEADROOM",
-                            mapOf("batch_index" to index,
-                                "beta_http_429" to ((failed as? HttpException)?.code() == 429),
-                                "beta_error" to failed.javaClass.simpleName,
-                                "alpha_ready_with_headroom" to allowFallback,
-                                "beta_paused_for_rest_of_sweep" to true))
-                        if (!allowFallback) null else
-                            fetchFixedDiscoveryLtpBatch(token, chunk, index)
-                                ?.also {
-                                    alphaSuccess.incrementAndGet()
-                                    alphaFallbackBatches.incrementAndGet()
-                                }
+                        auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "BETA_BATCH_SKIPPED_COOLDOWN_NO_ALPHA_FALLBACK",
+                            mapOf("batch_index" to index, "batch_size" to chunk.size,
+                                "beta_paused_for_rest_of_sweep" to true,
+                                "alpha_fallback_attempted" to false,
+                                "last_valid_discovery_snapshot_retained" to true))
+                        null
+                    } else {
+                        try {
+                            fixedBetaLtp(betaToken!!, chunk).also { betaSuccess.incrementAndGet() }
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (failed: Throwable) {
+                            betaStopped.set(true)
+                            auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "BETA_BATCH_FAILED_NO_ALPHA_FALLBACK",
+                                mapOf("batch_index" to index, "batch_size" to chunk.size,
+                                    "beta_http_429" to ((failed as? HttpException)?.code() == 429),
+                                    "beta_error" to failed.javaClass.simpleName,
+                                    "reason" to (failed.message ?: "UNSPECIFIED").take(160),
+                                    "alpha_fallback_attempted" to false,
+                                    "beta_paused_for_rest_of_sweep" to true))
+                            null
+                        }
                     }
                 } else {
-                    // A Beta-owned batch uses Alpha only when Alpha has real
-                    // spare capacity. Original Alpha-owned batches never need
-                    // to consult Beta or acquire Beta permits.
-                    val fallback = betaAssigned
-                    if (fallback && !alphaCanTakeBetaDiscoveryFallback()) null
-                    else fetchFixedDiscoveryLtpBatch(token, chunk, index)
-                        ?.also {
-                            alphaSuccess.incrementAndGet()
-                            if (fallback) alphaFallbackBatches.incrementAndGet()
-                        }
+                    fetchFixedDiscoveryLtpBatch(token, chunk, index)
+                        ?.also { alphaSuccess.incrementAndGet() }
                 }
             }
             for ((index, payload) in results) {
