@@ -294,8 +294,16 @@ class TraderViewModel @Inject constructor(
 
     fun exportLogs(uri: Uri) {
         viewModelScope.launch {
-            remote.value = remote.value.copy(loading = true, error = null, message = null)
-            runCatching { repository.exportCompleteLogs(uri) }
+            remote.value = remote.value.copy(
+                loading = true, error = null, message = "Exporting diagnostics in background…")
+            runCatching {
+                repository.exportCompleteLogs(uri) { file, count ->
+                    remote.value = remote.value.copy(
+                        loading = true,
+                        message = "Exporting diagnostics · $count files · $file",
+                        error = null)
+                }
+            }
                 .onSuccess { result ->
                     remote.value = remote.value.copy(
                         loading = false,
