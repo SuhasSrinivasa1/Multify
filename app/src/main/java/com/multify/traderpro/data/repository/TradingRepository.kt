@@ -7718,15 +7718,23 @@ class TradingRepository @Inject constructor(
             if (observed > 0) fixedOutcomePerformanceStore.record(fixedRecommendationStore.recommendations(today))
             return fixedRecommendationStore.recommendations(today).count { it.status == "ACTIVE" }
         }
-        // Avoid delaying protected trades and the high-priority Fixed scanner when Live Data is saturated.
-        val liveUsage = GrowwApiUsageLedger.snapshot().categories
-            .firstOrNull { it.category == GrowwApiUsageLedger.Category.LIVE_DATA }
-        if (liveUsage == null || liveUsage.minuteHeadroom <= 5) {
-            if (observed > 0) fixedOutcomePerformanceStore.record(fixedRecommendationStore.recommendations(today))
+        // Outcome monitoring is research traffic. Prefer Beta so Alpha's reserved
+        // execution headroom remains available for BUY/SELL/GTT. If Beta is configured
+        // but cooling down, skip this sample rather than transferring it to Alpha.
+        val betaMonitorToken = fixedBetaMarketTokenOrNull()
+        val alphaMonitorToken = if (betaMonitorToken == null) {
+            val liveUsage = GrowwApiUsageLedger.snapshot().categories
+                .firstOrNull { it.category == GrowwApiUsageLedger.Category.LIVE_DATA }
+            if (liveUsage == null || liveUsage.minuteHeadroom <= 5) {
+                if (observed > 0) fixedOutcomePerformanceStore.record(fixedRecommendationStore.recommendations(today))
+                return fixedRecommendationStore.recommendations(today).count { it.status == "ACTIVE" }
+            }
+            ensureToken()
+        } else null
+        if (betaMonitorToken == null && alphaMonitorToken == null)
             return fixedRecommendationStore.recommendations(today).count { it.status == "ACTIVE" }
-        }
+        val monitorAccount = if (betaMonitorToken != null) "BETA" else "ALPHA"
         lastFixedOutcomeMonitorAtMs = nowMs
-        val token = ensureToken() ?: return fixedRecommendationStore.recommendations(today).count { it.status == "ACTIVE" }
         val symbols = rows.map { it.symbol.uppercase(Locale.US) }.distinct()
         if (symbols.isEmpty()) return 0
         val fetched = linkedMapOf<String, Double>()
@@ -7734,14 +7742,22 @@ class TradingRepository @Inject constructor(
         for ((batchIndex, chunk) in chunks.withIndex()) {
             if (fixedApiPriorityRequested || marketCriticalTradeInFlight) break
             val batch = runCatching {
-                withFixedLiveDataSlot {
-                    apiFactory.groww.ltp(
-                        bearer(token), exchangeSymbols = chunk.joinToString(",") { "NSE_$it" }
-                    ).requirePayload("Fixed outcome live LTP batch")
+                if (betaMonitorToken != null) {
+                    betaMarketRead(betaMonitorToken, BetaResearchGate.Type.LIVE, "FIXED_OUTCOME_MONITOR") {
+                        apiFactory.betaGroww.ltp(
+                            bearer(betaMonitorToken), exchangeSymbols = chunk.joinToString(",") { "NSE_$it" }
+                        ).requirePayload("Fixed outcome Beta live LTP batch")
+                    }
+                } else {
+                    withFixedLiveDataSlot {
+                        apiFactory.groww.ltp(
+                            bearer(alphaMonitorToken!!), exchangeSymbols = chunk.joinToString(",") { "NSE_$it" }
+                        ).requirePayload("Fixed outcome Alpha live LTP batch")
+                    }
                 }
             }.onFailure { failure ->
                 auditLogger.logAsync("FIXED_OUTCOME", "LIVE_SAMPLE_BATCH_ERROR", mapOf(
-                    "account" to "ALPHA", "batch_index" to batchIndex,
+                    "account" to monitorAccount, "batch_index" to batchIndex,
                     "batch_count" to chunks.size, "symbols" to chunk.size,
                     "http_code" to ((failure as? HttpException)?.code() ?: 0),
                     "error_type" to failure.javaClass.simpleName,
@@ -7764,7 +7780,7 @@ class TradingRepository @Inject constructor(
             }
         }
         auditLogger.logAsync("FIXED_OUTCOME", "LIVE_SAMPLE_BATCH_PROFILE", mapOf(
-            "account" to "ALPHA", "symbols" to symbols.size,
+            "account" to monitorAccount, "symbols" to symbols.size,
             "batch_size" to com.multify.traderpro.engine.FixedDualAccountPolicy.FULL_NSE_LTP_BATCH_LIMIT,
             "batch_count" to chunks.size, "prices_returned" to fetched.size,
             "additional_retries" to 0,
