@@ -4683,9 +4683,9 @@ class TradingRepository @Inject constructor(
                     betaResearchGate.healthyForFixed(BetaResearchGate.Type.HISTORICAL)
             } else {
                 liveUsed = alphaLive.usedLastMinute
-                liveLimit = alphaLive.appPerMinuteLimit
+                liveLimit = com.multify.traderpro.engine.GrowwApiBudgetPolicy.fixedLiveDataPerMinute(false)
                 historicalUsed = alphaHistorical.usedLastMinute
-                historicalLimit = alphaHistorical.appPerMinuteLimit
+                historicalLimit = GrowwHistoricalThrottlePolicy.APP_PER_MINUTE
                 val recovery = recoveryGate.status(nowMs)
                 latestCooldownUntilMs = maxOf(
                     recovery.categoryCooldownUntilMs[GrowwApiUsageLedger.Category.LIVE_DATA] ?: 0L,
