@@ -147,8 +147,6 @@ object FixedLocalStrategyEngine {
         val closes = candles.map { it.close }
         val vols = candles.map { it.volume }
         val prevWindow = if (candles.size > 21) candles.dropLast(1).takeLast(20) else candles.dropLast(1)
-        val last = candles.lastOrNull()
-        val prev = candles.dropLast(1).lastOrNull()
         val rv = if (vols.size >= 6) {
             val base = vols.dropLast(1).takeLast(20).average().takeIf { it > 0.0 }
             base?.let { vols.last() / it }
