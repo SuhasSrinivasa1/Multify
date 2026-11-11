@@ -4657,7 +4657,7 @@ class TradingRepository @Inject constructor(
             val api = GrowwApiUsageLedger.snapshot()
             val alphaLive = api.categories.first { it.category == GrowwApiUsageLedger.Category.LIVE_DATA }
             val alphaHistorical = api.categories.first { it.category == GrowwApiUsageLedger.Category.HISTORICAL }
-            val sampleAccount = if (betaToken != null) "BETA" else "ALPHA"
+            sampleAccount = if (betaToken != null) "BETA" else "ALPHA"
             val liveUsed: Int
             val liveLimit: Int
             val historicalUsed: Int
