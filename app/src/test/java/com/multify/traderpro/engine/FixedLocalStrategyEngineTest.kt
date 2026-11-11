@@ -56,10 +56,10 @@ class FixedLocalStrategyEngineTest {
             intervalMinutes = 15, asOfMs = asOf.atZone(ist).toInstant().toEpochMilli()
         )
         val expected = (
-            (100.0 + 102.0 + 99.0 + 101.0) / 3.0 * 100.0 +
-            (101.0 + 103.0 + 100.0 + 102.0) / 3.0 * 200.0 +
-            (102.0 + 105.0 + 101.0 + 104.0) / 3.0 * 300.0 +
-            (104.0 + 108.0 + 103.0 + 107.0) / 3.0 * 400.0
+            (102.0 + 99.0 + 101.0) / 3.0 * 100.0 +
+            (103.0 + 100.0 + 102.0) / 3.0 * 200.0 +
+            (105.0 + 101.0 + 104.0) / 3.0 * 300.0 +
+            (108.0 + 103.0 + 107.0) / 3.0 * 400.0
         ) / 1_000.0
         assertEquals(expected, result.vwap!!, 0.000001)
         assertEquals(4, result.sessionCandleCount)
