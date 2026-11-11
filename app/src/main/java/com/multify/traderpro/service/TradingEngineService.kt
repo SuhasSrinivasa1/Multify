@@ -758,6 +758,19 @@ class TradingEngineService : Service() {
                             scope.launch {
                                 notifyNewFixedRecommendationsAfterOrderPath()
                             }
+                            // One optional real 5m candle comparison per eight completed
+                            // Fixed scans, only with spare category quota and no recent
+                            // broker 429. Shadow analysis never changes BUY decisions.
+                            val shadowOrdinal = nextFixedShadowScanOrdinal()
+                            if (shadowOrdinal % 8 == 0) {
+                                scope.launch(Dispatchers.IO) {
+                                    runCatching { repository.sampleFixedFiveMinuteShadow(shadowOrdinal) }
+                                        .onFailure { auditLogger.logAsync("FIXED_5M_SHADOW",
+                                            "COLLECTION_ERROR", mapOf(
+                                                "error_type" to it.javaClass.simpleName,
+                                                "trading_decision_changed" to false)) }
+                                }
+                            }
                             // Discretionary Forecast research is not launched immediately
                             // after Fixed: broker capacity is reserved for the next sweep.
                         }
