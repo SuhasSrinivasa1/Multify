@@ -11,6 +11,8 @@ import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -66,6 +68,29 @@ class AuditLogger @Inject constructor(
             directory.listFiles()?.filter { it.name.endsWith(".jsonl") }
                 ?.sortedBy { it.name }?.joinToString("") { it.readText() }.orEmpty()
         }
+    }
+
+    /** Low-memory ZIP export; does not join all historical audit segments into one String. */
+    fun appendExportEntry(zip: ZipOutputStream) {
+        runCatching { executor.submit {}.get(EXPORT_FLUSH_TIMEOUT_MS, TimeUnit.MILLISECONDS) }
+        val snapshot = synchronized(lock) {
+            directory.listFiles()?.filter { it.isFile && it.name.endsWith(".jsonl") }
+                ?.sortedBy { it.name }.orEmpty().map { it to it.length() }
+        }
+        zip.putNextEntry(ZipEntry("system_audit.jsonl"))
+        for ((source, initialLength) in snapshot) {
+            source.inputStream().buffered().use { input ->
+                var remaining = initialLength
+                val block = ByteArray(32 * 1024)
+                while (remaining > 0) {
+                    val n = input.read(block, 0, minOf(block.size.toLong(), remaining).toInt())
+                    if (n <= 0) break
+                    zip.write(block, 0, n)
+                    remaining -= n
+                }
+            }
+        }
+        zip.closeEntry()
     }
 
     /** Exact archival import; idempotent by digest. Does not restore secrets or broker state. */
