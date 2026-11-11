@@ -7743,11 +7743,15 @@ class TradingRepository @Inject constructor(
             if (fixedApiPriorityRequested || marketCriticalTradeInFlight) break
             val batch = runCatching {
                 if (betaMonitorToken != null) {
-                    betaMarketRead(betaMonitorToken, BetaResearchGate.Type.LIVE, "FIXED_OUTCOME_MONITOR") {
-                        apiFactory.betaGroww.ltp(
-                            bearer(betaMonitorToken), exchangeSymbols = chunk.joinToString(",") { "NSE_$it" }
-                        ).requirePayload("Fixed outcome Beta live LTP batch")
-                    }
+                    betaMarketRead(
+                        betaMonitorToken, BetaResearchGate.Type.LIVE,
+                        alphaCall = { error("Fixed outcome Beta monitor cannot borrow Alpha") },
+                        betaCall = {
+                            apiFactory.betaGroww.ltp(
+                                bearer(betaMonitorToken), exchangeSymbols = chunk.joinToString(",") { "NSE_$it" }
+                            ).requirePayload("Fixed outcome Beta live LTP batch")
+                        }
+                    )
                 } else {
                     withFixedLiveDataSlot {
                         apiFactory.groww.ltp(
