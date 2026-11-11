@@ -284,7 +284,8 @@ class TradingEngineService : Service() {
                         auditLogger.logAsync("API_HTTP_TRACE", "ACCOUNT_MINUTE_SUMMARY", mapOf(
                             "source" to "ACTUAL_NETWORK_DISPATCH_AFTER_CACHE_AND_ADMISSION",
                             "account_usage" to GrowwHttpTraceLedger.summary(),
-                            "beta_gate_usage" to betaResearchGate.snapshot().toString(),
+                            "beta_gate_usage" to betaResearchGate.diagnosticStatus(),
+                            "beta_gate_totals" to betaResearchGate.snapshot(),
                             "audit_dropped_total" to auditLogger.asyncDroppedCount()
                         ))
                     }
