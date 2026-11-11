@@ -66,8 +66,8 @@ object FixedEntryActionabilityPolicy {
         val price = quote?.lastPrice?.takeIf { it.isFinite() && it > 0.0 }
         val high = quote?.high?.takeIf { it.isFinite() && it > 0.0 }
         val dayMove = quote?.dayChangePct?.takeIf { it.isFinite() }
-        // The frozen 15-minute sessionHighDistancePct covers a MULTI-DAY history
-        // window, not necessarily today's session. Never use it as today's high.
+        // Prefer the broker quote's current day high, then the timestamp-verified
+        // current-session candle high. Multi-day history is never substituted here.
         val fallbackHigh = verifiedSameDayCandleHigh
             ?.takeIf { it.isFinite() && it > 0.0 }
         val usedHigh = if (price != null && high != null && high >= price)
@@ -106,10 +106,8 @@ object FixedEntryActionabilityPolicy {
         if (dayStrong && nearHigh && vwapAtr != null && vwapAtr >= 8.0 &&
             ((runup != null && runup >= 0.5) || volumeThin || adverseSpread))
             reasons += "EXTREME_VWAP_ATR_EXTENSION_NEAR_HIGH"
-        // Groww omitted the reported day-high in every Fixed quote of the
-        // 2026-11-04 13:25 diagnostic set. The frozen 15m 'session' high in
-        // fact spans the multi-DAY historical window. Only use it as a distinctly
-        // labeled, corroborating extension proxy, NEVER as today's NSE high.
+        // Keep the multi-day window high as a separately labeled exhaustion proxy;
+        // it is never presented as today's session high.
         val historicalWindowHighDistance =
             FixedMultiDayExhaustionProxyPolicy.distanceFromMultiDayWindowHigh(snapshot)
         if (FixedMultiDayExhaustionProxyPolicy.risky(
