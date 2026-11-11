@@ -9,8 +9,6 @@ package com.multify.traderpro.engine
 object FixedAccountTransportAdmissionPolicy {
     const val RESERVED_ALPHA_LIVE_REQUESTS = 12
 
-    fun allowAlphaFallback(alphaLiveReady: Boolean, alphaLiveUsed60s: Int, alphaAppLimit60s: Int): Boolean =
-        alphaLiveReady && alphaLiveUsed60s >= 0 &&
-            alphaAppLimit60s > RESERVED_ALPHA_LIVE_REQUESTS &&
-            alphaLiveUsed60s < alphaAppLimit60s - RESERVED_ALPHA_LIVE_REQUESTS
+    /** A Beta-owned discovery batch is never borrowed by Alpha: this prevents cooldown amplification. */
+    fun allowAlphaFallback(alphaLiveReady: Boolean, alphaLiveUsed60s: Int, alphaAppLimit60s: Int): Boolean = false
 }
