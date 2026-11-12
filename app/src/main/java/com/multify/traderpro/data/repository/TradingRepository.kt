@@ -3967,6 +3967,46 @@ class TradingRepository @Inject constructor(
             }.thenByDescending { it.score }
         )
 
+        // V8322_FROZEN_SHADOW_EXCEPTION_BEGIN
+        // Exact unbounded pre-clamp score for the FROZEN 107-call state.
+        // champions/research bonuses are exactly zero above; this recomputation
+        // is observational only, never used to sort, publish, buy or sell.
+        val uncappedDiagnosticCandidates = ranked.take(FIXED_V741_DETAILED_FORECAST_UNIVERSE_LIMIT).map { item ->
+            val confidenceComponent = item.evaluation.confidence
+            val directionalComponent =
+                item.evaluation.directionalScore.coerceAtLeast(0.0) * 0.10
+            val frequencyComponent = min(.04, (frequency[item.symbol] ?: 0) * .004)
+            val dnaComponent = if (item.symbol in dnaSymbols) .08 else 0.0
+            val qualityComponent = FixedForecastQualityPolicy.rankingBonus(
+                item.evaluation, item.quality.volatilityCapacityPct, targetPct, item.quality.tier)
+            val familyComponent = FixedMultifyFactorFamilies.rankingBonus(item.factorModel)
+            val raw = confidenceComponent + directionalComponent + frequencyComponent +
+                dnaComponent + qualityComponent + familyComponent
+            mapOf(
+                "symbol" to item.symbol,
+                "quality_tier" to item.quality.tier,
+                "uncapped_exact_fixed_score_for_current_frozen_champions_and_research" to raw,
+                "capped_production_score" to item.score,
+                "capped_at_0_99" to (raw > .99),
+                "score_reconstruction_delta" to (raw.coerceIn(.01,.99) - item.score),
+                "confidence" to confidenceComponent,
+                "directional_bonus" to directionalComponent,
+                "frozen_frequency_bonus" to frequencyComponent,
+                "frozen_dna_bonus" to dnaComponent,
+                "fixed_quality_bonus" to qualityComponent,
+                "factor_family_bonus" to familyComponent
+            )
+        }
+        auditLogger.logAsync("FIXED_SHADOW", "UNCAPPED_RANKING_COMPONENTS", mapOf(
+            "scan_start_at_ms" to nowMs,
+            "source" to "EXACT_STATIC_FROZEN_CONTRACT_NO_BROKER_REQUESTS",
+            "champions_bonus" to 0.0,
+            "prior_research_bonus" to 0.0,
+            "changes_trading_score_or_rank" to false,
+            "candidates" to uncappedDiagnosticCandidates
+        ))
+        // V8322_FROZEN_SHADOW_EXCEPTION_END
+
         fixedRecommendationStore.appendObservations(
             ranked.take(FIXED_V741_RESEARCH_CAPTURE_TOP_N).map { item ->
                 FixedScanObservation(
@@ -4073,6 +4113,35 @@ class TradingRepository @Inject constructor(
                     executionEligible = item.quality.executionEligible
                 )
             )
+            // V8322_FROZEN_SHADOW_EXCEPTION_BEGIN
+            val storedAtMs = System.currentTimeMillis()
+            val firstPriorPrimary = allTodayFixedObservations.asSequence()
+                .filter {
+                    it.symbol.equals(item.symbol, true) &&
+                        it.scanAtMs < nowMs &&
+                        it.qualityTier == "PRIMARY" &&
+                        it.publishEligible && it.executionEligible
+                }.minByOrNull { it.scanAtMs }
+            val driftPct = firstPriorPrimary?.observedPrice?.takeIf { it > 0.0 }
+                ?.let { (price / it - 1.0) * 100.0 }
+            auditLogger.logAsync("FIXED_SHADOW", "RECOMMENDATION_PERSISTED_TIMING", mapOf(
+                "symbol" to item.symbol,
+                "scan_started_at_ms" to nowMs,
+                "persisted_at_ms" to storedAtMs,
+                "scan_to_store_ms" to (storedAtMs - nowMs),
+                "last_evaluation_quote_captured_at_ms" to
+                    fixedShadowReferences[item.symbol]?.quoteCapturedAtMs,
+                "first_prior_primary_scan_at_ms" to firstPriorPrimary?.scanAtMs,
+                "first_prior_primary_price" to firstPriorPrimary?.observedPrice,
+                "first_primary_to_persist_ms" to firstPriorPrimary?.let {
+                    storedAtMs - it.scanAtMs
+                },
+                "pre_publication_runup_from_first_primary_pct" to driftPct,
+                "already_moved_more_than_full_target" to driftPct?.let { it >= targetPct },
+                "snapshot_is_not_exchange_tick_or_executable_quote" to true,
+                "trading_decisions_unchanged" to true
+            ))
+            // V8322_FROZEN_SHADOW_EXCEPTION_END
         }
 
         val all = fixedRecommendationStore.recommendations(today)
@@ -11010,6 +11079,33 @@ class TradingRepository @Inject constructor(
                 addText("fixed_historical_research.json", fixedHistoricalEvidenceArchive.archive())
                 addText("fixed_imported_same_day_dedup.json", fixedImportedSameDayDedupJournal.archive())
                 addText("fixed_early_watch.json", fixedEarlyWatchJournal.archive())
+                add("fixed_first_primary_to_publication_study.json",
+                    mapOf(
+                        "source" to "PERSISTED_SAME_DAY_FIRST_PRIMARY_PLUS_OFFICIAL_RECOMMENDATION",
+                        "scan_start_not_exchange_timestamp" to true,
+                        "not_replayed_trades" to true,
+                        "trading_decisions_affected" to false,
+                        "events" to fixedEarlyWatchJournal.recent(
+                            LocalDate.now(INDIA).toString(), 1000).map { w ->
+                            mapOf(
+                                "symbol" to w.symbol,
+                                "first_primary_scan_at_ms" to w.firstPrimaryScanAtMs,
+                                "first_primary_evaluated_at_ms" to w.firstEvaluatedAtMs,
+                                "first_primary_price" to w.firstPrimaryPrice,
+                                "latest_evaluated_at_ms" to w.latestEvaluatedAtMs,
+                                "latest_primary_quote_price" to w.latestPrice,
+                                "prior_primary_observations" to w.confirmationObservations,
+                                "published" to w.officialPublished,
+                                "official_entry_price" to w.officialEntryPrice,
+                                "pre_publication_or_pending_runup_pct" to w.runupPct,
+                                "price_moved_over_full_target_pre_publication" to
+                                    (w.officialPublished &&
+                                        w.runupPct >= FixedFinalContract.CANONICAL_MULTIFY_MFE_AVG_PCT),
+                                "quoted_spread_bps" to w.observedSpreadBps,
+                                "diagnostic_warnings" to w.warnings
+                            )
+                        }
+                    ))
                 addText("fixed_market_pulse_research.json", fixedMarketPulseResearchStore.archive())
                 addText("fixed_fast_candidates.json", fixedFastCandidatePriceStore.archive())
                 add("fixed_5m_shadow_pairs.json", fixedFiveMinuteShadowJournal.all())
@@ -11031,6 +11127,31 @@ class TradingRepository @Inject constructor(
                 add("fixed_sampled_maturity_and_repeat_research.json",
                     fixedMarketPathTelemetry.exportSampledOutcomeStudy(
                         fixedRecommendations, fixedRecommendationStore.archivedObservations()))
+                add("fixed_screen_compose_observation.json",
+                    com.multify.traderpro.data.logging.FixedUiRenderEvidenceStore.export(appContext))
+                add("fixed_shadow_hypotheses_manifest.json", mapOf(
+                    "schema" to "fixed_hypotheses_v8322",
+                    "purpose" to "OBSERVATIONAL_ONLY",
+                    "precision_over_90_percent_claimed" to false,
+                    "strategy_or_broker_rules_changed" to false,
+                    "tests" to listOf(
+                        "scan_quote_evaluation_persistence_notification_screen_composition",
+                        "first_primary_to_entry_runup",
+                        "opening_0915_0930_completed_bar_availability",
+                        "equal_maturity_15_20_30_60_minutes",
+                        "RSI_slope_and_VWAP_extension_session_high",
+                        "five_minute_vs_previous_sweep_deceleration",
+                        "green_candle_volume_share",
+                        "relative_volume_and_move_age",
+                        "resting_order_book_imbalance_with_spread",
+                        "distance_below_3_ATR_from_VWAP",
+                        "exact_uncapped_production_score_components",
+                        "first_0_50_touch_and_subsequent_price_reversal",
+                        "same_stock_repeat_primary_recommendations",
+                        "price_band_ranking_coverage_and_API_cost",
+                        "small_sample_holdout_and_time_of_day_buckets",
+                        "early_watch_no_trade_allowed")
+                ))
                 add("api_usage_snapshot.json", GrowwApiUsageLedger.snapshot())
                 add("groww_recovery_state.json", recoveryGate.status())
                 add("telemetry_metadata.json", mapOf(
@@ -11046,6 +11167,12 @@ class TradingRepository @Inject constructor(
                     "original_session_baseline_modified" to false,
                     "opening_0915_0930_candle_research_only" to true,
                     "sampled_maturity_research_file" to "fixed_sampled_maturity_and_repeat_research.json",
+                    "fixed_first_primary_progression_file" to "fixed_first_primary_to_publication_study.json",
+                    "fixed_screen_observation_file" to "fixed_screen_compose_observation.json",
+                    "fixed_pattern_research_schema" to "fixed_pattern_hypotheses_v8322",
+                    "fixed_unclamped_score_event" to "UNCAPPED_RANKING_COMPONENTS",
+                    "fixed_persisted_timestamp_event" to "RECOMMENDATION_PERSISTED_TIMING",
+                    "fixed_hypotheses_manifest" to "fixed_shadow_hypotheses_manifest.json",
                     "sampled_maturity_conservative_postscan_ms" to 90_000L,
                     "sampled_maturity_realized_trade_profit" to false,
                     "fixed_market_path_schema" to "fixed_market_path_v1",

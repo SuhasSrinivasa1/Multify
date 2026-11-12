@@ -30,8 +30,8 @@ android {
         applicationId = "com.multify.traderpro.vivoy73final"
         minSdk = 26
         targetSdk = 35
-        versionCode = 8402
-        versionName = "8.3.21-primary-carry-entry-timing-stability"
+        versionCode = 8403
+        versionName = "8.3.22-pattern-research-timing"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
     }

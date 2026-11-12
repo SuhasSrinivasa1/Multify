@@ -20,7 +20,7 @@ internal data class FixedSampledQuote(val atMs: Long, val price: Double)
 
 internal object FixedSampledOutcomeResearchPolicy {
     const val CONSERVATIVE_POST_SCAN_DELAY_MS = 90_000L
-    private val horizons = listOf(15, 30, 60)
+    private val horizons = listOf(15, 20, 30, 60)
     private val india = ZoneId.of("Asia/Kolkata")
 
     fun report(
@@ -73,8 +73,42 @@ internal object FixedSampledOutcomeResearchPolicy {
                     "full_target_rate_pct" to pct(full)
                 )
             }
+            val firstTouchObservations = matured.mapNotNull { row ->
+                if (!row.entryPrice.isFinite() || row.entryPrice <= 0.0) return@mapNotNull null
+                val samples = pricesByEvent[row.id].orEmpty().asSequence()
+                    .filter {
+                        it.atMs >= row.generatedAtMs + CONSERVATIVE_POST_SCAN_DELAY_MS &&
+                            it.atMs <= row.generatedAtMs + horizonMs &&
+                            it.price.isFinite() && it.price > 0.0
+                    }.sortedBy { it.atMs }.toList()
+                if (samples.isEmpty()) return@mapNotNull null
+                val firstHalf = samples.firstOrNull { (it.price / row.entryPrice - 1.0) * 100.0 >= 0.5 }
+                val firstFull = samples.firstOrNull {
+                    (it.price / row.entryPrice - 1.0) * 100.0 >= row.fullTargetPct
+                }
+                val reversedAfterHalf = firstHalf?.let { hit ->
+                    samples.any { it.atMs > hit.atMs && it.price < row.entryPrice }
+                } ?: false
+                mapOf(
+                    "id" to row.id,
+                    "symbol" to row.symbol,
+                    "first_observed_0_50_at_ms" to firstHalf?.atMs,
+                    "first_observed_full_target_at_ms" to firstFull?.atMs,
+                    "first_0_50_delay_from_scan_start_ms" to firstHalf?.let {
+                        it.atMs - row.generatedAtMs
+                    },
+                    "first_full_delay_from_scan_start_ms" to firstFull?.let {
+                        it.atMs - row.generatedAtMs
+                    },
+                    "sampled_below_entry_after_0_50" to reversedAfterHalf,
+                    "has_post_half_reversal_observation" to (firstHalf != null &&
+                        samples.any { it.atMs > firstHalf.atMs }),
+                    "not_intrabar_or_realized_profit" to true
+                )
+            }
             mapOf(
                 "horizon_minutes" to minutes,
+                "first_touch_and_reversal_examples" to firstTouchObservations.take(200),
                 "matured_events" to matured.size,
                 "matured_with_no_valid_sample" to (matured.size - observed.size),
                 "immature_events_excluded" to (recommendations.size - matured.size),
@@ -84,7 +118,7 @@ internal object FixedSampledOutcomeResearchPolicy {
             )
         }
         return mapOf(
-            "schema" to "fixed_sampled_maturity_v1",
+            "schema" to "fixed_sampled_maturity_v8322",
             "source" to "COMPLETED_FULL_MARKET_LTP_SWEEPS_ONLY",
             "realized_trade_profit" to false,
             "intrabar_highs_available" to false,
