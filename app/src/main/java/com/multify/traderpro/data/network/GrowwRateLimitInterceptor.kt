@@ -14,6 +14,7 @@ import com.multify.traderpro.engine.MarketDataPriorityAdmissionPolicy
 import com.multify.traderpro.engine.GrowwRetryAfterPolicy
 import com.multify.traderpro.engine.AlphaLtpPacingPolicy
 import com.multify.traderpro.engine.LtpAdaptivePacingPolicy
+import com.multify.traderpro.engine.AlphaQuotePacingPolicy
 import okhttp3.Interceptor
 import okhttp3.Response
 import java.util.ArrayDeque
@@ -43,6 +44,12 @@ internal class GrowwRateLimitInterceptor(
     private val pendingProtectionLtps = AtomicInteger(0)
     private var lastAlphaLtpGrantedAtMs = 0L
     private var alphaLtpPace = LtpAdaptivePacingPolicy.State(LtpAdaptivePacingPolicy.START_GAP_MS, SystemClock.elapsedRealtime())
+    // Quote requests were previously allowed to burst concurrently under the shared
+    // category cap. Smooth starts independently while retaining the same scoring path.
+    private var lastAlphaQuoteGrantedAtMs = 0L
+    private var alphaQuotePace = AlphaQuotePacingPolicy.State(
+        AlphaQuotePacingPolicy.START_GAP_MS, SystemClock.elapsedRealtime()
+    )
     private val lastBlockedAuditMs = EnumMap<GrowwApiUsageLedger.Category, Long>(GrowwApiUsageLedger.Category::class.java)
     private val states = EnumMap<GrowwApiUsageLedger.Category, State>(GrowwApiUsageLedger.Category::class.java).apply {
         GrowwApiUsageLedger.Category.values().forEach { put(it, State()) }
@@ -105,6 +112,8 @@ internal class GrowwRateLimitInterceptor(
                 state.cooldownUntilMs = maxOf(state.cooldownUntilMs, SystemClock.elapsedRealtime() + appliedCooldownMs)
                 if (path == "/v1/live-data/ltp")
                     alphaLtpPace = LtpAdaptivePacingPolicy.on429(alphaLtpPace, SystemClock.elapsedRealtime())
+                if (path == "/v1/live-data/quote")
+                    alphaQuotePace = AlphaQuotePacingPolicy.on429(alphaQuotePace, SystemClock.elapsedRealtime())
             }
             val row = GrowwApiUsageLedger.snapshot().categories.first { it.category == category }
             auditLogger.logAsync("API_RATE_LIMIT", "HTTP_429", mapOf(
@@ -133,6 +142,9 @@ internal class GrowwRateLimitInterceptor(
         }
         if (path == "/v1/live-data/ltp" && response.isSuccessful) synchronized(lock) {
             alphaLtpPace = LtpAdaptivePacingPolicy.onSuccess(alphaLtpPace, SystemClock.elapsedRealtime())
+        }
+        if (path == "/v1/live-data/quote" && response.isSuccessful) synchronized(lock) {
+            alphaQuotePace = AlphaQuotePacingPolicy.onSuccess(alphaQuotePace, SystemClock.elapsedRealtime())
         }
         if (response.code == 401 && category != GrowwApiUsageLedger.Category.AUTH) {
             recoveryGate.onUnauthorized()
@@ -174,6 +186,7 @@ internal class GrowwRateLimitInterceptor(
             MarketDataPriorityAdmissionPolicy.isProtectionHeader(
                 request.header(MarketDataPriorityAdmissionPolicy.HEADER))
         val protectionLtp = protection && path == "/v1/live-data/ltp"
+        val alphaQuote = path == "/v1/live-data/quote"
         if (protectionLtp) pendingProtectionLtps.incrementAndGet()
         var totalWaitMs = 0L
         var dominantReason = "NONE"
@@ -211,11 +224,18 @@ internal class GrowwRateLimitInterceptor(
                 ) else 0L
                 val protectionYield = MarketDataPriorityAdmissionPolicy.ltpPriorityYieldMs(
                     isAlphaLtp, protection, pendingProtectionLtps.get())
-                val wait = maxOf(cooldownWait, secondWait, minuteWait, ltpWait, protectionYield)
+                // Quote endpoint has its own adaptive inter-request gap. Protection
+                // traffic skips this research delay but still consumes the shared
+                // reserved/global LIVE_DATA budget.
+                val quoteWait = if (alphaQuote && !protection)
+                    AlphaQuotePacingPolicy.waitMs(now, lastAlphaQuoteGrantedAtMs, alphaQuotePace.gapMs)
+                else 0L
+                val wait = maxOf(cooldownWait, secondWait, minuteWait, ltpWait, protectionYield, quoteWait)
                 reason = when {
                     protectionYield > 0L && wait == protectionYield -> "YIELD_TO_HOLDING_PROTECTION"
                     cooldownWait > 0L && wait == cooldownWait -> "429_COOLDOWN"
                     ltpWait > 0L && wait == ltpWait -> "ALPHA_LTP_ENDPOINT_PACING"
+                    quoteWait > 0L && wait == quoteWait -> "ALPHA_QUOTE_ENDPOINT_PACING"
                     minuteWait > 0L && wait == minuteWait -> "APP_PER_MINUTE"
                     secondWait > 0L && wait == secondWait -> "APP_PER_SECOND"
                     else -> "NONE"
@@ -227,6 +247,7 @@ internal class GrowwRateLimitInterceptor(
                         alphaLtpMinute.addLast(now)
                         lastAlphaLtpGrantedAtMs = now
                     }
+                    if (alphaQuote) lastAlphaQuoteGrantedAtMs = now
                     0L
                 } else wait
             }
