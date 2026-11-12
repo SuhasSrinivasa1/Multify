@@ -1,17 +1,19 @@
 package com.multify.traderpro.engine
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class GrowwApiBudgetPolicyTest {
-    @Test fun alphaLiveCeilingAndResearchReserve() {
-        assertEquals(300, GrowwApiBudgetPolicy.APP_LIVE_DATA_PER_MINUTE)
-        assertEquals(10, GrowwApiBudgetPolicy.APP_LIVE_DATA_PER_SECOND)
-        assertEquals(GrowwApiBudgetPolicy.LIVE_DATA_HARD_PER_MINUTE, GrowwApiBudgetPolicy.APP_LIVE_DATA_PER_MINUTE)
-        assertEquals(8, GrowwApiBudgetPolicy.fixedLiveDataPerSecond(true))
-        assertEquals(240, GrowwApiBudgetPolicy.fixedLiveDataPerMinute(true))
-        assertEquals(8, GrowwApiBudgetPolicy.fixedLiveDataPerSecond(false))
-        assertEquals(240, GrowwApiBudgetPolicy.fixedLiveDataPerMinute(false))
+    @Test fun alphaLiveResearchBudgetIsReducedAndProtectionReserveIsPreserved() {
+        assertEquals(120, GrowwApiBudgetPolicy.APP_LIVE_DATA_PER_MINUTE)
+        assertEquals(4, GrowwApiBudgetPolicy.APP_LIVE_DATA_PER_SECOND)
+        assertTrue(GrowwApiBudgetPolicy.APP_LIVE_DATA_PER_MINUTE < GrowwApiBudgetPolicy.LIVE_DATA_HARD_PER_MINUTE)
+        assertEquals(2, GrowwApiBudgetPolicy.fixedLiveDataPerSecond(true))
+        assertEquals(60, GrowwApiBudgetPolicy.fixedLiveDataPerMinute(true))
+        assertEquals(2, GrowwApiBudgetPolicy.fixedLiveDataPerSecond(false))
+        assertEquals(60, GrowwApiBudgetPolicy.fixedLiveDataPerMinute(false))
+        assertEquals(2, GrowwApiBudgetPolicy.SELL_MONITOR_RESERVED_PER_SECOND)
         assertEquals(60, GrowwApiBudgetPolicy.SELL_MONITOR_RESERVED_PER_MINUTE)
     }
     @Test fun independentOrderNonTradingAndAuthBudgetsUnchanged() {

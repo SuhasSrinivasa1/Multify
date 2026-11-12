@@ -9,10 +9,10 @@ class MarketDataPriorityAdmissionPolicyTest {
         val ordinary = p.allowedLiveTraffic(true, false)
         val priority = p.allowedLiveTraffic(true, true)
         val beforeFirstHolding = p.allowedLiveTraffic(false, false)
-        assertEquals(8, ordinary.perSecond)
-        assertEquals(240, ordinary.perMinute)
-        assertEquals(10, priority.perSecond)
-        assertEquals(300, priority.perMinute)
+        assertEquals(2, ordinary.perSecond)
+        assertEquals(60, ordinary.perMinute)
+        assertEquals(4, priority.perSecond)
+        assertEquals(120, priority.perMinute)
         assertEquals(ordinary, beforeFirstHolding)
     }
 
