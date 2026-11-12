@@ -932,8 +932,17 @@ class TradingEngineService : Service() {
         val clientQuoteReceivedAtMs = repository.fixedQuoteReceivedAtForNotification(
             f.symbol, f.generatedAtMs)
         val actionable = f.executionEligible
+        val riskLevel = com.multify.traderpro.engine.FixedNotificationRiskLabelPolicy.level(
+            actionable, f.reason)
         val message = buildString {
-            append(if (actionable) "PRIMARY · entry ₹" else "RESEARCH ONLY · not buyable · observed entry ₹")
+            append(when (riskLevel) {
+                com.multify.traderpro.engine.FixedNotificationRiskLabelPolicy.Level.BUY ->
+                    "PRIMARY · entry ₹"
+                com.multify.traderpro.engine.FixedNotificationRiskLabelPolicy.Level.CAUTION ->
+                    "PRIMARY · CAUTION: possibly extended · entry ₹"
+                com.multify.traderpro.engine.FixedNotificationRiskLabelPolicy.Level.RESEARCH_ONLY ->
+                    "RESEARCH ONLY · not buyable · observed entry ₹"
+            })
             append(String.format(Locale.US, "%.2f", f.entryPrice))
             append(" · target +")
             append(String.format(Locale.US, "%.2f", f.targetPct))
@@ -944,7 +953,8 @@ class TradingEngineService : Service() {
         }
         val notification = NotificationCompat.Builder(this, FIXED_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_trader)
-            .setContentTitle((if (actionable) "Fixed BUY · " else "Fixed WATCH · ") + f.symbol)
+            .setContentTitle(com.multify.traderpro.engine.FixedNotificationRiskLabelPolicy.title(
+                riskLevel, f.symbol))
             .setContentText(message)
             .setStyle(NotificationCompat.BigTextStyle().bigText(message + "\n" + f.reason))
             .setAutoCancel(true)
@@ -954,7 +964,12 @@ class TradingEngineService : Service() {
         auditLogger.logAsync("EXECUTION_LATENCY", "FIXED_NOTIFICATION_POSTED", mapOf(
             "symbol" to f.symbol,
             "actionable_at_post_time" to actionable,
-            "notification_label" to if (actionable) "FIXED_BUY" else "FIXED_RESEARCH_ONLY",
+            "notification_label" to when (riskLevel) {
+                com.multify.traderpro.engine.FixedNotificationRiskLabelPolicy.Level.BUY -> "FIXED_BUY"
+                com.multify.traderpro.engine.FixedNotificationRiskLabelPolicy.Level.CAUTION -> "FIXED_BUY_CAUTION"
+                com.multify.traderpro.engine.FixedNotificationRiskLabelPolicy.Level.RESEARCH_ONLY -> "FIXED_RESEARCH_ONLY"
+            },
+            "caution_is_display_only_not_trading_override" to true,
             "recommendation_generated_at_ms" to f.generatedAtMs,
             "matched_client_quote_http_response_at_ms" to clientQuoteReceivedAtMs,
             "matched_client_quote_to_notification_ms" to clientQuoteReceivedAtMs?.let {
