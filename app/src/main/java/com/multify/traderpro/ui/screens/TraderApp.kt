@@ -83,6 +83,7 @@ import com.multify.traderpro.BuildConfig
 import com.multify.traderpro.engine.FixedBuyAvailabilityPolicy
 import com.multify.traderpro.data.network.DashboardDto
 import com.multify.traderpro.data.network.FixedScanTrendStore
+import com.multify.traderpro.data.logging.FixedUiRenderEvidenceStore
 import com.multify.traderpro.data.network.GrowwHttpTraceLedger
 import com.multify.traderpro.data.network.ExecutionAverageDto
 import com.multify.traderpro.engine.FixedFinalContract
@@ -899,6 +900,12 @@ private fun FixedScreen(
 ) {
     val dashboard = state.dashboard
     val rows = dashboard?.fixedForecasts.orEmpty().sortedBy { it.rank }
+    val screenContext = LocalContext.current
+    // Optional first screen composition observation; never claims physical display latency.
+    LaunchedEffect(rows.map { it.generatedAtMs to it.symbol }) {
+        FixedUiRenderEvidenceStore.recordFixedScreenObserved(
+            screenContext, rows, System.currentTimeMillis())
+    }
     val snapshot = dashboard?.fixedSnapshot ?: com.multify.traderpro.data.network.FixedSnapshotDto(
         snapshotId = FixedFinalContract.CONTRACT_ID,
         sourceVersion = "v7.4.1 final reference",
@@ -1057,6 +1064,45 @@ private fun FixedScreen(
                     enabled = false,
                     modifier = Modifier.weight(1f)
                 ) { Text("Learning locked") }
+            }
+        }
+        item {
+            val pending = dashboard?.fixedEarlyWatch.orEmpty()
+                .filter { !it.officialPublished &&
+                    fixedClockMs - it.latestEvaluatedAtMs in 0L..(6L * 60_000L) }
+                .take(6)
+            Card(
+                colors = CardDefaults.cardColors(containerColor =
+                    MaterialTheme.colorScheme.secondaryContainer.copy(alpha = .18f)),
+                shape = RoundedCornerShape(20.dp)
+            ) {
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("PRIMARY early watch · RESEARCH ONLY",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold)
+                    Text("AWAITING CONFIRMATION. Not an official BUY, not eligible for Auto Buy or manual BUY from this section. A new completed scan must requalify the stock.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (pending.isEmpty()) {
+                        Text("No recent unconfirmed PRIMARY candidates.",
+                            style = MaterialTheme.typography.bodySmall)
+                    } else pending.forEach { w ->
+                        HorizontalDivider()
+                        Text(w.symbol + " · AWAITING CONFIRMATION",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold)
+                        Text("First PRIMARY ₹" + String.format(Locale.US, "%.2f", w.firstPrimaryPrice) +
+                            " · last observed ₹" + String.format(Locale.US, "%.2f", w.latestPrice) +
+                            " · prior confirmations " + w.confirmationObservations +
+                            " · run-up " + String.format(Locale.US, "%+.2f%%", w.runupPct),
+                            style = MaterialTheme.typography.labelSmall)
+                        if (w.warnings.isNotEmpty()) {
+                            Text("Research caution: " + w.warnings.take(2).joinToString("; "),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
             }
         }
         item { ForecastTable(rows, onBuy,
