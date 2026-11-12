@@ -4511,9 +4511,16 @@ class TradingRepository @Inject constructor(
         val baselineReady = previousCoverageRatio >= FIXED_V741_MIN_DISCOVERY_COVERAGE_RATIO &&
             coverageRatio >= FIXED_V741_MIN_DISCOVERY_COVERAGE_RATIO && !abortedForNetwork
 
+        // v8.3.21: apply the EXISTING ₹200–₹5,000 Fixed eligibility
+        // before consuming the unchanged 28 dynamic candidate slots.
+        // The authoritative full-universe LTP sweep, health coverage, stored
+        // baselines and 65/35 momentum ranking formula are untouched.
+        val priceEligibleForDetail = current.filterValues {
+            RecommendationPriceBandPolicy.eligible(it)
+        }
         val ranked = if (baselineReady) {
             FixedMarketDiscoveryPolicy.rank(
-                currentLtps = current,
+                currentLtps = priceEligibleForDetail,
                 previousLtps = previous,
                 sessionOpenLtps = sessionOpen,
                 limit = FIXED_V741_DISCOVERY_DYNAMIC_LIMIT
