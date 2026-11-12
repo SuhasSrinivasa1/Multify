@@ -3967,6 +3967,46 @@ class TradingRepository @Inject constructor(
             }.thenByDescending { it.score }
         )
 
+        // V8322_FROZEN_SHADOW_EXCEPTION_BEGIN
+        // Exact unbounded pre-clamp score for the FROZEN 107-call state.
+        // champions/research bonuses are exactly zero above; this recomputation
+        // is observational only, never used to sort, publish, buy or sell.
+        val uncappedDiagnosticCandidates = ranked.take(FIXED_V741_DETAILED_FORECAST_UNIVERSE_LIMIT).map { item ->
+            val confidenceComponent = item.evaluation.confidence
+            val directionalComponent =
+                item.evaluation.directionalScore.coerceAtLeast(0.0) * 0.10
+            val frequencyComponent = min(.04, (frequency[item.symbol] ?: 0) * .004)
+            val dnaComponent = if (item.symbol in dnaSymbols) .08 else 0.0
+            val qualityComponent = FixedForecastQualityPolicy.rankingBonus(
+                item.evaluation, item.quality.volatilityCapacityPct, targetPct, item.quality.tier)
+            val familyComponent = FixedMultifyFactorFamilies.rankingBonus(item.factorModel)
+            val raw = confidenceComponent + directionalComponent + frequencyComponent +
+                dnaComponent + qualityComponent + familyComponent
+            mapOf(
+                "symbol" to item.symbol,
+                "quality_tier" to item.quality.tier,
+                "uncapped_exact_fixed_score_for_current_frozen_champions_and_research" to raw,
+                "capped_production_score" to item.score,
+                "capped_at_0_99" to (raw > .99),
+                "score_reconstruction_delta" to (raw.coerceIn(.01,.99) - item.score),
+                "confidence" to confidenceComponent,
+                "directional_bonus" to directionalComponent,
+                "frozen_frequency_bonus" to frequencyComponent,
+                "frozen_dna_bonus" to dnaComponent,
+                "fixed_quality_bonus" to qualityComponent,
+                "factor_family_bonus" to familyComponent
+            )
+        }
+        auditLogger.logAsync("FIXED_SHADOW", "UNCAPPED_RANKING_COMPONENTS", mapOf(
+            "scan_start_at_ms" to nowMs,
+            "source" to "EXACT_STATIC_FROZEN_CONTRACT_NO_BROKER_REQUESTS",
+            "champions_bonus" to 0.0,
+            "prior_research_bonus" to 0.0,
+            "changes_trading_score_or_rank" to false,
+            "candidates" to uncappedDiagnosticCandidates
+        ))
+        // V8322_FROZEN_SHADOW_EXCEPTION_END
+
         fixedRecommendationStore.appendObservations(
             ranked.take(FIXED_V741_RESEARCH_CAPTURE_TOP_N).map { item ->
                 FixedScanObservation(
