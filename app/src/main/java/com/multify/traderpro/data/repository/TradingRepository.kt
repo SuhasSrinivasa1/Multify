@@ -308,7 +308,10 @@ class TradingRepository @Inject constructor(
     )
     private data class PendingFixedSweep(
         val date: String, val tokenHash: String, val masterHash: String,
-        val dueAtMs: Long, val completion: CompletableDeferred<PrecomputedFixedSweep?>
+        val dueAtMs: Long, val completion: CompletableDeferred<PrecomputedFixedSweep?>,
+        // Mutated ONLY while pendingFixedSweepMutex is held.
+        var started: Boolean = false,
+        var cancelledBeforeStart: Boolean = false
     )
     private val pendingFixedSweepMutex = Mutex()
     private var pendingFixedSweep: PendingFixedSweep? = null
@@ -4364,6 +4367,25 @@ class TradingRepository @Inject constructor(
                 pending.completion.complete(null)
                 return false
             }
+            // Atomic handoff with the official scan. A scheduled-but-not-started
+            // sweep can be cancelled by the scan so ONLY the original official
+            // sweep runs; once started, it must be awaited instead.
+            val claimed = pendingFixedSweepMutex.withLock {
+                if (pending.cancelledBeforeStart || pending.completion.isCompleted ||
+                    pendingFixedSweep !== pending) false
+                else {
+                    pending.started = true
+                    true
+                }
+            }
+            if (!claimed) {
+                auditLogger.logAsync("FIXED_PERFORMANCE", "PREFETCH_NO_REQUEST_CANCELLED", mapOf(
+                    "scheduled_due_at_ms" to dueAtMs,
+                    "new_ltp_requests" to 0,
+                    "selection_or_fixed_formula_changed" to false
+                ))
+                return false
+            }
             fixedSweepPreparationActive = true
             val started = SystemClock.elapsedRealtime()
             val sweep = collectFixedWideLtp(token, master, preparing = true)
@@ -4372,6 +4394,9 @@ class TradingRepository @Inject constructor(
                     FIXED_V741_MIN_DISCOVERY_COVERAGE_RATIO && marketDataAvailableForFixed()
             auditLogger.logAsync("FIXED_PERFORMANCE", "NEXT_FULL_NSE_SWEEP_PREPARED", mapOf(
                 "elapsed_ms" to (SystemClock.elapsedRealtime() - started),
+                "prep_completed_relative_to_due_ms" to
+                    (sweep.completedAtMs - dueAtMs),
+                "preparation_finished_before_due" to (sweep.completedAtMs <= dueAtMs),
                 "ltp_batches" to sweep.requestCount,
                 "coverage" to sweep.prices.size, "batch_errors" to sweep.errors,
                 "usable" to usable, "same_broker_pacing" to true,
@@ -4396,8 +4421,27 @@ class TradingRepository @Inject constructor(
         token: String, master: List<String>, date: String
     ): PrecomputedFixedSweep? {
         val pending = pendingFixedSweepMutex.withLock {
-            pendingFixedSweep.also { pendingFixedSweep = null }
+            pendingFixedSweep.also { old ->
+                if (old != null && !old.started &&
+                    com.multify.traderpro.engine.FixedSweepPrefetchPolicy
+                        .officialSweepAllowedWithoutDuplication(old.started)
+                ) {
+                    old.cancelledBeforeStart = true
+                    if (!old.completion.isCompleted) old.completion.complete(null)
+                }
+                pendingFixedSweep = null
+            }
         } ?: return null
+        if (pending.cancelledBeforeStart) {
+            auditLogger.logAsync("FIXED_PERFORMANCE", "PREFETCH_NOT_STARTED_USE_OFFICIAL_SWEEP", mapOf(
+                "original_due_at_ms" to pending.dueAtMs,
+                "completed_broker_batches_from_cancelled_prefetch" to 0,
+                "original_official_sweep_authorized" to true,
+                "extra_full_market_sweeps" to 0,
+                "fixed_selection_or_formula_changed" to false
+            ))
+            return null
+        }
         if (pending.date != date || pending.tokenHash != sha256(token + "|" + (fixedBetaMarketTokenOrNull() ?: "ALPHA_ONLY")).take(12) ||
             pending.masterHash != sha256(master.joinToString("|")).take(16)) return null
         val started = SystemClock.elapsedRealtime()
@@ -4453,6 +4497,8 @@ class TradingRepository @Inject constructor(
         var failures = 0
         var aborted = false
         val chunks = master.chunked(50)
+        val sweepStartedElapsedMs = SystemClock.elapsedRealtime()
+        val batchWindowLatenciesMs = mutableListOf<Long>()
         val betaToken = fixedBetaMarketTokenOrNull()
         val betaStopped = AtomicBoolean(false)
         val betaSuccess = AtomicInteger(0)
@@ -4467,6 +4513,7 @@ class TradingRepository @Inject constructor(
                 aborted = true
                 break
             }
+            val batchWindowStartElapsedMs = SystemClock.elapsedRealtime()
             val results = FixedDiscoveryWindowScheduler.fetchOrdered(
                 chunks, windowStart
             ) { index, chunk ->
@@ -4504,6 +4551,8 @@ class TradingRepository @Inject constructor(
                         ?.also { alphaSuccess.incrementAndGet() }
                 }
             }
+            batchWindowLatenciesMs.add(
+                (SystemClock.elapsedRealtime() - batchWindowStartElapsedMs).coerceAtLeast(0L))
             for ((index, payload) in results) {
                 if (payload == null) {
                     errors++
@@ -4535,7 +4584,19 @@ class TradingRepository @Inject constructor(
             }
             if (aborted) break
         }
+        val sortedWindowLatenciesMs = batchWindowLatenciesMs.sorted()
         auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "FULL_NSE_SWEEP_ACCOUNT_PROFILE", mapOf(
+            "sweep_elapsed_ms" to (SystemClock.elapsedRealtime() - sweepStartedElapsedMs).coerceAtLeast(0L),
+            "parallel_ltp_window_size" to FixedDiscoveryWindowScheduler.WINDOW_SIZE,
+            "batch_window_count" to sortedWindowLatenciesMs.size,
+            "batch_window_latency_p50_ms" to sortedWindowLatenciesMs.takeIf { it.isNotEmpty() }
+                ?.let { samples -> samples[samples.size / 2] },
+            "batch_window_latency_p95_ms" to sortedWindowLatenciesMs.takeIf { it.isNotEmpty() }
+                ?.let { samples -> samples[(samples.size - 1) * 95 / 100] },
+            "prepared_for_next_scan" to preparing,
+            "two_independent_broker_accounts_used" to
+                (alphaSuccess.get() > 0 && betaSuccess.get() > 0),
+            "extra_ltp_requests_for_profiling" to 0,
             "master_symbols" to master.size,
             "total_batches" to chunks.size,
             "alpha_success_batches" to alphaSuccess.get(),
@@ -4665,6 +4726,22 @@ class TradingRepository @Inject constructor(
     suspend fun sampleFixedFiveMinuteShadow(completedScanNumber: Int) {
         if (!fixedFiveMinuteShadowMutex.tryLock()) return
         try {
+            // Yield the discretionary 5m HISTORY call to the existing official
+            // 53-batch LTP prefetch. This avoids category contention and adds
+            // ZERO mandatory market requests; no 15m production input changes.
+            val officialSweepPending = pendingFixedSweepMutex.withLock {
+                pendingFixedSweep?.completion?.isCompleted == false
+            }
+            if (fixedSweepPreparationActive || officialSweepPending) {
+                auditLogger.logAsync("FIXED_5M_SHADOW", "OFFICIAL_PREFETCH_HAS_PRIORITY", mapOf(
+                    "scan_number" to completedScanNumber,
+                    "official_full_sweep_pending" to officialSweepPending,
+                    "official_full_sweep_active" to fixedSweepPreparationActive,
+                    "discretionary_5m_history_requests" to 0,
+                    "production_fixed_scoring_changed" to false
+                ))
+                return
+            }
             val now = ZonedDateTime.now(INDIA)
             if (now.dayOfWeek.value >= 6 || now.toLocalTime() !in LocalTime.of(9, 15)..LocalTime.of(15, 25)) return
             val nowMs = System.currentTimeMillis()
@@ -4718,7 +4795,11 @@ class TradingRepository @Inject constructor(
             }
             val (symbol, reference) = candidate
             val token = ensureToken() ?: return // Alpha only: no Beta account, no fallback.
-            if (fixedApiPriorityRequested || marketCriticalTradeInFlight ||
+            val sweepDemandBeforeRequest = pendingFixedSweepMutex.withLock {
+                pendingFixedSweep?.completion?.isCompleted == false
+            }
+            if (fixedSweepPreparationActive || sweepDemandBeforeRequest ||
+                fixedApiPriorityRequested || marketCriticalTradeInFlight ||
                 millisUntilNextFixedScan() < FixedShadowSamplingPolicy.MIN_FIXED_HEADROOM_MS
             ) return
             val referenceTime = ZonedDateTime.ofInstant(

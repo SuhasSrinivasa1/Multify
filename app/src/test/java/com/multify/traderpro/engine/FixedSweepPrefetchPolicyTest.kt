@@ -21,6 +21,14 @@ class FixedSweepPrefetchPolicyTest {
         assertFalse(FixedSweepPrefetchPolicy.canConsume(0L, 101_000L, 2432, 2630, false))
     }
 
+    @Test fun officialSweepFallsBackOnlyBeforePrefetchBrokerRequests() {
+        // The next official scan must not be lost because a pending job
+        // was scheduled but never fetched even a single LTP batch.
+        assertTrue(FixedSweepPrefetchPolicy.officialSweepAllowedWithoutDuplication(false))
+        // Once started, the official scan must await or safely defer.
+        assertFalse(FixedSweepPrefetchPolicy.officialSweepAllowedWithoutDuplication(true))
+    }
+
     @Test fun matchesFrozenMinimumCoverageAndKeepsStrictAgeLimit() {
         assertEquals(0.85, FixedSweepPrefetchPolicy.MIN_COVERAGE, 0.000001)
         assertTrue(FixedSweepPrefetchPolicy.MAX_ACCEPTED_AGE_MS < 60_000L)

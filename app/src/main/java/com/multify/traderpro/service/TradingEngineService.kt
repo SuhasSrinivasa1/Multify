@@ -746,6 +746,12 @@ class TradingEngineService : Service() {
                             // No Early Watch/Pulse/Fast Watch background research.
                             // Prepare NEXT official NSE sweep, using no more full-market
                             // LTP batches per successful cycle than original v8.
+                            // Alert after the completed order/protection path,
+                            // BEFORE launching optional I/O-intensive market prefetch.
+                            // This never posts mid-scan or before SELL/GTT safeguards.
+                            scope.launch {
+                                notifyNewFixedRecommendationsAfterOrderPath()
+                            }
                             scope.launch(Dispatchers.IO) {
                                 runCatching { repository.prepareNextFixedDiscoverySweep() }
                                     .onFailure { error ->
@@ -754,9 +760,6 @@ class TradingEngineService : Service() {
                                             mapOf("error" to (error.message ?: error.javaClass.simpleName))
                                         )
                                     }
-                            }
-                            scope.launch {
-                                notifyNewFixedRecommendationsAfterOrderPath()
                             }
                             // One optional real 5m candle comparison per eight completed
                             // Fixed scans, only with spare category quota and no recent

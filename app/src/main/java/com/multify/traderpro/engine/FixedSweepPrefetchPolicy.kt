@@ -10,6 +10,15 @@ object FixedSweepPrefetchPolicy {
     const val MAX_OVERRUN_MS = 95_000L
     const val MIN_COVERAGE = 0.85
 
+    /**
+     * An official scan may take its ORIGINAL full-market sweep only when
+     * the scheduled prefetch never started any broker request. Once the
+     * prefetch has started, a duplicate sweep is forbidden even on timeout.
+     * This is transport arbitration, never permission to publish a partial scan.
+     */
+    fun officialSweepAllowedWithoutDuplication(prefetchRequestsStarted: Boolean): Boolean =
+        !prefetchRequestsStarted
+
     fun canStart(
         nowMs: Long, dueAtMs: Long, criticalTradeInFlight: Boolean, brokerReady: Boolean
     ): Boolean = nowMs > 0L && dueAtMs > nowMs &&
