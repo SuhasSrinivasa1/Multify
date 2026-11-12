@@ -19,7 +19,8 @@ The request trace does not prove Groww's hidden endpoint quota. The implementati
 1. Alpha LIVE_DATA application ceiling is reduced from 10 requests/second and 300/minute to 4/second and 120/minute. The existing protection reserve remains 2/second and 60/minute, leaving a research allowance of 2/second and 60/minute. Protection traffic can use the full application allowance and still passes the shared recovery gate.
 2. Added adaptive Alpha /live-data/quote pacing. Research quote starts are separated by an initial 650 ms; a quote 429 doubles the gap up to 8 seconds, and clean traffic gradually relaxes it. Protection-tagged requests skip this extra research delay but still consume the reserved/global live-data budget.
 3. Historical request admission increases cautiously from 1/second and 45/minute to 2/second and 90/minute. This remains below the configured published ceiling of 4/second and 180/minute and addresses the large historical wait time observed with zero historical 429s in this export.
-4. Added unit tests for quote pacing and updated live/historical budget tests.
+4. Rebalanced one-third of Fixed detail quote/15-minute-history reads to the healthy, separately authenticated Beta account (up from one-sixth). This is deterministic, read-only transport allocation; Alpha remains the only execution account, and Beta's independent 8/min historical gate is unchanged.
+5. Added unit tests for quote pacing, deterministic Beta detail allocation and updated live/historical budget tests.
 
 ## Explicitly unchanged
 
