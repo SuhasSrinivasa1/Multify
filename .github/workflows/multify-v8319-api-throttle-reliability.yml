@@ -95,8 +95,9 @@ jobs:
           assert 'APP_PER_MINUTE = 90' in historical_budget
           quote_policy = Path(root + 'engine/AlphaQuotePacingPolicy.kt').read_text()
           assert 'START_GAP_MS = 650L' in quote_policy
-          assert 'AlphaQuotePacingPolicy.on429' in alpha
-          assert 'ALPHA_QUOTE_ENDPOINT_PACING' in alpha
+          alpha_network = Path(root + 'data/network/GrowwRateLimitInterceptor.kt').read_text()
+          assert 'AlphaQuotePacingPolicy.on429' in alpha_network
+          assert 'ALPHA_QUOTE_ENDPOINT_PACING' in alpha_network
           beta_account = Path(root + 'engine/FixedDualAccountPolicy.kt').read_text()
           assert 'BETA_LIVE_PER_MINUTE = 270' in beta_account
           assert 'BETA_HISTORICAL_PER_MINUTE = 8' in beta_account
