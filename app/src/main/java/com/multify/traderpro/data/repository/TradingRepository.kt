@@ -4394,6 +4394,9 @@ class TradingRepository @Inject constructor(
                     FIXED_V741_MIN_DISCOVERY_COVERAGE_RATIO && marketDataAvailableForFixed()
             auditLogger.logAsync("FIXED_PERFORMANCE", "NEXT_FULL_NSE_SWEEP_PREPARED", mapOf(
                 "elapsed_ms" to (SystemClock.elapsedRealtime() - started),
+                "prep_completed_relative_to_due_ms" to
+                    (sweep.completedAtMs - dueAtMs),
+                "preparation_finished_before_due" to (sweep.completedAtMs <= dueAtMs),
                 "ltp_batches" to sweep.requestCount,
                 "coverage" to sweep.prices.size, "batch_errors" to sweep.errors,
                 "usable" to usable, "same_broker_pacing" to true,
@@ -4494,6 +4497,8 @@ class TradingRepository @Inject constructor(
         var failures = 0
         var aborted = false
         val chunks = master.chunked(50)
+        val sweepStartedElapsedMs = SystemClock.elapsedRealtime()
+        val batchWindowLatenciesMs = mutableListOf<Long>()
         val betaToken = fixedBetaMarketTokenOrNull()
         val betaStopped = AtomicBoolean(false)
         val betaSuccess = AtomicInteger(0)
@@ -4508,6 +4513,7 @@ class TradingRepository @Inject constructor(
                 aborted = true
                 break
             }
+            val batchWindowStartElapsedMs = SystemClock.elapsedRealtime()
             val results = FixedDiscoveryWindowScheduler.fetchOrdered(
                 chunks, windowStart
             ) { index, chunk ->
@@ -4545,6 +4551,8 @@ class TradingRepository @Inject constructor(
                         ?.also { alphaSuccess.incrementAndGet() }
                 }
             }
+            batchWindowLatenciesMs.add(
+                (SystemClock.elapsedRealtime() - batchWindowStartElapsedMs).coerceAtLeast(0L))
             for ((index, payload) in results) {
                 if (payload == null) {
                     errors++
@@ -4576,7 +4584,19 @@ class TradingRepository @Inject constructor(
             }
             if (aborted) break
         }
+        val sortedWindowLatenciesMs = batchWindowLatenciesMs.sorted()
         auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "FULL_NSE_SWEEP_ACCOUNT_PROFILE", mapOf(
+            "sweep_elapsed_ms" to (SystemClock.elapsedRealtime() - sweepStartedElapsedMs).coerceAtLeast(0L),
+            "parallel_ltp_window_size" to FixedDiscoveryWindowScheduler.WINDOW_SIZE,
+            "batch_window_count" to sortedWindowLatenciesMs.size,
+            "batch_window_latency_p50_ms" to sortedWindowLatenciesMs.takeIf { it.isNotEmpty() }
+                ?.get(it.size / 2),
+            "batch_window_latency_p95_ms" to sortedWindowLatenciesMs.takeIf { it.isNotEmpty() }
+                ?.get(((it.size - 1) * 95 / 100)),
+            "prepared_for_next_scan" to preparing,
+            "two_independent_broker_accounts_used" to
+                (alphaSuccess.get() > 0 && betaSuccess.get() > 0),
+            "extra_ltp_requests_for_profiling" to 0,
             "master_symbols" to master.size,
             "total_batches" to chunks.size,
             "alpha_success_batches" to alphaSuccess.get(),
