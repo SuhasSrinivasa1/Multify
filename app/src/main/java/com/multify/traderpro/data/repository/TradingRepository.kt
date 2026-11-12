@@ -4856,7 +4856,7 @@ class TradingRepository @Inject constructor(
             val observedVwapExtensionAtr = fifteen.features.atr14?.takeIf { it > 0.0 }
                 ?.let { atr -> fifteen.features.vwap?.takeIf { it > 0.0 }
                     ?.let { vwap -> (price - vwap) / atr } }
-            val timeframeVerdict = FixedTimeframeShadowDecisionPolicy.assess(
+            val timeframeVerdict = com.multify.traderpro.engine.FixedTimeframeShadowDecisionPolicy.assess(
                 capturedAtMs = reference.quoteCapturedAtMs,
                 fifteenMinuteTier = tier15,
                 fiveMinuteTier = tier5,
