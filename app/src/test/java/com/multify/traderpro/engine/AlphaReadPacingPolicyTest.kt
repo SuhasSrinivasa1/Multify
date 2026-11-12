@@ -6,11 +6,11 @@ import org.junit.Test
 class AlphaReadPacingPolicyTest {
     @Test fun onlyAlphaReadEndpointsArePaced() {
         val p = AlphaReadPacingPolicy
-        assertEquals(p.Lane.QUOTE, p.lane("GET", "/v1/live-data/quote"))
-        assertEquals(p.Lane.ACCOUNT_READ, p.lane("GET", "/v1/holdings/user"))
-        assertEquals(p.Lane.ACCOUNT_READ, p.lane("GET", "/v1/positions/user"))
-        assertEquals(p.Lane.ACCOUNT_READ, p.lane("GET", "/v1/order-advance/list"))
-        assertEquals(p.Lane.ACCOUNT_READ, p.lane("GET", "/v1/order-advance/status/CASH/GTT/internal/123"))
+        assertEquals(AlphaReadPacingPolicy.Lane.QUOTE, p.lane("GET", "/v1/live-data/quote"))
+        assertEquals(AlphaReadPacingPolicy.Lane.ACCOUNT_READ, p.lane("GET", "/v1/holdings/user"))
+        assertEquals(AlphaReadPacingPolicy.Lane.ACCOUNT_READ, p.lane("GET", "/v1/positions/user"))
+        assertEquals(AlphaReadPacingPolicy.Lane.ACCOUNT_READ, p.lane("GET", "/v1/order-advance/list"))
+        assertEquals(AlphaReadPacingPolicy.Lane.ACCOUNT_READ, p.lane("GET", "/v1/order-advance/status/CASH/GTT/internal/123"))
         assertNull(p.lane("GET", "/v1/live-data/ltp"))
         assertNull(p.lane("GET", "/v1/historical/candles"))
         assertNull(p.lane("GET", "/v1/order/detail/123")) // post-fill order evidence stays immediate
@@ -21,8 +21,8 @@ class AlphaReadPacingPolicyTest {
 
     @Test fun quoteStartsAreSpacedAnd429SlowsTheLane() {
         val p = AlphaReadPacingPolicy
-        val lane = p.Lane.QUOTE
-        var s = p.State(p.startGapMs(lane), 1000L)
+        val lane = AlphaReadPacingPolicy.Lane.QUOTE
+        var s = AlphaReadPacingPolicy.State(p.startGapMs(lane), 1000L)
         assertEquals(0L, p.waitMs(1000L, 0L, s.gapMs))
         assertEquals(850L, p.waitMs(1000L, 1000L, s.gapMs))
         assertEquals(0L, p.waitMs(1850L, 1000L, s.gapMs))
@@ -34,8 +34,8 @@ class AlphaReadPacingPolicyTest {
 
     @Test fun accountReadsShareOneLaneAndProtectedWritesRemainExempt() {
         val p = AlphaReadPacingPolicy
-        val lane = p.Lane.ACCOUNT_READ
-        val s = p.on429(lane, p.State(p.startGapMs(lane), 1000L), 1500L)
+        val lane = AlphaReadPacingPolicy.Lane.ACCOUNT_READ
+        val s = p.on429(lane, AlphaReadPacingPolicy.State(p.startGapMs(lane), 1000L), 1500L)
         assertEquals(2000L, s.gapMs)
         assertEquals(1200L, p.waitMs(2300L, 1500L, s.gapMs))
         assertEquals(0L, p.waitMs(3500L, 1500L, s.gapMs))
