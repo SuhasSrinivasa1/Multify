@@ -4113,6 +4113,35 @@ class TradingRepository @Inject constructor(
                     executionEligible = item.quality.executionEligible
                 )
             )
+            // V8322_FROZEN_SHADOW_EXCEPTION_BEGIN
+            val storedAtMs = System.currentTimeMillis()
+            val firstPriorPrimary = allTodayFixedObservations.asSequence()
+                .filter {
+                    it.symbol.equals(item.symbol, true) &&
+                        it.scanAtMs < nowMs &&
+                        it.qualityTier == "PRIMARY" &&
+                        it.publishEligible && it.executionEligible
+                }.minByOrNull { it.scanAtMs }
+            val driftPct = firstPriorPrimary?.observedPrice?.takeIf { it > 0.0 }
+                ?.let { (price / it - 1.0) * 100.0 }
+            auditLogger.logAsync("FIXED_SHADOW", "RECOMMENDATION_PERSISTED_TIMING", mapOf(
+                "symbol" to item.symbol,
+                "scan_started_at_ms" to nowMs,
+                "persisted_at_ms" to storedAtMs,
+                "scan_to_store_ms" to (storedAtMs - nowMs),
+                "last_evaluation_quote_captured_at_ms" to
+                    fixedShadowReferences[item.symbol]?.quoteCapturedAtMs,
+                "first_prior_primary_scan_at_ms" to firstPriorPrimary?.scanAtMs,
+                "first_prior_primary_price" to firstPriorPrimary?.observedPrice,
+                "first_primary_to_persist_ms" to firstPriorPrimary?.let {
+                    storedAtMs - it.scanAtMs
+                },
+                "pre_publication_runup_from_first_primary_pct" to driftPct,
+                "already_moved_more_than_full_target" to driftPct?.let { it >= targetPct },
+                "snapshot_is_not_exchange_tick_or_executable_quote" to true,
+                "trading_decisions_unchanged" to true
+            ))
+            // V8322_FROZEN_SHADOW_EXCEPTION_END
         }
 
         val all = fixedRecommendationStore.recommendations(today)
