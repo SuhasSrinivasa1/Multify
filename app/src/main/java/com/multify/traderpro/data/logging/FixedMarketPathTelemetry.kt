@@ -210,7 +210,7 @@ class FixedMarketPathTelemetry @Inject constructor(
      * User-triggered export analysis from the ALREADY RECORDED full-NSE LTP path.
      * No broker I/O, no trade scoring, no assumption of intrabar high/low or fills.
      */
-    fun exportSampledOutcomeStudy(
+    internal fun exportSampledOutcomeStudy(
         recommendations: List<FixedRecommendationRecord>,
         tierObservations: List<FixedScanObservation>
     ): Map<String, Any?> {
