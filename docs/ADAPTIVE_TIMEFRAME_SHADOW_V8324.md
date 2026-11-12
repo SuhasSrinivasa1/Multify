@@ -38,3 +38,26 @@ Leave Fixed Auto Buy OFF while testing. A CI-signed APK may not have a
 signing certificate compatible with the existing installation. Do not
 uninstall an active trading installation while it owns holdings or
 broker-side protective orders, or before exporting local diagnostics.
+
+## Offline timing replay
+
+This research CLI needs timestamped completed five-minute OHLCV and actual
+notification-available times. Summary MFE/MAE cannot reconstruct chronology.
+
+Candles CSV headers: symbol,at_ms,open,high,low,close,volume
+Signals CSV headers: key,symbol,at_ms,target_pct
+Each at_ms is UTC epoch milliseconds. Candle timestamps denote bar START;
+signal timestamps must denote when the signal was actually available.
+
+Usage:
+python -m backend.app.adaptive_timeframe_replay --candles history.csv --signals fixed_signals.csv > replay.json
+
+Compare identical official Fixed events under (A) next eligible 5m open,
+(B) later 5m breakout/volume confirmation, and (C) 9:45 scheduled study.
+No entry means zero return, not a winning trade. Missing bars are censored.
+If stop and target overlap a candle, pessimistically assume stop.
+
+Default stop 5%, target 1.1161043%, 5 bps each side slippage, 20 bps
+roundtrip cost and 60-minute horizon are configurable assumptions, NOT
+current exact trailing GTT or broker-fill reconstruction. Earlier-than-Fixed
+signals cannot be studied without earlier timestamped candidate evidence.

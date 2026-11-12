@@ -32,6 +32,8 @@ jobs:
           base = "a6752e82a8573db4a050334bf8956fde0c7348e0"
           allowed = {
             "app/build.gradle.kts",
+            "backend/app/adaptive_timeframe_replay.py",
+            "backend/tests/test_adaptive_timeframe_replay.py",
             "app/src/main/java/com/multify/traderpro/data/repository/TradingRepository.kt",
             "app/src/main/java/com/multify/traderpro/engine/FixedTimeframeShadowDecisionPolicy.kt",
             "app/src/test/java/com/multify/traderpro/engine/FixedTimeframeShadowDecisionPolicyTest.kt",
@@ -67,6 +69,8 @@ jobs:
           assert 'versionName = "8.3.24-adaptive-timeframe-shadow"' in Path('app/build.gradle.kts').read_text()
           print("PASS: production code unchanged; 5m diagnostics isolated")
           PY
+      - name: Offline chronological replay regression tests
+        run: python -m unittest discover -s backend/tests -p 'test_adaptive_timeframe_replay.py' -v
       - name: Android unit tests and APK
         run: gradle :app:testDebugUnitTest :app:assembleDebug --no-daemon --stacktrace
       - name: Upload experimental debug APK
