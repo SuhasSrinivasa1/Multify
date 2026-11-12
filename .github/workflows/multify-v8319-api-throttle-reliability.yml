@@ -82,8 +82,14 @@ jobs:
           fixed_dual = root + 'engine/FixedDualAccountPolicy.kt'
           fixed_dual_now = Path(fixed_dual).read_text()
           fixed_dual_before = subprocess.check_output(['git','show',f'{base}:{fixed_dual}'], text=True)
-          cut = 'const val FULL_NSE_LTP_BATCH_LIMIT'
-          assert fixed_dual_now[:fixed_dual_now.index(cut)] == fixed_dual_before[:fixed_dual_before.index(cut)], 'Fixed routing methods changed'
+          def function_body(src, start, stop):
+              i = src.index(start)
+              return src[i:src.index(stop, i)]
+          assert function_body(fixed_dual_now, 'fun betaDiscoveryBatch(', '// Route one-third') == function_body(
+              fixed_dual_before, 'fun betaDiscoveryBatch(', '// Keep the Beta 15m history budget')
+          assert function_body(fixed_dual_now, 'fun acceptableCoverage(', 'const val FULL_NSE_LTP_BATCH_LIMIT') == function_body(
+              fixed_dual_before, 'fun acceptableCoverage(', 'const val FULL_NSE_LTP_BATCH_LIMIT')
+          assert 'Math.floorMod(symbol.hashCode(), 3) == 0' in fixed_dual_now
           from pathlib import Path
           budgets = Path(root + 'engine/GrowwApiBudgetPolicy.kt').read_text()
           assert 'APP_LIVE_DATA_PER_SECOND = 4' in budgets
