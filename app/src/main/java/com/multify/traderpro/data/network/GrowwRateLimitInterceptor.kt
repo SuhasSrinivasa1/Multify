@@ -201,9 +201,9 @@ internal class GrowwRateLimitInterceptor(
             val waitMs = synchronized(lock) {
                 val now = SystemClock.elapsedRealtime()
                 val state = states.getValue(category)
-                // Centralized quota: protect one live request/second and sixty/minute
-                // for existing holdings. Ordinary Fixed/Forecast research uses only
-                // the residual allowance; protection still obeys Groww's hard budget.
+                // Centralized reduced quota: reserve two live requests/second and
+                // sixty/minute for immediate protection. Research uses only the
+                // residual allowance; all traffic remains below the broker ceiling.
                 val limits = if (category == GrowwApiUsageLedger.Category.LIVE_DATA) {
                     val admission = MarketDataPriorityAdmissionPolicy.allowedLiveTraffic(
                         MarketDataPriorityAdmissionPolicy.hasManagedHoldings, protection)
