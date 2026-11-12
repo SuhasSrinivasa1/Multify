@@ -10,9 +10,10 @@ object FixedDualAccountPolicy {
     fun betaDiscoveryBatch(batchIndex: Int, betaReady: Boolean): Boolean =
         betaReady && batchIndex >= 0 && batchIndex % 2 == 1
 
-    // Keep the Beta 15m history budget below its independently throttled limit.
+    // Route one-third of detail quote/history reads to healthy read-only Beta.
+    // This reduces Alpha quote bursts while staying below Beta's independent 8/min history budget.
     fun betaDetailedEvaluation(symbol: String, betaReady: Boolean): Boolean =
-        betaReady && symbol.isNotBlank() && Math.floorMod(symbol.hashCode(), 6) == 0
+        betaReady && symbol.isNotBlank() && Math.floorMod(symbol.hashCode(), 3) == 0
 
     fun acceptableCoverage(valid: Int, master: Int, aborted: Boolean): Boolean =
         !aborted && master > 0 && valid.toDouble() / master >= .85
