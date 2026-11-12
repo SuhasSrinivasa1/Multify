@@ -230,7 +230,7 @@ internal class GrowwRateLimitInterceptor(
                 val quoteWait = if (alphaQuote && !protection)
                     AlphaQuotePacingPolicy.waitMs(now, lastAlphaQuoteGrantedAtMs, alphaQuotePace.gapMs)
                 else 0L
-                val wait = maxOf(cooldownWait, secondWait, minuteWait, ltpWait, protectionYield, quoteWait)
+                val wait = maxOf(maxOf(cooldownWait, secondWait, minuteWait, ltpWait, protectionYield), quoteWait)
                 reason = when {
                     protectionYield > 0L && wait == protectionYield -> "YIELD_TO_HOLDING_PROTECTION"
                     cooldownWait > 0L && wait == cooldownWait -> "429_COOLDOWN"
