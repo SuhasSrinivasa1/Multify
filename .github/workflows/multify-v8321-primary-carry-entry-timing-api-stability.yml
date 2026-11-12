@@ -70,25 +70,25 @@ jobs:
                   # normalization the ENTIRE 40-factor Fixed function must
                   # byte-match the pinned older source.
                   allowed = re.compile(
-                      r'(?m)^ *// V8321_FROZEN_FOLLOWUP_EXCEPTION_BEGIN\\n.*?^ *// V8321_FROZEN_FOLLOWUP_EXCEPTION_END\\n',
+                      r'(?m)^ *// V8321_FROZEN_FOLLOWUP_EXCEPTION_BEGIN\n.*?^ *// V8321_FROZEN_FOLLOWUP_EXCEPTION_END\n',
                       re.S | re.M)
                   count = [0]
                   def strip_followup(match):
                       count[0] += 1
                       block = match.group(0)
                       if 'val universe =' in block:
-                          return ('        val universe = (discoveredSymbols + dnaSymbols + recentSymbols + rotating)\\n'
-                                  '            .distinct()\\n'
-                                  '            .take(FIXED_V741_DETAILED_FORECAST_UNIVERSE_LIMIT)\\n')
+                          return ('        val universe = (discoveredSymbols + dnaSymbols + recentSymbols + rotating)\n'
+                                  '            .distinct()\n'
+                                  '            .take(FIXED_V741_DETAILED_FORECAST_UNIVERSE_LIMIT)\n')
                       if 'discoveredMarketWide =' in block:
-                          return '                discoveredMarketWide = item.symbol in discoveredSymbols,\\n'
+                          return '                discoveredMarketWide = item.symbol in discoveredSymbols,\n'
                       return ''
                   current_piece = allowed.sub(strip_followup, current_piece)
                   assert count[0] == 4, f'Unexpected Fixed exception count: {count}'
                   for k in ('carried_recent_primary_symbols','carried_primary_evaluated',
                             'followup_not_auto_publication','fixed_detail_candidate_limit'):
                       current_piece, occurrences = re.subn(
-                          r'(?m)^            "' + k + r'".*\\n', '', current_piece)
+                          r'(?m)^            "' + k + r'".*\n', '', current_piece)
                       assert occurrences == 1, 'Missing controlled audit: ' + k
               assert current_piece == piece(before), f'Unapproved frozen Fixed model drift: {start}'
           assert 'FixedAutoBuyActivatedAtMs' not in now
