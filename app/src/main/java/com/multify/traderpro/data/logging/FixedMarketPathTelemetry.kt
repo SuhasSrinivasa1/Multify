@@ -188,7 +188,16 @@ class FixedMarketPathTelemetry @Inject constructor(
                             "broker_ltp" to row.ltp,
                             "pulse_since_previous_sweep_pct" to row.pulsePct,
                             "since_first_sweep_pct" to row.sessionPct,
-                            "selection_score" to row.score
+                            "selection_score" to row.score,
+                            "five_minute_change_pct_shadow" to sample?.selectedCandidates
+                                ?.firstOrNull { it.symbol == row.symbol }?.changePct,
+                            "five_minute_positive_90second_nonpositive_shadow" to sample
+                                ?.selectedCandidates?.firstOrNull { it.symbol == row.symbol }
+                                ?.let { five -> five.changePct > 0.0 && row.pulsePct <= 0.0 },
+                            "five_minute_minus_90second_change_pct_shadow" to sample
+                                ?.selectedCandidates?.firstOrNull { it.symbol == row.symbol }
+                                ?.let { five -> five.changePct - row.pulsePct },
+                            "not_a_fixed_selection_or_buy_gate" to true
                         )
                     },
                     "full_market_ltp_packed_format" to "SYMBOL~LTP|SYMBOL~LTP",
