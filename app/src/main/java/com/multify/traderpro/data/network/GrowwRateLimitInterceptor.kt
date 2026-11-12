@@ -14,6 +14,7 @@ import com.multify.traderpro.engine.MarketDataPriorityAdmissionPolicy
 import com.multify.traderpro.engine.GrowwRetryAfterPolicy
 import com.multify.traderpro.engine.AlphaLtpPacingPolicy
 import com.multify.traderpro.engine.LtpAdaptivePacingPolicy
+import com.multify.traderpro.engine.AlphaReadPacingPolicy
 import okhttp3.Interceptor
 import okhttp3.Response
 import java.util.ArrayDeque
@@ -41,6 +42,12 @@ internal class GrowwRateLimitInterceptor(
     // This never changes Fixed scoring, SELL stop triggers or order dispatch.
     private val alphaLtpMinute = ArrayDeque<Long>()
     private val pendingProtectionLtps = AtomicInteger(0)
+    private val readLastGrantedMs = EnumMap<AlphaReadPacingPolicy.Lane, Long>(AlphaReadPacingPolicy.Lane::class.java)
+    private val readPace = EnumMap<AlphaReadPacingPolicy.Lane, AlphaReadPacingPolicy.State>(AlphaReadPacingPolicy.Lane::class.java).apply {
+        AlphaReadPacingPolicy.Lane.values().forEach { lane ->
+            put(lane, AlphaReadPacingPolicy.State(AlphaReadPacingPolicy.startGapMs(lane), SystemClock.elapsedRealtime()))
+        }
+    }
     private var lastAlphaLtpGrantedAtMs = 0L
     private var alphaLtpPace = LtpAdaptivePacingPolicy.State(LtpAdaptivePacingPolicy.START_GAP_MS, SystemClock.elapsedRealtime())
     private val lastBlockedAuditMs = EnumMap<GrowwApiUsageLedger.Category, Long>(GrowwApiUsageLedger.Category::class.java)
@@ -105,6 +112,10 @@ internal class GrowwRateLimitInterceptor(
                 state.cooldownUntilMs = maxOf(state.cooldownUntilMs, SystemClock.elapsedRealtime() + appliedCooldownMs)
                 if (path == "/v1/live-data/ltp")
                     alphaLtpPace = LtpAdaptivePacingPolicy.on429(alphaLtpPace, SystemClock.elapsedRealtime())
+                AlphaReadPacingPolicy.lane(request.method, path)?.let { lane ->
+                    readPace[lane] = AlphaReadPacingPolicy.on429(
+                        lane, readPace.getValue(lane), SystemClock.elapsedRealtime())
+                }
             }
             val row = GrowwApiUsageLedger.snapshot().categories.first { it.category == category }
             auditLogger.logAsync("API_RATE_LIMIT", "HTTP_429", mapOf(
@@ -131,8 +142,13 @@ internal class GrowwRateLimitInterceptor(
                 "governor_wait_ms_max" to row.maxPermitWaitMs
             ))
         }
-        if (path == "/v1/live-data/ltp" && response.isSuccessful) synchronized(lock) {
-            alphaLtpPace = LtpAdaptivePacingPolicy.onSuccess(alphaLtpPace, SystemClock.elapsedRealtime())
+        if (response.isSuccessful) synchronized(lock) {
+            if (path == "/v1/live-data/ltp")
+                alphaLtpPace = LtpAdaptivePacingPolicy.onSuccess(alphaLtpPace, SystemClock.elapsedRealtime())
+            AlphaReadPacingPolicy.lane(request.method, path)?.let { lane ->
+                readPace[lane] = AlphaReadPacingPolicy.onSuccess(
+                    lane, readPace.getValue(lane), SystemClock.elapsedRealtime())
+            }
         }
         if (response.code == 401 && category != GrowwApiUsageLedger.Category.AUTH) {
             recoveryGate.onUnauthorized()
@@ -174,6 +190,7 @@ internal class GrowwRateLimitInterceptor(
             MarketDataPriorityAdmissionPolicy.isProtectionHeader(
                 request.header(MarketDataPriorityAdmissionPolicy.HEADER))
         val protectionLtp = protection && path == "/v1/live-data/ltp"
+        val readLane = AlphaReadPacingPolicy.lane(request.method, path)
         if (protectionLtp) pendingProtectionLtps.incrementAndGet()
         var totalWaitMs = 0L
         var dominantReason = "NONE"
@@ -209,13 +226,22 @@ internal class GrowwRateLimitInterceptor(
                     now, lastAlphaLtpGrantedAtMs,
                     alphaLtpMinute.peekFirst(), alphaLtpMinute.size, alphaLtpPace.gapMs
                 ) else 0L
+                val readWait = readLane?.let { lane ->
+                    AlphaReadPacingPolicy.waitMs(
+                        now, readLastGrantedMs[lane] ?: 0L, readPace.getValue(lane).gapMs)
+                } ?: 0L
                 val protectionYield = MarketDataPriorityAdmissionPolicy.ltpPriorityYieldMs(
                     isAlphaLtp, protection, pendingProtectionLtps.get())
-                val wait = maxOf(cooldownWait, secondWait, minuteWait, ltpWait, protectionYield)
+                val wait = maxOf(cooldownWait, secondWait, minuteWait, ltpWait, readWait, protectionYield)
                 reason = when {
                     protectionYield > 0L && wait == protectionYield -> "YIELD_TO_HOLDING_PROTECTION"
                     cooldownWait > 0L && wait == cooldownWait -> "429_COOLDOWN"
                     ltpWait > 0L && wait == ltpWait -> "ALPHA_LTP_ENDPOINT_PACING"
+                    readWait > 0L && wait == readWait -> when (readLane) {
+                        AlphaReadPacingPolicy.Lane.QUOTE -> "ALPHA_QUOTE_ENDPOINT_PACING"
+                        AlphaReadPacingPolicy.Lane.ACCOUNT_READ -> "ALPHA_ACCOUNT_READ_PACING"
+                        null -> "NONE"
+                    }
                     minuteWait > 0L && wait == minuteWait -> "APP_PER_MINUTE"
                     secondWait > 0L && wait == secondWait -> "APP_PER_SECOND"
                     else -> "NONE"
@@ -227,6 +253,7 @@ internal class GrowwRateLimitInterceptor(
                         alphaLtpMinute.addLast(now)
                         lastAlphaLtpGrantedAtMs = now
                     }
+                    readLane?.let { lane -> readLastGrantedMs[lane] = now }
                     0L
                 } else wait
             }
