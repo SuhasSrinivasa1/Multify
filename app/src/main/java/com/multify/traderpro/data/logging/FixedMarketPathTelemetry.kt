@@ -4,6 +4,14 @@ import android.content.Context
 import android.os.Process
 import com.google.gson.GsonBuilder
 import com.multify.traderpro.engine.FixedMarketDiscoveryCandidate
+import com.multify.traderpro.engine.FixedRollingMarketSample
+import com.multify.traderpro.engine.FixedRollingFiveMinuteResearchPolicy
+import com.multify.traderpro.engine.FixedSampledOutcomeResearchPolicy
+import com.multify.traderpro.engine.FixedSampledRecommendation
+import com.multify.traderpro.engine.FixedSampledQuote
+import com.multify.traderpro.data.repository.FixedRecommendationRecord
+import com.multify.traderpro.data.repository.FixedScanObservation
+import org.json.JSONObject
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
 import java.util.Locale
@@ -61,6 +69,10 @@ class FixedMarketPathTelemetry @Inject constructor(
     private val dir = File(context.filesDir, "fixed_market_path_telemetry").apply { mkdirs() }
     private val current = File(dir, "fixed_market_path.jsonl")
     private val lock = Any()
+    // This ring is shadow-only. It neither changes the persisted Fixed baseline
+    // nor schedules additional requests. All access is on the telemetry worker.
+    private val rollingSnapshots = java.util.ArrayDeque<FixedRollingMarketSample>()
+    private val researchPrefs = context.getSharedPreferences("fixed_rolling_research_v8320", Context.MODE_PRIVATE)
     private val gson = GsonBuilder().serializeNulls().disableHtmlEscaping().create()
     private val dropped = AtomicLong(0L)
     private val written = AtomicLong(0L)
@@ -93,6 +105,39 @@ class FixedMarketPathTelemetry @Inject constructor(
             runCatching {
                 Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND)
                 val packed = FixedMarketPathCodec.pack(prices)
+                val completeMarketSample =
+                    phase == "OFFICIAL_FIXED_MARKET_WIDE_DISCOVERY" &&
+                        universeCount > 0 && prices.size * 100L >= universeCount * 80L
+                val sample = if (completeMarketSample)
+                    FixedRollingFiveMinuteResearchPolicy.study(
+                        sweepCompletedAtMs, prices, rollingSnapshots.toList(),
+                        selected.map { it.symbol })
+                else null
+                if (completeMarketSample) {
+                    rollingSnapshots.addLast(FixedRollingMarketSample(sweepCompletedAtMs, prices))
+                    while (rollingSnapshots.isNotEmpty() &&
+                        sweepCompletedAtMs - rollingSnapshots.peekFirst().atMs >
+                            FixedRollingFiveMinuteResearchPolicy.MAX_LOOKBACK_MS) {
+                        rollingSnapshots.removeFirst()
+                    }
+                }
+                val firstObservedAtMs = if (completeMarketSample) {
+                    val sameDay = researchPrefs.getString("first_date", "") == date
+                    val old = if (sameDay) researchPrefs.getLong("first_at_ms", 0L) else 0L
+                    if (old > 0L) old else {
+                        researchPrefs.edit().putString("first_date", date)
+                            .putLong("first_at_ms", sweepCompletedAtMs).apply()
+                        sweepCompletedAtMs
+                    }
+                } else if (researchPrefs.getString("first_date", "") == date)
+                    researchPrefs.getLong("first_at_ms", 0L)
+                else 0L
+                val isPre0930Session = runCatching {
+                    val ist = java.time.Instant.ofEpochMilli(sweepCompletedAtMs)
+                        .atZone(java.time.ZoneId.of("Asia/Kolkata"))
+                    ist.toLocalTime() >= java.time.LocalTime.of(9, 15) &&
+                        ist.toLocalTime() < java.time.LocalTime.of(9, 30)
+                }.getOrDefault(false)
                 val upDown = prices.entries.asSequence().mapNotNull { (symbol, px) ->
                     sessionOpenLtps[symbol]?.takeIf { it > 0.0 && it.isFinite() }
                         ?.let { open -> (px / open - 1.0) * 100.0 }
@@ -110,6 +155,21 @@ class FixedMarketPathTelemetry @Inject constructor(
                     "reference_time_is_exchange_timestamp" to false,
                     "bulk_quote_has_volume" to false,
                     "preopen_iep_verified" to false,
+                    "first_observed_sweep_at_ms_research" to firstObservedAtMs.takeIf { it > 0L },
+                    "baseline_is_true_nse_0915_open" to false,
+                    "opening_0915_0930_window" to isPre0930Session,
+                    "completed_today_15m_opening_bar_available" to !isPre0930Session,
+                    "rolling_five_minute_research" to mapOf(
+                        "enabled" to true,
+                        "trade_or_fixed_ranking_effect" to false,
+                        "uses_additional_broker_calls" to false,
+                        "available" to (sample?.available == true),
+                        "reference_at_ms" to sample?.referenceAtMs,
+                        "lookback_ms" to sample?.lookbackMs,
+                        "symbols_compared" to (sample?.measuredCount ?: 0),
+                        "top_30_movers" to (sample?.topMovers ?: emptyList<Any>()),
+                        "existing_ranked_candidates" to (sample?.selectedCandidates ?: emptyList<Any>())
+                    ),
                     "universe_count" to universeCount,
                     "sample_count" to prices.size,
                     "valid_price_count" to packed.count { it == '~' },
@@ -145,6 +205,81 @@ class FixedMarketPathTelemetry @Inject constructor(
         }
     }
 
+
+    /**
+     * User-triggered export analysis from the ALREADY RECORDED full-NSE LTP path.
+     * No broker I/O, no trade scoring, no assumption of intrabar high/low or fills.
+     */
+    internal fun exportSampledOutcomeStudy(
+        recommendations: List<FixedRecommendationRecord>,
+        tierObservations: List<FixedScanObservation>
+    ): Map<String, Any?> {
+        runCatching { queued.submit {}.get(10, TimeUnit.SECONDS) }
+        val valid = recommendations.asSequence()
+            .filter { it.entryPrice.isFinite() && it.entryPrice > 0.0 && it.generatedAtMs > 0L }
+            .sortedByDescending { it.generatedAtMs }.take(1_500)
+            .map { FixedSampledRecommendation(
+                id = it.id.toString(), symbol = it.symbol.uppercase(Locale.US),
+                generatedAtMs = it.generatedAtMs, entryPrice = it.entryPrice,
+                fullTargetPct = it.targetPct) }
+            .toList()
+        val bySymbol = valid.groupBy { it.symbol }
+        val postPublish = linkedMapOf<String, MutableList<FixedSampledQuote>>()
+        var latestCompleteAtMs = 0L
+        val paths = (ARCHIVE_COUNT downTo 1).map { File(dir, "fixed_market_path.${it}.jsonl") } + current
+        for (file in paths) {
+            if (!file.isFile) continue
+            file.forEachLine { line ->
+                if (line.length > MAX_RESEARCH_LINE_CHARS) return@forEachLine
+                val obj = runCatching { JSONObject(line) }.getOrNull() ?: return@forEachLine
+                if (obj.optString("phase") != "OFFICIAL_FIXED_MARKET_WIDE_DISCOVERY") return@forEachLine
+                if (obj.optInt("sample_count", 0) < 1_000) return@forEachLine
+                val atMs = obj.optLong("sweep_completed_at_ms")
+                if (atMs <= 0L) return@forEachLine
+                latestCompleteAtMs = maxOf(latestCompleteAtMs, atMs)
+                val prices = FixedMarketPathCodec.unpack(obj.optString("full_market_ltp_packed"))
+                for ((symbol, records) in bySymbol) {
+                    val price = prices[symbol] ?: continue
+                    for (r in records) {
+                        if (atMs < r.generatedAtMs + FixedSampledOutcomeResearchPolicy.CONSERVATIVE_POST_SCAN_DELAY_MS ||
+                            atMs > r.generatedAtMs + 60L * 60_000L) continue
+                        postPublish.getOrPut(r.id) { mutableListOf() }
+                            .add(FixedSampledQuote(atMs, price))
+                    }
+                }
+            }
+        }
+        val window = FixedSampledOutcomeResearchPolicy.report(
+            valid, postPublish, latestCompleteAtMs)
+        // These are PRIMARY observations after an earlier same-stock publication,
+        // NOT proof that the publication engine suppressed an otherwise valid new event.
+        val earliestBySymbol = recommendations.groupBy { it.symbol.uppercase(Locale.US) }
+        val repeated = tierObservations.asSequence()
+            .filter { it.qualityTier == "PRIMARY" && it.publishEligible && it.executionEligible }
+            .filter { row -> earliestBySymbol[row.symbol.uppercase(Locale.US)]
+                ?.any { prior -> prior.generatedAtMs < row.scanAtMs } == true }
+            .sortedByDescending { it.scanAtMs }
+            .take(250).map { row ->
+                mapOf(
+                    "symbol" to row.symbol,
+                    "scan_at_ms" to row.scanAtMs,
+                    "observed_price" to row.observedPrice,
+                    "prior_publication_exists" to true,
+                    "not_proof_of_suppressed_trade" to true
+                )
+            }.toList()
+        return mapOf(
+            "sampled_target_hit_maturity" to window,
+            "subsequent_primary_observations" to mapOf(
+                "source" to "RECORDED_PRIMARY_AFTER_EARLIER_PUBLICATION",
+                "not_proof_of_suppressed_or_executable_trade" to true,
+                "sample_limit" to 250,
+                "cases" to repeated),
+            "fixed_production_decisions_affected" to false,
+            "additional_broker_calls" to 0
+        )
+    }
+
     fun writtenCount(): Long = written.get()
     fun droppedCount(): Long = dropped.get()
     fun queuedCount(): Int = queued.queue.size
@@ -174,6 +309,7 @@ class FixedMarketPathTelemetry @Inject constructor(
     }
 
     companion object {
+        private const val MAX_RESEARCH_LINE_CHARS = 300_000
         private const val QUEUE_CAPACITY = 12
         private const val MAX_FILE_BYTES = 20L * 1024L * 1024L
         private const val ARCHIVE_COUNT = 3

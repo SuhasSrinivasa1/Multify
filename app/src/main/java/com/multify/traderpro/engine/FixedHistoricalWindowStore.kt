@@ -10,6 +10,11 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.LinkedHashMap
 
+/** A temporary non-qualifying symbol, never a permanent exclusion or trading rule. */
+internal class FixedInsufficientHistoryDeferred(
+    val retryAtElapsedMs: Long
+) : IllegalStateException("FIXED_INSUFFICIENT_CANDLES_DEFERRED_UNTIL_NEXT_15M_BAR")
+
 /**
  * Bounded in-memory transport optimization for Fixed 15-minute history.
  *
@@ -31,6 +36,16 @@ class FixedHistoricalWindowStore {
     }
     private val format = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
     private val rejectionReasons = LinkedHashMap<String, String>(MAX_STOCKS, .75f, true)
+    private data class ShortHistoryRetry(val originalStart: String, val notBeforeElapsedMs: Long)
+    private val shortHistoryRetries = LinkedHashMap<String, ShortHistoryRetry>(MAX_STOCKS, .75f, true)
+
+    /** No broker request is needed while unchanged short-history cannot yet gain a new completed bar. */
+    private fun retryWaitUntilNext15mBarMs(): Long {
+        val now = java.time.ZonedDateTime.now(INDIA)
+        val next = now.plusMinutes((15 - now.minute % 15).toLong())
+            .withSecond(5).withNano(0)
+        return java.time.Duration.between(now, next).toMillis().coerceIn(5_000L, 905_000L)
+    }
 
     @Synchronized
     fun ineligibilityReason(symbol: String, originalStartTime: String, nowMs: Long): String {
@@ -45,6 +60,12 @@ class FixedHistoricalWindowStore {
 
     @Synchronized
     fun request(symbol: String, originalStartTime: String, nowMs: Long): IncrementalRequest? {
+        shortHistoryRetries[symbol]?.let { retry ->
+            if (retry.originalStart == originalStartTime &&
+                nowMs in 0L until retry.notBeforeElapsedMs)
+                throw FixedInsufficientHistoryDeferred(retry.notBeforeElapsedMs)
+            shortHistoryRetries.remove(symbol)
+        }
         val snapshot = cache[symbol] ?: return null
         if (snapshot.originalStartTime != originalStartTime || nowMs - snapshot.storedAtMs !in 0L..MAX_REUSE_AGE_MS) return null
         val rows = snapshot.history.candles
@@ -83,12 +104,22 @@ class FixedHistoricalWindowStore {
         }
         if (reason == null) {
             rejectionReasons.remove(symbol)
+            shortHistoryRetries.remove(symbol)
             cache[symbol] = Snapshot(nowMs, originalStartTime, response)
         } else {
             cache.remove(symbol)
             rejectionReasons[symbol] = reason
+            // Only the unprocessable <5-row case is temporarily deferred.
+            // 5-9 valid rows may still qualify in production and are NEVER deferred.
+            // Invalid timestamps are not assumed to be a no-new-candle condition.
+            if (response.candles.size < 5 &&
+                (response.candles.isEmpty() || strictlyIncreasing(response.candles))) {
+                shortHistoryRetries[symbol] = ShortHistoryRetry(
+                    originalStartTime, nowMs + retryWaitUntilNext15mBarMs())
+            } else shortHistoryRetries.remove(symbol)
             // A small bounded diagnostic, never an unbounded memory store.
             while (rejectionReasons.size > MAX_STOCKS) rejectionReasons.remove(rejectionReasons.keys.first())
+            while (shortHistoryRetries.size > MAX_STOCKS) shortHistoryRetries.remove(shortHistoryRetries.keys.first())
         }
     }
 

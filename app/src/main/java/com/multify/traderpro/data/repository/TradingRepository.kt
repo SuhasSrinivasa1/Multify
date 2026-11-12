@@ -10982,6 +10982,9 @@ class TradingRepository @Inject constructor(
                 written("fixed_factor_snapshots.jsonl")
                 fixedMarketPathTelemetry.appendExportEntry(zip)
                 written("fixed_market_path.jsonl")
+                add("fixed_sampled_maturity_and_repeat_research.json",
+                    fixedMarketPathTelemetry.exportSampledOutcomeStudy(
+                        fixedRecommendations, fixedRecommendationStore.archivedObservations()))
                 add("api_usage_snapshot.json", GrowwApiUsageLedger.snapshot())
                 add("groww_recovery_state.json", recoveryGate.status())
                 add("telemetry_metadata.json", mapOf(
@@ -10991,6 +10994,14 @@ class TradingRepository @Inject constructor(
                     "fixed_factor_telemetry_written_total" to fixedFactorTelemetry.writtenCount(),
                     "fixed_factor_telemetry_nonblocking" to true,
                     "fixed_market_path_file" to "fixed_market_path.jsonl",
+                    "rolling_five_minute_shadow_from_existing_sweeps" to true,
+                    "rolling_five_minute_additional_broker_calls" to 0,
+                    "five_minute_market_sweep_added" to false,
+                    "original_session_baseline_modified" to false,
+                    "opening_0915_0930_candle_research_only" to true,
+                    "sampled_maturity_research_file" to "fixed_sampled_maturity_and_repeat_research.json",
+                    "sampled_maturity_conservative_postscan_ms" to 90_000L,
+                    "sampled_maturity_realized_trade_profit" to false,
                     "fixed_market_path_schema" to "fixed_market_path_v1",
                     "fixed_market_path_written_total" to fixedMarketPathTelemetry.writtenCount(),
                     "fixed_market_path_dropped_total" to fixedMarketPathTelemetry.droppedCount(),

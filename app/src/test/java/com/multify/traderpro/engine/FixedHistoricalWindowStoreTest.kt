@@ -35,6 +35,29 @@ class FixedHistoricalWindowStoreTest {
         store.remember("RELIANCE", start, combined, 11_000L)
         assertNotNull(store.request("RELIANCE", start, 12_000L))
     }
+    @Test fun `under five valid bars are deferred only until the next complete candle boundary`() {
+        val store = FixedHistoricalWindowStore()
+        val start = "2026-11-12 09:15:00"
+        val t0 = 10_000L
+        store.remember("SHORT", start, rows(1_790_000_000L, 4), t0)
+        val blocked = assertThrows(FixedInsufficientHistoryDeferred::class.java) {
+            store.request("SHORT", start, t0 + 1L)
+        }
+        assertTrue(blocked.retryAtElapsedMs > t0)
+        assertTrue(blocked.retryAtElapsedMs - t0 <= 905_000L)
+        // Fresh completed bar makes it eligible for a full broker retry, never blacklisted.
+        assertNull(store.request("SHORT", start, blocked.retryAtElapsedMs + 1L))
+        store.remember("SHORT", start, rows(1_790_000_000L, 12), blocked.retryAtElapsedMs + 2L)
+        assertNotNull(store.request("SHORT", start, blocked.retryAtElapsedMs + 3L))
+    }
+
+    @Test fun `five to nine bars do not acquire the short-history deferral`() {
+        val store = FixedHistoricalWindowStore()
+        val start = "2026-11-12 09:15:00"
+        store.remember("MAYBE", start, rows(1_790_000_000L, 7), 10_000L)
+        assertNull(store.request("MAYBE", start, 10_001L))
+    }
+
     @Test fun `missing overlapping bars forces full broker request`() {
         val store = FixedHistoricalWindowStore()
         val start = "2026-10-23 09:15:00"

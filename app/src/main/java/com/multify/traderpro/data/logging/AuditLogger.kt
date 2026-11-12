@@ -117,11 +117,14 @@ class AuditLogger @Inject constructor(
         runCatching {
             synchronized(lock) {
                 rotateIfNeeded()
+                val diagnosticEvent = FixedResearchAuditClassificationPolicy.label(
+                    category, event, details["message"] as? String)
                 val obj = JSONObject()
                     .put("timestamp_ms", timestampMs)
                     .put("timestamp_utc", timestampUtc)
                     .put("category", category)
-                    .put("event", event)
+                    .put("event", diagnosticEvent)
+                if (diagnosticEvent != event) obj.put("original_event", event)
                 val safe = JSONObject()
                 details.forEach { (key, value) ->
                     if (!isSensitiveKey(key)) safe.put(key, value ?: JSONObject.NULL)
