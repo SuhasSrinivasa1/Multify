@@ -20,6 +20,16 @@ class FixedDualAccountPolicyTest {
             symbols.map { FixedDualAccountPolicy.betaDetailedEvaluation(it, true) }
         )
     }
+    @Test fun detailedReadOnlyWorkIsDeterministicallySplitOneThirdToBeta() {
+        val symbols = (0 until 300).map { "SYM$it" }
+        val betaCount = symbols.count { FixedDualAccountPolicy.betaDetailedEvaluation(it, true) }
+        assertTrue(betaCount in 95..105)
+        assertEquals(
+            symbols.map { FixedDualAccountPolicy.betaDetailedEvaluation(it, true) },
+            symbols.map { FixedDualAccountPolicy.betaDetailedEvaluation(it, true) }
+        )
+        assertEquals(0, symbols.count { FixedDualAccountPolicy.betaDetailedEvaluation(it, false) })
+    }
     @Test fun incompleteOrAbortedMarketSweepCannotQualify() {
         assertTrue(FixedDualAccountPolicy.acceptableCoverage(2431, 2630, false))
         assertFalse(FixedDualAccountPolicy.acceptableCoverage(1200, 2630, false))
