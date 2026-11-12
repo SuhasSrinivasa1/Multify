@@ -129,6 +129,7 @@ import com.multify.traderpro.engine.FixedMultifyReverseEngineering
 import com.multify.traderpro.engine.FixedPositiveCloseForecastPolicy
 import com.multify.traderpro.engine.FixedScanPerformancePolicy
 import com.multify.traderpro.engine.FixedFastCandidateSelectionPolicy
+import com.multify.traderpro.engine.FixedPrimaryCarryForwardPolicy
 import com.multify.traderpro.engine.FixedFastCandidateSamplingPolicy
 import com.multify.traderpro.engine.FixedDiscoveryWindowScheduler
 import com.multify.traderpro.engine.FixedHistoricalWindowStore
@@ -289,6 +290,7 @@ class TradingRepository @Inject constructor(
     @Volatile private var fixedScanDeferredBroker = false
     // In-memory historical OHLCV reuse across Fixed cycles; live latest bars are ALWAYS refetched.
     private val fixedHistoricalWindowStore = FixedHistoricalWindowStore()
+    private val fixedPreviouslyDiscoveredPrimaryAt = ConcurrentHashMap<String, Pair<String, Long>>()
     private val fixedReuseDiagnosticLastLoggedAtMs = AtomicLong(0L)
     private val fixedHistoryFullFetches = AtomicLong(0L)
     private val fixedHistoryDeltaFetches = AtomicLong(0L)
@@ -3815,6 +3817,14 @@ class TradingRepository @Inject constructor(
         }
         val discoveryPhaseMs = (SystemClock.elapsedRealtime() - scanPhaseStartedMs).coerceAtLeast(0L)
         val discoveredSymbols = discoveryPass.symbols
+        // V8321_FROZEN_FOLLOWUP_EXCEPTION_BEGIN
+        val carriedPrimarySymbols = FixedPrimaryCarryForwardPolicy.candidates(
+            fixedRecommendationStore.observations(today).map { row ->
+                FixedPrimaryCarryForwardPolicy.Observation(
+                    row.symbol, row.scanAtMs, row.qualityTier,
+                    row.publishEligible, row.executionEligible, row.observedPrice)
+            }, nowMs, existing.map { it.symbol })
+        // V8321_FROZEN_FOLLOWUP_EXCEPTION_END
         if (!marketDataAvailableForFixed()) {
             fixedScanDeferredBroker = true
             auditLogger.logAsync("FIXED_PERFORMANCE", "SCAN_DEFERRED_BROKER", mapOf(
@@ -3831,9 +3841,11 @@ class TradingRepository @Inject constructor(
                 master[Math.floorMod(seed + i * 131, master.size)]
             }
         }
-        val universe = (discoveredSymbols + dnaSymbols + recentSymbols + rotating)
+        // V8321_FROZEN_FOLLOWUP_EXCEPTION_BEGIN
+        val universe = (carriedPrimarySymbols + discoveredSymbols + dnaSymbols + recentSymbols + rotating)
             .distinct()
             .take(FIXED_V741_DETAILED_FORECAST_UNIVERSE_LIMIT)
+        // V8321_FROZEN_FOLLOWUP_EXCEPTION_END
         // Preserve the exact v7.4.1 universe, evaluation formulas, breadth and ranking inputs,
         // but fetch independent symbol evaluations in small bounded batches. Reconstruct results in
         // original universe order so this is a latency-only change, not a selection/ranking change.
@@ -3974,6 +3986,22 @@ class TradingRepository @Inject constructor(
         // After a prior event, require a witnessed non-PRIMARY reset followed by
         // a distinct, fresh confirmed PRIMARY, not a continuing old setup.
         val allTodayFixedObservations = fixedRecommendationStore.observations(today)
+        // V8321_FROZEN_FOLLOWUP_EXCEPTION_BEGIN
+        // Only same-day, recent, previously-discovered PRIMARYs retain discovery
+        // provenance. All current quality/confirmation and execution gates apply.
+        ranked.forEach { candidate ->
+            if (candidate.quality.tier != "PRIMARY" ||
+                !candidate.quality.publishEligible || !candidate.quality.executionEligible) {
+                fixedPreviouslyDiscoveredPrimaryAt.remove(candidate.symbol)
+            } else if (candidate.symbol in discoveredSymbols) {
+                fixedPreviouslyDiscoveredPrimaryAt[candidate.symbol] = today to nowMs
+            }
+        }
+        fixedPreviouslyDiscoveredPrimaryAt.entries.removeIf { (_, value) ->
+            !FixedPrimaryCarryForwardPolicy.wasRecentlyDiscovered(
+                value.first, value.second, today, nowMs)
+        }
+        // V8321_FROZEN_FOLLOWUP_EXCEPTION_END
         val unseen = ranked.filter { item ->
             FixedRepeatQualificationPolicy.qualifiedForNewEvent(
                 item.symbol, nowMs, existing, allTodayFixedObservations,
@@ -4005,7 +4033,14 @@ class TradingRepository @Inject constructor(
             FixedForecastPublicationPolicy.isReady(
                 discoveryBaselineReady = discoveryPass.baselineReady,
                 currentPrimary = currentPrimary,
-                discoveredMarketWide = item.symbol in discoveredSymbols,
+                // V8321_FROZEN_FOLLOWUP_EXCEPTION_BEGIN
+                discoveredMarketWide = item.symbol in discoveredSymbols ||
+                    (item.symbol in carriedPrimarySymbols &&
+                        fixedPreviouslyDiscoveredPrimaryAt[item.symbol]?.let {
+                            FixedPrimaryCarryForwardPolicy.wasRecentlyDiscovered(
+                                it.first, it.second, today, nowMs)
+                        } == true),
+                // V8321_FROZEN_FOLLOWUP_EXCEPTION_END
                 priorPrimaryHits = priorPrimaryHits(item.symbol)
             )
         }
@@ -4057,6 +4092,10 @@ class TradingRepository @Inject constructor(
             "secondary" to (tierCounts["SECONDARY"] ?: 0),
             "research" to (tierCounts["RESEARCH"] ?: 0),
             "published_count" to all.size,
+            "carried_recent_primary_symbols" to carriedPrimarySymbols,
+            "carried_primary_evaluated" to carriedPrimarySymbols.count { it in evaluatedBySymbol },
+            "followup_not_auto_publication" to true,
+            "fixed_detail_candidate_limit" to FIXED_V741_DETAILED_FORECAST_UNIVERSE_LIMIT,
             "daily_recommendation_cap" to "NONE",
             "price_min_exclusive" to 200,
             "price_max_exclusive" to 5000,
