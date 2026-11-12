@@ -4849,6 +4849,41 @@ class TradingRepository @Inject constructor(
                 fifteenMinuteStrategy = fifteen.strategy, fiveMinuteStrategy = five.strategy
             )
             fixedFiveMinuteShadowJournal.append(pair)
+            // V8324_SHADOW_DIAGNOSTICS_BEGIN
+            val observedFiveMinuteSpreadBps = reference.quote.bidPrice?.takeIf { it > 0.0 }
+                ?.let { bid -> reference.quote.offerPrice?.takeIf { it >= bid }
+                    ?.let { ask -> (ask - bid) * 10_000.0 / ((ask + bid) / 2.0) } }
+            val observedVwapExtensionAtr = fifteen.features.atr14?.takeIf { it > 0.0 }
+                ?.let { atr -> fifteen.features.vwap?.takeIf { it > 0.0 }
+                    ?.let { vwap -> (price - vwap) / atr } }
+            val timeframeVerdict = FixedTimeframeShadowDecisionPolicy.assess(
+                capturedAtMs = reference.quoteCapturedAtMs,
+                fifteenMinuteTier = tier15,
+                fiveMinuteTier = tier5,
+                completedFiveMinuteSessionBars = five.features.sessionCandleCount,
+                spreadBps = observedFiveMinuteSpreadBps,
+                vwapExtensionAtr = observedVwapExtensionAtr,
+                rsi14 = fifteen.features.rsi14,
+                rsiSlope = fifteen.features.rsiSlope
+            )
+            auditLogger.logAsync("FIXED_5M_SHADOW", "TIMEFRAME_RESEARCH_V8324", mapOf(
+                "symbol" to symbol, "date" to today,
+                "phase" to timeframeVerdict.phase,
+                "label" to timeframeVerdict.researchLabel,
+                "scheduled_shadow_reference" to timeframeVerdict.scheduledResearchReference,
+                "dynamic_shadow_reference" to timeframeVerdict.dynamicResearchReference,
+                "complete_5m_session_bars" to five.features.sessionCandleCount,
+                "spread_bps_from_same_quote" to observedFiveMinuteSpreadBps,
+                "vwap_extension_atr_15m" to observedVwapExtensionAtr,
+                "rsi_15m" to fifteen.features.rsi14,
+                "rsi_slope_15m" to fifteen.features.rsiSlope,
+                "exhaustion_hypothesis" to timeframeVerdict.exhaustionHypothesis,
+                "production_authority" to timeframeVerdict.productionAuthority,
+                "can_authorize_trading" to timeframeVerdict.canAuthorizeTrading,
+                "new_api_requests" to 0,
+                "counterfactual_not_realized_pnl" to true
+            ))
+            // V8324_SHADOW_DIAGNOSTICS_END
             fixedShadowPrefs.edit().putLong("last_successful_at_ms", System.currentTimeMillis()).apply()
             auditLogger.logAsync("FIXED_5M_SHADOW", "PAIRED_SIGNAL_CAPTURED", mapOf(
                 "date" to today, "symbol" to symbol,
