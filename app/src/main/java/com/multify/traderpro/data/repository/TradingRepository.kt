@@ -308,7 +308,10 @@ class TradingRepository @Inject constructor(
     )
     private data class PendingFixedSweep(
         val date: String, val tokenHash: String, val masterHash: String,
-        val dueAtMs: Long, val completion: CompletableDeferred<PrecomputedFixedSweep?>
+        val dueAtMs: Long, val completion: CompletableDeferred<PrecomputedFixedSweep?>,
+        // Mutated ONLY while pendingFixedSweepMutex is held.
+        var started: Boolean = false,
+        var cancelledBeforeStart: Boolean = false
     )
     private val pendingFixedSweepMutex = Mutex()
     private var pendingFixedSweep: PendingFixedSweep? = null
@@ -4364,6 +4367,25 @@ class TradingRepository @Inject constructor(
                 pending.completion.complete(null)
                 return false
             }
+            // Atomic handoff with the official scan. A scheduled-but-not-started
+            // sweep can be cancelled by the scan so ONLY the original official
+            // sweep runs; once started, it must be awaited instead.
+            val claimed = pendingFixedSweepMutex.withLock {
+                if (pending.cancelledBeforeStart || pending.completion.isCompleted ||
+                    pendingFixedSweep !== pending) false
+                else {
+                    pending.started = true
+                    true
+                }
+            }
+            if (!claimed) {
+                auditLogger.logAsync("FIXED_PERFORMANCE", "PREFETCH_NO_REQUEST_CANCELLED", mapOf(
+                    "scheduled_due_at_ms" to dueAtMs,
+                    "new_ltp_requests" to 0,
+                    "selection_or_fixed_formula_changed" to false
+                ))
+                return false
+            }
             fixedSweepPreparationActive = true
             val started = SystemClock.elapsedRealtime()
             val sweep = collectFixedWideLtp(token, master, preparing = true)
@@ -4396,8 +4418,27 @@ class TradingRepository @Inject constructor(
         token: String, master: List<String>, date: String
     ): PrecomputedFixedSweep? {
         val pending = pendingFixedSweepMutex.withLock {
-            pendingFixedSweep.also { pendingFixedSweep = null }
+            pendingFixedSweep.also { old ->
+                if (old != null && !old.started &&
+                    com.multify.traderpro.engine.FixedSweepPrefetchPolicy
+                        .officialSweepAllowedWithoutDuplication(old.started)
+                ) {
+                    old.cancelledBeforeStart = true
+                    if (!old.completion.isCompleted) old.completion.complete(null)
+                }
+                pendingFixedSweep = null
+            }
         } ?: return null
+        if (pending.cancelledBeforeStart) {
+            auditLogger.logAsync("FIXED_PERFORMANCE", "PREFETCH_NOT_STARTED_USE_OFFICIAL_SWEEP", mapOf(
+                "original_due_at_ms" to pending.dueAtMs,
+                "completed_broker_batches_from_cancelled_prefetch" to 0,
+                "original_official_sweep_authorized" to true,
+                "extra_full_market_sweeps" to 0,
+                "fixed_selection_or_formula_changed" to false
+            ))
+            return null
+        }
         if (pending.date != date || pending.tokenHash != sha256(token + "|" + (fixedBetaMarketTokenOrNull() ?: "ALPHA_ONLY")).take(12) ||
             pending.masterHash != sha256(master.joinToString("|")).take(16)) return null
         val started = SystemClock.elapsedRealtime()
@@ -4665,6 +4706,22 @@ class TradingRepository @Inject constructor(
     suspend fun sampleFixedFiveMinuteShadow(completedScanNumber: Int) {
         if (!fixedFiveMinuteShadowMutex.tryLock()) return
         try {
+            // Yield the discretionary 5m HISTORY call to the existing official
+            // 53-batch LTP prefetch. This avoids category contention and adds
+            // ZERO mandatory market requests; no 15m production input changes.
+            val officialSweepPending = pendingFixedSweepMutex.withLock {
+                pendingFixedSweep?.completion?.isCompleted == false
+            }
+            if (fixedSweepPreparationActive || officialSweepPending) {
+                auditLogger.logAsync("FIXED_5M_SHADOW", "OFFICIAL_PREFETCH_HAS_PRIORITY", mapOf(
+                    "scan_number" to completedScanNumber,
+                    "official_full_sweep_pending" to officialSweepPending,
+                    "official_full_sweep_active" to fixedSweepPreparationActive,
+                    "discretionary_5m_history_requests" to 0,
+                    "production_fixed_scoring_changed" to false
+                ))
+                return
+            }
             val now = ZonedDateTime.now(INDIA)
             if (now.dayOfWeek.value >= 6 || now.toLocalTime() !in LocalTime.of(9, 15)..LocalTime.of(15, 25)) return
             val nowMs = System.currentTimeMillis()
@@ -4718,7 +4775,11 @@ class TradingRepository @Inject constructor(
             }
             val (symbol, reference) = candidate
             val token = ensureToken() ?: return // Alpha only: no Beta account, no fallback.
-            if (fixedApiPriorityRequested || marketCriticalTradeInFlight ||
+            val sweepDemandBeforeRequest = pendingFixedSweepMutex.withLock {
+                pendingFixedSweep?.completion?.isCompleted == false
+            }
+            if (fixedSweepPreparationActive || sweepDemandBeforeRequest ||
+                fixedApiPriorityRequested || marketCriticalTradeInFlight ||
                 millisUntilNextFixedScan() < FixedShadowSamplingPolicy.MIN_FIXED_HEADROOM_MS
             ) return
             val referenceTime = ZonedDateTime.ofInstant(
