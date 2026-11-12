@@ -110,7 +110,7 @@ class FixedMarketPathTelemetry @Inject constructor(
                 if (completeMarketSample) {
                     rollingSnapshots.addLast(FixedRollingMarketSample(sweepCompletedAtMs, prices))
                     while (rollingSnapshots.isNotEmpty() &&
-                        sweepCompletedAtMs - rollingSnapshots.first.atMs >
+                        sweepCompletedAtMs - rollingSnapshots.peekFirst().atMs >
                             FixedRollingFiveMinuteResearchPolicy.MAX_LOOKBACK_MS) {
                         rollingSnapshots.removeFirst()
                     }
