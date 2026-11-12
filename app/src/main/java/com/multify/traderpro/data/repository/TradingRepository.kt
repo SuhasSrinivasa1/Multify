@@ -11079,6 +11079,33 @@ class TradingRepository @Inject constructor(
                 addText("fixed_historical_research.json", fixedHistoricalEvidenceArchive.archive())
                 addText("fixed_imported_same_day_dedup.json", fixedImportedSameDayDedupJournal.archive())
                 addText("fixed_early_watch.json", fixedEarlyWatchJournal.archive())
+                add("fixed_first_primary_to_publication_study.json",
+                    mapOf(
+                        "source" to "PERSISTED_SAME_DAY_FIRST_PRIMARY_PLUS_OFFICIAL_RECOMMENDATION",
+                        "scan_start_not_exchange_timestamp" to true,
+                        "not_replayed_trades" to true,
+                        "trading_decisions_affected" to false,
+                        "events" to fixedEarlyWatchJournal.recent(
+                            LocalDate.now(INDIA).toString(), 1000).map { w ->
+                            mapOf(
+                                "symbol" to w.symbol,
+                                "first_primary_scan_at_ms" to w.firstPrimaryScanAtMs,
+                                "first_primary_evaluated_at_ms" to w.firstEvaluatedAtMs,
+                                "first_primary_price" to w.firstPrimaryPrice,
+                                "latest_evaluated_at_ms" to w.latestEvaluatedAtMs,
+                                "latest_primary_quote_price" to w.latestPrice,
+                                "prior_primary_observations" to w.confirmationObservations,
+                                "published" to w.officialPublished,
+                                "official_entry_price" to w.officialEntryPrice,
+                                "pre_publication_or_pending_runup_pct" to w.runupPct,
+                                "price_moved_over_full_target_pre_publication" to
+                                    (w.officialPublished &&
+                                        w.runupPct >= FixedFinalContract.CANONICAL_MULTIFY_MFE_AVG_PCT),
+                                "quoted_spread_bps" to w.observedSpreadBps,
+                                "diagnostic_warnings" to w.warnings
+                            )
+                        }
+                    ))
                 addText("fixed_market_pulse_research.json", fixedMarketPulseResearchStore.archive())
                 addText("fixed_fast_candidates.json", fixedFastCandidatePriceStore.archive())
                 add("fixed_5m_shadow_pairs.json", fixedFiveMinuteShadowJournal.all())
@@ -11100,6 +11127,31 @@ class TradingRepository @Inject constructor(
                 add("fixed_sampled_maturity_and_repeat_research.json",
                     fixedMarketPathTelemetry.exportSampledOutcomeStudy(
                         fixedRecommendations, fixedRecommendationStore.archivedObservations()))
+                add("fixed_screen_compose_observation.json",
+                    com.multify.traderpro.data.logging.FixedUiRenderEvidenceStore.export(appContext))
+                add("fixed_shadow_hypotheses_manifest.json", mapOf(
+                    "schema" to "fixed_hypotheses_v8322",
+                    "purpose" to "OBSERVATIONAL_ONLY",
+                    "precision_over_90_percent_claimed" to false,
+                    "strategy_or_broker_rules_changed" to false,
+                    "tests" to listOf(
+                        "scan_quote_evaluation_persistence_notification_screen_composition",
+                        "first_primary_to_entry_runup",
+                        "opening_0915_0930_completed_bar_availability",
+                        "equal_maturity_15_20_30_60_minutes",
+                        "RSI_slope_and_VWAP_extension_session_high",
+                        "five_minute_vs_previous_sweep_deceleration",
+                        "green_candle_volume_share",
+                        "relative_volume_and_move_age",
+                        "resting_order_book_imbalance_with_spread",
+                        "distance_below_3_ATR_from_VWAP",
+                        "exact_uncapped_production_score_components",
+                        "first_0_50_touch_and_subsequent_price_reversal",
+                        "same_stock_repeat_primary_recommendations",
+                        "price_band_ranking_coverage_and_API_cost",
+                        "small_sample_holdout_and_time_of_day_buckets",
+                        "early_watch_no_trade_allowed")
+                ))
                 add("api_usage_snapshot.json", GrowwApiUsageLedger.snapshot())
                 add("groww_recovery_state.json", recoveryGate.status())
                 add("telemetry_metadata.json", mapOf(
@@ -11115,6 +11167,12 @@ class TradingRepository @Inject constructor(
                     "original_session_baseline_modified" to false,
                     "opening_0915_0930_candle_research_only" to true,
                     "sampled_maturity_research_file" to "fixed_sampled_maturity_and_repeat_research.json",
+                    "fixed_first_primary_progression_file" to "fixed_first_primary_to_publication_study.json",
+                    "fixed_screen_observation_file" to "fixed_screen_compose_observation.json",
+                    "fixed_pattern_research_schema" to "fixed_pattern_hypotheses_v8322",
+                    "fixed_unclamped_score_event" to "UNCAPPED_RANKING_COMPONENTS",
+                    "fixed_persisted_timestamp_event" to "RECOMMENDATION_PERSISTED_TIMING",
+                    "fixed_hypotheses_manifest" to "fixed_shadow_hypotheses_manifest.json",
                     "sampled_maturity_conservative_postscan_ms" to 90_000L,
                     "sampled_maturity_realized_trade_profit" to false,
                     "fixed_market_path_schema" to "fixed_market_path_v1",
