@@ -4590,9 +4590,9 @@ class TradingRepository @Inject constructor(
             "parallel_ltp_window_size" to FixedDiscoveryWindowScheduler.WINDOW_SIZE,
             "batch_window_count" to sortedWindowLatenciesMs.size,
             "batch_window_latency_p50_ms" to sortedWindowLatenciesMs.takeIf { it.isNotEmpty() }
-                ?.get(it.size / 2),
+                ?.let { samples -> samples[samples.size / 2] },
             "batch_window_latency_p95_ms" to sortedWindowLatenciesMs.takeIf { it.isNotEmpty() }
-                ?.get(((it.size - 1) * 95 / 100)),
+                ?.let { samples -> samples[(samples.size - 1) * 95 / 100] },
             "prepared_for_next_scan" to preparing,
             "two_independent_broker_accounts_used" to
                 (alphaSuccess.get() > 0 && betaSuccess.get() > 0),
