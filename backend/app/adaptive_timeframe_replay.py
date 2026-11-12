@@ -150,6 +150,18 @@ def replay(bars, signals, *, stop_pct=5.0, slippage_bps=5.0,
             raise ValueError("duplicate signal event id")
         keys.add(s.key)
         day_bars = groups[(s.symbol, s.day)]
+        if not day_bars:
+            unavailable = {"state": "DATA_MISSING", "net_pct": None}
+            result.append({
+                "key": s.key, "symbol": s.symbol, "signal_at_ms": s.at_ms,
+                "time_phase": "UNKNOWN_WITHOUT_CANDLES",
+                "comparison": {
+                    "FIXED_REFERENCE_DELAYED_OPEN": dict(unavailable),
+                    "FIVE_MINUTE_CONFIRMATION": dict(unavailable),
+                    "SCHEDULED_0945": dict(unavailable),
+                },
+            })
+            continue
         i_fixed = first_entry_index(day_bars, s.at_ms)
         i_5m = confirmation_index(day_bars, s.at_ms)
         local_clock = datetime.fromtimestamp(s.at_ms / 1000, IST).time()

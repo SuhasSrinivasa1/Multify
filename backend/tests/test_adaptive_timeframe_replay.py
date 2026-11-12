@@ -62,7 +62,8 @@ class ReplayTests(unittest.TestCase):
 
     def test_no_historic_bars_does_not_claim_pnl(self):
         out = replay([], [Signal('x', 'ABC', at(9, 30))])
-        self.assertEqual(out['events'][0]['comparison']['FIXED_REFERENCE_DELAYED_OPEN']['state'], 'NO_ENTRY')
+        self.assertEqual(out['events'][0]['comparison']['FIXED_REFERENCE_DELAYED_OPEN']['state'], 'DATA_MISSING')
+        self.assertIsNone(out['summary']['FIXED_REFERENCE_DELAYED_OPEN']['mean_net_pct_per_resolved_opportunity'])
         self.assertTrue(out['research_only'])
         self.assertFalse(out['realized_pnl'])
 
