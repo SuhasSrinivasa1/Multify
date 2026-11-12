@@ -15,6 +15,7 @@ import com.multify.traderpro.engine.GrowwRetryAfterPolicy
 import com.multify.traderpro.engine.AlphaLtpPacingPolicy
 import com.multify.traderpro.engine.LtpAdaptivePacingPolicy
 import com.multify.traderpro.engine.AlphaReadPacingPolicy
+import com.multify.traderpro.engine.FixedResearchLtpPacingPolicy
 import okhttp3.Interceptor
 import okhttp3.Response
 import java.util.ArrayDeque
@@ -224,7 +225,9 @@ internal class GrowwRateLimitInterceptor(
                 if (isAlphaLtp) prune(alphaLtpMinute, now - 60_000L)
                 val ltpWait = if (isAlphaLtp) AlphaLtpPacingPolicy.waitMs(
                     now, lastAlphaLtpGrantedAtMs,
-                    alphaLtpMinute.peekFirst(), alphaLtpMinute.size, alphaLtpPace.gapMs
+                    alphaLtpMinute.peekFirst(), alphaLtpMinute.size,
+                    FixedResearchLtpPacingPolicy.effectiveGapMs(
+                        alphaLtpPace.gapMs, protectionLtp)
                 ) else 0L
                 val readWait = readLane?.let { lane ->
                     AlphaReadPacingPolicy.waitMs(
