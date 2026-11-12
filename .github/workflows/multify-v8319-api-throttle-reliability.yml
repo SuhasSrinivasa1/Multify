@@ -133,7 +133,7 @@ jobs:
           assert 'wallet_api_calls" to 0' in now
           assert 'hard -5% loss floor' in ui
           assert 'hard -2% loss floor' not in ui
-          assert 'versionName = "8.3.18-export-research-stability"' in Path('app/build.gradle.kts').read_text()
+          assert 'versionName = "8.3.19-api-throttle-reliability"' in Path('app/build.gradle.kts').read_text()
           # Source baseline parity: selection, filter/target, 107 references, hard-stop, trailing.
           fixed834 = 'e506db984f225a56852cf28a963ba4d463b62308'
           immutable834 = [
