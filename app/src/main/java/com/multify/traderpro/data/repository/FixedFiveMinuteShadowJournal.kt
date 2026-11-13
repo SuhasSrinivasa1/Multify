@@ -24,7 +24,14 @@ internal data class FixedFiveMinuteShadowPair(
     val observations: Int = 0,
     val lastObservedAtMs: Long = 0L,
     val firstTargetObservedAtMs: Long? = null,
-    val firstTwoPctRiskObservedAtMs: Long? = null
+    val firstTwoPctRiskObservedAtMs: Long? = null,
+    // Independent retrospective completed 5m OHLC results; null means censored.
+    val forward15MinTargetTouched: Boolean? = null,
+    val forward60MinTargetTouched: Boolean? = null,
+    val forward15MinTargetBeforeTwoPctRisk: Boolean? = null,
+    val forward60MinTargetBeforeTwoPctRisk: Boolean? = null,
+    val forward15MinSameBarAmbiguous: Boolean? = null,
+    val forward60MinSameBarAmbiguous: Boolean? = null
 ) {
     // Both variants see the same entry quote and subsequently sampled LTP path;
     // only their hypothetical qualification differs. No fills/orders are claimed.
@@ -99,7 +106,11 @@ internal class FixedFiveMinuteShadowJournal(context: Context) {
 
     data class CohortStats(
         val sessionBucket: String, val comparisonGroup: String, val observations: Int,
-        val targetObserved: Int, val targetBeforeTwoPctRisk: Int, val noForwardObservations: Int
+        val targetObserved: Int, val targetBeforeTwoPctRisk: Int, val noForwardObservations: Int,
+        val forward15Matured: Int, val forward15TargetTouches: Int,
+        val forward15TargetBeforeRisk: Int, val forward15SameBarAmbiguous: Int,
+        val forward60Matured: Int, val forward60TargetTouches: Int,
+        val forward60TargetBeforeRisk: Int, val forward60SameBarAmbiguous: Int
     )
     @Synchronized fun cohortSummary(): List<CohortStats> = all()
         .groupBy { it.sessionBucket to it.comparisonGroup }
@@ -107,7 +118,15 @@ internal class FixedFiveMinuteShadowJournal(context: Context) {
             key.first, key.second, rows.size,
             rows.count { it.targetObserved && it.observations > 0 },
             rows.count { it.sampledTargetBeforeRisk && it.observations > 0 },
-            rows.count { it.observations == 0 }
+            rows.count { it.observations == 0 },
+            rows.count { it.forward15MinTargetTouched != null },
+            rows.count { it.forward15MinTargetTouched == true },
+            rows.count { it.forward15MinTargetBeforeTwoPctRisk == true },
+            rows.count { it.forward15MinSameBarAmbiguous == true },
+            rows.count { it.forward60MinTargetTouched != null },
+            rows.count { it.forward60MinTargetTouched == true },
+            rows.count { it.forward60MinTargetBeforeTwoPctRisk == true },
+            rows.count { it.forward60MinSameBarAmbiguous == true }
         ) }.sortedWith(compareBy({ it.sessionBucket }, { it.comparisonGroup }))
 
     private fun save(rows: List<FixedFiveMinuteShadowPair>) {

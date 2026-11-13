@@ -17,5 +17,7 @@ class FixedFiveMinuteShadowCohortTest {
         assertEquals("NEITHER_PRIMARY",row(opening,"RESEARCH","RESEARCH").comparisonGroup)
         assertEquals("OPEN_0915_1015",row(opening,"PRIMARY","PRIMARY").sessionBucket)
         assertFalse(row(opening,"PRIMARY","PRIMARY").sampledTargetBeforeRisk)
+        assertNull(row(opening,"PRIMARY","PRIMARY").forward15MinTargetTouched)
+        assertNull(row(opening,"PRIMARY","PRIMARY").forward60MinTargetTouched)
     }
 }
