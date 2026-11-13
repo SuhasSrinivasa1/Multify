@@ -27,6 +27,6 @@ class FixedAccountTransportAdmissionPolicyTest {
         assertEquals(0, (0 until 53).count { FixedDualAccountPolicy.betaDiscoveryBatch(it, false) })
         assertEquals(107, FixedFinalContract.CANONICAL_LEARNING_CALLS)
         assertEquals(1.1161043030113955, FixedFinalContract.CANONICAL_MULTIFY_MFE_AVG_PCT, 1e-12)
-        assertEquals(5.0, HardStopLossPolicy.MAX_LOSS_PCT, 0.00001)
+        assertEquals(2.0, HardStopLossPolicy.MAX_LOSS_PCT, 0.00001)
     }
 }

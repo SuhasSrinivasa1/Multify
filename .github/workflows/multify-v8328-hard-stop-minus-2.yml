@@ -111,6 +111,8 @@ jobs:
               prefix+"ui/screens/TraderApp.kt",
               "app/src/test/java/com/multify/traderpro/engine/HardStopLossPolicyTest.kt",
               "app/src/test/java/com/multify/traderpro/engine/HardStopGttTighteningPolicyTest.kt",
+              "app/src/test/java/com/multify/traderpro/engine/CircuitAwareBuyPolicyTest.kt",
+              "app/src/test/java/com/multify/traderpro/engine/FixedAccountTransportAdmissionPolicyTest.kt",
               "app/build.gradle.kts",
               ".github/workflows/multify-v8328-hard-stop-minus-2.yml",
               "docs/V8328_HARD_STOP_MINUS_2.md"}

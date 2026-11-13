@@ -104,8 +104,8 @@ class CircuitAwareBuyPolicyTest {
         )
     }
 
-    @Test fun commonStopAndTrailingRemainUnchanged() {
-        assertEquals(95.0, HardStopLossPolicy.stopPrice(100.0), 0.0001)
+    @Test fun commonStopNowMinusTwoAndProfitableTrailingRemainUnchanged() {
+        assertEquals(98.0, HardStopLossPolicy.stopPrice(100.0), 0.0001)
         assertEquals(0.55, SteppedTrailingPolicy.ARM_TRIGGER_PCT, 0.0)
         assertEquals(0.50, SteppedTrailingPolicy.INITIAL_STOP_GAIN_PCT, 0.0)
     }
