@@ -485,6 +485,8 @@ class TradingEngineService : Service() {
     }
 
     // Persistent per-day scan ordinal survives foreground-service restarts.
+    private var lastAfterCloseFiveMinuteShadowAttemptAtMs = 0L
+
     private fun nextFixedShadowScanOrdinal(): Int {
         val day = ZonedDateTime.now(INDIA).toLocalDate().toString()
         val prefs = getSharedPreferences("fixed_shadow_sampling_schedule_v1", Context.MODE_PRIVATE)
@@ -722,6 +724,36 @@ class TradingEngineService : Service() {
                                 "fixed_formula_changed" to false
                             ))
                         }
+                        if (scanned) {
+                            // Research-only cohort audit: no broker request, no
+                            // stock selection/publication/Auto Buy decision change.
+                            val usageAtReady = GrowwApiUsageLedger.snapshot()
+                            val liveBefore = usageBefore.categories.first {
+                                it.category == GrowwApiUsageLedger.Category.LIVE_DATA }
+                            val histBefore = usageBefore.categories.first {
+                                it.category == GrowwApiUsageLedger.Category.HISTORICAL }
+                            val liveReady = usageAtReady.categories.first {
+                                it.category == GrowwApiUsageLedger.Category.LIVE_DATA }
+                            val histReady = usageAtReady.categories.first {
+                                it.category == GrowwApiUsageLedger.Category.HISTORICAL }
+                            val cumulativeWaitMs = (
+                                (liveReady.permitWaitMs - liveBefore.permitWaitMs).coerceAtLeast(0L) +
+                                (histReady.permitWaitMs - histBefore.permitWaitMs).coerceAtLeast(0L)
+                            )
+                            scope.launch(Dispatchers.Default) {
+                                runCatching {
+                                    repository.auditFixedScanLatencyShadow(
+                                        scanId, startedAt, startedAt + elapsed, elapsed, cumulativeWaitMs
+                                    )
+                                }.onFailure {
+                                    auditLogger.logAsync("FIXED_LATENCY_SHADOW",
+                                        "SHADOW_AUDIT_FAILED", mapOf(
+                                            "scan_id" to scanId,
+                                            "error_type" to it.javaClass.simpleName
+                                        ))
+                                }
+                            }
+                        }
                         if (scanned && elapsed >= SCAN_DURATION_AUDIT_THRESHOLD_MS) {
                             auditLogger.log("RUNTIME", "FIXED_SCAN_DURATION", mapOf(
                                 "elapsed_ms" to elapsed,
@@ -776,6 +808,28 @@ class TradingEngineService : Service() {
                             }
                             // Discretionary Forecast research is not launched immediately
                             // after Fixed: broker capacity is reserved for the next sweep.
+                        }
+                    }
+                    // V8.3.26: real 5m historical research only after 15:35 IST.
+                    // The scheduler makes no broker requests; the repository
+                    // retains Alpha 429, market-prefetch and budget guards.
+                    val researchNow = ZonedDateTime.now(INDIA)
+                    val researchAtMs = System.currentTimeMillis()
+                    if (researchNow.dayOfWeek.value < 6 &&
+                        researchNow.toLocalTime() in LocalTime.of(15, 35)..LocalTime.of(18, 0) &&
+                        researchAtMs - lastAfterCloseFiveMinuteShadowAttemptAtMs >= 180_000L
+                    ) {
+                        lastAfterCloseFiveMinuteShadowAttemptAtMs = researchAtMs
+                        scope.launch(Dispatchers.IO) {
+                            runCatching {
+                                repository.sampleFixedFiveMinuteShadow(0, afterClose = true)
+                            }.onFailure {
+                                if (it !is CancellationException) auditLogger.logAsync(
+                                    "FIXED_5M_SHADOW", "AFTER_CLOSE_WORKER_ERROR",
+                                    mapOf("error_type" to it.javaClass.simpleName,
+                                        "trading_decision_changed" to false)
+                                )
+                            }
                         }
                     }
                     delay(SCAN_WORKER_POLL_MS)
