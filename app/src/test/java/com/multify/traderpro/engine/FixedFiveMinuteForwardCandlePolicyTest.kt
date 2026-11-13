@@ -6,7 +6,7 @@ import org.junit.Test
 class FixedFiveMinuteForwardCandlePolicyTest {
     private val p = FixedFiveMinuteForwardCandlePolicy
     private val barMs = p.BAR_DURATION_MS
-    private fun bar(i: Long, h: Double, l: Double) = p.Bar(i * barMs, h, l)
+    private fun bar(i: Long, h: Double, l: Double) = FixedFiveMinuteForwardCandlePolicy.Bar(i * barMs, h, l)
 
     @Test fun rejectsStillFormingCandleWhenReferenceIsMidBar() {
         val result = p.evaluate(
