@@ -9285,10 +9285,13 @@ class TradingRepository @Inject constructor(
         // Upgrade existing broker GTTs to the new -2% floor without cancelling
         // the protective SELL order first. On API failure retain the older
         // server GTT for continued position-monitor retries.
-        if (existingProtected && existingTrigger != null &&
-            existingTrigger + SMART_ORDER_PRICE_EPSILON < hardStop &&
-            com.multify.traderpro.engine.GttProtectionReadinessPolicy.verified(
-                position.smartOrderMode, position.smartOrderId, position.smartOrderStatus
+        if (com.multify.traderpro.engine.HardStopGttTighteningPolicy.shouldModifyExisting(
+                entryPrice = position.entryPrice,
+                smartOrderMode = position.smartOrderMode,
+                smartOrderId = position.smartOrderId,
+                smartOrderStatus = position.smartOrderStatus,
+                brokerTrigger = existingTrigger,
+                priceEpsilon = SMART_ORDER_PRICE_EPSILON
             )
         ) {
             return try {
