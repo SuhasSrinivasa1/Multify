@@ -371,6 +371,10 @@ class TradingRepository @Inject constructor(
         val quoteCapturedAtMs: Long
     )
     private val fixedShadowReferences = ConcurrentHashMap<String, FixedShadowReference>()
+    // V9 master validation: independent bounded CPU-only shadow, no broker calls.
+    // Never touches frozen generateFixedForecasts(), BUY, SELL, GTT or rank.
+    private val v9MasterShadowCollector =
+        com.multify.traderpro.engine.V9MasterShadowCollector(auditLogger)
     private val fixedShadowPrefs = appContext.getSharedPreferences("fixed_alpha_shadow_schedule_v2", Context.MODE_PRIVATE)
     private var nextFixedHistoricalAtElapsedMs = 0L
     private var fixedHistoricalCooldownUntilElapsedMs = 0L
@@ -4220,6 +4224,9 @@ class TradingRepository @Inject constructor(
         val referenceAt = System.currentTimeMillis()
         fixedShadowReferences[symbol] = FixedShadowReference(quote, evaluation, referenceAt)
         fixedFactorTelemetry.tryRecord(symbol, evaluation, lastFixedScanAtMs, quote, referenceAt)
+        v9MasterShadowCollector.offer(
+            symbol, quote, historical, evaluation, lastFixedScanAtMs, referenceAt
+        )
         return evaluation
     }
 
