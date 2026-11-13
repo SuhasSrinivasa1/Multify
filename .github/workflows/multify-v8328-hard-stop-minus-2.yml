@@ -1,0 +1,130 @@
+name: Multify v8.3.28 Hard Stop Minus 2 Percent
+on:
+  push:
+    branches: [v8328-hard-stop-minus-2]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  parity-test-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Android SDK 35
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
+      - name: Immutable Fixed source parity to BOTH v8.3.19 branches
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+          refs=["30d3ab4f474fc1ed4103da5e1247b0078f484eaf",
+                "af87c4126572c6aca9a8fadea940011a13bf0ab8"]
+          v27="9d746e162453f9eacb0df4c5868011088e83e63a"
+          prefix="app/src/main/java/com/multify/traderpro/"
+          repo=prefix+"data/repository/TradingRepository.kt"
+          service=prefix+"service/TradingEngineService.kt"
+          def read(ref,path):
+              return subprocess.check_output(["git","show",f"{ref}:{path}"],text=True)
+          def section(src,start,end):
+              i=src.index(start)
+              return src[i:src.index(end,i)]
+          current=Path(repo).read_text()
+          production=[
+              ("suspend fun generateFixedForecasts(",
+                "private fun fixedSnapshotMultifyMfeAverage("),
+              ("private suspend fun discoverFixedMarketWideCandidates(",
+                "private suspend fun fetchFixedDiscoveryLtpBatch(")]
+          for ref in refs:
+              original=read(ref,repo)
+              for a,b in production:
+                  assert section(current,a,b)==section(original,a,b), (ref,"Fixed production drift",a)
+              for relative in (
+                  "engine/FixedFinalContract.kt",
+                  "engine/FixedMarketDiscoveryPolicy.kt",
+                  "engine/FixedForecastPublicationPolicy.kt",
+                  "engine/FixedForecastQualityPolicy.kt",
+                  "engine/FixedLocalStrategyEngine.kt",
+                  "engine/FixedFastCandidateSelectionPolicy.kt",
+                  "engine/FixedEntryActionabilityPolicy.kt",
+                  "engine/RecommendationPriceBandPolicy.kt",
+                  "engine/FixedMultifyFactorFamilies.kt",
+              ):
+                  path=prefix+relative
+                  assert Path(path).read_bytes()==subprocess.check_output(["git","show",f"{ref}:{path}"]), (ref,path)
+          source=Path(service).read_text()
+          start=section(source,"private fun startFixedScanWorker()","private fun startForecastScanWorker()")
+          assert start.count("fixedScanWorkerStartGate.startIfAbsent")==1
+          assert start.count("scope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY)")==1
+          assert "fixedScanWorkerStartGate.cancel()" in source
+          assert "FixedScanAttributionPolicy.newlyPublishedIds" in source
+          assert "fixedPublishedRecommendationIdsForScanAttribution()" in source
+          assert "SCAN_COHORT_V8327" in current
+          assert "generatedAtMs >= serviceScanStartMs" not in section(
+              current,"fun auditFixedScanLatencyShadow(","suspend fun updateFixedFiveMinuteShadowOutcomes(")
+          assert "sampleFixedFiveMinuteShadow(0, afterClose = true)" in source
+          assert "versionCode = 8409" in Path("app/build.gradle.kts").read_text()
+          assert 'versionName = "8.3.28-hard-stop-minus-2"' in Path("app/build.gradle.kts").read_text()
+          # No changes to v8.3.27 single-flight worker, broker governor,
+          # stop-positive-gain trail, recommendation routing or 5m shadow.
+          assert Path(service).read_bytes()==subprocess.check_output(["git","show",f"{v27}:{service}"])
+          for p in (
+              "engine/SteppedTrailingPolicy.kt",
+              "engine/NetGainTrailingPolicy.kt",
+              "engine/FixedSingleWorkerStartGate.kt",
+              "engine/FixedFiveMinuteForwardCandlePolicy.kt",
+              "engine/FixedScanAttributionPolicy.kt",
+          ):
+              f=prefix+p
+              assert Path(f).read_bytes()==subprocess.check_output(["git","show",f"{v27}:{f}"]), f
+          stop=Path(prefix+"engine/HardStopLossPolicy.kt").read_text()
+          manifest=Path(prefix+"engine/ReleaseIntegrityManifest.kt").read_text()
+          assert "const val MAX_LOSS_PCT = 2.0" in stop
+          assert "const val HARD_STOP_LOSS_PCT = 2.0" in manifest
+          assert "const val MAX_LOSS_PCT = 5.0" not in stop
+          assert "const val HARD_STOP_LOSS_PCT = 5.0" not in manifest
+          assert "HardStopGttTighteningPolicy.shouldModifyExisting(" in current
+          assert "HARD_STOP_MINUS_2_EXISTING_GTT_UPGRADED" in current
+          assert "HARD_STOP_MINUS_2_GTT_UPGRADE_DEFERRED" in current
+          assert "-5%" not in current
+          assert "hard -5%" not in Path(prefix+"ui/screens/TraderApp.kt").read_text()
+          changed=set(subprocess.check_output(["git","diff","--name-only",v27,"HEAD"],text=True).splitlines())
+          allowed={
+              repo,
+              prefix+"engine/HardStopLossPolicy.kt",
+              prefix+"engine/HardStopGttTighteningPolicy.kt",
+              prefix+"engine/ReleaseIntegrityManifest.kt",
+              prefix+"ui/screens/TraderApp.kt",
+              "app/src/test/java/com/multify/traderpro/engine/HardStopLossPolicyTest.kt",
+              "app/src/test/java/com/multify/traderpro/engine/HardStopGttTighteningPolicyTest.kt",
+              "app/src/test/java/com/multify/traderpro/engine/CircuitAwareBuyPolicyTest.kt",
+              "app/src/test/java/com/multify/traderpro/engine/FixedAccountTransportAdmissionPolicyTest.kt",
+              "app/build.gradle.kts",
+              ".github/workflows/multify-v8328-hard-stop-minus-2.yml",
+              "docs/V8328_HARD_STOP_MINUS_2.md"}
+          assert changed<=allowed, ("UNAUTHORIZED_EDIT",changed-allowed)
+          print("PASS Frozen Fixed selection, unchanged scanners/trailing, verified -2% stop scope")
+          PY
+      - name: Offline chronological timeframe replay tests
+        run: python -m unittest discover -s backend/tests -p 'test_adaptive_timeframe_replay.py' -v
+      - name: JVM risk GTT worker regression tests and Android APK
+        run: gradle :app:testDebugUnitTest :app:assembleDebug --no-daemon --stacktrace
+      - name: Upload isolated TEST APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Multify-v8328-HardStopMinus2-TEST-debug
+          path: app/build/outputs/apk/debug/*.apk
