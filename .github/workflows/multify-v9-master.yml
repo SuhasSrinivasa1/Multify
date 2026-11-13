@@ -76,6 +76,14 @@ jobs:
           assert "v9MasterShadowCollector.offer(" not in part(
               current,"suspend fun generateFixedForecasts(","private fun fixedSnapshotMultifyMfeAverage(")
           assert Path(service).read_bytes()==subprocess.check_output(["git","show",f"{base28}:{service}"])
+          # Broker transport already had endpoint 1s/60s tracing; preserve it
+          # BYTE-IDENTICALLY rather than reimplementing duplicate counters.
+          for p in ("data/network/GrowwRateLimitInterceptor.kt",
+                    "data/network/BetaHttpTraceInterceptor.kt",
+                    "data/network/GrowwHttpTraceLedger.kt"):
+              f=root+p
+              assert Path(f).read_bytes()==subprocess.check_output(["git","show",f"{base28}:{f}"]), f
+          assert not Path(root+"engine/V9EndpointPressureWindow.kt").exists()
           for rel in ("engine/HardStopLossPolicy.kt","engine/ReleaseIntegrityManifest.kt",
                       "engine/SteppedTrailingPolicy.kt","engine/NetGainTrailingPolicy.kt",
                       "engine/FixedSingleWorkerStartGate.kt","engine/HardStopGttTighteningPolicy.kt"):
@@ -89,14 +97,10 @@ jobs:
           changed=set(subprocess.check_output(["git","diff","--name-only",base28,"HEAD"],text=True).splitlines())
           allowed={
               repo,"app/build.gradle.kts",
-              root+"data/network/GrowwRateLimitInterceptor.kt",
-              root+"data/network/BetaHttpTraceInterceptor.kt",
               root+"engine/V9Fixed8316StrategyShadow.kt",
               root+"engine/V9Fixed8316QualityShadow.kt",
               root+"engine/V9MasterShadowCollector.kt",
-              root+"engine/V9EndpointPressureWindow.kt",
               "app/src/test/java/com/multify/traderpro/engine/V9VersionedShadowReplayTest.kt",
-              "app/src/test/java/com/multify/traderpro/engine/V9EndpointPressureWindowTest.kt",
               "backend/app/v9_master_log_replay.py",
               "backend/tests/test_v9_master_log_replay.py",
               "docs/V9_MASTER_VALIDATION.md",

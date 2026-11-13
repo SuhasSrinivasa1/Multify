@@ -47,23 +47,27 @@ This is ONE consolidated source lineage, NOT a merge of divergent old PRs.
   higher retrospective hit rate might be lookahead bias or unsafe
   liquidity selection. Research records explicitly flag that risk.
 
-## API quota diagnosis — zero new requests, no speculative quota
-- The existing Alpha and Beta HTTP interceptors now log exact
-  observed endpoint-specific counts at request dispatch over rolling
-  1s/60s, plus category/account totals; on HTTP 429, include their
-  counts in the response record. Logs are V9_MASTER_API /
-  ALPHA_ENDPOINT_MINUTE_SAMPLE, BETA_ENDPOINT_MINUTE_SAMPLE and
-  BETA_ENDPOINT_429_PRESSURE, plus existing API_RATE_LIMIT/HTTP_429.
-- Existing category limits and endpoint pacing are unchanged: broker
-  quotas are NOT inferred from a lone 429 or documentation maximum.
-  Counts exclude requests locally blocked BEFORE HTTP dispatch.
-- The present logs (Nov 13 v8.3.27) show 9 Alpha 429s despite
-  successful HTTPs; slowdown involves many locally governed waits.
-  429s also occur on holdings and positions, not just stock quotes.
-- Before changing admission or caching, future matched evidence
-  must separate per-account, endpoint, 1/60s, successful dispatch,
-  blocked/local queued work, endpoint 429, and protection priority.
-- NEVER use stale cached market prices to authorize a live BUY/SELL.
+## API quota diagnosis — reusing existing trace, not reinventing it
+- Important audit correction: the ORIGINAL GrowwHttpTraceLedger already
+  records actual ALPHA/BETA requests at dispatch, response status,
+  endpoint, and 1s/60s endpoint/category/account counters. We removed
+  a redundant v9 counter before the final build.
+- The NEW offline v9_master_log_replay.py reads those existing 200/429
+  endpoint records to compare successful dispatch windows with windows
+  rejected by Groww. There are no additional broker requests, no new
+  admission locks, and no additional telemetry emitted by HTTP code.
+- In the Nov 13 v8.3.27 session, quote 429s occurred at 10, 37 and 18
+  local same-endpoint requests/minute, while a successful quote request
+  was observed at 45/min. Holdings 429s occurred at 12, 9 and 3/min,
+  while other holdings requests succeeded at 12/min. Thus the
+  local request rate is not a deterministic broker-side quota.
+- Alpha & Beta broker transport and existing cooldown/pacing policies
+  are now byte-identical to v8.3.28. Do not increase concurrency or
+  invent a fixed rate cap from a few 429s; causes may include hidden
+  shared quotas, windows, other sessions, server state, and
+  account/IP-wide traffic unavailable to this client.
+- Identify preventable duplicate or low-priority calls separately.
+  Never use stale cached quotes to authorize a live BUY/SELL.
 
 ## Historical evidence, not invented winner
 Only five original raw diagnostic ZIPs are currently available:
