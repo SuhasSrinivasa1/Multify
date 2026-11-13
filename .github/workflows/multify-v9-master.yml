@@ -34,7 +34,7 @@ jobs:
           import subprocess
           ref19=["30d3ab4f474fc1ed4103da5e1247b0078f484eaf",
                  "af87c4126572c6aca9a8fadea940011a13bf0ab8"]
-          ref16="v8316-account-api-telemetry-fixed-benchmark"
+          ref16="1e167cf64b4931c0c4eb9cdfd5756c1bc252c450"
           base28="309b50c297964bf313b26c651a1287e1795e5807"
           root="app/src/main/java/com/multify/traderpro/"
           repo=root+"data/repository/TradingRepository.kt"
