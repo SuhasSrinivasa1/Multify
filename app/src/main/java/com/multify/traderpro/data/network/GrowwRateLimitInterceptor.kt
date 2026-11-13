@@ -38,7 +38,6 @@ internal class GrowwRateLimitInterceptor(
     internal class PreAdmitted
 
     private val lock = Any()
-    private val v9EndpointPressure = com.multify.traderpro.engine.V9EndpointPressureWindow()
     // Local per-endpoint Alpha /ltp pacing: shared generic LIVE_DATA budget alone
     // did not prevent HTTP 429 at 2 requests/second and 18/minute in the broker logs.
     // This never changes Fixed scoring, SELL stop triggers or order dispatch.
@@ -82,21 +81,6 @@ internal class GrowwRateLimitInterceptor(
         GrowwApiUsageLedger.recordRequest(category)
         val started = SystemClock.elapsedRealtime()
         val requestStartedAtMs = System.currentTimeMillis()
-        val endpointPressure = v9EndpointPressure.admitted(
-            request.method, path, category.name, started
-        )
-        if (endpointPressure.emitMinuteSample) auditLogger.logAsync(
-            "V9_MASTER_API", "ALPHA_ENDPOINT_MINUTE_SAMPLE", mapOf(
-                "path" to path, "method" to request.method,
-                "category" to category.name, "endpoint_1s" to endpointPressure.endpoint1s,
-                "endpoint_60s" to endpointPressure.endpoint60s,
-                "category_1s" to endpointPressure.category1s,
-                "category_60s" to endpointPressure.category60s,
-                "all_alpha_60s" to endpointPressure.alphaAll60s,
-                "counts_admitted_http_not_governor_waiters" to true,
-                "changes_throttling" to false
-            )
-        )
         val trace = GrowwHttpTraceLedger.start("ALPHA", request.method, path)
         // Request priority is internal scheduler metadata, never a Groww API header.
         val response = try {
@@ -153,12 +137,6 @@ internal class GrowwRateLimitInterceptor(
                 "app_limit_60s" to row.appPerMinuteLimit,
                 "hard_limit_1s" to row.hardPerSecondLimit,
                 "hard_limit_60s" to row.hardPerMinuteLimit,
-                "v9_endpoint_1s_at_dispatch" to endpointPressure.endpoint1s,
-                "v9_endpoint_60s_at_dispatch" to endpointPressure.endpoint60s,
-                "v9_category_1s_at_dispatch" to endpointPressure.category1s,
-                "v9_category_60s_at_dispatch" to endpointPressure.category60s,
-                "v9_all_alpha_60s_at_dispatch" to endpointPressure.alphaAll60s,
-                "v9_not_a_verified_broker_quota" to true,
                 "category_429_total" to row.rateLimitResponses,
                 "governor_wait_count" to row.permitWaitCount,
                 "governor_wait_ms_total" to row.permitWaitMs,
