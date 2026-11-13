@@ -62,6 +62,40 @@ def summarize_exports(paths):
             rates = [a for a in audit if a.get("event") == "HTTP_429"
                      and a.get("category") == "API_RATE_LIMIT"]
             paired = _json(z, "fixed_5m_shadow_pairs.json", [])
+            # The preexisting GrowwHttpTraceLedger already tracks exact local
+            # ALPHA/BETA endpoint 1s/60s dispatch counts for every HTTP call.
+            traces = [x.get("details", {}) for x in audit
+                      if x.get("category") == "API_HTTP_TRACE"
+                      and x.get("event") == "REQUEST_FINISHED"]
+            at429 = [d for d in traces if d.get("http_status") == 429]
+            by_ep = defaultdict(lambda: {"success": 0, "rate_limit": 0,
+                                           "highest_successful_60s": 0,
+                                           "limit_at_429_60s": []})
+            for d in traces:
+                endpoint = d.get("endpoint")
+                account = d.get("account")
+                if not endpoint or not account:
+                    continue
+                group = by_ep[account + " " + endpoint]
+                n = d.get("endpoint_60s_at_start")
+                if d.get("http_status") in (200, 201):
+                    group["success"] += 1
+                    if isinstance(n, (int, float)):
+                        group["highest_successful_60s"] = max(
+                            group["highest_successful_60s"], n)
+                elif d.get("http_status") == 429:
+                    group["rate_limit"] += 1
+                    group["limit_at_429_60s"].append(n)
+            quota_evidence = {k: v for k, v in sorted(by_ep.items())
+                              if v["rate_limit"] > 0}
+            incident_details = [{
+                "account": d.get("account"),
+                "endpoint": d.get("endpoint"),
+                "endpoint_1s_at_start": d.get("endpoint_1s_at_start"),
+                "endpoint_60s_at_start": d.get("endpoint_60s_at_start"),
+                "category_60s_at_start": d.get("category_60s_at_start"),
+                "account_60s_at_start": d.get("account_60s_at_start")
+            } for d in at429]
             source_version = _json(z, "export_manifest.json", {}).get("version")
         cumulative = True
         for older in group[:-1]:
@@ -84,6 +118,9 @@ def summarize_exports(paths):
             "scan_median_sec": (round(statistics.median(durations) / 1000, 2)
                                 if durations else None),
             "http_429_events": len(rates),
+            "http_429_trace_incidents": incident_details,
+            "endpoint_429_vs_successful_dispatch": quota_evidence,
+            "does_not_establish_broker_hidden_quota": True,
             "actual_5m_shadow_pairs": len(paired),
             "performance_is_simulated": False,
             "sampled_LTP_not_realized_PnL": True,
@@ -96,6 +133,7 @@ def summarize_exports(paths):
             label for label in ("v8.3.16", "v8.3.19")
             if not any(x["version"] == label for x in rows)],
         "best_strategy_selected": None,
+        "broker_429_quota_inference": "Observed endpoint counts vary widely at rejection; successful requests may exceed rejected counts. Do not invent a fixed broker quota.",
         "reason": "No same-day matched full-candle replay or original v16/v19 exports",
         "source_constraints": [
             "Latest cumulative ZIP per installed version only; do not double-count exports",
