@@ -4610,7 +4610,7 @@ class TradingRepository @Inject constructor(
      * historical view ending at the SAME quote timestamp. One additional Alpha 5m
      * history call, never an extra quote or full-market scan. No execution or ranking effect.
      */
-    suspend fun sampleFixedFiveMinuteShadow(completedScanNumber: Int) {
+    suspend fun sampleFixedFiveMinuteShadow(completedScanNumber: Int, afterClose: Boolean = false) {
         if (!fixedFiveMinuteShadowMutex.tryLock()) return
         try {
             // Yield the discretionary 5m HISTORY call to the existing official
@@ -4622,6 +4622,7 @@ class TradingRepository @Inject constructor(
             if (fixedSweepPreparationActive || officialSweepPending) {
                 auditLogger.logAsync("FIXED_5M_SHADOW", "OFFICIAL_PREFETCH_HAS_PRIORITY", mapOf(
                     "scan_number" to completedScanNumber,
+                    "after_market" to afterClose,
                     "official_full_sweep_pending" to officialSweepPending,
                     "official_full_sweep_active" to fixedSweepPreparationActive,
                     "discretionary_5m_history_requests" to 0,
@@ -4630,7 +4631,10 @@ class TradingRepository @Inject constructor(
                 return
             }
             val now = ZonedDateTime.now(INDIA)
-            if (now.dayOfWeek.value >= 6 || now.toLocalTime() !in LocalTime.of(9, 15)..LocalTime.of(15, 25)) return
+            val liveSession = now.toLocalTime() in LocalTime.of(9, 15)..LocalTime.of(15, 25)
+            val postMarket = now.toLocalTime() in LocalTime.of(15, 35)..LocalTime.of(18, 0)
+            if (now.dayOfWeek.value >= 6 ||
+                !(if (afterClose) postMarket else liveSession)) return
             val nowMs = System.currentTimeMillis()
             val lastSuccess = fixedShadowPrefs.getLong("last_successful_at_ms", 0L)
             val api = GrowwApiUsageLedger.snapshot()
@@ -4643,7 +4647,9 @@ class TradingRepository @Inject constructor(
                 status.categoryCooldownUntilMs[GrowwApiUsageLedger.Category.HISTORICAL] ?: 0L
             )
             val lastObserved429AtMs = maxOf(live.lastRateLimitAtMs, historical.lastRateLimitAtMs)
-            val fixedDueIn = millisUntilNextFixedScan()
+            // Never lengthen market-hour scans. After 15:35 there is no
+            // scheduled Fixed full-universe scan competing for research capacity.
+            val fixedDueIn = if (afterClose) 60_000L else millisUntilNextFixedScan()
             if (!FixedShadowSamplingPolicy.canCollect(
                     nowMs, lastSuccess, fixedApiPriorityRequested, marketCriticalTradeInFlight,
                     fixedDueIn, live.usedLastMinute, live.appPerMinuteLimit,
@@ -4654,7 +4660,7 @@ class TradingRepository @Inject constructor(
             ) {
                 auditLogger.logAsync("FIXED_5M_SHADOW", "IDLE_CAPACITY_SKIPPED", mapOf(
                     "scan_number" to completedScanNumber, "alpha_only" to true,
-                    "fixed_due_in_ms" to fixedDueIn, "fixed_priority" to fixedApiPriorityRequested,
+                    "after_market" to afterClose, "fixed_due_in_ms" to fixedDueIn, "fixed_priority" to fixedApiPriorityRequested,
                     "critical_trade" to marketCriticalTradeInFlight, "broker_ready" to brokerReady,
                     "live_minute" to live.usedLastMinute,
                     "historical_minute" to historical.usedLastMinute,
@@ -4668,14 +4674,22 @@ class TradingRepository @Inject constructor(
             // Rotate across eligible evaluated symbols (including non-recommendations).
             // Otherwise a single published symbol would dominate all shadow samples.
             val preferred = fixedRecommendationStore.recommendations(today).map { it.symbol }
+            val alreadyPaired = fixedFiveMinuteShadowJournal.all().asSequence()
+                .filter { it.date == today }.map { it.symbol to it.atMs }.toSet()
+            val maxReferenceAgeMs = if (afterClose) 9L * 60L * 60_000L
+                else FixedShadowSamplingPolicy.MAX_REFERENCE_AGE_MS
             val candidates = (preferred + fixedShadowReferences.keys.sorted()).distinct().mapNotNull { symbol ->
                 fixedShadowReferences[symbol]?.takeIf {
                     RecommendationPriceBandPolicy.eligible(it.quote.lastPrice) &&
-                        (nowMs - it.quoteCapturedAtMs) in 0L..FixedShadowSamplingPolicy.MAX_REFERENCE_AGE_MS
+                        (nowMs - it.quoteCapturedAtMs) in 0L..maxReferenceAgeMs &&
+                        java.time.Instant.ofEpochMilli(it.quoteCapturedAtMs)
+                            .atZone(INDIA).toLocalDate().toString() == today &&
+                        (symbol to it.quoteCapturedAtMs) !in alreadyPaired
                 }?.let { symbol to it }
             }
             val candidate = if (candidates.isEmpty()) null
-                else candidates[Math.floorMod(completedScanNumber, candidates.size)]
+                else candidates[if (afterClose) 0 else
+                    Math.floorMod(completedScanNumber, candidates.size)]
             if (candidate == null) {
                 auditLogger.logAsync("FIXED_5M_SHADOW", "NO_FRESH_PRODUCTION_15M_REFERENCE")
                 return
@@ -4687,18 +4701,20 @@ class TradingRepository @Inject constructor(
             }
             if (fixedSweepPreparationActive || sweepDemandBeforeRequest ||
                 fixedApiPriorityRequested || marketCriticalTradeInFlight ||
-                millisUntilNextFixedScan() < FixedShadowSamplingPolicy.MIN_FIXED_HEADROOM_MS
+                (!afterClose && millisUntilNextFixedScan() <
+                    FixedShadowSamplingPolicy.MIN_FIXED_HEADROOM_MS)
             ) return
             val referenceTime = ZonedDateTime.ofInstant(
                 java.time.Instant.ofEpochMilli(reference.quoteCapturedAtMs), INDIA
             )
             val start = referenceTime.minusDays(4).toLocalDate().atTime(9, 15).format(HIST_FORMAT)
-            val end = referenceTime.toLocalDateTime().format(HIST_FORMAT)
+            val end = if (afterClose) now.toLocalDate().atTime(15, 30).format(HIST_FORMAT)
+                else referenceTime.toLocalDateTime().format(HIST_FORMAT)
             val before = System.currentTimeMillis()
-            // Never occupy Fixed's request slot waiting for a full network timeout.
-            val history = withTimeoutOrNull(
-                (millisUntilNextFixedScan() - 1_500L).coerceIn(500L, 4_000L)
-            ) {
+            // Bounded Alpha HISTORY call, never blocking a Fixed production slot.
+            val timeoutMs = if (afterClose) 15_000L
+                else (millisUntilNextFixedScan() - 1_500L).coerceIn(500L, 4_000L)
+            val history = withTimeoutOrNull(timeoutMs) {
                 if (fixedApiPriorityRequested || marketCriticalTradeInFlight || !marketDataAvailableForFixed()) null
                 else apiFactory.groww.historicalCandles(
                     bearer(token), growwSymbol = "NSE-$symbol",
@@ -4708,6 +4724,7 @@ class TradingRepository @Inject constructor(
             if (history == null || history.candles.size < 5) {
                 auditLogger.logAsync("FIXED_5M_SHADOW", "HISTORICAL_UNAVAILABLE_OR_TIMED_OUT", mapOf(
                     "symbol" to symbol, "alpha_only" to true,
+                    "after_market" to afterClose,
                     "elapsed_ms" to (System.currentTimeMillis() - before),
                     "extra_historical_requests_attempted" to 1
                 ))
@@ -4716,7 +4733,8 @@ class TradingRepository @Inject constructor(
             val signal = ParsedSignal(SignalType.TRADE_RELEASE, symbol = symbol,
                 rawText = "fixed-5m-idle-research", confidence = 1.0)
             val five = FixedLocalStrategyEngine.evaluateLong(
-                signal, FixedLocalStrategyEngine.buildFeatures(reference.quote, history, 5),
+                signal, FixedLocalStrategyEngine.buildFeatures(
+                    reference.quote, history, 5, asOfMs = reference.quoteCapturedAtMs),
                 includeEventPrior = false
             )
             val fifteen = reference.evaluation
@@ -4727,15 +4745,58 @@ class TradingRepository @Inject constructor(
             val tier15 = FixedForecastQualityPolicy.evaluate(fifteen, targetPct, regime).tier
             val tier5 = FixedForecastQualityPolicy.evaluate(five, targetPct, regime).tier
             val price = reference.quote.lastPrice ?: return
+            // Completed 5m forward candles are used ONLY after the original
+            // signal reference timestamp, never as features before signal time.
+            val forwardBars = if (!afterClose) emptyList() else history.candles.mapNotNull { x ->
+                if (x.size < 6) null else {
+                    val at = com.multify.traderpro.engine.MarketCandleTimestampParser
+                        .toEpochMillis(x[0])
+                    if (at == null) null else runCatching {
+                        com.multify.traderpro.engine.FixedFiveMinuteForwardCandlePolicy.Bar(
+                            at, x[2].asDouble, x[3].asDouble)
+                    }.getOrNull()
+                }
+            }
+            val outcome15 = com.multify.traderpro.engine.FixedFiveMinuteForwardCandlePolicy
+                .evaluate(reference.quoteCapturedAtMs, price, targetPct, forwardBars, 15)
+            val outcome60 = com.multify.traderpro.engine.FixedFiveMinuteForwardCandlePolicy
+                .evaluate(reference.quoteCapturedAtMs, price, targetPct, forwardBars, 60)
             val pair = FixedFiveMinuteShadowPair(
                 date = today, atMs = reference.quoteCapturedAtMs, symbol = symbol,
                 entryPrice = price, targetPct = targetPct,
                 fifteenMinuteTier = tier15, fiveMinuteTier = tier5,
                 fifteenMinuteConfidence = fifteen.confidence, fiveMinuteConfidence = five.confidence,
                 fifteenMinuteDirection = fifteen.directionalScore, fiveMinuteDirection = five.directionalScore,
-                fifteenMinuteStrategy = fifteen.strategy, fiveMinuteStrategy = five.strategy
+                fifteenMinuteStrategy = fifteen.strategy, fiveMinuteStrategy = five.strategy,
+                forward15MinTargetTouched = outcome15.targetTouched,
+                forward60MinTargetTouched = outcome60.targetTouched,
+                forward15MinTargetBeforeTwoPctRisk = outcome15.targetBeforeTwoPctAdverse,
+                forward60MinTargetBeforeTwoPctRisk = outcome60.targetBeforeTwoPctAdverse,
+                forward15MinSameBarAmbiguous = if (outcome15.matured)
+                    outcome15.sameCandleOrderingAmbiguous else null,
+                forward60MinSameBarAmbiguous = if (outcome60.matured)
+                    outcome60.sameCandleOrderingAmbiguous else null
             )
             fixedFiveMinuteShadowJournal.append(pair)
+            if (afterClose) auditLogger.logAsync(
+                "FIXED_5M_SHADOW", "FORWARD_CANDLE_OUTCOMES_V8326", mapOf(
+                    "symbol" to symbol, "reference_quote_at_ms" to reference.quoteCapturedAtMs,
+                    "forward_15m_matured" to outcome15.matured,
+                    "forward_15m_bars" to outcome15.completedForwardBars,
+                    "forward_15m_target_touched" to outcome15.targetTouched,
+                    "forward_15m_target_before_2pct_risk" to outcome15.targetBeforeTwoPctAdverse,
+                    "forward_15m_same_bar_ambiguous" to outcome15.sameCandleOrderingAmbiguous,
+                    "forward_60m_matured" to outcome60.matured,
+                    "forward_60m_bars" to outcome60.completedForwardBars,
+                    "forward_60m_target_touched" to outcome60.targetTouched,
+                    "forward_60m_target_before_2pct_risk" to outcome60.targetBeforeTwoPctAdverse,
+                    "forward_60m_same_bar_ambiguous" to outcome60.sameCandleOrderingAmbiguous,
+                    "two_variants_share_same_entry_and_forward_path" to true,
+                    "intrabar_ordering_unverified" to true,
+                    "not_realized_profit" to true,
+                    "not_used_for_trading" to true
+                )
+            )
             // V8324_SHADOW_DIAGNOSTICS_BEGIN
             val observedFiveMinuteSpreadBps = reference.quote.bidPrice?.takeIf { it > 0.0 }
                 ?.let { bid -> reference.quote.offerPrice?.takeIf { it >= bid }
@@ -4774,6 +4835,8 @@ class TradingRepository @Inject constructor(
             fixedShadowPrefs.edit().putLong("last_successful_at_ms", System.currentTimeMillis()).apply()
             auditLogger.logAsync("FIXED_5M_SHADOW", "PAIRED_SIGNAL_CAPTURED", mapOf(
                 "date" to today, "symbol" to symbol,
+                "after_market_research" to afterClose,
+                "feature_data_cutoff_at_reference_quote_ms" to true,
                 "entry_price" to price, "reference_quote_at_ms" to reference.quoteCapturedAtMs,
                 "reference_age_ms" to (nowMs - reference.quoteCapturedAtMs),
                 "target_pct" to targetPct, "tier_15m" to tier15, "tier_5m" to tier5,
@@ -4806,6 +4869,62 @@ class TradingRepository @Inject constructor(
         } finally {
             fixedFiveMinuteShadowMutex.unlock()
         }
+    }
+
+
+    /**
+     * Read-only cohort summary. Unknown quote age remains null because broker
+     * exchange timestamps are not supplied. Does not gate publication/orders.
+     */
+    fun auditFixedScanLatencyShadow(
+        scanId: String, serviceScanStartMs: Long, scanReadyAtMs: Long,
+        scanElapsedMs: Long, accumulatedGovernorWaitMs: Long
+    ) {
+        val verdict = com.multify.traderpro.engine.FixedScanLatencyShadowPolicy
+            .classify(scanElapsedMs)
+        val date = LocalDate.now(INDIA).toString()
+        val produced = fixedRecommendationStore.recommendations(date).filter {
+            it.generatedAtMs >= serviceScanStartMs &&
+                it.generatedAtMs <= scanReadyAtMs
+        }
+        val quotes = produced.map { row ->
+            val referenceAt = fixedShadowReferences[row.symbol]?.quoteCapturedAtMs
+            val clientLag = com.multify.traderpro.engine.FixedScanLatencyShadowPolicy
+                .localQuoteToReadyMs(referenceAt, serviceScanStartMs, scanReadyAtMs)
+            mapOf(
+                "id" to row.id.toString(),
+                "symbol" to row.symbol,
+                "entry_price" to row.entryPrice,
+                "target_pct" to row.targetPct,
+                "quality_tier" to row.qualityTier,
+                "client_reference_captured_at_ms" to
+                    referenceAt?.takeIf { clientLag != null },
+                "client_quote_to_scan_ready_ms" to clientLag,
+                "exchange_quote_timestamp_available" to false,
+                "frozen_15m_production" to true,
+                "would_warn_slow_scan" to verdict.wouldWarn,
+                "recommendation_not_blocked" to true
+            )
+        }
+        auditLogger.logAsync("FIXED_LATENCY_SHADOW", "SCAN_COHORT_V8326", mapOf(
+            "scan_id" to scanId,
+            "scan_started_at_ms" to serviceScanStartMs,
+            "scan_ready_at_ms" to scanReadyAtMs,
+            "scan_elapsed_ms" to scanElapsedMs,
+            "bucket" to verdict.bucket,
+            "recommendation_count" to produced.size,
+            "recommendations" to quotes,
+            "accumulated_governor_wait_ms_concurrent_sum" to
+                accumulatedGovernorWaitMs.coerceAtLeast(0L),
+            "governor_wait_is_not_wall_clock_ms" to true,
+            "slow_scan_warning_shadow_only" to verdict.wouldWarn,
+            "suppressed_recommendations" to 0,
+            "can_block_recommendations" to verdict.canBlockRecommendation,
+            "can_change_auto_buy" to verdict.canChangeAutoBuy,
+            "quote_reference_is_client_time_not_exchange_age" to true,
+            "outcome_to_be_joined_by_recommendation_id" to true,
+            "model_scoring_selection_publication_changed" to false
+        ))
     }
 
     /** Reuse Fixed's existing full-market LTP capture; never generate extra broker requests. */
