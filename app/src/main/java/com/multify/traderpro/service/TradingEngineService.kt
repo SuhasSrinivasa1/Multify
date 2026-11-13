@@ -58,6 +58,10 @@ class TradingEngineService : Service() {
     private var mobileHealthJob: Job? = null
     private var positionMonitorJob: Job? = null
     private var fixedScanJob: Job? = null
+    // Service startup and watchdog can run concurrently. A single-flight owner
+    // atomically publishes/starts the LAZY Fixed worker, never two workers.
+    private val fixedScanWorkerStartGate = com.multify.traderpro.engine.FixedSingleWorkerStartGate()
+    private val fixedScanIdSequence = java.util.concurrent.atomic.AtomicLong(0L)
     private var forecastScanJob: Job? = null
     private var forecastNewsJob: Job? = null
     private var positionMonitoringWakeLock: PowerManager.WakeLock? = null
@@ -115,6 +119,7 @@ class TradingEngineService : Service() {
     override fun onDestroy() {
         updatePositionMonitoringWakeLock(false, "SERVICE_DESTROYED")
         positionMonitorJob?.cancel()
+        fixedScanWorkerStartGate.cancel()
         fixedScanJob?.cancel()
         forecastScanJob?.cancel()
         forecastNewsJob?.cancel()
@@ -497,8 +502,10 @@ class TradingEngineService : Service() {
     }
 
     private fun startFixedScanWorker() {
-        if (fixedScanJob?.isActive == true) return
-        fixedScanJob = scope.launch {
+        // Both onStartCommand and the watchdog use this same atomic gate.
+        // LAZY launch prevents a second thread from observing an unregistered job.
+        val launchedFixedWorker = fixedScanWorkerStartGate.startIfAbsent {
+            scope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
             var previousFixedPause: FixedDataPipelinePolicy.Readiness? = null
             var lastFixedPauseAuditMs = 0L
             var lastSuccessfulFixedScanStartedAtMs = 0L
@@ -609,7 +616,8 @@ class TradingEngineService : Service() {
                             ))
                             previousFixedPause = null
                         }
-                        val scanId = "FX-" + System.currentTimeMillis()
+                        val scanId = com.multify.traderpro.engine.FixedScanAttributionPolicy
+                            .uniqueScanId(System.currentTimeMillis(), fixedScanIdSequence.incrementAndGet())
                         val alphaLiveBefore = GrowwHttpTraceLedger.counters("ALPHA", "LIVE_DATA")
                         val betaLiveBefore = GrowwHttpTraceLedger.counters("BETA", "LIVE_DATA")
                         val alphaHistBefore = GrowwHttpTraceLedger.counters("ALPHA", "HISTORICAL")
@@ -617,6 +625,9 @@ class TradingEngineService : Service() {
                         val usageBefore = GrowwApiUsageLedger.snapshot()
                         val cacheHitsBefore = GrowwApiUsageLedger.cacheHitCount()
                         val historicalBefore = repository.fixedHistoricalRequestCounters()
+                        // Local durable-ID snapshot only. Used to assign each newly
+                        // published recommendation to exactly one Fixed cycle.
+                        val publishedIdsBefore = repository.fixedPublishedRecommendationIdsForScanAttribution()
                         val startedAt = System.currentTimeMillis()
                         GrowwHttpTraceLedger.beginFixedScan(scanId)
                         val scanned = try {
@@ -633,6 +644,11 @@ class TradingEngineService : Service() {
                             GrowwHttpTraceLedger.endFixedScan(scanId)
                         }
                         val elapsed = System.currentTimeMillis() - startedAt
+                        val newlyPublishedIds = if (scanned)
+                            com.multify.traderpro.engine.FixedScanAttributionPolicy.newlyPublishedIds(
+                                publishedIdsBefore,
+                                repository.fixedPublishedRecommendationIdsForScanAttribution()
+                            ) else emptySet()
                         val alphaLiveAfter = GrowwHttpTraceLedger.counters("ALPHA", "LIVE_DATA")
                         val betaLiveAfter = GrowwHttpTraceLedger.counters("BETA", "LIVE_DATA")
                         val alphaHistAfter = GrowwHttpTraceLedger.counters("ALPHA", "HISTORICAL")
@@ -670,9 +686,11 @@ class TradingEngineService : Service() {
                             "beta_historical_http" to scanPoint.betaHistorical,
                             "alpha_429" to scanPoint.alpha429,
                             "beta_429" to scanPoint.beta429,
-                            "request_attribution" to "TIME_WINDOW_INCLUDES_OVERLAPPING_WORKERS",
-                            "strategy_changed" to true,
-                            "intentional_change" to "VERIFIED_SESSION_CANDLE_INPUTS_ONLY"
+                            "request_attribution" to "ONE_FIXED_WORKER_NO_COMPETING_FIXED_WORKER",
+                            "http_counters_include_other_account_workers" to true,
+                            "single_flight_worker_guard" to true,
+                            "strategy_changed" to false,
+                            "intentional_change" to "DUPLICATE_WORKER_GUARD_ONLY"
                             ))
                         }
                         // Diagnostic-only measured start-to-start cadence.
@@ -743,7 +761,8 @@ class TradingEngineService : Service() {
                             scope.launch(Dispatchers.Default) {
                                 runCatching {
                                     repository.auditFixedScanLatencyShadow(
-                                        scanId, startedAt, startedAt + elapsed, elapsed, cumulativeWaitMs
+                                        scanId, startedAt, startedAt + elapsed, elapsed,
+                                        cumulativeWaitMs, newlyPublishedIds
                                     )
                                 }.onFailure {
                                     auditLogger.logAsync("FIXED_LATENCY_SHADOW",
@@ -843,7 +862,9 @@ class TradingEngineService : Service() {
                     delay(ERROR_BACKOFF_MS)
                 }
             }
-        }
+            }
+        } ?: return
+        fixedScanJob = launchedFixedWorker
     }
 
     private fun startForecastScanWorker() {
