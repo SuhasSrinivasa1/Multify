@@ -4873,20 +4873,32 @@ class TradingRepository @Inject constructor(
 
 
     /**
+     * Local-only before/after snapshot for immutable recommendation-ID attribution.
+     * This does NOT filter, generate, or publish any Fixed recommendation.
+     */
+    fun fixedPublishedRecommendationIdsForScanAttribution(): Set<Long> {
+        val date = LocalDate.now(INDIA).toString()
+        return fixedRecommendationStore.recommendations(date).mapTo(mutableSetOf()) { it.id }
+    }
+
+    /**
      * Read-only cohort summary. Unknown quote age remains null because broker
      * exchange timestamps are not supplied. Does not gate publication/orders.
      */
     fun auditFixedScanLatencyShadow(
         scanId: String, serviceScanStartMs: Long, scanReadyAtMs: Long,
-        scanElapsedMs: Long, accumulatedGovernorWaitMs: Long
+        scanElapsedMs: Long, accumulatedGovernorWaitMs: Long,
+        newlyPublishedIds: Set<Long>
     ) {
         val verdict = com.multify.traderpro.engine.FixedScanLatencyShadowPolicy
             .classify(scanElapsedMs)
         val date = LocalDate.now(INDIA).toString()
-        val produced = fixedRecommendationStore.recommendations(date).filter {
-            it.generatedAtMs >= serviceScanStartMs &&
-                it.generatedAtMs <= scanReadyAtMs
-        }
+        // Do not infer ownership from overlapping time windows: old
+        // recommendations were counted in multiple scan cohorts in v8.3.26.
+        // The service captured the durable ID delta within this one Fixed run.
+        val produced = fixedRecommendationStore.recommendations(date)
+            .filter { it.id in newlyPublishedIds }
+            .sortedBy { it.generatedAtMs }
         val quotes = produced.map { row ->
             val referenceAt = fixedShadowReferences[row.symbol]?.quoteCapturedAtMs
             val clientLag = com.multify.traderpro.engine.FixedScanLatencyShadowPolicy
@@ -4906,13 +4918,16 @@ class TradingRepository @Inject constructor(
                 "recommendation_not_blocked" to true
             )
         }
-        auditLogger.logAsync("FIXED_LATENCY_SHADOW", "SCAN_COHORT_V8326", mapOf(
+        auditLogger.logAsync("FIXED_LATENCY_SHADOW", "SCAN_COHORT_V8327", mapOf(
             "scan_id" to scanId,
             "scan_started_at_ms" to serviceScanStartMs,
             "scan_ready_at_ms" to scanReadyAtMs,
             "scan_elapsed_ms" to scanElapsedMs,
             "bucket" to verdict.bucket,
             "recommendation_count" to produced.size,
+            "newly_published_ids" to newlyPublishedIds.toList().sorted(),
+            "attribution_basis" to "PERSISTED_RECOMMENDATION_ID_DELTA_SINGLE_FIXED_RUN",
+            "no_overlapping_time_window_double_count" to true,
             "recommendations" to quotes,
             "accumulated_governor_wait_ms_concurrent_sum" to
                 accumulatedGovernorWaitMs.coerceAtLeast(0L),
