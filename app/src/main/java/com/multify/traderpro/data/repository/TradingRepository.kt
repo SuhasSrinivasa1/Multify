@@ -3820,14 +3820,6 @@ class TradingRepository @Inject constructor(
         }
         val discoveryPhaseMs = (SystemClock.elapsedRealtime() - scanPhaseStartedMs).coerceAtLeast(0L)
         val discoveredSymbols = discoveryPass.symbols
-        // V8321_FROZEN_FOLLOWUP_EXCEPTION_BEGIN
-        val carriedPrimarySymbols = FixedPrimaryCarryForwardPolicy.candidates(
-            fixedRecommendationStore.observations(today).map { row ->
-                FixedPrimaryCarryForwardPolicy.Observation(
-                    row.symbol, row.scanAtMs, row.qualityTier,
-                    row.publishEligible, row.executionEligible, row.observedPrice)
-            }, nowMs, existing.map { it.symbol })
-        // V8321_FROZEN_FOLLOWUP_EXCEPTION_END
         if (!marketDataAvailableForFixed()) {
             fixedScanDeferredBroker = true
             auditLogger.logAsync("FIXED_PERFORMANCE", "SCAN_DEFERRED_BROKER", mapOf(
@@ -3844,11 +3836,9 @@ class TradingRepository @Inject constructor(
                 master[Math.floorMod(seed + i * 131, master.size)]
             }
         }
-        // V8321_FROZEN_FOLLOWUP_EXCEPTION_BEGIN
-        val universe = (carriedPrimarySymbols + discoveredSymbols + dnaSymbols + recentSymbols + rotating)
+        val universe = (discoveredSymbols + dnaSymbols + recentSymbols + rotating)
             .distinct()
             .take(FIXED_V741_DETAILED_FORECAST_UNIVERSE_LIMIT)
-        // V8321_FROZEN_FOLLOWUP_EXCEPTION_END
         // Preserve the exact v7.4.1 universe, evaluation formulas, breadth and ranking inputs,
         // but fetch independent symbol evaluations in small bounded batches. Reconstruct results in
         // original universe order so this is a latency-only change, not a selection/ranking change.
@@ -3970,46 +3960,6 @@ class TradingRepository @Inject constructor(
             }.thenByDescending { it.score }
         )
 
-        // V8322_FROZEN_SHADOW_EXCEPTION_BEGIN
-        // Exact unbounded pre-clamp score for the FROZEN 107-call state.
-        // champions/research bonuses are exactly zero above; this recomputation
-        // is observational only, never used to sort, publish, buy or sell.
-        val uncappedDiagnosticCandidates = ranked.take(FIXED_V741_DETAILED_FORECAST_UNIVERSE_LIMIT).map { item ->
-            val confidenceComponent = item.evaluation.confidence
-            val directionalComponent =
-                item.evaluation.directionalScore.coerceAtLeast(0.0) * 0.10
-            val frequencyComponent = min(.04, (frequency[item.symbol] ?: 0) * .004)
-            val dnaComponent = if (item.symbol in dnaSymbols) .08 else 0.0
-            val qualityComponent = FixedForecastQualityPolicy.rankingBonus(
-                item.evaluation, item.quality.volatilityCapacityPct, targetPct, item.quality.tier)
-            val familyComponent = FixedMultifyFactorFamilies.rankingBonus(item.factorModel)
-            val raw = confidenceComponent + directionalComponent + frequencyComponent +
-                dnaComponent + qualityComponent + familyComponent
-            mapOf(
-                "symbol" to item.symbol,
-                "quality_tier" to item.quality.tier,
-                "uncapped_exact_fixed_score_for_current_frozen_champions_and_research" to raw,
-                "capped_production_score" to item.score,
-                "capped_at_0_99" to (raw > .99),
-                "score_reconstruction_delta" to (raw.coerceIn(.01,.99) - item.score),
-                "confidence" to confidenceComponent,
-                "directional_bonus" to directionalComponent,
-                "frozen_frequency_bonus" to frequencyComponent,
-                "frozen_dna_bonus" to dnaComponent,
-                "fixed_quality_bonus" to qualityComponent,
-                "factor_family_bonus" to familyComponent
-            )
-        }
-        auditLogger.logAsync("FIXED_SHADOW", "UNCAPPED_RANKING_COMPONENTS", mapOf(
-            "scan_start_at_ms" to nowMs,
-            "source" to "EXACT_STATIC_FROZEN_CONTRACT_NO_BROKER_REQUESTS",
-            "champions_bonus" to 0.0,
-            "prior_research_bonus" to 0.0,
-            "changes_trading_score_or_rank" to false,
-            "candidates" to uncappedDiagnosticCandidates
-        ))
-        // V8322_FROZEN_SHADOW_EXCEPTION_END
-
         fixedRecommendationStore.appendObservations(
             ranked.take(FIXED_V741_RESEARCH_CAPTURE_TOP_N).map { item ->
                 FixedScanObservation(
@@ -4029,22 +3979,6 @@ class TradingRepository @Inject constructor(
         // After a prior event, require a witnessed non-PRIMARY reset followed by
         // a distinct, fresh confirmed PRIMARY, not a continuing old setup.
         val allTodayFixedObservations = fixedRecommendationStore.observations(today)
-        // V8321_FROZEN_FOLLOWUP_EXCEPTION_BEGIN
-        // Only same-day, recent, previously-discovered PRIMARYs retain discovery
-        // provenance. All current quality/confirmation and execution gates apply.
-        ranked.forEach { candidate ->
-            if (candidate.quality.tier != "PRIMARY" ||
-                !candidate.quality.publishEligible || !candidate.quality.executionEligible) {
-                fixedPreviouslyDiscoveredPrimaryAt.remove(candidate.symbol)
-            } else if (candidate.symbol in discoveredSymbols) {
-                fixedPreviouslyDiscoveredPrimaryAt[candidate.symbol] = today to nowMs
-            }
-        }
-        fixedPreviouslyDiscoveredPrimaryAt.entries.removeIf { (_, value) ->
-            !FixedPrimaryCarryForwardPolicy.wasRecentlyDiscovered(
-                value.first, value.second, today, nowMs)
-        }
-        // V8321_FROZEN_FOLLOWUP_EXCEPTION_END
         val unseen = ranked.filter { item ->
             FixedRepeatQualificationPolicy.qualifiedForNewEvent(
                 item.symbol, nowMs, existing, allTodayFixedObservations,
@@ -4076,14 +4010,7 @@ class TradingRepository @Inject constructor(
             FixedForecastPublicationPolicy.isReady(
                 discoveryBaselineReady = discoveryPass.baselineReady,
                 currentPrimary = currentPrimary,
-                // V8321_FROZEN_FOLLOWUP_EXCEPTION_BEGIN
-                discoveredMarketWide = item.symbol in discoveredSymbols ||
-                    (item.symbol in carriedPrimarySymbols &&
-                        fixedPreviouslyDiscoveredPrimaryAt[item.symbol]?.let {
-                            FixedPrimaryCarryForwardPolicy.wasRecentlyDiscovered(
-                                it.first, it.second, today, nowMs)
-                        } == true),
-                // V8321_FROZEN_FOLLOWUP_EXCEPTION_END
+                discoveredMarketWide = item.symbol in discoveredSymbols,
                 priorPrimaryHits = priorPrimaryHits(item.symbol)
             )
         }
@@ -4116,35 +4043,6 @@ class TradingRepository @Inject constructor(
                     executionEligible = item.quality.executionEligible
                 )
             )
-            // V8322_FROZEN_SHADOW_EXCEPTION_BEGIN
-            val storedAtMs = System.currentTimeMillis()
-            val firstPriorPrimary = allTodayFixedObservations.asSequence()
-                .filter {
-                    it.symbol.equals(item.symbol, true) &&
-                        it.scanAtMs < nowMs &&
-                        it.qualityTier == "PRIMARY" &&
-                        it.publishEligible && it.executionEligible
-                }.minByOrNull { it.scanAtMs }
-            val driftPct = firstPriorPrimary?.observedPrice?.takeIf { it > 0.0 }
-                ?.let { (price / it - 1.0) * 100.0 }
-            auditLogger.logAsync("FIXED_SHADOW", "RECOMMENDATION_PERSISTED_TIMING", mapOf(
-                "symbol" to item.symbol,
-                "scan_started_at_ms" to nowMs,
-                "persisted_at_ms" to storedAtMs,
-                "scan_to_store_ms" to (storedAtMs - nowMs),
-                "last_evaluation_quote_captured_at_ms" to
-                    fixedShadowReferences[item.symbol]?.quoteCapturedAtMs,
-                "first_prior_primary_scan_at_ms" to firstPriorPrimary?.scanAtMs,
-                "first_prior_primary_price" to firstPriorPrimary?.observedPrice,
-                "first_primary_to_persist_ms" to firstPriorPrimary?.let {
-                    storedAtMs - it.scanAtMs
-                },
-                "pre_publication_runup_from_first_primary_pct" to driftPct,
-                "already_moved_more_than_full_target" to driftPct?.let { it >= targetPct },
-                "snapshot_is_not_exchange_tick_or_executable_quote" to true,
-                "trading_decisions_unchanged" to true
-            ))
-            // V8322_FROZEN_SHADOW_EXCEPTION_END
         }
 
         val all = fixedRecommendationStore.recommendations(today)
@@ -4164,10 +4062,6 @@ class TradingRepository @Inject constructor(
             "secondary" to (tierCounts["SECONDARY"] ?: 0),
             "research" to (tierCounts["RESEARCH"] ?: 0),
             "published_count" to all.size,
-            "carried_recent_primary_symbols" to carriedPrimarySymbols,
-            "carried_primary_evaluated" to carriedPrimarySymbols.count { it in evaluatedBySymbol },
-            "followup_not_auto_publication" to true,
-            "fixed_detail_candidate_limit" to FIXED_V741_DETAILED_FORECAST_UNIVERSE_LIMIT,
             "daily_recommendation_cap" to "NONE",
             "price_min_exclusive" to 200,
             "price_max_exclusive" to 5000,
@@ -4641,16 +4535,9 @@ class TradingRepository @Inject constructor(
         val baselineReady = previousCoverageRatio >= FIXED_V741_MIN_DISCOVERY_COVERAGE_RATIO &&
             coverageRatio >= FIXED_V741_MIN_DISCOVERY_COVERAGE_RATIO && !abortedForNetwork
 
-        // v8.3.21: apply the EXISTING ₹200–₹5,000 Fixed eligibility
-        // before consuming the unchanged 28 dynamic candidate slots.
-        // The authoritative full-universe LTP sweep, health coverage, stored
-        // baselines and 65/35 momentum ranking formula are untouched.
-        val priceEligibleForDetail = current.filterValues {
-            RecommendationPriceBandPolicy.eligible(it)
-        }
         val ranked = if (baselineReady) {
             FixedMarketDiscoveryPolicy.rank(
-                currentLtps = priceEligibleForDetail,
+                currentLtps = current,
                 previousLtps = previous,
                 sessionOpenLtps = sessionOpen,
                 limit = FIXED_V741_DISCOVERY_DYNAMIC_LIMIT
