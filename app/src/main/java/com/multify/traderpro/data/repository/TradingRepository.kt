@@ -4256,67 +4256,90 @@ class TradingRepository @Inject constructor(
             } else throw failed
         }
         require(RecommendationPriceBandPolicy.eligible(quote.lastPrice)) { "FIXED_PRICE_BAND_OUTSIDE" }
-        // Token-scope the RAM snapshot so a reconnect or account change cannot reuse candles.
-        val historyKey = sha256(token).take(12) + ":" + symbol
-        val incremental = fixedHistoricalWindowStore.request(historyKey, start, SystemClock.elapsedRealtime())
+        // The RAM history cache MUST be scoped to the account that actually
+        // supplied 15m candles, not to the separate live quote account.
+        var historyAccountToken = historicalToken
+        var historicalUsesBeta = useBetaHistorical
+        var historyKey = sha256(historyAccountToken).take(12) + ":" + symbol
+        var incremental = fixedHistoricalWindowStore.request(
+            historyKey, start, SystemClock.elapsedRealtime()
+        )
         if (incremental == null) {
-            val reason = fixedHistoricalWindowStore.ineligibilityReason(historyKey, start, SystemClock.elapsedRealtime())
-            // Sample at most one diagnostic every 15 seconds; do not slow the Fixed pipeline.
+            val reason = fixedHistoricalWindowStore.ineligibilityReason(
+                historyKey, start, SystemClock.elapsedRealtime()
+            )
             val nowElapsed = SystemClock.elapsedRealtime()
             val lastLogged = fixedReuseDiagnosticLastLoggedAtMs.get()
             if (nowElapsed - lastLogged >= 15_000L &&
                 fixedReuseDiagnosticLastLoggedAtMs.compareAndSet(lastLogged, nowElapsed)) {
                 auditLogger.logAsync("FIXED_PERFORMANCE", "HISTORICAL_REUSE_SKIPPED", mapOf(
-                    "symbol" to symbol, "reason" to reason
+                    "symbol" to symbol, "reason" to reason,
+                    "account" to (if (historicalUsesBeta) "BETA" else "ALPHA")
                 ))
             }
         }
-        val raw = if (useBeta) {
-            betaMarketRead(
-                token, BetaResearchGate.Type.HISTORICAL,
-                alphaCall = { error("Beta Fixed 15m history cannot use Alpha credentials") },
-                betaCall = {
-                    apiFactory.betaGroww.historicalCandles(
-                        bearer(token), growwSymbol = "NSE-$symbol", startTime = incremental?.startTime ?: start,
-                        endTime = end, candleInterval = "15minute"
-                    ).requirePayload("Fixed Beta 15m candles $symbol")
-                }
-            )
-        } else withFixedHistoricalDataSlot {
-            apiFactory.groww.historicalCandles(
-                bearer(token), growwSymbol = "NSE-$symbol", startTime = incremental?.startTime ?: start,
-                endTime = end, candleInterval = "15minute"
-            ).requirePayload("Fixed forecast candles $symbol")
+        suspend fun historicalRequest(requestStart: String, reason: String): HistoricalPayload =
+            if (historicalUsesBeta) {
+                betaMarketRead(
+                    historyAccountToken, BetaResearchGate.Type.HISTORICAL,
+                    alphaCall = { error("Beta Fixed 15m historical cannot use Alpha credentials") },
+                    betaCall = {
+                        apiFactory.betaGroww.historicalCandles(
+                            bearer(historyAccountToken), growwSymbol = "NSE-$symbol",
+                            startTime = requestStart, endTime = end, candleInterval = "15minute"
+                        ).requirePayload(reason)
+                    }
+                )
+            } else withFixedHistoricalDataSlot {
+                apiFactory.groww.historicalCandles(
+                    bearer(historyAccountToken), growwSymbol = "NSE-$symbol",
+                    startTime = requestStart, endTime = end, candleInterval = "15minute"
+                ).requirePayload(reason)
+            }
+
+        val raw = try {
+            historicalRequest(incremental?.startTime ?: start,
+                "Fixed 15m candles $symbol")
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failed: Throwable) {
+            // If the Alpha HISTORICAL category receives a real 429 mid-flight,
+            // retry *only* the candles once using Beta and a full broker
+            // window. Invalidate the Alpha-token delta and cache key: never
+            // stitch a Beta response into an Alpha-token-scoped snapshot.
+            if (!historicalUsesBeta && failed is HttpException && failed.code() == 429 &&
+                fallbackBetaToken != null &&
+                betaResearchGate.healthyForFixed(BetaResearchGate.Type.HISTORICAL)) {
+                historyAccountToken = fallbackBetaToken
+                historicalUsesBeta = true
+                historyKey = sha256(historyAccountToken).take(12) + ":" + symbol
+                incremental = null
+                auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "ALPHA_HISTORY_429_BETA_HISTORY_ONLY", mapOf(
+                    "symbol" to symbol,
+                    "live_quote_preserved" to true,
+                    "history_delta_from_alpha_discarded" to true,
+                    "max_cross_account_history_retries" to 1,
+                    "fixed_scoring_unchanged" to true
+                ))
+                historicalRequest(start, "Fixed Beta 15m history 429 recovery $symbol")
+            } else throw failed
         }
         val historical = if (incremental == null) {
             fixedHistoryFullFetches.incrementAndGet()
             raw
         } else {
-            val merged = fixedHistoricalWindowStore.stitch(historyKey, start, raw, SystemClock.elapsedRealtime())
+            val merged = fixedHistoricalWindowStore.stitch(
+                historyKey, start, raw, SystemClock.elapsedRealtime()
+            )
             if (merged != null) {
                 fixedHistoryDeltaFetches.incrementAndGet()
                 merged
             } else {
-                // No guessing or partially stale candles: return to authoritative full history.
+                // Never accept a non-overlapping delta: an authoritative full
+                // 15m broker request on the SAME historical account is required.
                 fixedHistoryStitchFallbacks.incrementAndGet()
                 fixedHistoryFullFetches.incrementAndGet()
-                if (useBeta) {
-                    betaMarketRead(
-                        token, BetaResearchGate.Type.HISTORICAL,
-                        alphaCall = { error("No Alpha borrowed for Beta candle fallback") },
-                        betaCall = {
-                            apiFactory.betaGroww.historicalCandles(
-                                bearer(token), growwSymbol = "NSE-$symbol",
-                                startTime = start, endTime = end, candleInterval = "15minute"
-                            ).requirePayload("Fixed Beta historical fallback $symbol")
-                        }
-                    )
-                } else withFixedHistoricalDataSlot {
-                    apiFactory.groww.historicalCandles(
-                        bearer(token), growwSymbol = "NSE-$symbol", startTime = start, endTime = end,
-                        candleInterval = "15minute"
-                    ).requirePayload("Fixed historical fallback $symbol")
-                }
+                historicalRequest(start, "Fixed full 15m fallback $symbol")
             }
         }
         // Live v9 diagnostics showed the broker sometimes returned just one
