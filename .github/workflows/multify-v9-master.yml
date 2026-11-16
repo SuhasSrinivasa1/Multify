@@ -211,8 +211,18 @@ jobs:
           python -m unittest discover -s backend/tests -p 'test_v9_master_log_replay.py' -v
       - name: Full Android unit tests and v9 Master TEST APK
         run: gradle :app:testDebugUnitTest :app:assembleDebug --no-daemon --stacktrace
-      - name: Upload signed-by-CI TEST artifact
+      - name: Verify installable APK certificate and create checksum report
+        run: |
+          apk=$(find app/build/outputs/apk/debug -maxdepth 1 -name '*.apk' -type f | head -n 1)
+          test -n "$apk" && test -s "$apk"
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$apk" \
+            | tee app/build/outputs/apk/debug/v906-signature-verification.txt
+          sha256sum "$apk" | tee app/build/outputs/apk/debug/v906-SHA256SUMS.txt
+      - name: Upload verified-by-CI TEST artifact
         uses: actions/upload-artifact@v4
         with:
           name: Multify-v9.0.6-API-Recovery-Research-Integrity-TEST-debug
-          path: app/build/outputs/apk/debug/*.apk
+          path: |
+            app/build/outputs/apk/debug/*.apk
+            app/build/outputs/apk/debug/v906-signature-verification.txt
+            app/build/outputs/apk/debug/v906-SHA256SUMS.txt
