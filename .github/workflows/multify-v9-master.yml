@@ -1,9 +1,9 @@
-name: Multify 9.0.2 Frozen Fixed speed and Alpha Beta prefetch
+name: Multify 9.0.3 Fixed 60 percent independent account research quotas
 on:
   push:
-    branches: [v902-fixed-speed-parity-prefetch-20261116]
+    branches: [v903-fixed-60pct-account-quotas-20261116]
   pull_request:
-    branches: [v901-candle-data-and-beta-cooldown-20261116]
+    branches: [v902-fixed-speed-parity-prefetch-20261116]
   workflow_dispatch:
 permissions:
   contents: read
@@ -104,8 +104,29 @@ jobs:
           assert "const val MAX_LOSS_PCT = 2.0" in Path(root+"engine/HardStopLossPolicy.kt").read_text()
           assert "const val HARD_STOP_LOSS_PCT = 2.0" in Path(root+"engine/ReleaseIntegrityManifest.kt").read_text()
           assert "const val CANONICAL_LEARNING_CALLS = 107" in Path(root+"engine/FixedFinalContract.kt").read_text()
-          assert 'versionCode = 9002' in Path('app/build.gradle.kts').read_text()
-          assert 'versionName = "9.0.2-fixed-dual-account-speed-test"' in Path("app/build.gradle.kts").read_text()
+          assert 'versionCode = 9003' in Path('app/build.gradle.kts').read_text()
+          assert 'versionName = "9.0.3-fixed-60pct-account-quota-test"' in Path("app/build.gradle.kts").read_text()
+          budgets=(Path(root+"engine/GrowwApiBudgetPolicy.kt").read_text())
+          beta_policy=Path(root+"engine/FixedDualAccountPolicy.kt").read_text()
+          beta_governor=Path(root+"data/network/BetaResearchGate.kt").read_text()
+          assert "const val FIXED_LIVE_DATA_PERCENT = 60" in budgets
+          assert "const val SELL_MONITOR_RESERVED_PER_SECOND = 4" in budgets
+          assert "const val SELL_MONITOR_RESERVED_PER_MINUTE = 120" in budgets
+          assert "const val BETA_LIVE_PER_SECOND = 6" in beta_policy
+          assert "const val BETA_LIVE_PER_MINUTE = 180" in beta_policy
+          assert "private val liveSec = FixedDualAccountPolicy.BETA_LIVE_PER_SECOND" in beta_governor
+          assert "private val histSec = 1" in beta_governor
+          assert "private val histMinute = FixedDualAccountPolicy.BETA_HISTORICAL_PER_MINUTE" in beta_governor
+          fixed_repo=Path(repo).read_text()
+          quote_iface=Path(root+"data/network/GrowwApi.kt").read_text()
+          assert '@Header("X-Multify-Request-Priority") trafficPriority: String? = null' in quote_iface
+          assert "trafficPriority = MarketDataPriorityAdmissionPolicy.PROTECTION" in fixed_repo
+          assert 'apiFactory.groww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Fixed quote $symbol")' in fixed_repo
+          # The existing interceptor must strip the internal priority before wire dispatch.
+          assert '.removeHeader(MarketDataPriorityAdmissionPolicy.HEADER)' in Path(
+              root+"data/network/GrowwRateLimitInterceptor.kt").read_text()
+          assert Path(root+"data/network/GrowwHistoricalThrottlePolicy.kt").read_bytes()==subprocess.check_output(["git","show",f"{base28}:{root+'data/network/GrowwHistoricalThrottlePolicy.kt'}"])
+
           changed=set(subprocess.check_output(["git","diff","--name-only",base28,"HEAD"],text=True).splitlines())
           allowed={
               repo,"app/build.gradle.kts",
@@ -120,6 +141,14 @@ jobs:
               root+"engine/Fixed15mHistoryRepair.kt",
               root+"engine/FixedSweepPrefetchPolicy.kt",
               root+"engine/FixedEarlyPrefetchPolicy.kt",
+              root+"engine/GrowwApiBudgetPolicy.kt",
+              root+"engine/FixedDualAccountPolicy.kt",
+              root+"data/network/BetaResearchGate.kt",
+              root+"data/network/GrowwApi.kt",
+              root+"engine/MarketDataPriorityAdmissionPolicy.kt",
+              "app/src/test/java/com/multify/traderpro/engine/GrowwApiBudgetPolicyTest.kt",
+              "app/src/test/java/com/multify/traderpro/engine/MarketDataPriorityAdmissionPolicyTest.kt",
+              "app/src/test/java/com/multify/traderpro/engine/FixedDualAccountPolicyTest.kt",
               service,
               "app/src/test/java/com/multify/traderpro/engine/Fixed15mHistoryRepairTest.kt",
               "app/src/test/java/com/multify/traderpro/engine/FixedEarlyPrefetchPolicyTest.kt",
@@ -136,5 +165,5 @@ jobs:
       - name: Upload signed-by-CI TEST artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Multify-v9.0.2-Fixed-Dual-Account-Speed-TEST-debug
+          name: Multify-v9.0.3-Fixed-60pct-Quota-TEST-debug
           path: app/build/outputs/apk/debug/*.apk

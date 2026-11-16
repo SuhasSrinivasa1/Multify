@@ -53,7 +53,7 @@ class BetaResearchGate @Inject constructor() {
     // Conservative per-endpoint limits observed necessary after 429s. Groww
     // documents 300 LIVE category requests/min per account; that is not a
     // promise that one /ltp endpoint can safely sustain 300 requests/min.
-    private val liveSec = 9
+    private val liveSec = FixedDualAccountPolicy.BETA_LIVE_PER_SECOND
     private val liveMinute = FixedDualAccountPolicy.BETA_LIVE_PER_MINUTE
     private val histSec = 1
     private val histMinute = FixedDualAccountPolicy.BETA_HISTORICAL_PER_MINUTE

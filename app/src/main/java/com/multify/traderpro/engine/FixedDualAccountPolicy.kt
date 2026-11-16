@@ -19,6 +19,9 @@ object FixedDualAccountPolicy {
 
     const val FULL_NSE_LTP_BATCH_LIMIT = 50
     const val BETA_LTP_MIN_GAP_MS = LtpAdaptivePacingPolicy.MIN_GAP_MS
-    const val BETA_LIVE_PER_MINUTE = 270
+    // Beta is read-only Fixed research. Hard 60% of Groww's published
+    // LIVE_DATA per-second and rolling-minute ceilings; no Alpha quota borrowing.
+    const val BETA_LIVE_PER_SECOND = 6
+    const val BETA_LIVE_PER_MINUTE = 180
     const val BETA_HISTORICAL_PER_MINUTE = 8
 }

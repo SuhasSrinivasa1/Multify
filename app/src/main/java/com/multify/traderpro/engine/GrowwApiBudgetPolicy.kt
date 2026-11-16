@@ -25,17 +25,21 @@ object GrowwApiBudgetPolicy {
     const val APP_HISTORICAL_PER_SECOND = 4
     const val APP_HISTORICAL_PER_MINUTE = 180
 
-    const val SELL_MONITOR_RESERVED_PER_SECOND = 2
-    const val SELL_MONITOR_RESERVED_PER_MINUTE = 60
+    // Fixed and other non-protective Alpha LIVE_DATA calls may consume at
+    // most 60% of the published 10/s and 300/rolling-minute category limits.
+    // The complementary headroom is available to higher-priority protection;
+    // it is NOT an exemption from Groww's total broker limits.
+    const val FIXED_LIVE_DATA_PERCENT = 60
+    const val SELL_MONITOR_RESERVED_PER_SECOND = 4
+    const val SELL_MONITOR_RESERVED_PER_MINUTE = 120
     const val RATE_LIMIT_COOLDOWN_MS = 5_000L
     const val FIXED_HISTORICAL_MIN_GAP_MS = 20L
 
-    // Discovery/evaluation consumes a conservative subset of Alpha LIVE_DATA capacity.
-    // Keep the rest available to immediate Multify quotes and app-owned SELL monitoring.
-    // These limits affect scheduling only, never the frozen Fixed decision formula.
-    fun fixedLiveDataPerSecond(hasOpenHoldings: Boolean): Int = 8
-
-    // 80% of published Alpha LIVE_DATA ceiling. Remaining 60/minute is held
-    // outside research for executable quotes and position protection.
-    fun fixedLiveDataPerMinute(hasOpenHoldings: Boolean): Int = 240
+    // Fixed recommendation/market research cap is 60%, regardless of current
+    // holdings; never borrow protected Alpha LIVE_DATA headroom.
+    // Order/GTT and other existing priority policies are intentionally unchanged.
+    fun fixedLiveDataPerSecond(hasOpenHoldings: Boolean): Int =
+        LIVE_DATA_HARD_PER_SECOND * FIXED_LIVE_DATA_PERCENT / 100
+    fun fixedLiveDataPerMinute(hasOpenHoldings: Boolean): Int =
+        LIVE_DATA_HARD_PER_MINUTE * FIXED_LIVE_DATA_PERCENT / 100
 }

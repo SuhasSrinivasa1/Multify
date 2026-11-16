@@ -2113,7 +2113,8 @@ class TradingRepository @Inject constructor(
         // No pre-BUY funds call. Broker evaluates available cash on order submission.
         val quoteStartedAtMs = SystemClock.elapsedRealtime()
         val entryQuote = apiFactory.groww.quote(
-            bearer(token), tradingSymbol = symbol
+            bearer(token), tradingSymbol = symbol,
+            trafficPriority = MarketDataPriorityAdmissionPolicy.PROTECTION
         ).requirePayload("Multify entry quote $symbol")
         preferences.recordMarketData()
         val quoteElapsedMs = (SystemClock.elapsedRealtime() - quoteStartedAtMs).coerceAtLeast(0L)
@@ -6689,9 +6690,10 @@ class TradingRepository @Inject constructor(
             return "${row.symbol} already has a Forecast holding; duplicate Forecast BUY blocked"
         }
         val quoteRequestStartedAtMs = System.currentTimeMillis()
-        val quote = withFixedLiveDataSlot {
-            apiFactory.groww.quote(bearer(token), tradingSymbol = row.symbol).requirePayload("Quote ${row.symbol}")
-        }
+        val quote = apiFactory.groww.quote(
+            bearer(token), tradingSymbol = row.symbol,
+            trafficPriority = MarketDataPriorityAdmissionPolicy.PROTECTION
+        ).requirePayload("Quote ${row.symbol}")
         val quoteRequestElapsedMs = System.currentTimeMillis() - quoteRequestStartedAtMs
         val ltp = quote.lastPrice ?: error("Groww quote has no LTP")
         require(RecommendationPriceBandPolicy.eligible(ltp)) { "Forecast BUY requires fresh price >₹200 and <₹5,000" }
@@ -7219,9 +7221,10 @@ class TradingRepository @Inject constructor(
         }
 
         val quoteRequestStartedAtMs = System.currentTimeMillis()
-        val quote = withFixedLiveDataSlot {
-            apiFactory.groww.quote(bearer(token), tradingSymbol = row.symbol).requirePayload("Quote ${row.symbol}")
-        }
+        val quote = apiFactory.groww.quote(
+            bearer(token), tradingSymbol = row.symbol,
+            trafficPriority = MarketDataPriorityAdmissionPolicy.PROTECTION
+        ).requirePayload("Quote ${row.symbol}")
         val quoteRequestElapsedMs = System.currentTimeMillis() - quoteRequestStartedAtMs
         val ltp = quote.lastPrice ?: error("Groww quote has no LTP")
         require(RecommendationPriceBandPolicy.eligible(ltp)) { "Fixed BUY requires fresh price >₹200 and <₹5,000" }
@@ -7420,12 +7423,10 @@ class TradingRepository @Inject constructor(
 
             val quoteStartedAtMs = System.currentTimeMillis()
             val quote = runCatching {
-                withFixedLiveDataSlot {
-                    apiFactory.groww.quote(
-                        bearer(token),
-                        tradingSymbol = row.symbol
-                    ).requirePayload("Fixed direct quote ${row.symbol}")
-                }
+                apiFactory.groww.quote(
+                    bearer(token), tradingSymbol = row.symbol,
+                    trafficPriority = MarketDataPriorityAdmissionPolicy.PROTECTION
+                ).requirePayload("Fixed direct quote ${row.symbol}")
             }.onFailure {
                 auditLogger.log("FIXED_AUTO_BUY", "DIRECT_QUOTE_ERROR", mapOf(
                     "symbol" to row.symbol,
@@ -10266,8 +10267,10 @@ class TradingRepository @Inject constructor(
         )
         if (position.smartOrderId.isNullOrBlank()) {
             val livePrice = if (marketSession() == "OPEN") runCatching {
-                apiFactory.groww.quote(bearer(token), tradingSymbol = position.symbol)
-                    .requirePayload("Recovery GTT quote ${position.symbol}").lastPrice
+                apiFactory.groww.quote(
+                    bearer(token), tradingSymbol = position.symbol,
+                    trafficPriority = MarketDataPriorityAdmissionPolicy.PROTECTION
+                ).requirePayload("Recovery GTT quote ${position.symbol}").lastPrice
             }.getOrNull() ?: position.lastPrice else position.lastPrice
             val direction = HoldingSmartOrderPolicy.recoveryDirection(livePrice, target)
             val pending = position.copy(
@@ -10390,8 +10393,10 @@ class TradingRepository @Inject constructor(
 
     private suspend fun closeLegacyNonLong(token: String, position: ManagedPositionEntity) {
         if (marketSession() != "OPEN" || !appOwned(position)) return
-        val ltp = apiFactory.groww.quote(bearer(token), tradingSymbol = position.symbol)
-            .requirePayload("Quote ${position.symbol}").lastPrice ?: position.lastPrice
+        val ltp = apiFactory.groww.quote(
+            bearer(token), tradingSymbol = position.symbol,
+            trafficPriority = MarketDataPriorityAdmissionPolicy.PROTECTION
+        ).requirePayload("Quote ${position.symbol}").lastPrice ?: position.lastPrice
         val ref = stableRef("LGC", "${position.id}-${position.symbol}")
         val order = placeLegacyExposureFlatten(token, position, ref)
         val exit = order.averageFillPrice?.takeIf { it > 0.0 } ?: ltp
@@ -11687,8 +11692,10 @@ class TradingRepository @Inject constructor(
         val freshQuote: QuotePayload
         val freshAt: Long
         if (age < 0L || age > CircuitAwareBuyPolicy.MAX_QUOTE_AGE_MS) {
-            freshQuote = apiFactory.groww.quote(bearer(token), tradingSymbol = symbol)
-                .requirePayload("Circuit refresh $symbol")
+            freshQuote = apiFactory.groww.quote(
+                bearer(token), tradingSymbol = symbol,
+                trafficPriority = MarketDataPriorityAdmissionPolicy.PROTECTION
+            ).requirePayload("Circuit refresh $symbol")
             freshAt = System.currentTimeMillis()
             preferences.recordMarketData()
         } else {
