@@ -2315,19 +2315,35 @@ class TradingRepository @Inject constructor(
     // Transport-only availability: Alpha and read-only Beta are independent.
     // A cooldown on Alpha does not prevent Beta research, but ALL real BUY/SELL/
     // protective GTT execution still goes through Alpha's unchanged broker gate.
-    private fun alphaResearchAvailableForFixed(): Boolean = runCatching {
-        recoveryGate.checkRequestAllowed(GrowwApiUsageLedger.Category.LIVE_DATA)
-        recoveryGate.checkRequestAllowed(GrowwApiUsageLedger.Category.HISTORICAL)
-    }.isSuccess
+    private fun alphaCategoryReadyForFixed(category: GrowwApiUsageLedger.Category): Boolean =
+        runCatching { recoveryGate.checkRequestAllowed(category) }.isSuccess
+
+    private fun alphaResearchAvailableForFixed(): Boolean =
+        alphaCategoryReadyForFixed(GrowwApiUsageLedger.Category.LIVE_DATA) &&
+            alphaCategoryReadyForFixed(GrowwApiUsageLedger.Category.HISTORICAL)
 
     suspend fun betaAvailableForFixedReadOnlyResearch(): Boolean =
         fixedBetaMarketTokenOrNull() != null &&
             betaResearchGate.healthyForFixed(BetaResearchGate.Type.LIVE) &&
             betaResearchGate.healthyForFixed(BetaResearchGate.Type.HISTORICAL)
 
+    // Read-only preflight is composed by category. An Alpha LIVE 429 does
+    // not disable healthy Alpha HISTORICAL. Orders remain Alpha-only.
+    suspend fun fixedReadOnlyCategoriesAvailable(): Boolean {
+        val betaConnected = fixedBetaMarketTokenOrNull() != null
+        val betaLive = betaConnected &&
+            betaResearchGate.healthyForFixed(BetaResearchGate.Type.LIVE)
+        val betaHistory = betaConnected &&
+            betaResearchGate.healthyForFixed(BetaResearchGate.Type.HISTORICAL)
+        return com.multify.traderpro.engine.FixedCategoryAccountRoutingPolicy.available(
+            alphaCategoryReadyForFixed(GrowwApiUsageLedger.Category.LIVE_DATA),
+            alphaCategoryReadyForFixed(GrowwApiUsageLedger.Category.HISTORICAL),
+            betaLive, betaHistory
+        )
+    }
+
     private suspend fun marketDataAvailableForFixed(): Boolean =
-        !fixedReadOnlyTransportIncomplete &&
-            (alphaResearchAvailableForFixed() || betaAvailableForFixedReadOnlyResearch())
+        !fixedReadOnlyTransportIncomplete && fixedReadOnlyCategoriesAvailable()
 
     private fun fixedBrokerCooldownAuditDetails(): Map<String, Any> {
         val state = recoveryGate.status()
