@@ -81,10 +81,10 @@ jobs:
           # All original Fixed worker/BUY/SELL/GTT code must be EXACT, allowing
           # only the three precisely marked service-lifetime prefetch insertions.
           service_now=Path(service).read_text()
-          assert service_now.count("import kotlinx.coroutines.flow.collect\\n")==1
-          service_now=service_now.replace("import kotlinx.coroutines.flow.collect\\n","",1)
+          assert service_now.count("import kotlinx.coroutines.flow.collect\n")==1
+          service_now=service_now.replace("import kotlinx.coroutines.flow.collect\n","",1)
           for marker in ("FIELD","OBSERVER","DESTROY"):
-              expression=r"(?ms)^[ \\t]*// V902_PREFETCH_"+marker+r"_BEGIN\\n.*?^[ \\t]*// V902_PREFETCH_"+marker+r"_END\\n"
+              expression=r"(?ms)^[ \t]*// V902_PREFETCH_"+marker+r"_BEGIN\n.*?^[ \t]*// V902_PREFETCH_"+marker+r"_END\n"
               service_now,count=re.subn(expression,"",service_now)
               assert count==1, ("MISSING_SERVICE_PREFETCH_BOUNDARY",marker)
           assert service_now==old(base28,service), "TRADING_SERVICE_UNAUTHORIZED_EDIT"
