@@ -117,6 +117,14 @@ jobs:
           assert "private val liveSec = FixedDualAccountPolicy.BETA_LIVE_PER_SECOND" in beta_governor
           assert "private val histSec = 1" in beta_governor
           assert "private val histMinute = FixedDualAccountPolicy.BETA_HISTORICAL_PER_MINUTE" in beta_governor
+          fixed_repo=Path(repo).read_text()
+          quote_iface=Path(root+"data/network/GrowwApi.kt").read_text()
+          assert '@Header("X-Multify-Request-Priority") trafficPriority: String? = null' in quote_iface
+          assert "trafficPriority = MarketDataPriorityAdmissionPolicy.PROTECTION" in fixed_repo
+          assert 'apiFactory.groww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Fixed quote $symbol")' in fixed_repo
+          # The existing interceptor must strip the internal priority before wire dispatch.
+          assert '.removeHeader(MarketDataPriorityAdmissionPolicy.HEADER)' in Path(
+              root+"data/network/GrowwRateLimitInterceptor.kt").read_text()
           assert Path(root+"data/network/GrowwHistoricalThrottlePolicy.kt").read_bytes()==subprocess.check_output(["git","show",f"{base28}:{root+'data/network/GrowwHistoricalThrottlePolicy.kt'}"])
 
           changed=set(subprocess.check_output(["git","diff","--name-only",base28,"HEAD"],text=True).splitlines())
@@ -136,6 +144,7 @@ jobs:
               root+"engine/GrowwApiBudgetPolicy.kt",
               root+"engine/FixedDualAccountPolicy.kt",
               root+"data/network/BetaResearchGate.kt",
+              root+"data/network/GrowwApi.kt",
               root+"engine/MarketDataPriorityAdmissionPolicy.kt",
               "app/src/test/java/com/multify/traderpro/engine/GrowwApiBudgetPolicyTest.kt",
               "app/src/test/java/com/multify/traderpro/engine/MarketDataPriorityAdmissionPolicyTest.kt",
