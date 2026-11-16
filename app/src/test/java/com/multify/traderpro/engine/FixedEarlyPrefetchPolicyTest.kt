@@ -26,6 +26,8 @@ class FixedEarlyPrefetchPolicyTest {
     @Test fun twoAccountsUseMeasuredLeadInsteadOfNearlyExpiredSnapshot() {
         assertEquals(50_000L, FixedSweepPrefetchPolicy.expectedSweepLeadMs(true))
         assertEquals(82_000L, FixedSweepPrefetchPolicy.expectedSweepLeadMs(false))
+        assertEquals(76_000L, FixedSweepPrefetchPolicy.expectedSweepLeadMs(true, false))
+        assertEquals(82_000L, FixedSweepPrefetchPolicy.expectedSweepLeadMs(false, false))
         // With a 40-second Beta+Alpha sweep, a 50-second lead leaves ~10 sec of age.
         val due = 190_000L
         val completedAt = due - 50_000L + 40_000L
