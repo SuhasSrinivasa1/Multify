@@ -29,7 +29,11 @@ Forecast research and automatic buying remain frozen; no new five-minute live st
    from symbols whose valid broker window was previously stored but evicted
    from the bounded 128-entry LRU. Keep the existing fresh-delta, 2-overlap,
    12-minute and timestamp validation unchanged.
-5. Version code 9006, distinct TEST version name, updated CI source lock, new
+5. **Research-only outcome reconciliation:** the export now includes timestamped
+   side-by-side post-publication sampled LTP MFE and the existing recommendation
+   tracker MFE, without combining non-equivalent observation windows or
+   overwriting any trading decisions. No additional HTTP requests.
+6. Version code 9006, distinct TEST version name, updated CI source lock, new
    focused tests for routing, independent lead calculation, invalid-data 
    audit behavior, and cache classification.
 
