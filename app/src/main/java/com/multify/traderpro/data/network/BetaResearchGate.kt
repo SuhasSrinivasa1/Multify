@@ -72,6 +72,7 @@ class BetaResearchGate @Inject constructor() {
         else readRateLimited(type, block)
 
     private fun updateLiveStatus(now: Long, w: Window) {
+        liveStatusCapturedAtElapsedMs = now
         liveStatusSnapshot = LiveStatus(
             usedLastMinute = w.minute.size,
             endpointLimitPerMinute = liveMinute,
@@ -186,6 +187,17 @@ class BetaResearchGate @Inject constructor() {
 
     companion object {
         @Volatile private var liveStatusSnapshot = LiveStatus()
-        fun latestLiveStatus(): LiveStatus = liveStatusSnapshot
+        @Volatile private var liveStatusCapturedAtElapsedMs = 0L
+        fun latestLiveStatus(): LiveStatus {
+            val snapshot = liveStatusSnapshot
+            val age = (SystemClock.elapsedRealtime() - liveStatusCapturedAtElapsedMs)
+                .coerceAtLeast(0L)
+            return snapshot.copy(
+                // These are conservative UI estimates; actual rolling HTTP
+                // counts come from GrowwHttpTraceLedger, not this cache.
+                usedLastMinute = if (age >= 60_000L) 0 else snapshot.usedLastMinute,
+                cooldownRemainingMs = (snapshot.cooldownRemainingMs - age).coerceAtLeast(0L)
+            )
+        }
     }
 }
