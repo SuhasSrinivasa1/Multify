@@ -28,6 +28,7 @@ class AlphaReadPacingPolicyTest {
         assertEquals(0L, p.waitMs(1850L, 1000L, s.gapMs))
         s = p.on429(lane, s, 1850L)
         assertEquals(1800L, s.gapMs)
+        assertTrue(p.preferHealthyBetaQuoteForFixedResearch())
         assertEquals(s, p.onSuccess(lane, s, 5000L))
         assertEquals(1750L, p.onSuccess(lane, s, 121850L).gapMs)
     }
