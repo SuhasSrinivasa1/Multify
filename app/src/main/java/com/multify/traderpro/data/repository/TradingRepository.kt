@@ -4133,107 +4133,88 @@ class TradingRepository @Inject constructor(
     }
 
     private suspend fun fixedForecastEvaluation(symbol: String, token: String): FixedStrategyEvaluation {
-        val alphaReady = alphaResearchAvailableForFixed()
+        // Account choice is TRANSPORT ONLY. A broker 429 in Alpha LIVE_DATA
+        // must NOT force healthy Alpha HISTORICAL traffic into Beta's 8/min pool.
+        val alphaLiveReady = runCatching {
+            recoveryGate.checkRequestAllowed(GrowwApiUsageLedger.Category.LIVE_DATA)
+        }.isSuccess
+        val alphaHistoricalReady = runCatching {
+            recoveryGate.checkRequestAllowed(GrowwApiUsageLedger.Category.HISTORICAL)
+        }.isSuccess
         val betaToken = fixedBetaMarketTokenOrNull()
         val betaLiveReady = betaToken != null &&
             betaResearchGate.healthyForFixed(BetaResearchGate.Type.LIVE)
         val betaHistoricalReady = betaToken != null &&
             betaResearchGate.healthyForFixed(BetaResearchGate.Type.HISTORICAL)
+        val betaHistoricalHeadroom = betaHistoricalReady &&
+            betaResearchGate.historicalHasSpareFixedCapacity()
         val deterministicBeta = com.multify.traderpro.engine.FixedDualAccountPolicy
             .betaDetailedEvaluation(symbol, betaToken != null)
-        val beta = betaToken?.takeIf {
-            com.multify.traderpro.engine.FixedAccountResearchRecoveryPolicy.betaForDetail(
-                deterministicBeta, alphaReady, alphaReady, betaLiveReady, betaHistoricalReady
-            )
+        val route = com.multify.traderpro.engine.FixedCategoryAccountRoutingPolicy.choose(
+            deterministicBeta, alphaLiveReady, alphaHistoricalReady,
+            betaLiveReady, betaHistoricalReady, betaHistoricalHeadroom
+        )
+        val account = com.multify.traderpro.engine.FixedCategoryAccountRoutingPolicy.Account
+        if (!route.isUsable) {
+            fixedReadOnlyTransportIncomplete = true
+            auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "DETAIL_CATEGORY_NOT_AVAILABLE", mapOf(
+                "symbol" to symbol,
+                "alpha_live_ready" to alphaLiveReady,
+                "alpha_historical_ready" to alphaHistoricalReady,
+                "beta_live_ready" to betaLiveReady,
+                "beta_historical_ready" to betaHistoricalReady,
+                "reason" to "MISSING_QUOTES_OR_15M_CANDLE_TRANSPORT",
+                "partial_publication_blocked" to true
+            ))
+            throw IOException("FIXED_READONLY_CATEGORY_UNAVAILABLE")
         }
-        if (!alphaReady && beta != null) {
-            auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "BETA_DETAIL_ALPHA_COOLDOWN_TAKEOVER", mapOf(
-                "symbol" to symbol, "beta_historical_quota_preserved" to true,
-                "original_stock_rank_and_score_unchanged" to true,
-                "alpha_execution_not_attempted" to true
+        val quoteToken = if (route.live == account.BETA) betaToken!! else token
+        val historicalToken = if (route.historical == account.BETA) betaToken!! else token
+        if (route.splitAcrossAccounts) {
+            auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "SPLIT_LIVE_HISTORY_ROUTING", mapOf(
+                "symbol" to symbol,
+                "live_account" to route.live.name,
+                "historical_account" to route.historical.name,
+                "alpha_live_ready" to alphaLiveReady,
+                "alpha_historical_ready" to alphaHistoricalReady,
+                "beta_historical_headroom" to betaHistoricalHeadroom,
+                "original_candidate_order_and_scoring_unchanged" to true
             ))
         }
-        if (beta != null) {
-            try {
-                return fixedForecastEvaluationUsingAccount(symbol, beta, useBeta = true)
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (failed: Throwable) {
-                // During an Alpha outage a Beta historical rate-budget error
-                // makes this entire detailed pass incomplete. The ORIGINAL
-                // frozen Fixed loop sees the preflight fail at its next batch
-                // boundary and refuses publication, without touching its rules.
-                if (!alphaReady && (failed is IOException ||
-                        (failed is HttpException && failed.code() >= 429))) {
-                    fixedReadOnlyTransportIncomplete = true
-                    auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "BETA_ONLY_DETAIL_BUDGET_DEFERRED", mapOf(
-                        "symbol" to symbol,
-                        "beta_failure" to (failed.message ?: failed.javaClass.simpleName).take(140),
-                        "partial_publication_blocked" to true,
-                        "original_fixed_publication_unchanged" to true
-                    ))
-                }
-                // A correctly enforced Fixed price-band veto is not a Beta transport outage.
-                // Returning to Alpha here repeats a known-invalid quote and wastes requests.
-                if (!com.multify.traderpro.engine.FixedBetaDetailFallbackPolicy.shouldRetryOnAlpha(failed)) {
-                    auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "BETA_DETAIL_NO_ALPHA_FALLBACK", mapOf(
-                        "symbol" to symbol, "reason" to (failed.message ?: failed.javaClass.simpleName).take(120),
-                        "alpha_fallback_attempted" to false,
-                        "account_cooldown_amplification_prevented" to true,
-                        "fixed_scoring_changed" to false
-                    ))
-                    throw failed
-                }
-                auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "BETA_DETAIL_FALLBACK_ALPHA", mapOf(
-                    "symbol" to symbol,
-                    "error" to failed.javaClass.simpleName,
-                    "reason" to (failed.message ?: "UNSPECIFIED").take(180),
-                    "fixed_scoring_changed" to false,
-                    "broker_execution_account" to "ALPHA"
-                ))
-            }
-        }
-        // Never send the same Fixed evaluation to an Alpha account that
-        // is in a known broker cooldown. Beta may be constrained by its
-        // separate historical quota; an incomplete evaluation fails closed.
-        if (!alphaReady) {
-            fixedReadOnlyTransportIncomplete = true
-            throw IOException("FIXED_ALPHA_RESEARCH_COOLDOWN_BETA_UNAVAILABLE")
-        }
         try {
-            return fixedForecastEvaluationUsingAccount(symbol, token, useBeta = false)
+            return fixedForecastEvaluationUsingAccount(
+                symbol = symbol,
+                token = quoteToken,
+                useBeta = route.live == account.BETA,
+                historicalToken = historicalToken,
+                useBetaHistorical = route.historical == account.BETA,
+                fallbackBetaToken = betaToken
+            )
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failed: Throwable) {
-            // The Alpha 429 may arrive after preflight. One independent Beta
-            // recovery is allowed for a broker/transport failure only.
-            // Price-band, candle validity and score rules never fall back.
-            val alphaStillReady = alphaResearchAvailableForFixed()
-            val transient = failed is IOException ||
-                (failed is HttpException && failed.code() >= 429)
-            val rescueBeta = if (!alphaStillReady && transient &&
-                betaAvailableForFixedReadOnlyResearch()) fixedBetaMarketTokenOrNull() else null
-            if (rescueBeta != null) {
-                auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "ALPHA_DETAIL_429_BETA_RETRY", mapOf(
-                    "symbol" to symbol, "beta_read_only" to true,
-                    "max_cross_account_retries" to 1, "fixed_model_unchanged" to true
+            // Transport failure after the category selection is never treated
+            // as a successfully evaluated stock. An incomplete infrastructure
+            // scan must not publish from an unavailable account.
+            if (failed is IOException ||
+                (failed is HttpException && (failed.code() == 429 || failed.code() >= 500))) {
+                fixedReadOnlyTransportIncomplete = true
+                auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "DETAIL_TRANSPORT_FAILED_CLOSED", mapOf(
+                    "symbol" to symbol,
+                    "live_account" to route.live.name,
+                    "historical_account" to route.historical.name,
+                    "failure_type" to failed.javaClass.simpleName,
+                    "partial_publication_blocked" to true
                 ))
-                return try {
-                    fixedForecastEvaluationUsingAccount(symbol, rescueBeta, useBeta = true)
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (betaFailure: Throwable) {
-                    fixedReadOnlyTransportIncomplete = true
-                    throw betaFailure
-                }
             }
-            if (!alphaStillReady && transient) fixedReadOnlyTransportIncomplete = true
             throw failed
         }
     }
 
     private suspend fun fixedForecastEvaluationUsingAccount(
-        symbol: String, token: String, useBeta: Boolean
+        symbol: String, token: String, useBeta: Boolean,
+        historicalToken: String, useBetaHistorical: Boolean,
+        fallbackBetaToken: String?
     ): FixedStrategyEvaluation {
         val now = ZonedDateTime.now(INDIA)
         val start = now.minusDays(4).toLocalDate().atTime(9, 15).format(HIST_FORMAT)
