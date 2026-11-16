@@ -13,6 +13,12 @@ object AlphaReadPacingPolicy {
 
     data class State(val gapMs: Long, val lastAdjustmentAtMs: Long)
 
+    // Read-only advisory for Fixed account selection. Actual admission is always
+    // enforced by GrowwRateLimitInterceptor; this never authorizes a broker call.
+    @Volatile private var alphaQuoteResearchGapMs = 850L
+    fun preferHealthyBetaQuoteForFixedResearch(): Boolean =
+        alphaQuoteResearchGapMs >= 1_800L
+
     fun lane(method: String, path: String): Lane? {
         if (method != "GET") return null
         return when {
@@ -39,7 +45,9 @@ object AlphaReadPacingPolicy {
             Lane.QUOTE -> 1_800L
             Lane.ACCOUNT_READ -> 2_000L
         }
-        return State(maxOf(floor, state.gapMs * 2L).coerceAtMost(8_000L), nowMs)
+        val next = State(maxOf(floor, state.gapMs * 2L).coerceAtMost(8_000L), nowMs)
+        if (lane == Lane.QUOTE) alphaQuoteResearchGapMs = next.gapMs
+        return next
     }
 
     fun onSuccess(lane: Lane, state: State, nowMs: Long): State {
@@ -49,6 +57,8 @@ object AlphaReadPacingPolicy {
             Lane.QUOTE -> 650L
             Lane.ACCOUNT_READ -> 900L
         }
-        return State((state.gapMs - 50L).coerceAtLeast(floor), nowMs)
+        val next = State((state.gapMs - 50L).coerceAtLeast(floor), nowMs)
+        if (lane == Lane.QUOTE) alphaQuoteResearchGapMs = next.gapMs
+        return next
     }
 }
