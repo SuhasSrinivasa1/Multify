@@ -51,11 +51,32 @@ class FixedHistoricalWindowStoreTest {
         assertNotNull(store.request("SHORT", start, blocked.retryAtElapsedMs + 3L))
     }
 
-    @Test fun `five to nine bars do not acquire the short-history deferral`() {
+    @Test fun `five to nine valid broker bars get fresh overlap instead of wasted full refetch`() {
         val store = FixedHistoricalWindowStore()
         val start = "2026-11-12 09:15:00"
-        store.remember("MAYBE", start, rows(1_790_000_000L, 7), 10_000L)
-        assertNull(store.request("MAYBE", start, 10_001L))
+        for (count in 5..9) {
+            val symbol = "TEST$count"
+            val first = rows(1_790_000_000L, count)
+            store.remember(symbol, start, first, 10_000L)
+            assertNotNull(store.request(symbol, start, 10_001L))
+            val delta = rows(1_790_000_000L + (count - 3) * 300L, 4)
+            val stitched = store.stitch(symbol, start, delta, 11_000L)
+            assertNotNull(stitched)
+            assertEquals(count + 1, stitched!!.candles.size)
+            assertEquals(first.candles.first(), stitched.candles.first())
+            assertEquals(delta.candles.last(), stitched.candles.last())
+        }
+    }
+
+    @Test fun `five to nine rows without two broker timestamp overlaps still fail closed`() {
+        val store = FixedHistoricalWindowStore()
+        val start = "2026-11-12 09:15:00"
+        store.remember("NO_OVERLAP", start, rows(1_790_000_000L, 8), 10_000L)
+        assertNotNull(store.request("NO_OVERLAP", start, 10_001L))
+        assertNull(store.stitch("NO_OVERLAP", start,
+            rows(1_790_100_000L, 4), 11_000L))
+        // Original 12-minute maximum snapshot age is still strictly enforced.
+        assertNull(store.request("NO_OVERLAP", start, 750_000L))
     }
 
     @Test fun `missing overlapping bars forces full broker request`() {
