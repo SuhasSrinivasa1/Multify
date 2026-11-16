@@ -260,6 +260,40 @@ class FixedMarketPathTelemetry @Inject constructor(
         }
         val window = FixedSampledOutcomeResearchPolicy.report(
             valid, postPublish, latestCompleteAtMs)
+        // Read-only source reconciliation. Recommendation high-water can use a
+        // different quote schedule; full-market LTP samples begin only after the
+        // conservative 90-second delay. Differences are evidence, not a bug
+        // verdict, and NEVER replace the production recommendation tracker.
+        val trackersById = recommendations.associateBy { it.id.toString() }
+        val pricePathReconciliation = valid.take(250).map { row ->
+            val tracker = trackersById[row.id]
+            val path = postPublish[row.id].orEmpty().filter {
+                it.price.isFinite() && it.price > 0.0
+            }
+            val highestSample = path.maxByOrNull { it.price }
+            val sampledMfePct = highestSample?.let {
+                (it.price / row.entryPrice - 1.0) * 100.0
+            }
+            val trackerMfePct = tracker?.maxFavourablePct
+            val differencePctPoints = if (sampledMfePct != null && trackerMfePct != null)
+                sampledMfePct - trackerMfePct else null
+            mapOf(
+                "recommendation_id" to row.id,
+                "symbol" to row.symbol,
+                "entry_reference" to row.entryPrice,
+                "publication_at_ms" to row.generatedAtMs,
+                "recommendation_tracker_mfe_pct" to trackerMfePct,
+                "sampled_full_market_ltp_mfe_pct" to sampledMfePct,
+                "difference_pct_points" to differencePctPoints,
+                "sample_count" to path.size,
+                "first_sample_at_ms" to path.minOfOrNull { it.atMs },
+                "last_sample_at_ms" to path.maxOfOrNull { it.atMs },
+                "sampled_peak_at_ms" to highestSample?.atMs,
+                "sampled_peak_price" to highestSample?.price,
+                "observation_windows_not_equivalent" to true,
+                "not_an_intrabar_high_or_realized_trade" to true
+            )
+        }
         // These are PRIMARY observations after an earlier same-stock publication,
         // NOT proof that the publication engine suppressed an otherwise valid new event.
         val earliestBySymbol = recommendations.groupBy { it.symbol.uppercase(Locale.US) }
@@ -279,6 +313,14 @@ class FixedMarketPathTelemetry @Inject constructor(
             }.toList()
         return mapOf(
             "sampled_target_hit_maturity" to window,
+            "price_path_reconciliation" to mapOf(
+                "schema" to "fixed_price_path_reconciliation_v906",
+                "source" to "READ_ONLY_EXISTING_RECOMMENDATIONS_AND_SAMPLED_LTP",
+                "non_identical_observation_windows" to true,
+                "original_tracker_not_overwritten" to true,
+                "additional_broker_calls" to 0,
+                "cases" to pricePathReconciliation
+            ),
             "subsequent_primary_observations" to mapOf(
                 "source" to "RECORDED_PRIMARY_AFTER_EARLIER_PUBLICATION",
                 "not_proof_of_suppressed_or_executable_trade" to true,
