@@ -4327,9 +4327,21 @@ class TradingRepository @Inject constructor(
                 pendingFixedSweep = it
             }
         } ?: return false
-        // Fetch just ahead of the next official scan, keeping the sample age bounded.
-        val startDelay = (dueAtMs - System.currentTimeMillis() -
-            com.multify.traderpro.engine.FixedSweepPrefetchPolicy.EXPECTED_SWEEP_MS).coerceAtLeast(0L)
+        // Two-account live sweeps measured ~40s, whereas Alpha-only measured ~79s.
+        // An 82s dual-account lead made valid snapshots 40+ seconds old at the
+        // next scan and often invalidated the prefetch. Use measured account-aware
+        // lead time; no extra requests or change to accepted snapshot freshness.
+        val betaLiveReadyForTiming = fixedBetaMarketTokenOrNull() != null &&
+            betaResearchGate.healthyForFixed(BetaResearchGate.Type.LIVE)
+        val expectedSweepMs = com.multify.traderpro.engine.FixedSweepPrefetchPolicy
+            .expectedSweepLeadMs(betaLiveReadyForTiming)
+        val startDelay = (dueAtMs - System.currentTimeMillis() - expectedSweepMs).coerceAtLeast(0L)
+        auditLogger.logAsync("FIXED_PERFORMANCE", "NEXT_SWEEP_PREFETCH_TIMING", mapOf(
+            "beta_healthy_at_schedule" to betaLiveReadyForTiming,
+            "planned_lead_ms" to expectedSweepMs,
+            "start_delay_ms" to startDelay,
+            "extra_full_market_sweeps" to 0,
+            "fixed_scoring_changed" to false))
         try {
             if (startDelay > 0L) delay(startDelay)
             if (marketCriticalTradeInFlight || !marketDataAvailableForFixed() ||
