@@ -4210,12 +4210,72 @@ class TradingRepository @Inject constructor(
                 }
             }
         }
-        fixedHistoricalWindowStore.remember(historyKey, start, historical, SystemClock.elapsedRealtime())
-        require(historical.candles.size >= 5) { "Insufficient fixed forecast candles" }
+        // Live v9 diagnostics showed the broker sometimes returned just one
+        // 15m row even for a multi-day request. Make at most six additional
+        // historical requests per 90-second window across all symbols. These
+        // fetch *completed prior sessions only*, merge against the fresh
+        // current-session response and require verified timestamps/closed bars.
+        // No 5m substitution, fabricated candles or shadow input to live scoring.
+        val repairedHistory = if (historical.candles.size < 5 &&
+            com.multify.traderpro.engine.Fixed15mHistoryRepair.allowRecovery(SystemClock.elapsedRealtime())
+        ) {
+            val (olderStart, olderEnd) =
+                com.multify.traderpro.engine.Fixed15mHistoryRepair.priorWindow(now)
+            try {
+                val prior = if (useBeta) {
+                    betaMarketRead(
+                        token, BetaResearchGate.Type.HISTORICAL,
+                        alphaCall = { error("Beta prior-session request must stay Beta") },
+                        betaCall = {
+                            apiFactory.betaGroww.historicalCandles(
+                                bearer(token), growwSymbol = "NSE-$symbol", startTime = olderStart,
+                                endTime = olderEnd, candleInterval = "15minute"
+                            ).requirePayload("Fixed Beta prior-session recovery $symbol")
+                        }
+                    )
+                } else withFixedHistoricalDataSlot {
+                    apiFactory.groww.historicalCandles(
+                        bearer(token), growwSymbol = "NSE-$symbol", startTime = olderStart,
+                        endTime = olderEnd, candleInterval = "15minute"
+                    ).requirePayload("Fixed prior-session recovery $symbol")
+                }
+                fixedHistoryFullFetches.incrementAndGet()
+                val merged = com.multify.traderpro.engine.Fixed15mHistoryRepair.mergeCompleted(
+                    historical, prior, System.currentTimeMillis())
+                auditLogger.logAsync("FIXED_DATA_PIPELINE", "SHORT_15M_RECOVERY", mapOf(
+                    "symbol" to symbol,
+                    "account" to (if (useBeta) "BETA" else "ALPHA"),
+                    "current_rows" to historical.candles.size,
+                    "prior_rows" to prior.candles.size,
+                    "recovered_rows" to (merged?.candles?.size ?: 0),
+                    "previous_session_start" to olderStart,
+                    "previous_session_end" to olderEnd,
+                    "recovered" to (merged != null),
+                    "fresh_execution_quote_preserved" to true,
+                    "fixed_scoring_changed" to false
+                ))
+                merged
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failed: Throwable) {
+                auditLogger.logAsync("FIXED_DATA_PIPELINE", "SHORT_15M_RECOVERY_FAILED", mapOf(
+                    "symbol" to symbol,
+                    "account" to (if (useBeta) "BETA" else "ALPHA"),
+                    "current_rows" to historical.candles.size,
+                    "failure_type" to failed.javaClass.simpleName,
+                    "reason" to (failed.message ?: "unknown").take(120),
+                    "recovered" to false, "published_from_incomplete_data" to false
+                ))
+                null
+            }
+        } else null
+        val verifiedHistory = repairedHistory ?: historical
+        fixedHistoricalWindowStore.remember(historyKey, start, verifiedHistory, SystemClock.elapsedRealtime())
+        require(verifiedHistory.candles.size >= 5) { "Insufficient fixed forecast candles" }
         // Broker I/O is completed before scheduling CPU-only feature/scoring work.
         // Identical inputs and scoring; only the execution dispatcher differs.
         val evaluation = withContext(fixedCpuDispatcher) {
-            val features = FixedLocalStrategyEngine.buildFeatures(quote, historical, 15)
+            val features = FixedLocalStrategyEngine.buildFeatures(quote, verifiedHistory, 15)
             val signal = ParsedSignal(SignalType.TRADE_RELEASE, symbol = symbol, rawText = "fixed-forecast", confidence = 1.0)
             FixedLocalStrategyEngine.evaluateLong(signal, features, includeEventPrior = false)
         }
@@ -4225,7 +4285,7 @@ class TradingRepository @Inject constructor(
         fixedShadowReferences[symbol] = FixedShadowReference(quote, evaluation, referenceAt)
         fixedFactorTelemetry.tryRecord(symbol, evaluation, lastFixedScanAtMs, quote, referenceAt)
         v9MasterShadowCollector.offer(
-            symbol, quote, historical, evaluation, lastFixedScanAtMs, referenceAt
+            symbol, quote, verifiedHistory, evaluation, lastFixedScanAtMs, referenceAt
         )
         return evaluation
     }
@@ -4400,7 +4460,28 @@ class TradingRepository @Inject constructor(
         val chunks = master.chunked(50)
         val sweepStartedElapsedMs = SystemClock.elapsedRealtime()
         val batchWindowLatenciesMs = mutableListOf<Long>()
-        val betaToken = fixedBetaMarketTokenOrNull()
+        val connectedBetaToken = fixedBetaMarketTokenOrNull()
+        // If Beta is *already* cooling down when this sweep starts, never reserve
+        // its 26 batches and then silently skip them. Use a fresh Alpha-only sweep
+        // only if Alpha is ready, has reserved protection headroom, and there is no
+        // critical trade. Otherwise fail closed without an incomplete publication.
+        val betaHealthyAtStart = connectedBetaToken != null &&
+            betaResearchGate.healthyForFixed(BetaResearchGate.Type.LIVE)
+        val alphaOnlyAllowed = connectedBetaToken == null ||
+            (alphaCanTakeBetaDiscoveryFallback() && !marketCriticalTradeInFlight)
+        if (!betaHealthyAtStart && !alphaOnlyAllowed) {
+            auditLogger.logAsync("FIXED_DUAL_ACCOUNT",
+                "BETA_COOLDOWN_SWEEP_DEFERRED_TO_PROTECT_ALPHA", mapOf(
+                    "beta_connected" to (connectedBetaToken != null),
+                    "alpha_protection_reserved" to true, "complete_sweep_required" to true))
+            return PrecomputedFixedSweep(emptyMap(), 1, true, System.currentTimeMillis(), 0)
+        }
+        val betaToken = if (betaHealthyAtStart) connectedBetaToken else null
+        if (connectedBetaToken != null && betaToken == null) {
+            auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "BETA_UNHEALTHY_ALPHA_ONLY_SWEEP", mapOf(
+                "alpha_headroom_checked" to true, "beta_requests_dispatched" to 0,
+                "protective_orders_preserved" to true))
+        }
         val betaStopped = AtomicBoolean(false)
         val betaSuccess = AtomicInteger(0)
         val alphaSuccess = AtomicInteger(0)
@@ -4482,6 +4563,16 @@ class TradingRepository @Inject constructor(
                     }
                 }
                 if (index + 1 < chunks.size) delay(FIXED_V741_DISCOVERY_BATCH_PACING_MS)
+            }
+            // Stop immediately after a mid-sweep Beta outage instead of continuing
+            // to spend Alpha quota on an unusably incomplete snapshot. The next
+            // sweep can start Alpha-only after Beta is confirmed unhealthy.
+            if (betaStopped.get()) {
+                aborted = true
+                auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "BETA_SWEEP_ABORTED_EARLY", mapOf(
+                    "successful_alpha_batches" to alphaSuccess.get(),
+                    "successful_beta_batches" to betaSuccess.get(),
+                    "partial_coverage_must_not_publish" to true))
             }
             if (aborted) break
         }
