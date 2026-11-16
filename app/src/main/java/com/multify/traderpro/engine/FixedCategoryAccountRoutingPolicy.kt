@@ -17,10 +17,11 @@ object FixedCategoryAccountRoutingPolicy {
         deterministicBeta: Boolean,
         alphaLiveReady: Boolean, alphaHistoricalReady: Boolean,
         betaLiveReady: Boolean, betaHistoricalReady: Boolean,
-        betaHistoricalHasHeadroom: Boolean
+        betaHistoricalHasHeadroom: Boolean,
+        preferBetaLiveForQuote: Boolean = false
     ): Route {
         val live = when {
-            deterministicBeta && betaLiveReady -> Account.BETA
+            (deterministicBeta || preferBetaLiveForQuote) && betaLiveReady -> Account.BETA
             alphaLiveReady -> Account.ALPHA
             betaLiveReady -> Account.BETA
             else -> Account.NONE
