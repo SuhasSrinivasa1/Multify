@@ -3,6 +3,13 @@ package com.multify.traderpro.engine
 /** Transport-only guard; does not authorize an order or alter a Fixed signal. */
 object FixedSweepPrefetchPolicy {
     const val EXPECTED_SWEEP_MS = 82_000L
+    // Real v9.0.1 Alpha+Beta sweeps took ~40 seconds vs 79s Alpha-only.
+    // Schedule dual-account samples just-in-time: an 82s lead left prepared
+    // snapshots almost expired at the next 90s Fixed scan.
+    const val DUAL_ACCOUNT_EXPECTED_SWEEP_MS = 50_000L
+
+    fun expectedSweepLeadMs(betaLiveReady: Boolean): Long =
+        if (betaLiveReady) DUAL_ACCOUNT_EXPECTED_SWEEP_MS else EXPECTED_SWEEP_MS
     const val MIN_START_HEADROOM_MS = 20_000L
     const val MAX_START_HEADROOM_MS = 150_000L
     const val MAX_ACCEPTED_AGE_MS = 45_000L

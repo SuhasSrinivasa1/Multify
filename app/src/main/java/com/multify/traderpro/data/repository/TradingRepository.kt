@@ -255,6 +255,11 @@ class TradingRepository @Inject constructor(
 ) {
     private val _fixedDeliveryEvents = MutableSharedFlow<Long>(extraBufferCapacity = 8)
     val fixedDeliveryEvents: SharedFlow<Long> = _fixedDeliveryEvents.asSharedFlow()
+    // Transport-only signal consumed by the foreground service's lifecycle scope.
+    // The full market sweep can be prepared while detail works; no repository-owned
+    // background job survives service shutdown.
+    private val _fixedEarlyPrefetchReady = MutableSharedFlow<Long>(extraBufferCapacity = 2)
+    val fixedEarlyPrefetchReady: SharedFlow<Long> = _fixedEarlyPrefetchReady.asSharedFlow()
 
     val settings: Flow<AppSettings> = preferences.settings
     val recentEvents: Flow<List<SignalEventEntity>> = dao.observeRecent(100)
@@ -299,7 +304,7 @@ class TradingRepository @Inject constructor(
         fixedHistoryFullFetches.get(), fixedHistoryDeltaFetches.get(), fixedHistoryStitchFallbacks.get()
     )
     @Volatile private var forecastPostFixedOpportunity = false
-    private var lastFixedScanAtMs = 0L
+    @Volatile private var lastFixedScanAtMs = 0L
     /** A single full-NSE sweep prepared for the NEXT scan, not a separate strategy. */
     private data class PrecomputedFixedSweep(
         val prices: Map<String, Double>,
@@ -4309,6 +4314,12 @@ class TradingRepository @Inject constructor(
         if (master.isEmpty()) return false
         val date = clock.toLocalDate().toString()
         val pending = pendingFixedSweepMutex.withLock {
+            // The early discovery-triggered worker and the legacy post-cycle
+            // worker must never issue two full NSE sweeps for one due slot.
+            // A completed pending sweep still owns the slot until consumption.
+            if (com.multify.traderpro.engine.FixedEarlyPrefetchPolicy.alreadyScheduledForDue(
+                    pendingFixedSweep?.date, pendingFixedSweep?.dueAtMs, date, dueAtMs
+                )) return@withLock null
             if (pendingFixedSweep?.completion?.isCompleted == false) return@withLock null
             PendingFixedSweep(date, sha256(token + "|" + (fixedBetaMarketTokenOrNull() ?: "ALPHA_ONLY")).take(12),
                 sha256(master.joinToString("|")).take(16),
@@ -4316,9 +4327,21 @@ class TradingRepository @Inject constructor(
                 pendingFixedSweep = it
             }
         } ?: return false
-        // Fetch just ahead of the next official scan, keeping the sample age bounded.
-        val startDelay = (dueAtMs - System.currentTimeMillis() -
-            com.multify.traderpro.engine.FixedSweepPrefetchPolicy.EXPECTED_SWEEP_MS).coerceAtLeast(0L)
+        // Two-account live sweeps measured ~40s, whereas Alpha-only measured ~79s.
+        // An 82s dual-account lead made valid snapshots 40+ seconds old at the
+        // next scan and often invalidated the prefetch. Use measured account-aware
+        // lead time; no extra requests or change to accepted snapshot freshness.
+        val betaLiveReadyForTiming = fixedBetaMarketTokenOrNull() != null &&
+            betaResearchGate.healthyForFixed(BetaResearchGate.Type.LIVE)
+        val expectedSweepMs = com.multify.traderpro.engine.FixedSweepPrefetchPolicy
+            .expectedSweepLeadMs(betaLiveReadyForTiming)
+        val startDelay = (dueAtMs - System.currentTimeMillis() - expectedSweepMs).coerceAtLeast(0L)
+        auditLogger.logAsync("FIXED_PERFORMANCE", "NEXT_SWEEP_PREFETCH_TIMING", mapOf(
+            "beta_healthy_at_schedule" to betaLiveReadyForTiming,
+            "planned_lead_ms" to expectedSweepMs,
+            "start_delay_ms" to startDelay,
+            "extra_full_market_sweeps" to 0,
+            "fixed_scoring_changed" to false))
         try {
             if (startDelay > 0L) delay(startDelay)
             if (marketCriticalTradeInFlight || !marketDataAvailableForFixed() ||
@@ -4431,6 +4454,9 @@ class TradingRepository @Inject constructor(
             "extra_full_market_scans" to 0,
             "fixed_formula_changed" to false
         ))
+        // This is the CURRENT official discovery. Signal the service to
+        // schedule exactly one NEXT sweep now, while details are evaluated.
+        _fixedEarlyPrefetchReady.tryEmit(lastFixedScanAtMs)
         return sweep
     }
 
@@ -4607,6 +4633,20 @@ class TradingRepository @Inject constructor(
             "alpha_and_beta_quota_independent" to true,
             "beta_429_does_not_pause_alpha" to true
         ))
+        // No extra full-market calls: schedule only the NEXT original sweep
+        // once the valid current discovery is available. The service owns the
+        // coroutine lifecycle and the pending-sweep registry deduplicates it.
+        if (com.multify.traderpro.engine.FixedEarlyPrefetchPolicy.mayNotifyOfficialDiscovery(
+                preparing, aborted, current.size, master.size
+            )) {
+            _fixedEarlyPrefetchReady.tryEmit(lastFixedScanAtMs)
+            auditLogger.logAsync("FIXED_PERFORMANCE", "EARLY_PREFETCH_READY_AFTER_DISCOVERY", mapOf(
+                "discovery_elapsed_ms" to (SystemClock.elapsedRealtime() - sweepStartedElapsedMs),
+                "valid_symbols" to current.size,
+                "next_due_at_ms" to (lastFixedScanAtMs + FIXED_V741_FORECAST_SCAN_INTERVAL_MS),
+                "extra_full_sweeps" to 0, "fixed_selection_unchanged" to true
+            ))
+        }
         return PrecomputedFixedSweep(current, errors, aborted, System.currentTimeMillis(), chunks.size)
     }
 
