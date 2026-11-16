@@ -4154,7 +4154,6 @@ class TradingRepository @Inject constructor(
             deterministicBeta, alphaLiveReady, alphaHistoricalReady,
             betaLiveReady, betaHistoricalReady, betaHistoricalHeadroom
         )
-        val account = com.multify.traderpro.engine.FixedCategoryAccountRoutingPolicy.Account
         if (!route.isUsable) {
             fixedReadOnlyTransportIncomplete = true
             auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "DETAIL_CATEGORY_NOT_AVAILABLE", mapOf(
@@ -4168,8 +4167,8 @@ class TradingRepository @Inject constructor(
             ))
             throw IOException("FIXED_READONLY_CATEGORY_UNAVAILABLE")
         }
-        val quoteToken = if (route.live == account.BETA) betaToken!! else token
-        val historicalToken = if (route.historical == account.BETA) betaToken!! else token
+        val quoteToken = if (route.live.name == "BETA") betaToken!! else token
+        val historicalToken = if (route.historical.name == "BETA") betaToken!! else token
         if (route.splitAcrossAccounts) {
             auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "SPLIT_LIVE_HISTORY_ROUTING", mapOf(
                 "symbol" to symbol,
@@ -4185,9 +4184,9 @@ class TradingRepository @Inject constructor(
             return fixedForecastEvaluationUsingAccount(
                 symbol = symbol,
                 token = quoteToken,
-                useBeta = route.live == account.BETA,
+                useBeta = route.live.name == "BETA",
                 historicalToken = historicalToken,
-                useBetaHistorical = route.historical == account.BETA,
+                useBetaHistorical = route.historical.name == "BETA",
                 fallbackBetaToken = betaToken
             )
         } catch (cancelled: CancellationException) {
@@ -4219,17 +4218,42 @@ class TradingRepository @Inject constructor(
         val now = ZonedDateTime.now(INDIA)
         val start = now.minusDays(4).toLocalDate().atTime(9, 15).format(HIST_FORMAT)
         val end = now.toLocalDateTime().format(HIST_FORMAT)
-        val quote = if (useBeta) {
-            betaMarketRead(
-                token, BetaResearchGate.Type.LIVE,
-                alphaCall = { error("Beta Fixed quote cannot use Alpha credentials") },
-                betaCall = {
-                    apiFactory.betaGroww.quote(bearer(token), tradingSymbol = symbol)
-                        .requirePayload("Fixed Beta quote $symbol")
-                }
-            )
-        } else withFixedLiveDataSlot {
-            apiFactory.groww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Fixed quote $symbol")
+        val quote = try {
+            if (useBeta) {
+                betaMarketRead(
+                    token, BetaResearchGate.Type.LIVE,
+                    alphaCall = { error("Beta Fixed quote cannot use Alpha credentials") },
+                    betaCall = {
+                        apiFactory.betaGroww.quote(bearer(token), tradingSymbol = symbol)
+                            .requirePayload("Fixed Beta quote $symbol")
+                    }
+                )
+            } else withFixedLiveDataSlot {
+                apiFactory.groww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Fixed quote $symbol")
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failed: Throwable) {
+            // If an Alpha 429 arrives after the route was calculated, retry
+            // only the *quote* on healthy Beta, at most once. No 15m refetch.
+            if (!useBeta && failed is HttpException && failed.code() == 429 &&
+                fallbackBetaToken != null &&
+                betaResearchGate.healthyForFixed(BetaResearchGate.Type.LIVE)) {
+                auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "ALPHA_QUOTE_429_BETA_QUOTE_ONLY", mapOf(
+                    "symbol" to symbol,
+                    "historical_account_preserved" to (if (useBetaHistorical) "BETA" else "ALPHA"),
+                    "max_cross_account_quote_retries" to 1,
+                    "fixed_score_and_candidate_unchanged" to true
+                ))
+                betaMarketRead(
+                    fallbackBetaToken, BetaResearchGate.Type.LIVE,
+                    alphaCall = { error("Beta quote recovery cannot use Alpha credentials") },
+                    betaCall = {
+                        apiFactory.betaGroww.quote(bearer(fallbackBetaToken), tradingSymbol = symbol)
+                            .requirePayload("Fixed Beta quote recovery $symbol")
+                    }
+                )
+            } else throw failed
         }
         require(RecommendationPriceBandPolicy.eligible(quote.lastPrice)) { "FIXED_PRICE_BAND_OUTSIDE" }
         // Token-scope the RAM snapshot so a reconnect or account change cannot reuse candles.
