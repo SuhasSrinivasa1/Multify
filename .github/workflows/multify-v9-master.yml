@@ -1,6 +1,8 @@
-name: Multify 9.0 MASTER fixed parity and versioned shadow
+name: Multify 9.0.1 Fixed candle recovery and Beta cooldown
 on:
   push:
+    branches: [v901-candle-data-and-beta-cooldown-20261116]
+  pull_request:
     branches: [v9-master-validation-shadow-20261113]
   workflow_dispatch:
 permissions:
@@ -92,8 +94,8 @@ jobs:
           assert "const val MAX_LOSS_PCT = 2.0" in Path(root+"engine/HardStopLossPolicy.kt").read_text()
           assert "const val HARD_STOP_LOSS_PCT = 2.0" in Path(root+"engine/ReleaseIntegrityManifest.kt").read_text()
           assert "const val CANONICAL_LEARNING_CALLS = 107" in Path(root+"engine/FixedFinalContract.kt").read_text()
-          assert "versionCode = 9000" in Path("app/build.gradle.kts").read_text()
-          assert 'versionName = "9.0.0-master-strategy-validation"' in Path("app/build.gradle.kts").read_text()
+          assert 'versionCode = 9001' in Path('app/build.gradle.kts').read_text()
+          assert 'versionName = "9.0.1-candle-recovery-beta-sweep"' in Path("app/build.gradle.kts").read_text()
           changed=set(subprocess.check_output(["git","diff","--name-only",base28,"HEAD"],text=True).splitlines())
           allowed={
               repo,"app/build.gradle.kts",
@@ -105,6 +107,8 @@ jobs:
               "backend/tests/test_v9_master_log_replay.py",
               "docs/V9_MASTER_VALIDATION.md",
               "docs/V9_MASTER_100_QUESTION_VALIDATION.md",
+              root+"engine/Fixed15mHistoryRepair.kt",
+              "app/src/test/java/com/multify/traderpro/engine/Fixed15mHistoryRepairTest.kt",
               ".github/workflows/multify-v9-master.yml"}
           assert changed<=allowed, ("UNAUTHORIZED_LIVE_EDIT",changed-allowed)
           print("PASS 7.4.1 reference, v19 LIVE parity, exact v16 shadow, -2% GTT safety, scope")
@@ -118,5 +122,5 @@ jobs:
       - name: Upload signed-by-CI TEST artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Multify-v9.0.0-Master-Validation-TEST-debug
+          name: Multify-v9.0.1-Verified-Candle-Recovery-TEST-debug
           path: app/build/outputs/apk/debug/*.apk
