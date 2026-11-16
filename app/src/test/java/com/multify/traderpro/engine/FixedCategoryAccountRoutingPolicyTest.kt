@@ -40,6 +40,31 @@ class FixedCategoryAccountRoutingPolicyTest {
         assertTrue(plan.splitAcrossAccounts)
     }
 
+    @Test fun quotePressureUsesBetaLiveWithoutConsumingBetaHistoryBudget() {
+        val route = p.choose(
+            deterministicBeta = false,
+            alphaLiveReady = true, alphaHistoricalReady = true,
+            betaLiveReady = true, betaHistoricalReady = true,
+            betaHistoricalHasHeadroom = false,
+            preferBetaLiveForQuote = true
+        )
+        assertEquals(b, route.live)
+        assertEquals(a, route.historical)
+        assertTrue(route.splitAcrossAccounts)
+    }
+
+    @Test fun quotePressureCannotBypassMissingBetaLiveTransport() {
+        val route = p.choose(
+            deterministicBeta = false,
+            alphaLiveReady = true, alphaHistoricalReady = true,
+            betaLiveReady = false, betaHistoricalReady = true,
+            betaHistoricalHasHeadroom = false,
+            preferBetaLiveForQuote = true
+        )
+        assertEquals(a, route.live)
+        assertEquals(a, route.historical)
+    }
+
     @Test fun onlyOneBrokerCanBeRequiredPerCategoryAndPartialAvailabilityFailsClosed() {
         val combos = (0..15).map { bits ->
             val al = bits and 1 != 0

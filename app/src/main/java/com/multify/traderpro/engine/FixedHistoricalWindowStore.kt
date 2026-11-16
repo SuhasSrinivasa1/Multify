@@ -36,6 +36,11 @@ class FixedHistoricalWindowStore {
     }
     private val format = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
     private val rejectionReasons = LinkedHashMap<String, String>(MAX_STOCKS, .75f, true)
+    // Bounded proof that a symbol previously had a valid broker snapshot. A
+    // missing entry can then be classified as cache eviction instead of being
+    // incorrectly presented as a never-before-seen stock.
+    private val previouslyCachedSymbols = LinkedHashSet<String>()
+
     private data class ShortHistoryRetry(val originalStart: String, val notBeforeElapsedMs: Long)
     private val shortHistoryRetries = LinkedHashMap<String, ShortHistoryRetry>(MAX_STOCKS, .75f, true)
 
@@ -49,7 +54,8 @@ class FixedHistoricalWindowStore {
 
     @Synchronized
     fun ineligibilityReason(symbol: String, originalStartTime: String, nowMs: Long): String {
-        val snapshot = cache[symbol] ?: return rejectionReasons[symbol] ?: "SNAPSHOT_NOT_SEEN"
+        val snapshot = cache[symbol] ?: return rejectionReasons[symbol]
+            ?: if (symbol in previouslyCachedSymbols) "CACHE_ENTRY_EVICTED" else "SNAPSHOT_NOT_SEEN"
         if (snapshot.originalStartTime != originalStartTime) return "START_TIME_CHANGED"
         if (nowMs - snapshot.storedAtMs !in 0L..MAX_REUSE_AGE_MS) return "SNAPSHOT_EXPIRED"
         if (snapshot.history.candles.size < MIN_BASE_ROWS) return "INSUFFICIENT_BASE_ROWS"
@@ -106,6 +112,11 @@ class FixedHistoricalWindowStore {
             rejectionReasons.remove(symbol)
             shortHistoryRetries.remove(symbol)
             cache[symbol] = Snapshot(nowMs, originalStartTime, response)
+            previouslyCachedSymbols.add(symbol)
+            while (previouslyCachedSymbols.size > MAX_STOCKS * 2) {
+                previouslyCachedSymbols.remove(previouslyCachedSymbols.first())
+            }
+
         } else {
             cache.remove(symbol)
             rejectionReasons[symbol] = reason

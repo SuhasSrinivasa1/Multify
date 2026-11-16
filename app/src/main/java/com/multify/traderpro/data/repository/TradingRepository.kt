@@ -323,6 +323,10 @@ class TradingRepository @Inject constructor(
     )
     private val pendingFixedSweepMutex = Mutex()
     private var pendingFixedSweep: PendingFixedSweep? = null
+    // Rolling valid full-NSE sweep durations per actual account lane.
+    // This is an in-memory transport estimate, never a new scan or score.
+    private val fixedSweepAdaptiveLead =
+        com.multify.traderpro.engine.FixedSweepAdaptiveLeadPolicy()
     @Volatile private var fixedSweepPreparationActive = false
 
     private var lastForecastOutcomeMonitorAtMs = 0L
@@ -4166,10 +4170,22 @@ class TradingRepository @Inject constructor(
             betaResearchGate.historicalHasSpareFixedCapacity()
         val deterministicBeta = com.multify.traderpro.engine.FixedDualAccountPolicy
             .betaDetailedEvaluation(symbol, betaToken != null)
+        // If Alpha's independently verified quote pace is still in post-429
+        // slowdown, use available read-only Beta LIVE without moving healthy
+        // Alpha HISTORICAL into Beta's scarce 8/minute historical bucket.
+        val alphaQuoteSlow = com.multify.traderpro.engine.AlphaReadPacingPolicy
+            .preferHealthyBetaQuoteForFixedResearch()
         val route = com.multify.traderpro.engine.FixedCategoryAccountRoutingPolicy.choose(
             deterministicBeta, alphaLiveReady, alphaHistoricalReady,
-            betaLiveReady, betaHistoricalReady, betaHistoricalHeadroom
+            betaLiveReady, betaHistoricalReady, betaHistoricalHeadroom,
+            preferBetaLiveForQuote = alphaQuoteSlow && betaLiveReady
         )
+        if (alphaQuoteSlow && route.live.name == "BETA" && !deterministicBeta) {
+            auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "ALPHA_QUOTE_PACE_BETA_LIVE", mapOf(
+                "symbol" to symbol, "historical_account" to route.historical.name,
+                "alpha_order_account_unchanged" to true, "fixed_score_unchanged" to true
+            ))
+        }
         if (!route.isUsable) {
             fixedReadOnlyTransportIncomplete = true
             auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "DETAIL_CATEGORY_NOT_AVAILABLE", mapOf(
@@ -4479,13 +4495,16 @@ class TradingRepository @Inject constructor(
         val alphaLiveReadyForTiming = runCatching {
             recoveryGate.checkRequestAllowed(GrowwApiUsageLedger.Category.LIVE_DATA)
         }.isSuccess
-        val expectedSweepMs = com.multify.traderpro.engine.FixedSweepPrefetchPolicy
-            .expectedSweepLeadMs(betaLiveReadyForTiming, alphaLiveReadyForTiming)
+        val expectedSweepMs = fixedSweepAdaptiveLead.expectedLeadMs(
+            betaLiveReadyForTiming, alphaLiveReadyForTiming
+        )
         val startDelay = (dueAtMs - System.currentTimeMillis() - expectedSweepMs).coerceAtLeast(0L)
         auditLogger.logAsync("FIXED_PERFORMANCE", "NEXT_SWEEP_PREFETCH_TIMING", mapOf(
             "beta_healthy_at_schedule" to betaLiveReadyForTiming,
             "alpha_live_ready_at_schedule" to alphaLiveReadyForTiming,
             "planned_lead_ms" to expectedSweepMs,
+            "adaptive_valid_samples" to fixedSweepAdaptiveLead.sampleCount(
+                alphaLiveReadyForTiming, betaLiveReadyForTiming),
             "start_delay_ms" to startDelay,
             "extra_full_market_sweeps" to 0,
             "fixed_scoring_changed" to false))
@@ -4664,7 +4683,11 @@ class TradingRepository @Inject constructor(
         val alphaRecoveryExtraCalls = AtomicInteger(0)
         var missingFromBroker = 0
         var invalidBrokerPrices = 0
+        var nonFiniteBrokerPrices = 0
+        var nonPositiveBrokerPrices = 0
+        var belowDataFloorBrokerPrices = 0
         val missingSample = mutableListOf<String>()
+        val invalidSample = mutableListOf<String>()
         for (windowStart in chunks.indices step FixedDiscoveryWindowScheduler.WINDOW_SIZE) {
             if (preparing && (marketCriticalTradeInFlight || !marketDataAvailableForFixed() ||
                 !com.multify.traderpro.engine.NseEquitySessionCalendar.mayContinuePreparedFixedSweep(ZonedDateTime.now(INDIA)))) {
@@ -4769,6 +4792,14 @@ class TradingRepository @Inject constructor(
                             current[key.removePrefix("NSE_").uppercase(Locale.US)] = value
                         } else {
                             invalidBrokerPrices++
+                            val reason = when {
+                                !value.isFinite() -> { nonFiniteBrokerPrices++; "NON_FINITE" }
+                                value <= 0.0 -> { nonPositiveBrokerPrices++; "NON_POSITIVE" }
+                                else -> { belowDataFloorBrokerPrices++; "BELOW_EXISTING_LTP_FLOOR" }
+                            }
+                            if (invalidSample.size < 20) {
+                                invalidSample.add(key.take(32) + ":" + reason)
+                            }
                         }
                     }
                 }
@@ -4787,8 +4818,17 @@ class TradingRepository @Inject constructor(
             if (aborted) break
         }
         val sortedWindowLatenciesMs = batchWindowLatenciesMs.sorted()
+        val elapsedSweepMs = (SystemClock.elapsedRealtime() - sweepStartedElapsedMs).coerceAtLeast(0L)
+        val validForTiming = !aborted && master.isNotEmpty() &&
+            current.size.toDouble() / master.size >= FIXED_V741_MIN_DISCOVERY_COVERAGE_RATIO
+        fixedSweepAdaptiveLead.record(
+            alphaUsed = alphaSuccess.get() > 0,
+            betaUsed = betaSuccess.get() > 0,
+            elapsedMs = elapsedSweepMs, valid = validForTiming
+        )
         auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "FULL_NSE_SWEEP_ACCOUNT_PROFILE", mapOf(
-            "sweep_elapsed_ms" to (SystemClock.elapsedRealtime() - sweepStartedElapsedMs).coerceAtLeast(0L),
+            "sweep_elapsed_ms" to elapsedSweepMs,
+            "adaptive_timing_sample_accepted" to validForTiming,
             "parallel_ltp_window_size" to FixedDiscoveryWindowScheduler.WINDOW_SIZE,
             "batch_window_count" to sortedWindowLatenciesMs.size,
             "batch_window_latency_p50_ms" to sortedWindowLatenciesMs.takeIf { it.isNotEmpty() }
@@ -4810,7 +4850,11 @@ class TradingRepository @Inject constructor(
             "total_fixed_discovery_batch_slots_unchanged" to chunks.size,
             "broker_omitted_symbols" to missingFromBroker,
             "broker_invalid_ltp_values" to invalidBrokerPrices,
+            "broker_invalid_nonfinite" to nonFiniteBrokerPrices,
+            "broker_invalid_nonpositive" to nonPositiveBrokerPrices,
+            "broker_invalid_below_existing_floor" to belowDataFloorBrokerPrices,
             "broker_omission_examples" to missingSample,
+            "broker_invalid_examples" to invalidSample,
             "extra_ltp_requests_for_diagnostics" to 0,
             "beta_authenticated" to (betaToken != null),
             "beta_disabled_during_sweep" to betaStopped.get(),

@@ -79,6 +79,17 @@ class FixedHistoricalWindowStoreTest {
         assertNull(store.request("NO_OVERLAP", start, 750_000L))
     }
 
+    @Test fun `LRU evictions are diagnosed without changing broker reuse decisions`() {
+        val store = FixedHistoricalWindowStore()
+        val start = "2026-11-16 09:15:00"
+        for (n in 0 until 130) {
+            store.remember("LTP$n", start, rows(1_790_000_000L, 8), 1_000L)
+        }
+        assertNull(store.request("LTP0", start, 2_000L))
+        assertEquals("CACHE_ENTRY_EVICTED", store.ineligibilityReason("LTP0", start, 2_000L))
+        assertEquals("SNAPSHOT_NOT_SEEN", store.ineligibilityReason("NEW_STOCK", start, 2_000L))
+    }
+
     @Test fun `missing overlapping bars forces full broker request`() {
         val store = FixedHistoricalWindowStore()
         val start = "2026-10-23 09:15:00"
