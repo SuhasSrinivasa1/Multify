@@ -7,9 +7,17 @@ object FixedSweepPrefetchPolicy {
     // Schedule dual-account samples just-in-time: an 82s lead left prepared
     // snapshots almost expired at the next 90s Fixed scan.
     const val DUAL_ACCOUNT_EXPECTED_SWEEP_MS = 50_000L
+    // When Alpha is cooling but Beta can read, a full 53-batch Beta-only
+    // sweep needs longer than the normal split. This is a planning lead,
+    // not permission to return a stale or incomplete market snapshot.
+    const val BETA_ONLY_EXPECTED_SWEEP_MS = 76_000L
 
-    fun expectedSweepLeadMs(betaLiveReady: Boolean): Long =
-        if (betaLiveReady) DUAL_ACCOUNT_EXPECTED_SWEEP_MS else EXPECTED_SWEEP_MS
+    fun expectedSweepLeadMs(betaLiveReady: Boolean, alphaLiveReady: Boolean = true): Long =
+        when {
+            betaLiveReady && !alphaLiveReady -> BETA_ONLY_EXPECTED_SWEEP_MS
+            betaLiveReady -> DUAL_ACCOUNT_EXPECTED_SWEEP_MS
+            else -> EXPECTED_SWEEP_MS
+        }
     const val MIN_START_HEADROOM_MS = 20_000L
     const val MAX_START_HEADROOM_MS = 150_000L
     const val MAX_ACCEPTED_AGE_MS = 45_000L
