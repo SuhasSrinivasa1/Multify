@@ -11,8 +11,14 @@ class FixedAccountResearchRecoveryPolicyTest {
         assertTrue(p.researchAvailable(false, false, true, true))
         assertTrue(p.researchAvailable(false, false, true, false).not())
         assertFalse(p.researchAvailable(false, false, false, false))
+        // Both brokers may offer quotes without offering *any* candles:
+        // this must still fail closed.
         assertFalse(p.researchAvailable(true, false, true, false))
         assertFalse(p.researchAvailable(false, true, false, true))
+        // Healthy history from Alpha can be paired with a fresh Beta quote.
+        assertTrue(p.researchAvailable(false, true, true, false))
+        // Healthy quote from Alpha can be paired with Beta history.
+        assertTrue(p.researchAvailable(true, false, false, true))
     }
 
     @Test fun originalFiftyThreeDiscoverySlotsRemainIntactAndBetaTakesOverAlphaDuringCooldown() {
