@@ -155,6 +155,10 @@ class FixedHistoricalWindowStore {
         // Reuse only as the historical prefix: every evaluation still gets a fresh
         // broker delta, and >=2 overlapping candle timestamps must validate.
         private const val MAX_REUSE_AGE_MS = 12L * 60_000L
-        private const val MIN_BASE_ROWS = 10
+        // The frozen Fixed scorer can evaluate from >=5 valid broker bars.
+        // Reusing 5-9 valid rows as a VERIFIED historical prefix is safe only
+        // because each new scan still fetches fresh broker candles and stitch()
+        // requires >=2 matching timestamps with a non-regressing latest bar.
+        private const val MIN_BASE_ROWS = 5
     }
 }
