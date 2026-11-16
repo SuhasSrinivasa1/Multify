@@ -1018,7 +1018,7 @@ private fun FixedScreen(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Text(
-                        "Last completed market sweep: ${String.format(Locale.US, "%.1f%%", health.discoveryCoveragePct)} NSE coverage (minimum 85%) · ${health.discoveryBatchErrors} failed batches · " +
+                        "Last NSE market sweep result: ${String.format(Locale.US, "%.1f%%", health.discoveryCoveragePct)} NSE coverage (minimum 85%) · ${health.discoveryBatchErrors} failed batches · " +
                             if (health.discoveryBaselineReady) "baseline confirmed" else "baseline not yet confirmed",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
