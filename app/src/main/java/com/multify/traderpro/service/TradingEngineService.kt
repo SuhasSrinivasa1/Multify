@@ -38,6 +38,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import java.time.LocalTime
@@ -58,6 +59,9 @@ class TradingEngineService : Service() {
     private var mobileHealthJob: Job? = null
     private var positionMonitorJob: Job? = null
     private var fixedScanJob: Job? = null
+    // V902_PREFETCH_FIELD_BEGIN
+    private var fixedEarlyPrefetchObserverJob: Job? = null
+    // V902_PREFETCH_FIELD_END
     // Service startup and watchdog can run concurrently. A single-flight owner
     // atomically publishes/starts the LAZY Fixed worker, never two workers.
     private val fixedScanWorkerStartGate = com.multify.traderpro.engine.FixedSingleWorkerStartGate()
@@ -103,6 +107,31 @@ class TradingEngineService : Service() {
         // Keep the CPU awake until the first successful pass confirms whether holdings need monitoring.
         repository.setTradingRecoveryReady(false)
         updatePositionMonitoringWakeLock(true, "INITIAL_POSITION_DISCOVERY")
+        // V902_PREFETCH_OBSERVER_BEGIN
+        // Listen only while this foreground service is alive. A completed official
+        // full-NSE discovery can prepare the NEXT sweep concurrently with detail.
+        // Existing pending-sweep ownership prevents double-fetching.
+        fixedEarlyPrefetchObserverJob = scope.launch(Dispatchers.IO) {
+            repository.fixedEarlyPrefetchReady.collect { scanStartedAtMs ->
+                if (scanStartedAtMs <= 0L) return@collect
+                try {
+                    val prepared = repository.prepareNextFixedDiscoverySweep()
+                    auditLogger.logAsync("FIXED_PERFORMANCE", "EARLY_PREFETCH_SERVICE_RESULT", mapOf(
+                        "scan_started_at_ms" to scanStartedAtMs,
+                        "prepared" to prepared,
+                        "extra_full_market_sweeps" to 0,
+                        "production_scoring_changed" to false
+                    ))
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (failed: Throwable) {
+                    auditLogger.logAsync("FIXED_PERFORMANCE", "EARLY_PREFETCH_SERVICE_ERROR", mapOf(
+                        "error_type" to failed.javaClass.simpleName,
+                        "extra_full_market_sweeps" to 0))
+                }
+            }
+        }
+        // V902_PREFETCH_OBSERVER_END
         startEngineLoop()
     }
 
@@ -120,6 +149,9 @@ class TradingEngineService : Service() {
         updatePositionMonitoringWakeLock(false, "SERVICE_DESTROYED")
         positionMonitorJob?.cancel()
         fixedScanWorkerStartGate.cancel()
+        // V902_PREFETCH_DESTROY_BEGIN
+        fixedEarlyPrefetchObserverJob?.cancel()
+        // V902_PREFETCH_DESTROY_END
         fixedScanJob?.cancel()
         forecastScanJob?.cancel()
         forecastNewsJob?.cancel()
