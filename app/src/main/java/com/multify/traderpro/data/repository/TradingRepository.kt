@@ -293,6 +293,9 @@ class TradingRepository @Inject constructor(
 
     // The scheduling timestamp remains frozen; this flag only prevents auto-BUY on incomplete scans.
     @Volatile private var fixedScanDeferredBroker = false
+    // A read-only Beta history/quote budget denial during Alpha cooldown
+    // must never be mistaken for a complete evaluated production scan.
+    @Volatile private var fixedReadOnlyTransportIncomplete = false
     // In-memory historical OHLCV reuse across Fixed cycles; live latest bars are ALWAYS refetched.
     private val fixedHistoricalWindowStore = FixedHistoricalWindowStore()
     private val fixedPreviouslyDiscoveredPrimaryAt = ConcurrentHashMap<String, Pair<String, Long>>()
@@ -2323,7 +2326,8 @@ class TradingRepository @Inject constructor(
             betaResearchGate.healthyForFixed(BetaResearchGate.Type.HISTORICAL)
 
     private suspend fun marketDataAvailableForFixed(): Boolean =
-        alphaResearchAvailableForFixed() || betaAvailableForFixedReadOnlyResearch()
+        !fixedReadOnlyTransportIncomplete &&
+            (alphaResearchAvailableForFixed() || betaAvailableForFixedReadOnlyResearch())
 
     private fun fixedBrokerCooldownAuditDetails(): Map<String, Any> {
         val state = recoveryGate.status()
@@ -2347,7 +2351,8 @@ class TradingRepository @Inject constructor(
             "last_completed_fixed_scan_age_ms" to (if (lastFixedScanAtMs > 0L) (now - lastFixedScanAtMs).coerceAtLeast(0L) else -1L),
             "stale_snapshot_never_used_as_fresh_live_data" to true,
             "retry_after_broker_cooldown_not_an_extra_fixed_scan" to true,
-            "reconnect_required" to state.reconnectRequired
+            "reconnect_required" to state.reconnectRequired,
+            "read_only_recovery_transport_incomplete" to fixedReadOnlyTransportIncomplete
         )
     }
 
@@ -2357,6 +2362,7 @@ class TradingRepository @Inject constructor(
             val cycleStartedAtMs = System.currentTimeMillis()
             try {
                 fixedScanDeferredBroker = false
+                fixedReadOnlyTransportIncomplete = false
                 if (!marketDataAvailableForFixed()) {
                     fixedScanDeferredBroker = true
                     auditLogger.logAsync("FIXED_PERFORMANCE", "SCAN_DEFERRED_BROKER", mapOf(
@@ -4153,6 +4159,20 @@ class TradingRepository @Inject constructor(
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failed: Throwable) {
+                // During an Alpha outage a Beta historical rate-budget error
+                // makes this entire detailed pass incomplete. The ORIGINAL
+                // frozen Fixed loop sees the preflight fail at its next batch
+                // boundary and refuses publication, without touching its rules.
+                if (!alphaReady && (failed is IOException ||
+                        (failed is HttpException && failed.code() >= 429))) {
+                    fixedReadOnlyTransportIncomplete = true
+                    auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "BETA_ONLY_DETAIL_BUDGET_DEFERRED", mapOf(
+                        "symbol" to symbol,
+                        "beta_failure" to (failed.message ?: failed.javaClass.simpleName).take(140),
+                        "partial_publication_blocked" to true,
+                        "original_fixed_publication_unchanged" to true
+                    ))
+                }
                 // A correctly enforced Fixed price-band veto is not a Beta transport outage.
                 // Returning to Alpha here repeats a known-invalid quote and wastes requests.
                 if (!com.multify.traderpro.engine.FixedBetaDetailFallbackPolicy.shouldRetryOnAlpha(failed)) {
@@ -4176,8 +4196,40 @@ class TradingRepository @Inject constructor(
         // Never send the same Fixed evaluation to an Alpha account that
         // is in a known broker cooldown. Beta may be constrained by its
         // separate historical quota; an incomplete evaluation fails closed.
-        if (!alphaReady) throw IOException("FIXED_ALPHA_RESEARCH_COOLDOWN_BETA_UNAVAILABLE")
-        return fixedForecastEvaluationUsingAccount(symbol, token, useBeta = false)
+        if (!alphaReady) {
+            fixedReadOnlyTransportIncomplete = true
+            throw IOException("FIXED_ALPHA_RESEARCH_COOLDOWN_BETA_UNAVAILABLE")
+        }
+        try {
+            return fixedForecastEvaluationUsingAccount(symbol, token, useBeta = false)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failed: Throwable) {
+            // The Alpha 429 may arrive after preflight. One independent Beta
+            // recovery is allowed for a broker/transport failure only.
+            // Price-band, candle validity and score rules never fall back.
+            val alphaStillReady = alphaResearchAvailableForFixed()
+            val transient = failed is IOException ||
+                (failed is HttpException && failed.code() >= 429)
+            val rescueBeta = if (!alphaStillReady && transient &&
+                betaAvailableForFixedReadOnlyResearch()) fixedBetaMarketTokenOrNull() else null
+            if (rescueBeta != null) {
+                auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "ALPHA_DETAIL_429_BETA_RETRY", mapOf(
+                    "symbol" to symbol, "beta_read_only" to true,
+                    "max_cross_account_retries" to 1, "fixed_model_unchanged" to true
+                ))
+                return try {
+                    fixedForecastEvaluationUsingAccount(symbol, rescueBeta, useBeta = true)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (betaFailure: Throwable) {
+                    fixedReadOnlyTransportIncomplete = true
+                    throw betaFailure
+                }
+            }
+            if (!alphaStillReady && transient) fixedReadOnlyTransportIncomplete = true
+            throw failed
+        }
     }
 
     private suspend fun fixedForecastEvaluationUsingAccount(
