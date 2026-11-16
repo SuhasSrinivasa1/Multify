@@ -4543,6 +4543,9 @@ class TradingRepository @Inject constructor(
         val betaSuccess = AtomicInteger(0)
         val alphaSuccess = AtomicInteger(0)
         val alphaFallbackBatches = AtomicInteger(0)
+        val alphaBatchesRescuedOnBeta = AtomicInteger(0)
+        val betaOnlyDuringAlphaCooldown = AtomicInteger(0)
+        val alphaRecoveryExtraCalls = AtomicInteger(0)
         var missingFromBroker = 0
         var invalidBrokerPrices = 0
         val missingSample = mutableListOf<String>()
@@ -4558,36 +4561,70 @@ class TradingRepository @Inject constructor(
             ) { index, chunk ->
                 val betaAssigned = betaToken != null &&
                     com.multify.traderpro.engine.FixedDualAccountPolicy.betaDiscoveryBatch(index, true)
-                val useBeta = betaAssigned && !betaStopped.get() &&
+                // Re-check the ACTUAL category cooldown immediately before the
+                // network call. A 429 in another concurrent Alpha batch should
+                // redirect subsequent read-only batches to healthy Beta, not
+                // repeat an Alpha request that is guaranteed to be locally denied.
+                val alphaLiveReady = runCatching {
+                    recoveryGate.checkRequestAllowed(GrowwApiUsageLedger.Category.LIVE_DATA)
+                }.isSuccess
+                val betaLiveReady = betaToken != null && !betaStopped.get() &&
                     betaResearchGate.healthyForFixed(BetaResearchGate.Type.LIVE)
-                if (useBeta) {
-                    try {
-                        fixedBetaLtp(betaToken!!, chunk).also { betaSuccess.incrementAndGet() }
+                val useBeta = com.multify.traderpro.engine.FixedAccountResearchRecoveryPolicy
+                    .betaForDiscovery(betaAssigned, alphaLiveReady, betaLiveReady)
+
+                suspend fun betaRead(reason: String): Map<String, Double>? {
+                    if (betaToken == null || betaStopped.get()) return null
+                    return try {
+                        fixedBetaLtp(betaToken, chunk).also {
+                            betaSuccess.incrementAndGet()
+                            if (reason == "ALPHA_BATCH_FAILED") {
+                                alphaBatchesRescuedOnBeta.incrementAndGet()
+                                alphaRecoveryExtraCalls.incrementAndGet()
+                            }
+                            if (reason == "ALPHA_ALREADY_COOLING") {
+                                betaOnlyDuringAlphaCooldown.incrementAndGet()
+                            }
+                        }
                     } catch (cancelled: CancellationException) {
                         throw cancelled
                     } catch (failed: Throwable) {
-                        // Beta's independent 429 must NOT pause Alpha. Switch
-                        // only if Alpha is ready and has protected category headroom.
-                        // Never issue an unbounded immediate retry burst.
+                        // No spillover burst back to Alpha on a Beta failure.
                         betaStopped.set(true)
-                        // No Alpha spillover during a Beta cooldown: incomplete
-                        // market coverage is deferred rather than repaired with a burst.
                         auditLogger.logAsync("FIXED_DUAL_ACCOUNT",
-                            "BETA_DISCOVERY_COOLDOWN_NO_ALPHA_FALLBACK",
-                            mapOf("batch_index" to index,
+                            "BETA_RECOVERY_FAILED_NO_ALPHA_BURST", mapOf(
+                                "batch_index" to index, "reason" to reason,
                                 "beta_http_429" to ((failed as? HttpException)?.code() == 429),
                                 "beta_error" to failed.javaClass.simpleName,
-                                "beta_paused_for_rest_of_sweep" to true,
-                                "alpha_fallback_requests" to 0,
-                                "partial_coverage_must_not_publish" to true))
+                                "partial_coverage_must_not_publish" to true,
+                                "alpha_fallback_requests" to 0
+                            ))
                         null
                     }
-                } else {
-                    // Never move Beta-owned discovery traffic onto Alpha while Beta
-                    // is paused. Alpha-owned batches still proceed independently.
-                    if (betaAssigned) null
-                    else fetchFixedDiscoveryLtpBatch(token, chunk, index)
-                        ?.also { alphaSuccess.incrementAndGet() }
+                }
+                when {
+                    useBeta -> betaRead(if (betaAssigned) "NORMAL_BETA_SLOT" else "ALPHA_ALREADY_COOLING")
+                    betaAssigned -> null // Beta is unavailable; do not crowd Alpha.
+                    !alphaLiveReady -> null // Alpha is locally cooling; never retry it.
+                    else -> {
+                        val alphaData = fetchFixedDiscoveryLtpBatch(token, chunk, index)
+                        if (alphaData != null) {
+                            alphaSuccess.incrementAndGet()
+                            alphaData
+                        } else {
+                            // One Beta rescue after an Alpha batch fails, never
+                            // concurrent duplicate retrieval or an unbounded retry
+                            // loop. Beta's separate 6/s 180/min governor remains
+                            // authoritative, including during an Alpha 429.
+                            val betaReadyToRescue = betaToken != null && !betaStopped.get() &&
+                                betaResearchGate.healthyForFixed(BetaResearchGate.Type.LIVE)
+                            if (com.multify.traderpro.engine.FixedAccountResearchRecoveryPolicy
+                                    .rescueAlphaBatchOnBeta(false, betaReadyToRescue, betaStopped.get())
+                            ) {
+                                betaRead("ALPHA_BATCH_FAILED")
+                            } else null
+                        }
+                    }
                 }
             }
             batchWindowLatenciesMs.add(
@@ -4651,6 +4688,10 @@ class TradingRepository @Inject constructor(
             "alpha_success_batches" to alphaSuccess.get(),
             "beta_success_batches" to betaSuccess.get(),
             "alpha_fallback_batches" to alphaFallbackBatches.get(),
+            "alpha_batches_rescued_on_beta" to alphaBatchesRescuedOnBeta.get(),
+            "beta_only_batches_during_alpha_cooldown" to betaOnlyDuringAlphaCooldown.get(),
+            "beta_extra_calls_to_recover_failed_alpha_batches" to alphaRecoveryExtraCalls.get(),
+            "total_fixed_discovery_batch_slots_unchanged" to chunks.size,
             "broker_omitted_symbols" to missingFromBroker,
             "broker_invalid_ltp_values" to invalidBrokerPrices,
             "broker_omission_examples" to missingSample,
