@@ -23,6 +23,15 @@ class FixedEarlyPrefetchPolicyTest {
         assertFalse(gate.alreadyScheduledForDue(null, null, date, due))
     }
 
+    @Test fun twoAccountsUseMeasuredLeadInsteadOfNearlyExpiredSnapshot() {
+        assertEquals(50_000L, FixedSweepPrefetchPolicy.expectedSweepLeadMs(true))
+        assertEquals(82_000L, FixedSweepPrefetchPolicy.expectedSweepLeadMs(false))
+        // With a 40-second Beta+Alpha sweep, a 50-second lead leaves ~10 sec of age.
+        val due = 190_000L
+        val completedAt = due - 50_000L + 40_000L
+        assertTrue(FixedSweepPrefetchPolicy.canConsume(completedAt, due, 2438, 2646, false))
+    }
+
     @Test fun oldPrefetchSafetyStillRejectsStaleAndIncompleteData() {
         val clock = 1_000_000L
         val total = 2646
