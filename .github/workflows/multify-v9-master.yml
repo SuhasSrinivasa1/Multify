@@ -1,7 +1,9 @@
 name: Multify 9.0.1 Fixed candle recovery and Beta cooldown
 on:
   push:
-    branches: [v9-master-validation-shadow-20261113, v901-candle-data-and-beta-cooldown-20261116]
+    branches: [v901-candle-data-and-beta-cooldown-20261116]
+  pull_request:
+    branches: [v9-master-validation-shadow-20261113]
   workflow_dispatch:
 permissions:
   contents: read
