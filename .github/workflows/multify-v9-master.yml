@@ -1,9 +1,9 @@
-name: Multify 9.0.3 Fixed 60 percent independent account research quotas
+name: Multify v9.0.4 Frozen Fixed independent-account cooldown recovery
 on:
   push:
-    branches: [v903-fixed-60pct-account-quotas-20261116]
+    branches: [v904-fixed-dual-account-recovery-20261116]
   pull_request:
-    branches: [v902-fixed-speed-parity-prefetch-20261116]
+    branches: [v903-fixed-60pct-account-quotas-20261116]
   workflow_dispatch:
 permissions:
   contents: read
@@ -87,6 +87,12 @@ jobs:
               expression=r"(?ms)^[ \t]*// V902_PREFETCH_"+marker+r"_BEGIN\n.*?^[ \t]*// V902_PREFETCH_"+marker+r"_END\n"
               service_now,count=re.subn(expression,"",service_now)
               assert count==1, ("MISSING_SERVICE_PREFETCH_BOUNDARY",marker)
+          # Normalize exactly one additional bounded service preflight extension.
+          # Original worker, order and protection byte-level logic stays untouched.
+          gate_pattern=r"(?ms)^[ \t]*// V904_READONLY_BETA_GATE_BEGIN\n.*?^[ \t]*// V904_READONLY_BETA_GATE_END\n"
+          original_gate="                        if (readiness != FixedDataPipelinePolicy.Readiness.READY) {\n"
+          service_now,count=re.subn(gate_pattern,original_gate,service_now)
+          assert count==1, "BETA_GATE_CHANGE_SCOPE"
           assert service_now==old(base28,service), "TRADING_SERVICE_UNAUTHORIZED_EDIT"
           # Broker transport already had endpoint 1s/60s tracing; preserve it
           # BYTE-IDENTICALLY rather than reimplementing duplicate counters.
@@ -104,8 +110,8 @@ jobs:
           assert "const val MAX_LOSS_PCT = 2.0" in Path(root+"engine/HardStopLossPolicy.kt").read_text()
           assert "const val HARD_STOP_LOSS_PCT = 2.0" in Path(root+"engine/ReleaseIntegrityManifest.kt").read_text()
           assert "const val CANONICAL_LEARNING_CALLS = 107" in Path(root+"engine/FixedFinalContract.kt").read_text()
-          assert 'versionCode = 9003' in Path('app/build.gradle.kts').read_text()
-          assert 'versionName = "9.0.3-fixed-60pct-account-quota-test"' in Path("app/build.gradle.kts").read_text()
+          assert 'versionCode = 9004' in Path('app/build.gradle.kts').read_text()
+          assert 'versionName = "9.0.4-fixed-independent-recovery-test"' in Path("app/build.gradle.kts").read_text()
           budgets=(Path(root+"engine/GrowwApiBudgetPolicy.kt").read_text())
           beta_policy=Path(root+"engine/FixedDualAccountPolicy.kt").read_text()
           beta_governor=Path(root+"data/network/BetaResearchGate.kt").read_text()
@@ -126,6 +132,19 @@ jobs:
           assert '.removeHeader(MarketDataPriorityAdmissionPolicy.HEADER)' in Path(
               root+"data/network/GrowwRateLimitInterceptor.kt").read_text()
           assert Path(root+"data/network/GrowwHistoricalThrottlePolicy.kt").read_bytes()==subprocess.check_output(["git","show",f"{base28}:{root+'data/network/GrowwHistoricalThrottlePolicy.kt'}"])
+          # Only transport helpers can change: full v19 scoring and v16 shadow remain locked.
+          assert "alphaBatchesRescuedOnBeta" in current
+          assert "fixedReadOnlyTransportIncomplete = true" in current
+          assert "ALPHA_DETAIL_429_BETA_RETRY" in current
+          assert "BETA_DETAIL_ALPHA_COOLDOWN_TAKEOVER" in current
+          assert "betaAvailableForFixedReadOnlyResearch()" in current
+          assert "ALPHA_COOLDOWN_BETA_RESEARCH_CONTINUES" in Path(service).read_text()
+          assert "const val BETA_ONLY_EXPECTED_SWEEP_MS = 76_000L" in Path(
+              root+"engine/FixedSweepPrefetchPolicy.kt").read_text()
+          ui=Path(root+"ui/screens/TraderApp.kt").read_text()
+          assert "Fixed max 240/min" not in ui
+          assert "Last completed market sweep" not in ui
+          assert "BETA_READ_ONLY_RECOVERY" in ui
 
           changed=set(subprocess.check_output(["git","diff","--name-only",base28,"HEAD"],text=True).splitlines())
           allowed={
@@ -141,6 +160,9 @@ jobs:
               root+"engine/Fixed15mHistoryRepair.kt",
               root+"engine/FixedSweepPrefetchPolicy.kt",
               root+"engine/FixedEarlyPrefetchPolicy.kt",
+              root+"engine/FixedAccountResearchRecoveryPolicy.kt",
+              root+"engine/FixedDiscoveryDisplayPolicy.kt",
+              root+"ui/screens/TraderApp.kt",
               root+"engine/GrowwApiBudgetPolicy.kt",
               root+"engine/FixedDualAccountPolicy.kt",
               root+"data/network/BetaResearchGate.kt",
@@ -152,6 +174,9 @@ jobs:
               service,
               "app/src/test/java/com/multify/traderpro/engine/Fixed15mHistoryRepairTest.kt",
               "app/src/test/java/com/multify/traderpro/engine/FixedEarlyPrefetchPolicyTest.kt",
+              "app/src/test/java/com/multify/traderpro/engine/FixedAccountResearchRecoveryPolicyTest.kt",
+              "app/src/test/java/com/multify/traderpro/engine/FixedDiscoveryDisplayPolicyTest.kt",
+              "docs/V904_INDEPENDENT_ALPHA_BETA_RECOVERY_VALIDATION.md",
               ".github/workflows/multify-v9-master.yml"}
           assert changed<=allowed, ("UNAUTHORIZED_LIVE_EDIT",changed-allowed)
           print("PASS original v19 live selection, original v16 shadow, original service trading code, -2% GTT, bounded sweep scope")
@@ -165,5 +190,5 @@ jobs:
       - name: Upload signed-by-CI TEST artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Multify-v9.0.3-Fixed-60pct-Quota-TEST-debug
+          name: Multify-v9.0.4-Independent-Alpha-Beta-Recovery-TEST-debug
           path: app/build/outputs/apk/debug/*.apk

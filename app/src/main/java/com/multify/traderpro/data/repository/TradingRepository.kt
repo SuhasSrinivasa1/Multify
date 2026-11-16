@@ -293,6 +293,9 @@ class TradingRepository @Inject constructor(
 
     // The scheduling timestamp remains frozen; this flag only prevents auto-BUY on incomplete scans.
     @Volatile private var fixedScanDeferredBroker = false
+    // A read-only Beta history/quote budget denial during Alpha cooldown
+    // must never be mistaken for a complete evaluated production scan.
+    @Volatile private var fixedReadOnlyTransportIncomplete = false
     // In-memory historical OHLCV reuse across Fixed cycles; live latest bars are ALWAYS refetched.
     private val fixedHistoricalWindowStore = FixedHistoricalWindowStore()
     private val fixedPreviouslyDiscoveredPrimaryAt = ConcurrentHashMap<String, Pair<String, Long>>()
@@ -1727,14 +1730,22 @@ class TradingRepository @Inject constructor(
         }
         val fixedDiscoveryHealth = fixedMarketDiscoveryStateStore.loadHealth(today)
         val fixedDiscoveryAge = fixedDiscoveryHealth?.let { nowMs - it.updatedAtMs } ?: Long.MAX_VALUE
-        val fixedDiscoveryStatus = when {
-            fixedDiscoveryHealth == null -> "WAITING"
-            fixedDiscoveryHealth.abortedForNetwork -> "DEGRADED"
-            !fixedDiscoveryHealth.baselineReady -> "WARMING"
-            fixedDiscoveryHealth.coverageRatio < FIXED_V741_MIN_DISCOVERY_COVERAGE_RATIO -> "DEGRADED"
-            fixedDiscoveryAge > DISCOVERY_HEALTH_STALE_MS -> "STALE"
-            else -> "HEALTHY"
-        }
+        val fixedAlphaRecovery = recoveryGate.status(nowMs)
+        val alphaReadCooldown = fixedAlphaRecovery.reconnectRequired ||
+            (fixedAlphaRecovery.categoryCooldownUntilMs[GrowwApiUsageLedger.Category.LIVE_DATA] ?: 0L) > nowMs ||
+            (fixedAlphaRecovery.categoryCooldownUntilMs[GrowwApiUsageLedger.Category.HISTORICAL] ?: 0L) > nowMs
+        val betaReadOnlyReady = betaAvailableForFixedReadOnlyResearch()
+        val fixedDiscoveryStatus = com.multify.traderpro.engine.FixedDiscoveryDisplayPolicy.label(
+            hasScan = fixedDiscoveryHealth != null,
+            lastSweepAborted = fixedDiscoveryHealth?.abortedForNetwork ?: false,
+            lastSweepCoverage = fixedDiscoveryHealth?.coverageRatio ?: 0.0,
+            baselineReady = fixedDiscoveryHealth?.baselineReady ?: false,
+            lastScanAgeMs = fixedDiscoveryAge,
+            staleThresholdMs = DISCOVERY_HEALTH_STALE_MS,
+            minCoverage = FIXED_V741_MIN_DISCOVERY_COVERAGE_RATIO,
+            alphaReadCooldown = alphaReadCooldown,
+            betaReadOnlyReady = betaReadOnlyReady
+        )
 
         return DashboardDto(
             armed = settings.armEffective,
@@ -1899,14 +1910,22 @@ class TradingRepository @Inject constructor(
             }
             val fixedDiscoveryHealth = fixedMarketDiscoveryStateStore.loadHealth(today)
             val fixedDiscoveryAge = fixedDiscoveryHealth?.let { nowMs - it.updatedAtMs } ?: Long.MAX_VALUE
-            val fixedDiscoveryStatus = when {
-                fixedDiscoveryHealth == null -> "WAITING"
-                fixedDiscoveryHealth.abortedForNetwork -> "DEGRADED"
-                !fixedDiscoveryHealth.baselineReady -> "WARMING"
-                fixedDiscoveryHealth.coverageRatio < FIXED_V741_MIN_DISCOVERY_COVERAGE_RATIO -> "DEGRADED"
-                fixedDiscoveryAge > DISCOVERY_HEALTH_STALE_MS -> "STALE"
-                else -> "HEALTHY"
-            }
+            val fixedAlphaRecovery = recoveryGate.status(nowMs)
+            val alphaReadCooldown = fixedAlphaRecovery.reconnectRequired ||
+                (fixedAlphaRecovery.categoryCooldownUntilMs[GrowwApiUsageLedger.Category.LIVE_DATA] ?: 0L) > nowMs ||
+                (fixedAlphaRecovery.categoryCooldownUntilMs[GrowwApiUsageLedger.Category.HISTORICAL] ?: 0L) > nowMs
+            val betaReadOnlyReady = betaAvailableForFixedReadOnlyResearch()
+            val fixedDiscoveryStatus = com.multify.traderpro.engine.FixedDiscoveryDisplayPolicy.label(
+                hasScan = fixedDiscoveryHealth != null,
+                lastSweepAborted = fixedDiscoveryHealth?.abortedForNetwork ?: false,
+                lastSweepCoverage = fixedDiscoveryHealth?.coverageRatio ?: 0.0,
+                baselineReady = fixedDiscoveryHealth?.baselineReady ?: false,
+                lastScanAgeMs = fixedDiscoveryAge,
+                staleThresholdMs = DISCOVERY_HEALTH_STALE_MS,
+                minCoverage = FIXED_V741_MIN_DISCOVERY_COVERAGE_RATIO,
+                alphaReadCooldown = alphaReadCooldown,
+                betaReadOnlyReady = betaReadOnlyReady
+            )
             DashboardDto(
                 armed = settings.armEffective, halted = settings.safetyHalt, marketSession = marketSession(),
                 asOf = ZonedDateTime.now(INDIA).format(DateTimeFormatter.ISO_OFFSET_DATE_TIME),
@@ -2293,12 +2312,22 @@ class TradingRepository @Inject constructor(
         return id
     }
 
-    // Only broker availability preflight. Never delays the configured 90s Fixed cadence
-    // or bypasses trading controls. A deferred attempt is NOT a completed Fixed scan.
-    private fun marketDataAvailableForFixed(): Boolean = runCatching {
+    // Transport-only availability: Alpha and read-only Beta are independent.
+    // A cooldown on Alpha does not prevent Beta research, but ALL real BUY/SELL/
+    // protective GTT execution still goes through Alpha's unchanged broker gate.
+    private fun alphaResearchAvailableForFixed(): Boolean = runCatching {
         recoveryGate.checkRequestAllowed(GrowwApiUsageLedger.Category.LIVE_DATA)
         recoveryGate.checkRequestAllowed(GrowwApiUsageLedger.Category.HISTORICAL)
     }.isSuccess
+
+    suspend fun betaAvailableForFixedReadOnlyResearch(): Boolean =
+        fixedBetaMarketTokenOrNull() != null &&
+            betaResearchGate.healthyForFixed(BetaResearchGate.Type.LIVE) &&
+            betaResearchGate.healthyForFixed(BetaResearchGate.Type.HISTORICAL)
+
+    private suspend fun marketDataAvailableForFixed(): Boolean =
+        !fixedReadOnlyTransportIncomplete &&
+            (alphaResearchAvailableForFixed() || betaAvailableForFixedReadOnlyResearch())
 
     private fun fixedBrokerCooldownAuditDetails(): Map<String, Any> {
         val state = recoveryGate.status()
@@ -2322,7 +2351,8 @@ class TradingRepository @Inject constructor(
             "last_completed_fixed_scan_age_ms" to (if (lastFixedScanAtMs > 0L) (now - lastFixedScanAtMs).coerceAtLeast(0L) else -1L),
             "stale_snapshot_never_used_as_fresh_live_data" to true,
             "retry_after_broker_cooldown_not_an_extra_fixed_scan" to true,
-            "reconnect_required" to state.reconnectRequired
+            "reconnect_required" to state.reconnectRequired,
+            "read_only_recovery_transport_incomplete" to fixedReadOnlyTransportIncomplete
         )
     }
 
@@ -2332,6 +2362,7 @@ class TradingRepository @Inject constructor(
             val cycleStartedAtMs = System.currentTimeMillis()
             try {
                 fixedScanDeferredBroker = false
+                fixedReadOnlyTransportIncomplete = false
                 if (!marketDataAvailableForFixed()) {
                     fixedScanDeferredBroker = true
                     auditLogger.logAsync("FIXED_PERFORMANCE", "SCAN_DEFERRED_BROKER", mapOf(
@@ -4102,8 +4133,25 @@ class TradingRepository @Inject constructor(
     }
 
     private suspend fun fixedForecastEvaluation(symbol: String, token: String): FixedStrategyEvaluation {
-        val beta = fixedBetaMarketTokenOrNull()?.takeIf {
-            com.multify.traderpro.engine.FixedDualAccountPolicy.betaDetailedEvaluation(symbol, true)
+        val alphaReady = alphaResearchAvailableForFixed()
+        val betaToken = fixedBetaMarketTokenOrNull()
+        val betaLiveReady = betaToken != null &&
+            betaResearchGate.healthyForFixed(BetaResearchGate.Type.LIVE)
+        val betaHistoricalReady = betaToken != null &&
+            betaResearchGate.healthyForFixed(BetaResearchGate.Type.HISTORICAL)
+        val deterministicBeta = com.multify.traderpro.engine.FixedDualAccountPolicy
+            .betaDetailedEvaluation(symbol, betaToken != null)
+        val beta = betaToken?.takeIf {
+            com.multify.traderpro.engine.FixedAccountResearchRecoveryPolicy.betaForDetail(
+                deterministicBeta, alphaReady, alphaReady, betaLiveReady, betaHistoricalReady
+            )
+        }
+        if (!alphaReady && beta != null) {
+            auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "BETA_DETAIL_ALPHA_COOLDOWN_TAKEOVER", mapOf(
+                "symbol" to symbol, "beta_historical_quota_preserved" to true,
+                "original_stock_rank_and_score_unchanged" to true,
+                "alpha_execution_not_attempted" to true
+            ))
         }
         if (beta != null) {
             try {
@@ -4111,6 +4159,20 @@ class TradingRepository @Inject constructor(
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failed: Throwable) {
+                // During an Alpha outage a Beta historical rate-budget error
+                // makes this entire detailed pass incomplete. The ORIGINAL
+                // frozen Fixed loop sees the preflight fail at its next batch
+                // boundary and refuses publication, without touching its rules.
+                if (!alphaReady && (failed is IOException ||
+                        (failed is HttpException && failed.code() >= 429))) {
+                    fixedReadOnlyTransportIncomplete = true
+                    auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "BETA_ONLY_DETAIL_BUDGET_DEFERRED", mapOf(
+                        "symbol" to symbol,
+                        "beta_failure" to (failed.message ?: failed.javaClass.simpleName).take(140),
+                        "partial_publication_blocked" to true,
+                        "original_fixed_publication_unchanged" to true
+                    ))
+                }
                 // A correctly enforced Fixed price-band veto is not a Beta transport outage.
                 // Returning to Alpha here repeats a known-invalid quote and wastes requests.
                 if (!com.multify.traderpro.engine.FixedBetaDetailFallbackPolicy.shouldRetryOnAlpha(failed)) {
@@ -4131,7 +4193,43 @@ class TradingRepository @Inject constructor(
                 ))
             }
         }
-        return fixedForecastEvaluationUsingAccount(symbol, token, useBeta = false)
+        // Never send the same Fixed evaluation to an Alpha account that
+        // is in a known broker cooldown. Beta may be constrained by its
+        // separate historical quota; an incomplete evaluation fails closed.
+        if (!alphaReady) {
+            fixedReadOnlyTransportIncomplete = true
+            throw IOException("FIXED_ALPHA_RESEARCH_COOLDOWN_BETA_UNAVAILABLE")
+        }
+        try {
+            return fixedForecastEvaluationUsingAccount(symbol, token, useBeta = false)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failed: Throwable) {
+            // The Alpha 429 may arrive after preflight. One independent Beta
+            // recovery is allowed for a broker/transport failure only.
+            // Price-band, candle validity and score rules never fall back.
+            val alphaStillReady = alphaResearchAvailableForFixed()
+            val transient = failed is IOException ||
+                (failed is HttpException && failed.code() >= 429)
+            val rescueBeta = if (!alphaStillReady && transient &&
+                betaAvailableForFixedReadOnlyResearch()) fixedBetaMarketTokenOrNull() else null
+            if (rescueBeta != null) {
+                auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "ALPHA_DETAIL_429_BETA_RETRY", mapOf(
+                    "symbol" to symbol, "beta_read_only" to true,
+                    "max_cross_account_retries" to 1, "fixed_model_unchanged" to true
+                ))
+                return try {
+                    fixedForecastEvaluationUsingAccount(symbol, rescueBeta, useBeta = true)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (betaFailure: Throwable) {
+                    fixedReadOnlyTransportIncomplete = true
+                    throw betaFailure
+                }
+            }
+            if (!alphaStillReady && transient) fixedReadOnlyTransportIncomplete = true
+            throw failed
+        }
     }
 
     private suspend fun fixedForecastEvaluationUsingAccount(
@@ -4334,11 +4432,15 @@ class TradingRepository @Inject constructor(
         // lead time; no extra requests or change to accepted snapshot freshness.
         val betaLiveReadyForTiming = fixedBetaMarketTokenOrNull() != null &&
             betaResearchGate.healthyForFixed(BetaResearchGate.Type.LIVE)
+        val alphaLiveReadyForTiming = runCatching {
+            recoveryGate.checkRequestAllowed(GrowwApiUsageLedger.Category.LIVE_DATA)
+        }.isSuccess
         val expectedSweepMs = com.multify.traderpro.engine.FixedSweepPrefetchPolicy
-            .expectedSweepLeadMs(betaLiveReadyForTiming)
+            .expectedSweepLeadMs(betaLiveReadyForTiming, alphaLiveReadyForTiming)
         val startDelay = (dueAtMs - System.currentTimeMillis() - expectedSweepMs).coerceAtLeast(0L)
         auditLogger.logAsync("FIXED_PERFORMANCE", "NEXT_SWEEP_PREFETCH_TIMING", mapOf(
             "beta_healthy_at_schedule" to betaLiveReadyForTiming,
+            "alpha_live_ready_at_schedule" to alphaLiveReadyForTiming,
             "planned_lead_ms" to expectedSweepMs,
             "start_delay_ms" to startDelay,
             "extra_full_market_sweeps" to 0,
@@ -4513,6 +4615,9 @@ class TradingRepository @Inject constructor(
         val betaSuccess = AtomicInteger(0)
         val alphaSuccess = AtomicInteger(0)
         val alphaFallbackBatches = AtomicInteger(0)
+        val alphaBatchesRescuedOnBeta = AtomicInteger(0)
+        val betaOnlyDuringAlphaCooldown = AtomicInteger(0)
+        val alphaRecoveryExtraCalls = AtomicInteger(0)
         var missingFromBroker = 0
         var invalidBrokerPrices = 0
         val missingSample = mutableListOf<String>()
@@ -4528,36 +4633,70 @@ class TradingRepository @Inject constructor(
             ) { index, chunk ->
                 val betaAssigned = betaToken != null &&
                     com.multify.traderpro.engine.FixedDualAccountPolicy.betaDiscoveryBatch(index, true)
-                val useBeta = betaAssigned && !betaStopped.get() &&
+                // Re-check the ACTUAL category cooldown immediately before the
+                // network call. A 429 in another concurrent Alpha batch should
+                // redirect subsequent read-only batches to healthy Beta, not
+                // repeat an Alpha request that is guaranteed to be locally denied.
+                val alphaLiveReady = runCatching {
+                    recoveryGate.checkRequestAllowed(GrowwApiUsageLedger.Category.LIVE_DATA)
+                }.isSuccess
+                val betaLiveReady = betaToken != null && !betaStopped.get() &&
                     betaResearchGate.healthyForFixed(BetaResearchGate.Type.LIVE)
-                if (useBeta) {
-                    try {
-                        fixedBetaLtp(betaToken!!, chunk).also { betaSuccess.incrementAndGet() }
+                val useBeta = com.multify.traderpro.engine.FixedAccountResearchRecoveryPolicy
+                    .betaForDiscovery(betaAssigned, alphaLiveReady, betaLiveReady)
+
+                suspend fun betaRead(reason: String): Map<String, Double>? {
+                    if (betaToken == null || betaStopped.get()) return null
+                    return try {
+                        fixedBetaLtp(betaToken, chunk).also {
+                            betaSuccess.incrementAndGet()
+                            if (reason == "ALPHA_BATCH_FAILED") {
+                                alphaBatchesRescuedOnBeta.incrementAndGet()
+                                alphaRecoveryExtraCalls.incrementAndGet()
+                            }
+                            if (reason == "ALPHA_ALREADY_COOLING") {
+                                betaOnlyDuringAlphaCooldown.incrementAndGet()
+                            }
+                        }
                     } catch (cancelled: CancellationException) {
                         throw cancelled
                     } catch (failed: Throwable) {
-                        // Beta's independent 429 must NOT pause Alpha. Switch
-                        // only if Alpha is ready and has protected category headroom.
-                        // Never issue an unbounded immediate retry burst.
+                        // No spillover burst back to Alpha on a Beta failure.
                         betaStopped.set(true)
-                        // No Alpha spillover during a Beta cooldown: incomplete
-                        // market coverage is deferred rather than repaired with a burst.
                         auditLogger.logAsync("FIXED_DUAL_ACCOUNT",
-                            "BETA_DISCOVERY_COOLDOWN_NO_ALPHA_FALLBACK",
-                            mapOf("batch_index" to index,
+                            "BETA_RECOVERY_FAILED_NO_ALPHA_BURST", mapOf(
+                                "batch_index" to index, "reason" to reason,
                                 "beta_http_429" to ((failed as? HttpException)?.code() == 429),
                                 "beta_error" to failed.javaClass.simpleName,
-                                "beta_paused_for_rest_of_sweep" to true,
-                                "alpha_fallback_requests" to 0,
-                                "partial_coverage_must_not_publish" to true))
+                                "partial_coverage_must_not_publish" to true,
+                                "alpha_fallback_requests" to 0
+                            ))
                         null
                     }
-                } else {
-                    // Never move Beta-owned discovery traffic onto Alpha while Beta
-                    // is paused. Alpha-owned batches still proceed independently.
-                    if (betaAssigned) null
-                    else fetchFixedDiscoveryLtpBatch(token, chunk, index)
-                        ?.also { alphaSuccess.incrementAndGet() }
+                }
+                when {
+                    useBeta -> betaRead(if (betaAssigned) "NORMAL_BETA_SLOT" else "ALPHA_ALREADY_COOLING")
+                    betaAssigned -> null // Beta is unavailable; do not crowd Alpha.
+                    !alphaLiveReady -> null // Alpha is locally cooling; never retry it.
+                    else -> {
+                        val alphaData = fetchFixedDiscoveryLtpBatch(token, chunk, index)
+                        if (alphaData != null) {
+                            alphaSuccess.incrementAndGet()
+                            alphaData
+                        } else {
+                            // One Beta rescue after an Alpha batch fails, never
+                            // concurrent duplicate retrieval or an unbounded retry
+                            // loop. Beta's separate 6/s 180/min governor remains
+                            // authoritative, including during an Alpha 429.
+                            val betaReadyToRescue = betaToken != null && !betaStopped.get() &&
+                                betaResearchGate.healthyForFixed(BetaResearchGate.Type.LIVE)
+                            if (com.multify.traderpro.engine.FixedAccountResearchRecoveryPolicy
+                                    .rescueAlphaBatchOnBeta(false, betaReadyToRescue, betaStopped.get())
+                            ) {
+                                betaRead("ALPHA_BATCH_FAILED")
+                            } else null
+                        }
+                    }
                 }
             }
             batchWindowLatenciesMs.add(
@@ -4621,6 +4760,10 @@ class TradingRepository @Inject constructor(
             "alpha_success_batches" to alphaSuccess.get(),
             "beta_success_batches" to betaSuccess.get(),
             "alpha_fallback_batches" to alphaFallbackBatches.get(),
+            "alpha_batches_rescued_on_beta" to alphaBatchesRescuedOnBeta.get(),
+            "beta_only_batches_during_alpha_cooldown" to betaOnlyDuringAlphaCooldown.get(),
+            "beta_extra_calls_to_recover_failed_alpha_batches" to alphaRecoveryExtraCalls.get(),
+            "total_fixed_discovery_batch_slots_unchanged" to chunks.size,
             "broker_omitted_symbols" to missingFromBroker,
             "broker_invalid_ltp_values" to invalidBrokerPrices,
             "broker_omission_examples" to missingSample,

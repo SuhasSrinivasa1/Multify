@@ -992,24 +992,50 @@ private fun FixedScreen(
                     val accountActual = GrowwHttpTraceLedger.summary()
                     val actualAlpha = accountActual["ALPHA"]
                     val actualBeta = accountActual["BETA"]
-                    Text("ALPHA Live Data: ${alphaLive.usedLastMinute}/${alphaLive.appPerMinuteLimit} per minute · Fixed max 240/min · 60/min reserved for priority quotes",
+                    val alphaLiveActual =
+                        (((actualAlpha?.get("categories") as? Map<*, *>)?.get("LIVE_DATA")
+                            as? Map<*, *>)?.get("actual_http_60s") as? Number)?.toInt() ?: 0
+                    val betaLiveActual =
+                        (((actualBeta?.get("categories") as? Map<*, *>)?.get("LIVE_DATA")
+                            as? Map<*, *>)?.get("actual_http_60s") as? Number)?.toInt() ?: 0
+                    // These are ACTUAL dispatched HTTP requests, with rolling
+                    // windows recalculated as Compose refreshes; not stale cached
+                    // Beta governor counters, and not progress percentages.
+                    val alphaResearchMax = com.multify.traderpro.engine.GrowwApiBudgetPolicy
+                        .fixedLiveDataPerMinute(false)
+                    val protectedAlphaReserve = com.multify.traderpro.engine.GrowwApiBudgetPolicy
+                        .SELL_MONITOR_RESERVED_PER_MINUTE
+                    Text("ALPHA Live Data: $alphaLiveActual/${alphaLive.appPerMinuteLimit} HTTP/min · Fixed research max $alphaResearchMax/min · $protectedAlphaReserve/min reserved for protection",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text("BETA Live Data: ${betaLive.usedLastMinute}/${betaLive.endpointLimitPerMinute} per minute · adaptive gap ${betaLive.activeGapMs}ms" +
-                        if (betaLive.cooldownRemainingMs > 0)
-                            " · Beta retry in ${(betaLive.cooldownRemainingMs + 999) / 1000}s"
+                    Text("BETA Live Data: $betaLiveActual/${com.multify.traderpro.engine.FixedDualAccountPolicy.BETA_LIVE_PER_MINUTE} HTTP/min · research-only · adaptive gap ${betaLive.activeGapMs}ms" +
+                        if (betaLive.cooldownRemainingMs > 0L)
+                            " · local cooldown ${(betaLive.cooldownRemainingMs + 999) / 1000}s"
                         else if (betaLive.halfOpenProbeInFlight) " · recovery probe" else "",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text("Actual outgoing HTTP this minute: Alpha ${actualAlpha?.get("all_requests_60s") ?: "—"} · Beta ${actualBeta?.get("all_requests_60s") ?: "—"}",
+                    Text("Actual outgoing HTTP (all categories, rolling 60s): Alpha ${actualAlpha?.get("all_requests_60s") ?: 0} · Beta ${actualBeta?.get("all_requests_60s") ?: 0}",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Text(
-                        "${String.format(Locale.US, "%.1f%%", health.discoveryCoveragePct)} NSE coverage · baseline " +
-                            if (health.discoveryBaselineReady) "ready" else "warming",
+                        "Last NSE market sweep result: ${String.format(Locale.US, "%.1f%%", health.discoveryCoveragePct)} NSE coverage (minimum 85%) · ${health.discoveryBatchErrors} failed batches · " +
+                            if (health.discoveryBaselineReady) "baseline confirmed" else "baseline not yet confirmed",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                    Text(when (health.discovery) {
+                        "BETA_READ_ONLY_RECOVERY" ->
+                            "Alpha market data is cooling down; Beta read-only recovery is available. No Alpha orders/GTTs bypass their broker checks."
+                        "PAUSED_ALPHA_COOLDOWN" ->
+                            "Fixed research paused by Alpha cooldown; Beta is not available for full read-only recovery. The coverage figure is the last failed sweep, not warm-up progress."
+                        "DEGRADED" ->
+                            "Last sweep is incomplete. New official recommendations require verified market coverage and the original Fixed confirmation rules."
+                        "WARMING" ->
+                            "A full baseline was collected, but the original two-sweep confirmation is not complete yet."
+                        else ->
+                            "Coverage is the last market snapshot, not a scan-progress percentage."
+                    }, style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }
