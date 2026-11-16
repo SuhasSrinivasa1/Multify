@@ -42,7 +42,10 @@ interface GrowwApi {
         @Header("Authorization") authorization: String,
         @Query("exchange") exchange: String = "NSE",
         @Query("segment") segment: String = "CASH",
-        @Query("trading_symbol") tradingSymbol: String
+        @Query("trading_symbol") tradingSymbol: String,
+        // Internal-only priority. GrowwRateLimitInterceptor strips this header
+        // before wire dispatch; ordinary Fixed research keeps the 60% cap.
+        @Header("X-Multify-Request-Priority") trafficPriority: String? = null
     ): ApiEnvelope<QuotePayload>
 
     @GET("v1/live-data/ltp")
