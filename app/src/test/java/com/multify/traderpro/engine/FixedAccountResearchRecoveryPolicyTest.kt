@@ -28,6 +28,21 @@ class FixedAccountResearchRecoveryPolicyTest {
         assertEquals(0, assigned.count { p.betaForDiscovery(it, false, false) })
     }
 
+    @Test fun brokerCapsStillApplyWhenBetaRecoversAllFiftyThreeBatches() {
+        // More *work slots* on Beta cannot expand its independent request cap.
+        assertEquals(6, FixedDualAccountPolicy.BETA_LIVE_PER_SECOND)
+        assertEquals(180, FixedDualAccountPolicy.BETA_LIVE_PER_MINUTE)
+        // v9.0.3: 5 Alpha + 26 Beta successful batches, 22 Alpha failures.
+        // The 22 missing slots can be attempted on Beta once each.
+        val alphaSuccess = 5
+        val betaNormalSuccess = 26
+        val betaRescueSlots = 22
+        assertEquals(53, alphaSuccess + betaNormalSuccess + betaRescueSlots)
+        assertEquals(22, (0 until betaRescueSlots).count {
+            p.rescueAlphaBatchOnBeta(false, true, false)
+        })
+    }
+
     @Test fun rescueIsSingleAccountAwareAndDoesNotRetryBetaAfterFailure() {
         assertTrue(p.rescueAlphaBatchOnBeta(false, true, false))
         assertFalse(p.rescueAlphaBatchOnBeta(true, true, false))
