@@ -4432,11 +4432,15 @@ class TradingRepository @Inject constructor(
         // lead time; no extra requests or change to accepted snapshot freshness.
         val betaLiveReadyForTiming = fixedBetaMarketTokenOrNull() != null &&
             betaResearchGate.healthyForFixed(BetaResearchGate.Type.LIVE)
+        val alphaLiveReadyForTiming = runCatching {
+            recoveryGate.checkRequestAllowed(GrowwApiUsageLedger.Category.LIVE_DATA)
+        }.isSuccess
         val expectedSweepMs = com.multify.traderpro.engine.FixedSweepPrefetchPolicy
-            .expectedSweepLeadMs(betaLiveReadyForTiming)
+            .expectedSweepLeadMs(betaLiveReadyForTiming, alphaLiveReadyForTiming)
         val startDelay = (dueAtMs - System.currentTimeMillis() - expectedSweepMs).coerceAtLeast(0L)
         auditLogger.logAsync("FIXED_PERFORMANCE", "NEXT_SWEEP_PREFETCH_TIMING", mapOf(
             "beta_healthy_at_schedule" to betaLiveReadyForTiming,
+            "alpha_live_ready_at_schedule" to alphaLiveReadyForTiming,
             "planned_lead_ms" to expectedSweepMs,
             "start_delay_ms" to startDelay,
             "extra_full_market_sweeps" to 0,
