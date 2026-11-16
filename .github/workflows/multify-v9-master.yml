@@ -1,9 +1,9 @@
-name: Multify 9.0.1 Fixed candle recovery and Beta cooldown
+name: Multify 9.0.2 Frozen Fixed speed and Alpha Beta prefetch
 on:
   push:
-    branches: [v901-candle-data-and-beta-cooldown-20261116]
+    branches: [v902-fixed-speed-parity-prefetch-20261116]
   pull_request:
-    branches: [v9-master-validation-shadow-20261113]
+    branches: [v901-candle-data-and-beta-cooldown-20261116]
   workflow_dispatch:
 permissions:
   contents: read
@@ -34,6 +34,7 @@ jobs:
           python - <<'PY'
           from pathlib import Path
           import subprocess
+          import re
           ref19=["30d3ab4f474fc1ed4103da5e1247b0078f484eaf",
                  "af87c4126572c6aca9a8fadea940011a13bf0ab8"]
           ref16="1e167cf64b4931c0c4eb9cdfd5756c1bc252c450"
@@ -77,7 +78,16 @@ jobs:
           assert "v9MasterShadowCollector.offer(" in current
           assert "v9MasterShadowCollector.offer(" not in part(
               current,"suspend fun generateFixedForecasts(","private fun fixedSnapshotMultifyMfeAverage(")
-          assert Path(service).read_bytes()==subprocess.check_output(["git","show",f"{base28}:{service}"])
+          # All original Fixed worker/BUY/SELL/GTT code must be EXACT, allowing
+          # only the three precisely marked service-lifetime prefetch insertions.
+          service_now=Path(service).read_text()
+          assert service_now.count("import kotlinx.coroutines.flow.collect\\n")==1
+          service_now=service_now.replace("import kotlinx.coroutines.flow.collect\\n","",1)
+          for marker in ("FIELD","OBSERVER","DESTROY"):
+              expression=r"(?ms)^[ \\t]*// V902_PREFETCH_"+marker+r"_BEGIN\\n.*?^[ \\t]*// V902_PREFETCH_"+marker+r"_END\\n"
+              service_now,count=re.subn(expression,"",service_now)
+              assert count==1, ("MISSING_SERVICE_PREFETCH_BOUNDARY",marker)
+          assert service_now==old(base28,service), "TRADING_SERVICE_UNAUTHORIZED_EDIT"
           # Broker transport already had endpoint 1s/60s tracing; preserve it
           # BYTE-IDENTICALLY rather than reimplementing duplicate counters.
           for p in ("data/network/GrowwRateLimitInterceptor.kt",
@@ -94,8 +104,8 @@ jobs:
           assert "const val MAX_LOSS_PCT = 2.0" in Path(root+"engine/HardStopLossPolicy.kt").read_text()
           assert "const val HARD_STOP_LOSS_PCT = 2.0" in Path(root+"engine/ReleaseIntegrityManifest.kt").read_text()
           assert "const val CANONICAL_LEARNING_CALLS = 107" in Path(root+"engine/FixedFinalContract.kt").read_text()
-          assert 'versionCode = 9001' in Path('app/build.gradle.kts').read_text()
-          assert 'versionName = "9.0.1-candle-recovery-beta-sweep"' in Path("app/build.gradle.kts").read_text()
+          assert 'versionCode = 9002' in Path('app/build.gradle.kts').read_text()
+          assert 'versionName = "9.0.2-fixed-dual-account-speed-test"' in Path("app/build.gradle.kts").read_text()
           changed=set(subprocess.check_output(["git","diff","--name-only",base28,"HEAD"],text=True).splitlines())
           allowed={
               repo,"app/build.gradle.kts",
@@ -108,10 +118,14 @@ jobs:
               "docs/V9_MASTER_VALIDATION.md",
               "docs/V9_MASTER_100_QUESTION_VALIDATION.md",
               root+"engine/Fixed15mHistoryRepair.kt",
+              root+"engine/FixedSweepPrefetchPolicy.kt",
+              root+"engine/FixedEarlyPrefetchPolicy.kt",
+              service,
               "app/src/test/java/com/multify/traderpro/engine/Fixed15mHistoryRepairTest.kt",
+              "app/src/test/java/com/multify/traderpro/engine/FixedEarlyPrefetchPolicyTest.kt",
               ".github/workflows/multify-v9-master.yml"}
           assert changed<=allowed, ("UNAUTHORIZED_LIVE_EDIT",changed-allowed)
-          print("PASS 7.4.1 reference, v19 LIVE parity, exact v16 shadow, -2% GTT safety, scope")
+          print("PASS original v19 live selection, original v16 shadow, original service trading code, -2% GTT, bounded sweep scope")
           PY
       - name: Matched historical replay plus cumulative ZIP test
         run: |
@@ -122,5 +136,5 @@ jobs:
       - name: Upload signed-by-CI TEST artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Multify-v9.0.1-Verified-Candle-Recovery-TEST-debug
+          name: Multify-v9.0.2-Fixed-Dual-Account-Speed-TEST-debug
           path: app/build/outputs/apk/debug/*.apk
