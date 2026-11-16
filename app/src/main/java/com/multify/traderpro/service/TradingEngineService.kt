@@ -610,7 +610,22 @@ class TradingEngineService : Service() {
                             liveCooldownUntilMs,
                             nowMs
                         )
-                        if (readiness != FixedDataPipelinePolicy.Readiness.READY) {
+                        // V904_READONLY_BETA_GATE_BEGIN
+                        // An Alpha-only 429 cannot block a separately authenticated
+                        // Beta from READ-ONLY Fixed research. Execution checks, orders,
+                        // and broker-side protection remain on Alpha, unchanged.
+                        val betaResearchReady = repository.betaAvailableForFixedReadOnlyResearch()
+                        if (readiness != FixedDataPipelinePolicy.Readiness.READY && betaResearchReady) {
+                            auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "ALPHA_COOLDOWN_BETA_RESEARCH_CONTINUES", mapOf(
+                                "alpha_reason" to readiness.name,
+                                "alpha_live_cooldown_until_ms" to liveCooldownUntilMs,
+                                "alpha_historical_cooldown_until_ms" to historicalCooldownUntilMs,
+                                "beta_read_only" to true,
+                                "alpha_order_and_gtt_safety_unchanged" to true
+                            ))
+                        }
+                        if (readiness != FixedDataPipelinePolicy.Readiness.READY && !betaResearchReady) {
+                        // V904_READONLY_BETA_GATE_END
                             if (FixedDataPipelinePolicy.shouldAuditSuppression(
                                 previousFixedPause, readiness, lastFixedPauseAuditMs, nowMs
                             )) {
