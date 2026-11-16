@@ -4354,20 +4354,20 @@ class TradingRepository @Inject constructor(
             val (olderStart, olderEnd) =
                 com.multify.traderpro.engine.Fixed15mHistoryRepair.priorWindow(now)
             try {
-                val prior = if (useBeta) {
+                val prior = if (historicalUsesBeta) {
                     betaMarketRead(
-                        token, BetaResearchGate.Type.HISTORICAL,
+                        historyAccountToken, BetaResearchGate.Type.HISTORICAL,
                         alphaCall = { error("Beta prior-session request must stay Beta") },
                         betaCall = {
                             apiFactory.betaGroww.historicalCandles(
-                                bearer(token), growwSymbol = "NSE-$symbol", startTime = olderStart,
+                                bearer(historyAccountToken), growwSymbol = "NSE-$symbol", startTime = olderStart,
                                 endTime = olderEnd, candleInterval = "15minute"
                             ).requirePayload("Fixed Beta prior-session recovery $symbol")
                         }
                     )
                 } else withFixedHistoricalDataSlot {
                     apiFactory.groww.historicalCandles(
-                        bearer(token), growwSymbol = "NSE-$symbol", startTime = olderStart,
+                        bearer(historyAccountToken), growwSymbol = "NSE-$symbol", startTime = olderStart,
                         endTime = olderEnd, candleInterval = "15minute"
                     ).requirePayload("Fixed prior-session recovery $symbol")
                 }
@@ -4376,7 +4376,7 @@ class TradingRepository @Inject constructor(
                     historical, prior, System.currentTimeMillis())
                 auditLogger.logAsync("FIXED_DATA_PIPELINE", "SHORT_15M_RECOVERY", mapOf(
                     "symbol" to symbol,
-                    "account" to (if (useBeta) "BETA" else "ALPHA"),
+                    "account" to (if (historicalUsesBeta) "BETA" else "ALPHA"),
                     "current_rows" to historical.candles.size,
                     "prior_rows" to prior.candles.size,
                     "recovered_rows" to (merged?.candles?.size ?: 0),
@@ -4392,7 +4392,7 @@ class TradingRepository @Inject constructor(
             } catch (failed: Throwable) {
                 auditLogger.logAsync("FIXED_DATA_PIPELINE", "SHORT_15M_RECOVERY_FAILED", mapOf(
                     "symbol" to symbol,
-                    "account" to (if (useBeta) "BETA" else "ALPHA"),
+                    "account" to (if (historicalUsesBeta) "BETA" else "ALPHA"),
                     "current_rows" to historical.candles.size,
                     "failure_type" to failed.javaClass.simpleName,
                     "reason" to (failed.message ?: "unknown").take(120),
