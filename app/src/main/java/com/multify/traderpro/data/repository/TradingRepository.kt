@@ -2293,12 +2293,21 @@ class TradingRepository @Inject constructor(
         return id
     }
 
-    // Only broker availability preflight. Never delays the configured 90s Fixed cadence
-    // or bypasses trading controls. A deferred attempt is NOT a completed Fixed scan.
-    private fun marketDataAvailableForFixed(): Boolean = runCatching {
+    // Transport-only availability: Alpha and read-only Beta are independent.
+    // A cooldown on Alpha does not prevent Beta research, but ALL real BUY/SELL/
+    // protective GTT execution still goes through Alpha's unchanged broker gate.
+    private fun alphaResearchAvailableForFixed(): Boolean = runCatching {
         recoveryGate.checkRequestAllowed(GrowwApiUsageLedger.Category.LIVE_DATA)
         recoveryGate.checkRequestAllowed(GrowwApiUsageLedger.Category.HISTORICAL)
     }.isSuccess
+
+    suspend fun betaAvailableForFixedReadOnlyResearch(): Boolean =
+        fixedBetaMarketTokenOrNull() != null &&
+            betaResearchGate.healthyForFixed(BetaResearchGate.Type.LIVE) &&
+            betaResearchGate.healthyForFixed(BetaResearchGate.Type.HISTORICAL)
+
+    private suspend fun marketDataAvailableForFixed(): Boolean =
+        alphaResearchAvailableForFixed() || betaAvailableForFixedReadOnlyResearch()
 
     private fun fixedBrokerCooldownAuditDetails(): Map<String, Any> {
         val state = recoveryGate.status()
@@ -4102,8 +4111,25 @@ class TradingRepository @Inject constructor(
     }
 
     private suspend fun fixedForecastEvaluation(symbol: String, token: String): FixedStrategyEvaluation {
-        val beta = fixedBetaMarketTokenOrNull()?.takeIf {
-            com.multify.traderpro.engine.FixedDualAccountPolicy.betaDetailedEvaluation(symbol, true)
+        val alphaReady = alphaResearchAvailableForFixed()
+        val betaToken = fixedBetaMarketTokenOrNull()
+        val betaLiveReady = betaToken != null &&
+            betaResearchGate.healthyForFixed(BetaResearchGate.Type.LIVE)
+        val betaHistoricalReady = betaToken != null &&
+            betaResearchGate.healthyForFixed(BetaResearchGate.Type.HISTORICAL)
+        val deterministicBeta = com.multify.traderpro.engine.FixedDualAccountPolicy
+            .betaDetailedEvaluation(symbol, betaToken != null)
+        val beta = betaToken?.takeIf {
+            com.multify.traderpro.engine.FixedAccountResearchRecoveryPolicy.betaForDetail(
+                deterministicBeta, alphaReady, alphaReady, betaLiveReady, betaHistoricalReady
+            )
+        }
+        if (!alphaReady && beta != null) {
+            auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "BETA_DETAIL_ALPHA_COOLDOWN_TAKEOVER", mapOf(
+                "symbol" to symbol, "beta_historical_quota_preserved" to true,
+                "original_stock_rank_and_score_unchanged" to true,
+                "alpha_execution_not_attempted" to true
+            ))
         }
         if (beta != null) {
             try {
@@ -4131,6 +4157,10 @@ class TradingRepository @Inject constructor(
                 ))
             }
         }
+        // Never send the same Fixed evaluation to an Alpha account that
+        // is in a known broker cooldown. Beta may be constrained by its
+        // separate historical quota; an incomplete evaluation fails closed.
+        if (!alphaReady) throw IOException("FIXED_ALPHA_RESEARCH_COOLDOWN_BETA_UNAVAILABLE")
         return fixedForecastEvaluationUsingAccount(symbol, token, useBeta = false)
     }
 
