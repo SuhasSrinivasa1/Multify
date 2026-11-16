@@ -175,6 +175,7 @@ jobs:
               root+"engine/FixedEarlyPrefetchPolicy.kt",
               root+"engine/FixedSweepAdaptiveLeadPolicy.kt",
               root+"engine/AlphaReadPacingPolicy.kt",
+              root+"data/logging/FixedMarketPathTelemetry.kt",
               root+"engine/FixedAccountResearchRecoveryPolicy.kt",
               root+"engine/FixedDiscoveryDisplayPolicy.kt",
               root+"engine/FixedCategoryAccountRoutingPolicy.kt",
