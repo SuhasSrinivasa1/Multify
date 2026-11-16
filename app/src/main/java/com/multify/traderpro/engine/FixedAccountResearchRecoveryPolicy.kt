@@ -12,8 +12,10 @@ object FixedAccountResearchRecoveryPolicy {
         alphaLiveReady: Boolean, alphaHistoricalReady: Boolean,
         betaLiveReady: Boolean, betaHistoricalReady: Boolean
     ): Boolean =
-        (alphaLiveReady && alphaHistoricalReady) ||
-            (betaLiveReady && betaHistoricalReady)
+        FixedCategoryAccountRoutingPolicy.available(
+            alphaLiveReady, alphaHistoricalReady,
+            betaLiveReady, betaHistoricalReady
+        )
 
     fun betaForDiscovery(
         betaAssigned: Boolean, alphaLiveReady: Boolean, betaLiveReady: Boolean

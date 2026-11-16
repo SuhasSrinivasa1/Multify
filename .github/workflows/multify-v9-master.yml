@@ -1,9 +1,9 @@
-name: Multify v9.0.4 Frozen Fixed independent-account cooldown recovery
+name: Multify v9.0.5 Frozen Fixed independent LIVE HISTORICAL recovery
 on:
   push:
-    branches: [v904-fixed-dual-account-recovery-20261116]
+    branches: [v905-independent-quote-history-routing-20261116]
   pull_request:
-    branches: [v903-fixed-60pct-account-quotas-20261116]
+    branches: [v904-fixed-dual-account-recovery-20261116]
   workflow_dispatch:
 permissions:
   contents: read
@@ -110,8 +110,8 @@ jobs:
           assert "const val MAX_LOSS_PCT = 2.0" in Path(root+"engine/HardStopLossPolicy.kt").read_text()
           assert "const val HARD_STOP_LOSS_PCT = 2.0" in Path(root+"engine/ReleaseIntegrityManifest.kt").read_text()
           assert "const val CANONICAL_LEARNING_CALLS = 107" in Path(root+"engine/FixedFinalContract.kt").read_text()
-          assert 'versionCode = 9004' in Path('app/build.gradle.kts').read_text()
-          assert 'versionName = "9.0.4-fixed-independent-recovery-test"' in Path("app/build.gradle.kts").read_text()
+          assert 'versionCode = 9005' in Path('app/build.gradle.kts').read_text()
+          assert 'versionName = "9.0.5-fixed-split-data-routing-test"' in Path("app/build.gradle.kts").read_text()
           budgets=(Path(root+"engine/GrowwApiBudgetPolicy.kt").read_text())
           beta_policy=Path(root+"engine/FixedDualAccountPolicy.kt").read_text()
           beta_governor=Path(root+"data/network/BetaResearchGate.kt").read_text()
@@ -135,9 +135,19 @@ jobs:
           # Only transport helpers can change: full v19 scoring and v16 shadow remain locked.
           assert "alphaBatchesRescuedOnBeta" in current
           assert "fixedReadOnlyTransportIncomplete = true" in current
-          assert "ALPHA_DETAIL_429_BETA_RETRY" in current
-          assert "BETA_DETAIL_ALPHA_COOLDOWN_TAKEOVER" in current
-          assert "betaAvailableForFixedReadOnlyResearch()" in current
+          assert "ALPHA_QUOTE_429_BETA_QUOTE_ONLY" in current
+          assert "ALPHA_HISTORY_429_BETA_HISTORY_ONLY" in current
+          assert "SPLIT_LIVE_HISTORY_ROUTING" in current
+          assert "fixedReadOnlyCategoriesAvailable()" in current
+          assert "fixedReadOnlyTransportIncomplete = true" in current
+          route=Path(root+"engine/FixedCategoryAccountRoutingPolicy.kt").read_text()
+          assert "alphaHistoricalReady -> Account.ALPHA" in route
+          assert "(alphaLiveReady || betaLiveReady) && (alphaHistoricalReady || betaHistoricalReady)" in route
+          store=Path(root+"engine/FixedHistoricalWindowStore.kt").read_text()
+          assert "private const val MIN_BASE_ROWS = 5" in store
+          assert "oldTimes.count { it in newTimes } < 2" in store
+          assert "private const val MAX_REUSE_AGE_MS = 12L * 60_000L" in store
+          assert "historicalHasSpareFixedCapacity()" in Path(root+"data/network/BetaResearchGate.kt").read_text()
           assert "ALPHA_COOLDOWN_BETA_RESEARCH_CONTINUES" in Path(service).read_text()
           assert "const val BETA_ONLY_EXPECTED_SWEEP_MS = 76_000L" in Path(
               root+"engine/FixedSweepPrefetchPolicy.kt").read_text()
@@ -162,6 +172,8 @@ jobs:
               root+"engine/FixedEarlyPrefetchPolicy.kt",
               root+"engine/FixedAccountResearchRecoveryPolicy.kt",
               root+"engine/FixedDiscoveryDisplayPolicy.kt",
+              root+"engine/FixedCategoryAccountRoutingPolicy.kt",
+              root+"engine/FixedHistoricalWindowStore.kt",
               root+"ui/screens/TraderApp.kt",
               root+"engine/GrowwApiBudgetPolicy.kt",
               root+"engine/FixedDualAccountPolicy.kt",
@@ -176,7 +188,10 @@ jobs:
               "app/src/test/java/com/multify/traderpro/engine/FixedEarlyPrefetchPolicyTest.kt",
               "app/src/test/java/com/multify/traderpro/engine/FixedAccountResearchRecoveryPolicyTest.kt",
               "app/src/test/java/com/multify/traderpro/engine/FixedDiscoveryDisplayPolicyTest.kt",
+              "app/src/test/java/com/multify/traderpro/engine/FixedCategoryAccountRoutingPolicyTest.kt",
+              "app/src/test/java/com/multify/traderpro/engine/FixedHistoricalWindowStoreTest.kt",
               "docs/V904_INDEPENDENT_ALPHA_BETA_RECOVERY_VALIDATION.md",
+              "docs/V905_FIXED_SPLIT_CATEGORY_RECOVERY.md",
               ".github/workflows/multify-v9-master.yml"}
           assert changed<=allowed, ("UNAUTHORIZED_LIVE_EDIT",changed-allowed)
           print("PASS original v19 live selection, original v16 shadow, original service trading code, -2% GTT, bounded sweep scope")
@@ -190,5 +205,5 @@ jobs:
       - name: Upload signed-by-CI TEST artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Multify-v9.0.4-Independent-Alpha-Beta-Recovery-TEST-debug
+          name: Multify-v9.0.5-Fixed-Split-Account-Routing-TEST-debug
           path: app/build/outputs/apk/debug/*.apk

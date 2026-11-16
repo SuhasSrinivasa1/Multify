@@ -2315,19 +2315,35 @@ class TradingRepository @Inject constructor(
     // Transport-only availability: Alpha and read-only Beta are independent.
     // A cooldown on Alpha does not prevent Beta research, but ALL real BUY/SELL/
     // protective GTT execution still goes through Alpha's unchanged broker gate.
-    private fun alphaResearchAvailableForFixed(): Boolean = runCatching {
-        recoveryGate.checkRequestAllowed(GrowwApiUsageLedger.Category.LIVE_DATA)
-        recoveryGate.checkRequestAllowed(GrowwApiUsageLedger.Category.HISTORICAL)
-    }.isSuccess
+    private fun alphaCategoryReadyForFixed(category: GrowwApiUsageLedger.Category): Boolean =
+        runCatching { recoveryGate.checkRequestAllowed(category) }.isSuccess
+
+    private fun alphaResearchAvailableForFixed(): Boolean =
+        alphaCategoryReadyForFixed(GrowwApiUsageLedger.Category.LIVE_DATA) &&
+            alphaCategoryReadyForFixed(GrowwApiUsageLedger.Category.HISTORICAL)
 
     suspend fun betaAvailableForFixedReadOnlyResearch(): Boolean =
         fixedBetaMarketTokenOrNull() != null &&
             betaResearchGate.healthyForFixed(BetaResearchGate.Type.LIVE) &&
             betaResearchGate.healthyForFixed(BetaResearchGate.Type.HISTORICAL)
 
+    // Read-only preflight is composed by category. An Alpha LIVE 429 does
+    // not disable healthy Alpha HISTORICAL. Orders remain Alpha-only.
+    suspend fun fixedReadOnlyCategoriesAvailable(): Boolean {
+        val betaConnected = fixedBetaMarketTokenOrNull() != null
+        val betaLive = betaConnected &&
+            betaResearchGate.healthyForFixed(BetaResearchGate.Type.LIVE)
+        val betaHistory = betaConnected &&
+            betaResearchGate.healthyForFixed(BetaResearchGate.Type.HISTORICAL)
+        return com.multify.traderpro.engine.FixedCategoryAccountRoutingPolicy.available(
+            alphaCategoryReadyForFixed(GrowwApiUsageLedger.Category.LIVE_DATA),
+            alphaCategoryReadyForFixed(GrowwApiUsageLedger.Category.HISTORICAL),
+            betaLive, betaHistory
+        )
+    }
+
     private suspend fun marketDataAvailableForFixed(): Boolean =
-        !fixedReadOnlyTransportIncomplete &&
-            (alphaResearchAvailableForFixed() || betaAvailableForFixedReadOnlyResearch())
+        !fixedReadOnlyTransportIncomplete && fixedReadOnlyCategoriesAvailable()
 
     private fun fixedBrokerCooldownAuditDetails(): Map<String, Any> {
         val state = recoveryGate.status()
@@ -4133,185 +4149,213 @@ class TradingRepository @Inject constructor(
     }
 
     private suspend fun fixedForecastEvaluation(symbol: String, token: String): FixedStrategyEvaluation {
-        val alphaReady = alphaResearchAvailableForFixed()
+        // Account choice is TRANSPORT ONLY. A broker 429 in Alpha LIVE_DATA
+        // must NOT force healthy Alpha HISTORICAL traffic into Beta's 8/min pool.
+        val alphaLiveReady = runCatching {
+            recoveryGate.checkRequestAllowed(GrowwApiUsageLedger.Category.LIVE_DATA)
+        }.isSuccess
+        val alphaHistoricalReady = runCatching {
+            recoveryGate.checkRequestAllowed(GrowwApiUsageLedger.Category.HISTORICAL)
+        }.isSuccess
         val betaToken = fixedBetaMarketTokenOrNull()
         val betaLiveReady = betaToken != null &&
             betaResearchGate.healthyForFixed(BetaResearchGate.Type.LIVE)
         val betaHistoricalReady = betaToken != null &&
             betaResearchGate.healthyForFixed(BetaResearchGate.Type.HISTORICAL)
+        val betaHistoricalHeadroom = betaHistoricalReady &&
+            betaResearchGate.historicalHasSpareFixedCapacity()
         val deterministicBeta = com.multify.traderpro.engine.FixedDualAccountPolicy
             .betaDetailedEvaluation(symbol, betaToken != null)
-        val beta = betaToken?.takeIf {
-            com.multify.traderpro.engine.FixedAccountResearchRecoveryPolicy.betaForDetail(
-                deterministicBeta, alphaReady, alphaReady, betaLiveReady, betaHistoricalReady
-            )
+        val route = com.multify.traderpro.engine.FixedCategoryAccountRoutingPolicy.choose(
+            deterministicBeta, alphaLiveReady, alphaHistoricalReady,
+            betaLiveReady, betaHistoricalReady, betaHistoricalHeadroom
+        )
+        if (!route.isUsable) {
+            fixedReadOnlyTransportIncomplete = true
+            auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "DETAIL_CATEGORY_NOT_AVAILABLE", mapOf(
+                "symbol" to symbol,
+                "alpha_live_ready" to alphaLiveReady,
+                "alpha_historical_ready" to alphaHistoricalReady,
+                "beta_live_ready" to betaLiveReady,
+                "beta_historical_ready" to betaHistoricalReady,
+                "reason" to "MISSING_QUOTES_OR_15M_CANDLE_TRANSPORT",
+                "partial_publication_blocked" to true
+            ))
+            throw IOException("FIXED_READONLY_CATEGORY_UNAVAILABLE")
         }
-        if (!alphaReady && beta != null) {
-            auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "BETA_DETAIL_ALPHA_COOLDOWN_TAKEOVER", mapOf(
-                "symbol" to symbol, "beta_historical_quota_preserved" to true,
-                "original_stock_rank_and_score_unchanged" to true,
-                "alpha_execution_not_attempted" to true
+        val quoteToken = if (route.live.name == "BETA") betaToken!! else token
+        val historicalToken = if (route.historical.name == "BETA") betaToken!! else token
+        if (route.splitAcrossAccounts) {
+            auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "SPLIT_LIVE_HISTORY_ROUTING", mapOf(
+                "symbol" to symbol,
+                "live_account" to route.live.name,
+                "historical_account" to route.historical.name,
+                "alpha_live_ready" to alphaLiveReady,
+                "alpha_historical_ready" to alphaHistoricalReady,
+                "beta_historical_headroom" to betaHistoricalHeadroom,
+                "original_candidate_order_and_scoring_unchanged" to true
             ))
         }
-        if (beta != null) {
-            try {
-                return fixedForecastEvaluationUsingAccount(symbol, beta, useBeta = true)
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (failed: Throwable) {
-                // During an Alpha outage a Beta historical rate-budget error
-                // makes this entire detailed pass incomplete. The ORIGINAL
-                // frozen Fixed loop sees the preflight fail at its next batch
-                // boundary and refuses publication, without touching its rules.
-                if (!alphaReady && (failed is IOException ||
-                        (failed is HttpException && failed.code() >= 429))) {
-                    fixedReadOnlyTransportIncomplete = true
-                    auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "BETA_ONLY_DETAIL_BUDGET_DEFERRED", mapOf(
-                        "symbol" to symbol,
-                        "beta_failure" to (failed.message ?: failed.javaClass.simpleName).take(140),
-                        "partial_publication_blocked" to true,
-                        "original_fixed_publication_unchanged" to true
-                    ))
-                }
-                // A correctly enforced Fixed price-band veto is not a Beta transport outage.
-                // Returning to Alpha here repeats a known-invalid quote and wastes requests.
-                if (!com.multify.traderpro.engine.FixedBetaDetailFallbackPolicy.shouldRetryOnAlpha(failed)) {
-                    auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "BETA_DETAIL_NO_ALPHA_FALLBACK", mapOf(
-                        "symbol" to symbol, "reason" to (failed.message ?: failed.javaClass.simpleName).take(120),
-                        "alpha_fallback_attempted" to false,
-                        "account_cooldown_amplification_prevented" to true,
-                        "fixed_scoring_changed" to false
-                    ))
-                    throw failed
-                }
-                auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "BETA_DETAIL_FALLBACK_ALPHA", mapOf(
-                    "symbol" to symbol,
-                    "error" to failed.javaClass.simpleName,
-                    "reason" to (failed.message ?: "UNSPECIFIED").take(180),
-                    "fixed_scoring_changed" to false,
-                    "broker_execution_account" to "ALPHA"
-                ))
-            }
-        }
-        // Never send the same Fixed evaluation to an Alpha account that
-        // is in a known broker cooldown. Beta may be constrained by its
-        // separate historical quota; an incomplete evaluation fails closed.
-        if (!alphaReady) {
-            fixedReadOnlyTransportIncomplete = true
-            throw IOException("FIXED_ALPHA_RESEARCH_COOLDOWN_BETA_UNAVAILABLE")
-        }
         try {
-            return fixedForecastEvaluationUsingAccount(symbol, token, useBeta = false)
+            return fixedForecastEvaluationUsingAccount(
+                symbol = symbol,
+                token = quoteToken,
+                useBeta = route.live.name == "BETA",
+                historicalToken = historicalToken,
+                useBetaHistorical = route.historical.name == "BETA",
+                fallbackBetaToken = betaToken
+            )
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failed: Throwable) {
-            // The Alpha 429 may arrive after preflight. One independent Beta
-            // recovery is allowed for a broker/transport failure only.
-            // Price-band, candle validity and score rules never fall back.
-            val alphaStillReady = alphaResearchAvailableForFixed()
-            val transient = failed is IOException ||
-                (failed is HttpException && failed.code() >= 429)
-            val rescueBeta = if (!alphaStillReady && transient &&
-                betaAvailableForFixedReadOnlyResearch()) fixedBetaMarketTokenOrNull() else null
-            if (rescueBeta != null) {
-                auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "ALPHA_DETAIL_429_BETA_RETRY", mapOf(
-                    "symbol" to symbol, "beta_read_only" to true,
-                    "max_cross_account_retries" to 1, "fixed_model_unchanged" to true
+            // Transport failure after the category selection is never treated
+            // as a successfully evaluated stock. An incomplete infrastructure
+            // scan must not publish from an unavailable account.
+            if (failed is IOException ||
+                (failed is HttpException && (failed.code() == 429 || failed.code() >= 500))) {
+                fixedReadOnlyTransportIncomplete = true
+                auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "DETAIL_TRANSPORT_FAILED_CLOSED", mapOf(
+                    "symbol" to symbol,
+                    "live_account" to route.live.name,
+                    "historical_account" to route.historical.name,
+                    "failure_type" to failed.javaClass.simpleName,
+                    "partial_publication_blocked" to true
                 ))
-                return try {
-                    fixedForecastEvaluationUsingAccount(symbol, rescueBeta, useBeta = true)
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (betaFailure: Throwable) {
-                    fixedReadOnlyTransportIncomplete = true
-                    throw betaFailure
-                }
             }
-            if (!alphaStillReady && transient) fixedReadOnlyTransportIncomplete = true
             throw failed
         }
     }
 
     private suspend fun fixedForecastEvaluationUsingAccount(
-        symbol: String, token: String, useBeta: Boolean
+        symbol: String, token: String, useBeta: Boolean,
+        historicalToken: String, useBetaHistorical: Boolean,
+        fallbackBetaToken: String?
     ): FixedStrategyEvaluation {
         val now = ZonedDateTime.now(INDIA)
         val start = now.minusDays(4).toLocalDate().atTime(9, 15).format(HIST_FORMAT)
         val end = now.toLocalDateTime().format(HIST_FORMAT)
-        val quote = if (useBeta) {
-            betaMarketRead(
-                token, BetaResearchGate.Type.LIVE,
-                alphaCall = { error("Beta Fixed quote cannot use Alpha credentials") },
-                betaCall = {
-                    apiFactory.betaGroww.quote(bearer(token), tradingSymbol = symbol)
-                        .requirePayload("Fixed Beta quote $symbol")
-                }
-            )
-        } else withFixedLiveDataSlot {
-            apiFactory.groww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Fixed quote $symbol")
+        val quote = try {
+            if (useBeta) {
+                betaMarketRead(
+                    token, BetaResearchGate.Type.LIVE,
+                    alphaCall = { error("Beta Fixed quote cannot use Alpha credentials") },
+                    betaCall = {
+                        apiFactory.betaGroww.quote(bearer(token), tradingSymbol = symbol)
+                            .requirePayload("Fixed Beta quote $symbol")
+                    }
+                )
+            } else withFixedLiveDataSlot {
+                apiFactory.groww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Fixed quote $symbol")
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failed: Throwable) {
+            // If an Alpha 429 arrives after the route was calculated, retry
+            // only the *quote* on healthy Beta, at most once. No 15m refetch.
+            if (!useBeta && failed is HttpException && failed.code() == 429 &&
+                fallbackBetaToken != null &&
+                betaResearchGate.healthyForFixed(BetaResearchGate.Type.LIVE)) {
+                auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "ALPHA_QUOTE_429_BETA_QUOTE_ONLY", mapOf(
+                    "symbol" to symbol,
+                    "historical_account_preserved" to (if (useBetaHistorical) "BETA" else "ALPHA"),
+                    "max_cross_account_quote_retries" to 1,
+                    "fixed_score_and_candidate_unchanged" to true
+                ))
+                betaMarketRead(
+                    fallbackBetaToken, BetaResearchGate.Type.LIVE,
+                    alphaCall = { error("Beta quote recovery cannot use Alpha credentials") },
+                    betaCall = {
+                        apiFactory.betaGroww.quote(bearer(fallbackBetaToken), tradingSymbol = symbol)
+                            .requirePayload("Fixed Beta quote recovery $symbol")
+                    }
+                )
+            } else throw failed
         }
         require(RecommendationPriceBandPolicy.eligible(quote.lastPrice)) { "FIXED_PRICE_BAND_OUTSIDE" }
-        // Token-scope the RAM snapshot so a reconnect or account change cannot reuse candles.
-        val historyKey = sha256(token).take(12) + ":" + symbol
-        val incremental = fixedHistoricalWindowStore.request(historyKey, start, SystemClock.elapsedRealtime())
+        // The RAM history cache MUST be scoped to the account that actually
+        // supplied 15m candles, not to the separate live quote account.
+        var historyAccountToken = historicalToken
+        var historicalUsesBeta = useBetaHistorical
+        var historyKey = sha256(historyAccountToken).take(12) + ":" + symbol
+        var incremental = fixedHistoricalWindowStore.request(
+            historyKey, start, SystemClock.elapsedRealtime()
+        )
         if (incremental == null) {
-            val reason = fixedHistoricalWindowStore.ineligibilityReason(historyKey, start, SystemClock.elapsedRealtime())
-            // Sample at most one diagnostic every 15 seconds; do not slow the Fixed pipeline.
+            val reason = fixedHistoricalWindowStore.ineligibilityReason(
+                historyKey, start, SystemClock.elapsedRealtime()
+            )
             val nowElapsed = SystemClock.elapsedRealtime()
             val lastLogged = fixedReuseDiagnosticLastLoggedAtMs.get()
             if (nowElapsed - lastLogged >= 15_000L &&
                 fixedReuseDiagnosticLastLoggedAtMs.compareAndSet(lastLogged, nowElapsed)) {
                 auditLogger.logAsync("FIXED_PERFORMANCE", "HISTORICAL_REUSE_SKIPPED", mapOf(
-                    "symbol" to symbol, "reason" to reason
+                    "symbol" to symbol, "reason" to reason,
+                    "account" to (if (historicalUsesBeta) "BETA" else "ALPHA")
                 ))
             }
         }
-        val raw = if (useBeta) {
-            betaMarketRead(
-                token, BetaResearchGate.Type.HISTORICAL,
-                alphaCall = { error("Beta Fixed 15m history cannot use Alpha credentials") },
-                betaCall = {
-                    apiFactory.betaGroww.historicalCandles(
-                        bearer(token), growwSymbol = "NSE-$symbol", startTime = incremental?.startTime ?: start,
-                        endTime = end, candleInterval = "15minute"
-                    ).requirePayload("Fixed Beta 15m candles $symbol")
-                }
-            )
-        } else withFixedHistoricalDataSlot {
-            apiFactory.groww.historicalCandles(
-                bearer(token), growwSymbol = "NSE-$symbol", startTime = incremental?.startTime ?: start,
-                endTime = end, candleInterval = "15minute"
-            ).requirePayload("Fixed forecast candles $symbol")
+        suspend fun historicalRequest(requestStart: String, reason: String): HistoricalPayload =
+            if (historicalUsesBeta) {
+                betaMarketRead(
+                    historyAccountToken, BetaResearchGate.Type.HISTORICAL,
+                    alphaCall = { error("Beta Fixed 15m historical cannot use Alpha credentials") },
+                    betaCall = {
+                        apiFactory.betaGroww.historicalCandles(
+                            bearer(historyAccountToken), growwSymbol = "NSE-$symbol",
+                            startTime = requestStart, endTime = end, candleInterval = "15minute"
+                        ).requirePayload(reason)
+                    }
+                )
+            } else withFixedHistoricalDataSlot {
+                apiFactory.groww.historicalCandles(
+                    bearer(historyAccountToken), growwSymbol = "NSE-$symbol",
+                    startTime = requestStart, endTime = end, candleInterval = "15minute"
+                ).requirePayload(reason)
+            }
+
+        val raw = try {
+            historicalRequest(incremental?.startTime ?: start,
+                "Fixed 15m candles $symbol")
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failed: Throwable) {
+            // If the Alpha HISTORICAL category receives a real 429 mid-flight,
+            // retry *only* the candles once using Beta and a full broker
+            // window. Invalidate the Alpha-token delta and cache key: never
+            // stitch a Beta response into an Alpha-token-scoped snapshot.
+            if (!historicalUsesBeta && failed is HttpException && failed.code() == 429 &&
+                fallbackBetaToken != null &&
+                betaResearchGate.healthyForFixed(BetaResearchGate.Type.HISTORICAL)) {
+                historyAccountToken = fallbackBetaToken
+                historicalUsesBeta = true
+                historyKey = sha256(historyAccountToken).take(12) + ":" + symbol
+                incremental = null
+                auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "ALPHA_HISTORY_429_BETA_HISTORY_ONLY", mapOf(
+                    "symbol" to symbol,
+                    "live_quote_preserved" to true,
+                    "history_delta_from_alpha_discarded" to true,
+                    "max_cross_account_history_retries" to 1,
+                    "fixed_scoring_unchanged" to true
+                ))
+                historicalRequest(start, "Fixed Beta 15m history 429 recovery $symbol")
+            } else throw failed
         }
         val historical = if (incremental == null) {
             fixedHistoryFullFetches.incrementAndGet()
             raw
         } else {
-            val merged = fixedHistoricalWindowStore.stitch(historyKey, start, raw, SystemClock.elapsedRealtime())
+            val merged = fixedHistoricalWindowStore.stitch(
+                historyKey, start, raw, SystemClock.elapsedRealtime()
+            )
             if (merged != null) {
                 fixedHistoryDeltaFetches.incrementAndGet()
                 merged
             } else {
-                // No guessing or partially stale candles: return to authoritative full history.
+                // Never accept a non-overlapping delta: an authoritative full
+                // 15m broker request on the SAME historical account is required.
                 fixedHistoryStitchFallbacks.incrementAndGet()
                 fixedHistoryFullFetches.incrementAndGet()
-                if (useBeta) {
-                    betaMarketRead(
-                        token, BetaResearchGate.Type.HISTORICAL,
-                        alphaCall = { error("No Alpha borrowed for Beta candle fallback") },
-                        betaCall = {
-                            apiFactory.betaGroww.historicalCandles(
-                                bearer(token), growwSymbol = "NSE-$symbol",
-                                startTime = start, endTime = end, candleInterval = "15minute"
-                            ).requirePayload("Fixed Beta historical fallback $symbol")
-                        }
-                    )
-                } else withFixedHistoricalDataSlot {
-                    apiFactory.groww.historicalCandles(
-                        bearer(token), growwSymbol = "NSE-$symbol", startTime = start, endTime = end,
-                        candleInterval = "15minute"
-                    ).requirePayload("Fixed historical fallback $symbol")
-                }
+                historicalRequest(start, "Fixed full 15m fallback $symbol")
             }
         }
         // Live v9 diagnostics showed the broker sometimes returned just one
@@ -4326,20 +4370,20 @@ class TradingRepository @Inject constructor(
             val (olderStart, olderEnd) =
                 com.multify.traderpro.engine.Fixed15mHistoryRepair.priorWindow(now)
             try {
-                val prior = if (useBeta) {
+                val prior = if (historicalUsesBeta) {
                     betaMarketRead(
-                        token, BetaResearchGate.Type.HISTORICAL,
+                        historyAccountToken, BetaResearchGate.Type.HISTORICAL,
                         alphaCall = { error("Beta prior-session request must stay Beta") },
                         betaCall = {
                             apiFactory.betaGroww.historicalCandles(
-                                bearer(token), growwSymbol = "NSE-$symbol", startTime = olderStart,
+                                bearer(historyAccountToken), growwSymbol = "NSE-$symbol", startTime = olderStart,
                                 endTime = olderEnd, candleInterval = "15minute"
                             ).requirePayload("Fixed Beta prior-session recovery $symbol")
                         }
                     )
                 } else withFixedHistoricalDataSlot {
                     apiFactory.groww.historicalCandles(
-                        bearer(token), growwSymbol = "NSE-$symbol", startTime = olderStart,
+                        bearer(historyAccountToken), growwSymbol = "NSE-$symbol", startTime = olderStart,
                         endTime = olderEnd, candleInterval = "15minute"
                     ).requirePayload("Fixed prior-session recovery $symbol")
                 }
@@ -4348,7 +4392,7 @@ class TradingRepository @Inject constructor(
                     historical, prior, System.currentTimeMillis())
                 auditLogger.logAsync("FIXED_DATA_PIPELINE", "SHORT_15M_RECOVERY", mapOf(
                     "symbol" to symbol,
-                    "account" to (if (useBeta) "BETA" else "ALPHA"),
+                    "account" to (if (historicalUsesBeta) "BETA" else "ALPHA"),
                     "current_rows" to historical.candles.size,
                     "prior_rows" to prior.candles.size,
                     "recovered_rows" to (merged?.candles?.size ?: 0),
@@ -4364,7 +4408,7 @@ class TradingRepository @Inject constructor(
             } catch (failed: Throwable) {
                 auditLogger.logAsync("FIXED_DATA_PIPELINE", "SHORT_15M_RECOVERY_FAILED", mapOf(
                     "symbol" to symbol,
-                    "account" to (if (useBeta) "BETA" else "ALPHA"),
+                    "account" to (if (historicalUsesBeta) "BETA" else "ALPHA"),
                     "current_rows" to historical.candles.size,
                     "failure_type" to failed.javaClass.simpleName,
                     "reason" to (failed.message ?: "unknown").take(120),

@@ -167,6 +167,21 @@ class BetaResearchGate @Inject constructor() {
         }
     }
 
+    /**
+     * Non-reserving advisory headroom for the *optional* deterministic Beta
+     * historical share. Actual 1/s and 8/60s enforcement is still atomic inside
+     * readRateLimited(). Reserve one possible slot for Alpha-history failure.
+     * When Alpha historical is already unavailable, the router may use Beta
+     * irrespective of this advisory hint and must fail closed if capacity runs out.
+     */
+    suspend fun historicalHasSpareFixedCapacity(): Boolean = lock.withLock {
+        val w = windows.getValue(Type.HISTORICAL)
+        val now = SystemClock.elapsedRealtime()
+        while (w.minute.isNotEmpty() && w.minute.first() <= now - 60_000L) w.minute.removeFirst()
+        w.cooldownUntil <= now && !w.probeInFlight &&
+            !historicalInFlight.isLocked && w.minute.size < (histMinute - 1)
+    }
+
     /** Beta cooldown is account-local. Alpha trading and market-data are independent. */
     suspend fun healthyForFixed(type: Type): Boolean = lock.withLock {
         val w = windows.getValue(type)
