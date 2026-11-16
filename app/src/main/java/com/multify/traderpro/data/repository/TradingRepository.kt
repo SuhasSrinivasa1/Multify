@@ -1727,14 +1727,22 @@ class TradingRepository @Inject constructor(
         }
         val fixedDiscoveryHealth = fixedMarketDiscoveryStateStore.loadHealth(today)
         val fixedDiscoveryAge = fixedDiscoveryHealth?.let { nowMs - it.updatedAtMs } ?: Long.MAX_VALUE
-        val fixedDiscoveryStatus = when {
-            fixedDiscoveryHealth == null -> "WAITING"
-            fixedDiscoveryHealth.abortedForNetwork -> "DEGRADED"
-            !fixedDiscoveryHealth.baselineReady -> "WARMING"
-            fixedDiscoveryHealth.coverageRatio < FIXED_V741_MIN_DISCOVERY_COVERAGE_RATIO -> "DEGRADED"
-            fixedDiscoveryAge > DISCOVERY_HEALTH_STALE_MS -> "STALE"
-            else -> "HEALTHY"
-        }
+        val fixedAlphaRecovery = recoveryGate.status(nowMs)
+        val alphaReadCooldown = fixedAlphaRecovery.reconnectRequired ||
+            (fixedAlphaRecovery.categoryCooldownUntilMs[GrowwApiUsageLedger.Category.LIVE_DATA] ?: 0L) > nowMs ||
+            (fixedAlphaRecovery.categoryCooldownUntilMs[GrowwApiUsageLedger.Category.HISTORICAL] ?: 0L) > nowMs
+        val betaReadOnlyReady = betaAvailableForFixedReadOnlyResearch()
+        val fixedDiscoveryStatus = com.multify.traderpro.engine.FixedDiscoveryDisplayPolicy.label(
+            hasScan = fixedDiscoveryHealth != null,
+            lastSweepAborted = fixedDiscoveryHealth?.abortedForNetwork ?: false,
+            lastSweepCoverage = fixedDiscoveryHealth?.coverageRatio ?: 0.0,
+            baselineReady = fixedDiscoveryHealth?.baselineReady ?: false,
+            lastScanAgeMs = fixedDiscoveryAge,
+            staleThresholdMs = DISCOVERY_HEALTH_STALE_MS,
+            minCoverage = FIXED_V741_MIN_DISCOVERY_COVERAGE_RATIO,
+            alphaReadCooldown = alphaReadCooldown,
+            betaReadOnlyReady = betaReadOnlyReady
+        )
 
         return DashboardDto(
             armed = settings.armEffective,
@@ -1899,14 +1907,22 @@ class TradingRepository @Inject constructor(
             }
             val fixedDiscoveryHealth = fixedMarketDiscoveryStateStore.loadHealth(today)
             val fixedDiscoveryAge = fixedDiscoveryHealth?.let { nowMs - it.updatedAtMs } ?: Long.MAX_VALUE
-            val fixedDiscoveryStatus = when {
-                fixedDiscoveryHealth == null -> "WAITING"
-                fixedDiscoveryHealth.abortedForNetwork -> "DEGRADED"
-                !fixedDiscoveryHealth.baselineReady -> "WARMING"
-                fixedDiscoveryHealth.coverageRatio < FIXED_V741_MIN_DISCOVERY_COVERAGE_RATIO -> "DEGRADED"
-                fixedDiscoveryAge > DISCOVERY_HEALTH_STALE_MS -> "STALE"
-                else -> "HEALTHY"
-            }
+            val fixedAlphaRecovery = recoveryGate.status(nowMs)
+            val alphaReadCooldown = fixedAlphaRecovery.reconnectRequired ||
+                (fixedAlphaRecovery.categoryCooldownUntilMs[GrowwApiUsageLedger.Category.LIVE_DATA] ?: 0L) > nowMs ||
+                (fixedAlphaRecovery.categoryCooldownUntilMs[GrowwApiUsageLedger.Category.HISTORICAL] ?: 0L) > nowMs
+            val betaReadOnlyReady = betaAvailableForFixedReadOnlyResearch()
+            val fixedDiscoveryStatus = com.multify.traderpro.engine.FixedDiscoveryDisplayPolicy.label(
+                hasScan = fixedDiscoveryHealth != null,
+                lastSweepAborted = fixedDiscoveryHealth?.abortedForNetwork ?: false,
+                lastSweepCoverage = fixedDiscoveryHealth?.coverageRatio ?: 0.0,
+                baselineReady = fixedDiscoveryHealth?.baselineReady ?: false,
+                lastScanAgeMs = fixedDiscoveryAge,
+                staleThresholdMs = DISCOVERY_HEALTH_STALE_MS,
+                minCoverage = FIXED_V741_MIN_DISCOVERY_COVERAGE_RATIO,
+                alphaReadCooldown = alphaReadCooldown,
+                betaReadOnlyReady = betaReadOnlyReady
+            )
             DashboardDto(
                 armed = settings.armEffective, halted = settings.safetyHalt, marketSession = marketSession(),
                 asOf = ZonedDateTime.now(INDIA).format(DateTimeFormatter.ISO_OFFSET_DATE_TIME),
