@@ -67,6 +67,6 @@ internal object Fixed15mHistoryRepair {
         // No production Fixed evaluation is authorized before a valid *completed*
         // current-session 15m candle exists.
         if (rows.size < 5 || rows.keys.none { it >= sessionOpen }) return null
-        return current.copy(candles = rows.values.takeLast(160))
+        return current.copy(candles = rows.values.toList().takeLast(160))
     }
 }
