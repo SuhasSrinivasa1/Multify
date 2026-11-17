@@ -7,7 +7,7 @@ class FixedAutoBuyPublicationEvidencePolicyTest {
     private val p = FixedAutoBuyPublicationEvidencePolicy
     private val t = 1_800_000_000_000L
     private fun evidence(sourceDelay: Long, publicationDelay: Long) =
-        p.Evidence(1L, "SEJALLTD", t, t + sourceDelay, t + publicationDelay)
+        FixedAutoBuyPublicationEvidencePolicy.Evidence(1L, "SEJALLTD", t, t + sourceDelay, t + publicationDelay)
     private fun check(e: FixedAutoBuyPublicationEvidencePolicy.Evidence?, now: Long, activation: Long = t - 1L) =
         p.decide(e, 1L, "SEJALLTD", t, activation, now)
 
