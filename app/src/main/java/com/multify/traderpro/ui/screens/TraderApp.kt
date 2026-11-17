@@ -1299,6 +1299,7 @@ private fun SettingsScreen(
     val lastParsedAt = listenerPrefs.getLong("last_univest_parsed_at_ms", 0L)
     val lastParsedSymbol = listenerPrefs.getString("last_univest_parsed_symbol", "").orEmpty()
     val lastParsedStatus = listenerPrefs.getString("last_univest_parse_status", "NOT_CAPTURED").orEmpty()
+    val lastUnivestOrderStatus = listenerPrefs.getString("last_univest_order_status", "NO_ENTRY_ATTEMPT").orEmpty()
     fun captureTime(ms: Long): String = if (ms <= 0L) "Never"
         else SimpleDateFormat("dd MMM HH:mm:ss", Locale.US).format(Date(ms))
     val notificationAccess = notificationAccessEnabled(context)
@@ -1517,6 +1518,7 @@ private fun SettingsScreen(
                     KeyValueRow("Univest parse result",
                         if (lastParsedSymbol.isBlank()) lastParsedStatus
                         else "$lastParsedSymbol · $lastParsedStatus")
+                    KeyValueRow("Univest Alpha entry", lastUnivestOrderStatus)
                     Text(
                         "Univest buys require a fresh official notification and Fixed Auto Buy ON. SELL remains managed only by the common -2% hard stop and trailing GTT. A running engine does not prove Android notification access is connected.",
                         style = MaterialTheme.typography.bodySmall,
