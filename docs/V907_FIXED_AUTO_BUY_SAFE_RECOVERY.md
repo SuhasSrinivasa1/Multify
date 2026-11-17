@@ -20,12 +20,16 @@ cooldown exceeds the original five-minute maximum recommendation age.
    does not guarantee no 429 and does not alter the 53-slot universe,
    coverage requirement, per-account governors, or response fail-closed behavior.
    With Fixed Auto Buy OFF, original deterministic batch split remains exact.
-2. `FixedAutoBuyCooldownQueue`: bounded 48-entry *in-memory intent*
+2. Spread a deterministic subset of detailed read-only research quotes to
+   healthy Beta while Auto Buy is ON, reducing competition with the mandatory
+   fresh Alpha execution quote. Alpha/Beta limits and original historical
+   account selection remain independent; no BUY quote may come from Beta.
+3. `FixedAutoBuyCooldownQueue`: bounded 48-entry *in-memory intent*
    journal, never a broker order or a cached quote. Queue only post-activation
    recommendations with original 5-minute freshness. On cooldown, emit a
    one-shot recheck time only if expiry leaves at least 20 seconds for
    broker revalidation. Long 15-minute cooldowns never revive stale signals.
-3. Lifecycle-scoped foreground-service observer receives retry intent and,
+4. Lifecycle-scoped foreground-service observer receives retry intent and,
    after the time, calls the entire original `autoBuyFixedRecommendations`
    under its existing submission mutex. Any new order still requires
    authenticated Alpha, normal trading hours, Auto Buy ON, no safety halt,
@@ -33,13 +37,13 @@ cooldown exceeds the original five-minute maximum recommendation age.
    existing broker/app inventory proof, protection readiness, and original
    post-fill -2% hard-stop/GTT creation. No retries or orders are issued
    during a live broker cooldown.
-4. Explicit event-by-event recommendation ID, symbol, original expiry,
+5. Explicit event-by-event recommendation ID, symbol, original expiry,
    broker cooldown, and retry decision are emitted to audit. Already stale
    rows are filtered before any broker readiness call.
-5. When eligible Auto Buy candidates are blocked, a rate-limited status notification
+6. When eligible Auto Buy candidates are blocked, a rate-limited status notification
    displays the broker cooldown and explicitly states that expired signals will
    not be bought. The notification does not place orders or bypass limits.
-6. CI freezes v8.3.19 score/discovery/publication and v8.3.16 shadow;
+7. CI freezes v8.3.19 score/discovery/publication and v8.3.16 shadow;
    the original service logic is byte-identical after stripping exactly
    the marked V902 prefetch, V904 research gate, and V907 service-scope
    observer additions. Unit tests cover cooldown/retry safety and batch routing.
