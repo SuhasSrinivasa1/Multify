@@ -4244,11 +4244,24 @@ class TradingRepository @Inject constructor(
         // Alpha HISTORICAL into Beta's scarce 8/minute historical bucket.
         val alphaQuoteSlow = com.multify.traderpro.engine.AlphaReadPacingPolicy
             .preferHealthyBetaQuoteForFixedResearch()
+        val preferBetaToProtectAlphaExecution = com.multify.traderpro.engine
+            .FixedAutoBuyResearchQuoteRoutingPolicy.preferBetaQuote(
+                symbol, preferences.settings.first().fixedAutoBuyEnabled
+            )
         val route = com.multify.traderpro.engine.FixedCategoryAccountRoutingPolicy.choose(
             deterministicBeta, alphaLiveReady, alphaHistoricalReady,
             betaLiveReady, betaHistoricalReady, betaHistoricalHeadroom,
-            preferBetaLiveForQuote = alphaQuoteSlow && betaLiveReady
+            preferBetaLiveForQuote = (alphaQuoteSlow || preferBetaToProtectAlphaExecution) &&
+                betaLiveReady
         )
+        if (preferBetaToProtectAlphaExecution && betaLiveReady &&
+            route.live.name == "BETA" && !deterministicBeta) {
+            auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "FIXED_AUTO_BUY_ALPHA_QUOTE_HEADROOM", mapOf(
+                "symbol" to symbol, "historical_account" to route.historical.name,
+                "beta_read_only" to true, "alpha_execution_quote_reserved" to true,
+                "same_original_candidate_and_scoring" to true
+            ))
+        }
         if (alphaQuoteSlow && route.live.name == "BETA" && !deterministicBeta) {
             auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "ALPHA_QUOTE_PACE_BETA_LIVE", mapOf(
                 "symbol" to symbol, "historical_account" to route.historical.name,
