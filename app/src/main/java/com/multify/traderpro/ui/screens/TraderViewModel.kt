@@ -208,6 +208,22 @@ class TraderViewModel @Inject constructor(
         }
     }
 
+    fun setMaxTotalCapital(value: Long) {
+        viewModelScope.launch {
+            runCatching { repository.setMaxTotalCapital(value) }
+                .onSuccess { refresh(silent = true) }
+                .onFailure { remote.value = remote.value.copy(error = it.userMessage()) }
+        }
+    }
+
+    fun setMaxConcurrentHoldings(value: Int) {
+        viewModelScope.launch {
+            runCatching { repository.setMaxConcurrentHoldings(value) }
+                .onSuccess { refresh(silent = true) }
+                .onFailure { remote.value = remote.value.copy(error = it.userMessage()) }
+        }
+    }
+
     fun setHoldingBudget(value: Long) {
         viewModelScope.launch {
             runCatching { repository.setHoldingBudget(value) }

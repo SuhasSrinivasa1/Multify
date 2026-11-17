@@ -21,9 +21,9 @@ object ForecastUnivestLearningPolicy {
     const val MAX_BONUS = 0.045
     private val india = ZoneId.of("Asia/Kolkata")
     private val duration = Regex("(?i)\\b(?:duration|holding(?:\\s+period)?|time\\s*horizon)\\s*[:\\-]?\\s*(\\d+(?:\\.\\d+)?)\\s*(?:[-–—]|to)?\\s*(\\d+(?:\\.\\d+)?)?\\s*months?\\b")
-    private val stockLabel = Regex("(?im)^\\s*(?:stock(?:\\s+name)?|symbol|scrip|script|company|advisory\\s+pick)\\s*[:\\-]\\s*([A-Z][A-Z0-9&.\\-]{1,29})\\s*$")
-    private val compact = Regex("(?im)^\\s*(?:stock|symbol|advisory\\s+pick)\\s*[:\\-]\\s*([A-Z][A-Z0-9&.\\-]{1,29})\\b")
-    enum class Type { ENTRY, EXIT }
+    private val stockLabel = Regex("(?im)^\\s*(?:✅|✔️|☑️|🔹|•|[-*])?\\s*(?:stock(?:\\s+name)?|symbol|scrip|script|company|advisory\\s+pick)\\s*[:\\-]\\s*([A-Z][A-Z0-9&.\\-]{1,29})\\s*$")
+    private val compact = Regex("(?im)^\\s*(?:✅|✔️|☑️|🔹|•|[-*])?\\s*(?:stock|symbol|advisory\\s+pick)\\s*[:\\-]\\s*([A-Z][A-Z0-9&.\\-]{1,29})\\b")
+    enum class Type { ENTRY, REENTRY, EXIT }
     data class Signal(val type: Type, val symbol: String, val durationMonths: Double?)
 
     fun parse(sourcePackage: String, text: String): Signal? {
@@ -43,6 +43,9 @@ object ForecastUnivestLearningPolicy {
                 "sell recommendation", "exit now", "target achieved", "target hit",
                 "profit of the day", "square off", "squared off", "position closed",
                 "stock closed", "exit call").any { lower.contains(it) }) return Signal(Type.EXIT, symbol, null)
+        if (listOf("back in entry range", "back to entry range", "re-entered entry range",
+                "back in buy range", "entry range again").any { lower.contains(it) })
+            return Signal(Type.REENTRY, symbol, null)
         if (!listOf("new advisory pick", "new equity pick", "new stock pick", "equity pick",
                 "stock recommendation", "new recommendation", "equity recommendation",
                 "new investment idea", "new stock recommendation", "buy recommendation",

@@ -6,7 +6,8 @@ object BrokerBuyFailureMessagePolicy {
         val s = errorText.orEmpty().lowercase()
         return listOf("insufficient fund", "insufficient balance", "insufficient margin",
             "not enough fund", "not enough balance", "available balance",
-            "funds shortfall", "insufficient buying power", "margin shortfall")
+            "funds shortfall", "insufficient buying power", "margin shortfall", "margin exceeds", "rms:margin exceeds", "exceeds margin",
+            "not enough buying power", "available funds")
             .any { s.contains(it) }
     }
 }
