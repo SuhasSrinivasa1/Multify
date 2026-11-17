@@ -12608,8 +12608,22 @@ class TradingRepository @Inject constructor(
         require(unresolvedBrokerCncBuys.isEmpty()) {
             "BUY blocked: ${unresolvedBrokerCncBuys.size} pending broker CNC BUY order(s) require reconciliation"
         }
+        // Do not place an auto-buy after its user toggle/session or execution quote
+        // became invalid while Alpha cash and the broker order book were checked.
+        if (reference.startsWith("FXM") || reference.startsWith("UVH")) {
+            val switchAtDispatch = preferences.settings.first()
+            require(switchAtDispatch.fixedAutoBuyEnabled && !switchAtDispatch.safetyHalt &&
+                com.multify.traderpro.engine.NseEquitySessionCalendar
+                    .isFixedNewEntryWindow(ZonedDateTime.now(INDIA))) {
+                "BUY blocked: Fixed/Univest auto-buy disabled or session entry window ended during broker preflight"
+            }
+        }
+        require(System.currentTimeMillis() - freshAt in
+            0L..CircuitAwareBuyPolicy.MAX_QUOTE_AGE_MS) {
+            "BUY blocked: Alpha quote expired while verifying funds and pending broker orders"
+        }
         auditLogger.log("EXECUTION", "CIRCUIT_SAFE_LIMIT_BUY", mapOf(
-            "symbol" to symbol, "qty" to qty, "limit_price" to price.limitPrice,
+            "symbol" to symbol, "qty" to capitalVerdict.allowedQuantity, "limit_price" to price.limitPrice,
             "upper_circuit" to price.upperCircuit, "best_offer" to price.bestOffer,
             "last_price" to price.lastPrice, "quote_age_ms" to price.quoteAgeMs,
             "single_symbol_quote_refresh" to (freshAt != quoteReceivedAtMs),
