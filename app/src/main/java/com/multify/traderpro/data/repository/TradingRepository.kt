@@ -270,6 +270,15 @@ class TradingRepository @Inject constructor(
         MutableSharedFlow<FixedAutoBuyCooldownNotice>(extraBufferCapacity = 4)
     val fixedAutoBuyBlockedNotices: SharedFlow<FixedAutoBuyCooldownNotice> =
         _fixedAutoBuyBlockedNotices.asSharedFlow()
+    data class FixedAutoBuyTerminalSkipNotice(
+        val recommendationId: Long, val symbol: String, val reason: String
+    )
+    private val _fixedAutoBuyTerminalSkips =
+        MutableSharedFlow<FixedAutoBuyTerminalSkipNotice>(extraBufferCapacity = 8)
+    val fixedAutoBuyTerminalSkips: SharedFlow<FixedAutoBuyTerminalSkipNotice> =
+        _fixedAutoBuyTerminalSkips.asSharedFlow()
+    private val notifiedFixedAutoBuyTerminalSkips = ConcurrentHashMap.newKeySet<Long>()
+
 
     val settings: Flow<AppSettings> = preferences.settings
     val recentEvents: Flow<List<SignalEventEntity>> = dao.observeRecent(100)
@@ -1625,6 +1634,7 @@ class TradingRepository @Inject constructor(
         // OFF/ON cannot inherit any old pending intent or a previous session wake.
         fixedAutoBuyCooldownQueue.clear()
         fixedAutoBuyPublicationEvidence.clear() // Toggles must never revive prior events.
+        notifiedFixedAutoBuyTerminalSkips.clear()
         fixedAutoBuyWakeScheduledForMs = 0L
         fixedAutoBuyActivationForQueue =
             if (enabled) preferences.settings.first().fixedAutoBuyActivatedAtMs else 0L
@@ -7777,14 +7787,18 @@ class TradingRepository @Inject constructor(
                     row.symbol, row.generatedAtMs, settings.fixedAutoBuyActivatedAtMs,
                     System.currentTimeMillis()
                 )
-            if (!freshness.eligible) auditLogger.logAsync(
-                "FIXED_AUTO_BUY", "NO_FRESH_POST_ACTIVATION_BUYS", mapOf(
+            if (!freshness.eligible) {
+                auditLogger.logAsync("FIXED_AUTO_BUY", "NO_FRESH_POST_ACTIVATION_BUYS", mapOf(
                     "recommendation_id" to row.id, "symbol" to row.symbol,
                     "reason" to freshness.reason, "expiry_ms" to freshness.expiresAtMs,
                     "scan_start_is_not_publication_time" to true,
                     "cooldown_bypass" to false
-                )
-            )
+                ))
+                if (notifiedFixedAutoBuyTerminalSkips.add(row.id))
+                    _fixedAutoBuyTerminalSkips.tryEmit(FixedAutoBuyTerminalSkipNotice(
+                        row.id, row.symbol, freshness.reason
+                    ))
+            }
             freshness.eligible
         }
         fixedAutoBuyActivationForQueue = settings.fixedAutoBuyActivatedAtMs
