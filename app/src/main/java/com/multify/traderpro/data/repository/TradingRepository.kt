@@ -4305,8 +4305,8 @@ class TradingRepository @Inject constructor(
         val alphaQuoteSlow = com.multify.traderpro.engine.AlphaReadPacingPolicy
             .preferHealthyBetaQuoteForFixedResearch()
         val preferBetaToProtectAlphaExecution = com.multify.traderpro.engine
-            .FixedAutoBuyResearchQuoteRoutingPolicy.preferBetaQuote(
-                symbol, preferences.settings.first().fixedAutoBuyEnabled
+            .FixedBetaFirstResearchPolicy.preferBetaDetail(
+                symbol, betaLiveReady, BetaResearchGate.latestLiveStatus().activeGapMs
             )
         val route = com.multify.traderpro.engine.FixedCategoryAccountRoutingPolicy.choose(
             deterministicBeta, alphaLiveReady, alphaHistoricalReady,
@@ -4429,6 +4429,7 @@ class TradingRepository @Inject constructor(
                 )
             } else throw failed
         }
+        val fixedQuoteReceivedAtMs = System.currentTimeMillis()
         require(RecommendationPriceBandPolicy.eligible(quote.lastPrice)) { "FIXED_PRICE_BAND_OUTSIDE" }
         // The RAM history cache MUST be scoped to the account that actually
         // supplied 15m candles, not to the separate live quote account.
@@ -4588,6 +4589,8 @@ class TradingRepository @Inject constructor(
         // Diagnostic-only, O(1) non-blocking queue offer. All 40 factor calculations and disk
         // writes execute later on a low-priority worker; never delay Fixed recommendations.
         val referenceAt = System.currentTimeMillis()
+        fixedResearchQuoteReceipts[symbol.uppercase(Locale.US)] =
+            FixedResearchQuoteReceipt(lastFixedScanAtMs, fixedQuoteReceivedAtMs)
         fixedShadowReferences[symbol] = FixedShadowReference(quote, evaluation, referenceAt)
         fixedFactorTelemetry.tryRecord(symbol, evaluation, lastFixedScanAtMs, quote, referenceAt)
         v9MasterShadowCollector.offer(
