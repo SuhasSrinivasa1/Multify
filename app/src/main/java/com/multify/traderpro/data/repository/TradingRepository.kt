@@ -270,6 +270,15 @@ class TradingRepository @Inject constructor(
         MutableSharedFlow<FixedAutoBuyCooldownNotice>(extraBufferCapacity = 4)
     val fixedAutoBuyBlockedNotices: SharedFlow<FixedAutoBuyCooldownNotice> =
         _fixedAutoBuyBlockedNotices.asSharedFlow()
+    data class FixedAutoBuyTerminalSkipNotice(
+        val recommendationId: Long, val symbol: String, val reason: String
+    )
+    private val _fixedAutoBuyTerminalSkips =
+        MutableSharedFlow<FixedAutoBuyTerminalSkipNotice>(extraBufferCapacity = 8)
+    val fixedAutoBuyTerminalSkips: SharedFlow<FixedAutoBuyTerminalSkipNotice> =
+        _fixedAutoBuyTerminalSkips.asSharedFlow()
+    private val notifiedFixedAutoBuyTerminalSkips = ConcurrentHashMap.newKeySet<Long>()
+
 
     val settings: Flow<AppSettings> = preferences.settings
     val recentEvents: Flow<List<SignalEventEntity>> = dao.observeRecent(100)
@@ -365,6 +374,11 @@ class TradingRepository @Inject constructor(
     private val fixedAutoBuySubmissionMutex = Mutex()
     private val fixedAutoBuyCooldownQueue =
         com.multify.traderpro.engine.FixedAutoBuyCooldownQueue()
+    // Execution-only event timing; original Fixed generatedAtMs remains scan start.
+    private val fixedAutoBuyPublicationEvidence =
+        com.multify.traderpro.engine.FixedAutoBuyPublicationEvidenceLedger()
+    private data class FixedResearchQuoteReceipt(val scanStartMs: Long, val receivedAtMs: Long)
+    private val fixedResearchQuoteReceipts = ConcurrentHashMap<String, FixedResearchQuoteReceipt>()
     @Volatile private var fixedAutoBuyWakeScheduledForMs = 0L
     private val fixedAutoBuyLastBlockedNoticeAtMs = AtomicLong(0L)
     private val scanApiCycleMutex = Mutex()
@@ -1578,10 +1592,14 @@ class TradingRepository @Inject constructor(
     ) {
         val activatedAtMs = fixedAutoBuyActivationForQueue
         val plan = fixedAutoBuyCooldownQueue.afterCooldown(
-            rows.map {
-                com.multify.traderpro.engine.FixedAutoBuyCooldownQueue.Pending(
-                    it.id, it.symbol, it.generatedAtMs, activatedAtMs
-                )
+            rows.mapNotNull { row ->
+                fixedAutoBuyPublicationEvidence.find(row.id)?.let { evidence ->
+                    com.multify.traderpro.engine.FixedAutoBuyCooldownQueue.Pending(
+                        row.id, row.symbol, evidence.publishedAtMs, activatedAtMs,
+                        scanStartedAtMs = row.generatedAtMs,
+                        sourceQuoteAtMs = evidence.sourceQuoteReceivedAtMs
+                    )
+                }
             }, atMs, blocked.nextAllowedAtMs
         )
         val previousAlertAt = fixedAutoBuyLastBlockedNoticeAtMs.get()
@@ -1615,6 +1633,8 @@ class TradingRepository @Inject constructor(
         preferences.setFixedAutoBuy(enabled)
         // OFF/ON cannot inherit any old pending intent or a previous session wake.
         fixedAutoBuyCooldownQueue.clear()
+        fixedAutoBuyPublicationEvidence.clear() // Toggles must never revive prior events.
+        notifiedFixedAutoBuyTerminalSkips.clear()
         fixedAutoBuyWakeScheduledForMs = 0L
         fixedAutoBuyActivationForQueue =
             if (enabled) preferences.settings.first().fixedAutoBuyActivatedAtMs else 0L
@@ -2463,10 +2483,60 @@ class TradingRepository @Inject constructor(
                 }
                 val previousScanAtMs = lastFixedScanAtMs
                 val recommendationStartedAtMs = System.currentTimeMillis()
+                val priorIds = fixedRecommendationStore.recommendations(
+                    LocalDate.now(INDIA).toString()
+                ).mapTo(mutableSetOf()) { it.id }
                 generateFixedForecasts(false)
                 val recommendationCompletedAtMs = System.currentTimeMillis()
                 val scanned = lastFixedScanAtMs != previousScanAtMs && !fixedScanDeferredBroker
                 if (scanned) {
+                    // The byte-locked Fixed model still timestamps every event at
+                    // SCAN START. This separate, ephemeral clock records the first
+                    // actual publication and quote-source receipt for BUY safety.
+                    val freshPublished = fixedRecommendationStore.recommendations(
+                        LocalDate.now(INDIA).toString()
+                    ).filter { it.id !in priorIds }
+                    for (row in freshPublished) {
+                        val ref = fixedResearchQuoteReceipts[row.symbol.uppercase(Locale.US)]
+                        if (ref != null && ref.scanStartMs == row.generatedAtMs &&
+                            ref.receivedAtMs in row.generatedAtMs..recommendationCompletedAtMs) {
+                            fixedAutoBuyPublicationEvidence.record(
+                                com.multify.traderpro.engine
+                                    .FixedAutoBuyPublicationEvidencePolicy.Evidence(
+                                        row.id, row.symbol, row.generatedAtMs,
+                                        ref.receivedAtMs, recommendationCompletedAtMs
+                                    )
+                            )
+                            auditLogger.logAsync("FIXED_AUTO_BUY", "PUBLICATION_SOURCE_EVIDENCE_V908", mapOf(
+                                "recommendation_id" to row.id, "symbol" to row.symbol,
+                                "scan_started_at_ms" to row.generatedAtMs,
+                                "source_quote_received_at_ms" to ref.receivedAtMs,
+                                "publication_at_ms" to recommendationCompletedAtMs,
+                                "source_age_at_publication_ms" to
+                                    (recommendationCompletedAtMs - ref.receivedAtMs),
+                                "exchange_tick_timestamp_verified" to false,
+                                "source_and_publication_expiry" to "MIN_OF_TWO_5_MIN_CLOCKS",
+                                "fixed_selection_changed" to false
+                            ))
+                        } else auditLogger.logAsync(
+                            "FIXED_AUTO_BUY", "PUBLICATION_SOURCE_EVIDENCE_MISSING_V908",
+                            mapOf("recommendation_id" to row.id, "symbol" to row.symbol,
+                                "auto_buy_fails_closed" to true)
+                        )
+                    }
+                    val scanElapsedMs = (recommendationCompletedAtMs -
+                        recommendationStartedAtMs).coerceAtLeast(0L)
+                    auditLogger.logAsync("FIXED_PERFORMANCE", "SCAN_HEALTH_V908", mapOf(
+                        "elapsed_ms" to scanElapsedMs,
+                        "classification" to when {
+                            scanElapsedMs > 300_000L -> "EXTREME_DATA_FRESHNESS_AUDIT"
+                            scanElapsedMs > 120_000L -> "CRITICAL"
+                            scanElapsedMs > 90_000L -> "WARNING"
+                            else -> "NORMAL"
+                        },
+                        "performance_warning_never_filters_stocks_or_buy" to true,
+                        "new_recommendation_count" to freshPublished.size
+                    ))
                     // Evidence-based execution actionability is outside frozen Fixed scoring.
                     auditFixedActionabilityAfterScan()
                     // Outside FIXED_FINAL_LOCK: read-only publication diagnostics.
@@ -4245,8 +4315,8 @@ class TradingRepository @Inject constructor(
         val alphaQuoteSlow = com.multify.traderpro.engine.AlphaReadPacingPolicy
             .preferHealthyBetaQuoteForFixedResearch()
         val preferBetaToProtectAlphaExecution = com.multify.traderpro.engine
-            .FixedAutoBuyResearchQuoteRoutingPolicy.preferBetaQuote(
-                symbol, preferences.settings.first().fixedAutoBuyEnabled
+            .FixedBetaFirstResearchPolicy.preferBetaDetail(
+                symbol, betaLiveReady, BetaResearchGate.latestLiveStatus().activeGapMs
             )
         val route = com.multify.traderpro.engine.FixedCategoryAccountRoutingPolicy.choose(
             deterministicBeta, alphaLiveReady, alphaHistoricalReady,
@@ -4369,6 +4439,7 @@ class TradingRepository @Inject constructor(
                 )
             } else throw failed
         }
+        val fixedQuoteReceivedAtMs = System.currentTimeMillis()
         require(RecommendationPriceBandPolicy.eligible(quote.lastPrice)) { "FIXED_PRICE_BAND_OUTSIDE" }
         // The RAM history cache MUST be scoped to the account that actually
         // supplied 15m candles, not to the separate live quote account.
@@ -4528,6 +4599,8 @@ class TradingRepository @Inject constructor(
         // Diagnostic-only, O(1) non-blocking queue offer. All 40 factor calculations and disk
         // writes execute later on a low-priority worker; never delay Fixed recommendations.
         val referenceAt = System.currentTimeMillis()
+        fixedResearchQuoteReceipts[symbol.uppercase(Locale.US)] =
+            FixedResearchQuoteReceipt(lastFixedScanAtMs, fixedQuoteReceivedAtMs)
         fixedShadowReferences[symbol] = FixedShadowReference(quote, evaluation, referenceAt)
         fixedFactorTelemetry.tryRecord(symbol, evaluation, lastFixedScanAtMs, quote, referenceAt)
         v9MasterShadowCollector.offer(
@@ -4751,23 +4824,35 @@ class TradingRepository @Inject constructor(
             return PrecomputedFixedSweep(emptyMap(), 1, true, System.currentTimeMillis(), 0)
         }
         val betaToken = if (betaHealthyAtStart) connectedBetaToken else null
-        // While execution is enabled, protect Alpha quote capacity by shifting
-        // 35 rather than 26 of the ORIGINAL 53 discovery slots to read-only Beta.
-        // No duplicate sweep or additional broker request is introduced.
-        val protectAlphaForFixedAutoBuy = preferences.settings.first().let {
-            it.fixedAutoBuyEnabled && !it.safetyHalt
-        } && betaToken != null
-        if (protectAlphaForFixedAutoBuy) {
-            auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "FIXED_AUTO_BUY_ALPHA_LIVE_HEADROOM", mapOf(
-                "preferred_beta_ltp_slots" to chunks.indices.count { index ->
-                    com.multify.traderpro.engine.FixedAutoBuyResearchLtpRoutingPolicy
-                        .useBetaBatch(index, true, true)
-                },
-                "original_batch_count" to chunks.size,
-                "beta_read_only" to true,
-                "alpha_order_quote_reserved" to true,
-                "research_limits_unchanged" to true
+        // Beta becomes the primary read-only LIVE research lane regardless of
+        // Fixed Auto Buy toggle. Alpha retains exclusive execution and a small
+        // optional research share ONLY with independent spare LIVE capacity.
+        val initialBetaGapMs = BetaResearchGate.latestLiveStatus().activeGapMs
+        val alphaLiveReadyForResearch = runCatching {
+            recoveryGate.checkRequestAllowed(GrowwApiUsageLedger.Category.LIVE_DATA)
+        }.isSuccess
+        auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "BETA_FIRST_SWEEP_PLAN_V908", mapOf(
+            "preferred_beta_ltp_slots" to chunks.indices.count { index ->
+                com.multify.traderpro.engine.FixedBetaFirstResearchPolicy
+                    .preferBetaBatch(index, betaToken != null, initialBetaGapMs)
+            },
+            "original_batch_count" to chunks.size,
+            "beta_live_gap_ms" to initialBetaGapMs,
+            "alpha_live_ready_for_research" to alphaLiveReadyForResearch,
+            "beta_read_only" to true,
+            "alpha_order_account_unchanged" to true,
+            "broker_limits_unchanged" to true
+        ))
+        if (com.multify.traderpro.engine.FixedBetaFirstResearchPolicy
+                .shouldDeferBetaOnlySweep(betaToken != null,
+                    alphaLiveReadyForResearch, initialBetaGapMs)) {
+            auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "BETA_PRESSURE_SWEEP_DEFERRED_V908", mapOf(
+                "beta_gap_ms" to initialBetaGapMs,
+                "reason" to "UNUSABLE_BETA_ONLY_REQUEST_PACE",
+                "no_partial_sweep_published" to true,
+                "strategy_and_primary_rules_unchanged" to true
             ))
+            return PrecomputedFixedSweep(emptyMap(), 1, true, System.currentTimeMillis(), 0)
         }
         if (connectedBetaToken != null && betaToken == null) {
             auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "BETA_UNHEALTHY_ALPHA_ONLY_SWEEP", mapOf(
@@ -4799,8 +4884,8 @@ class TradingRepository @Inject constructor(
                 chunks, windowStart
             ) { index, chunk ->
                 val betaAssigned = betaToken != null &&
-                    com.multify.traderpro.engine.FixedAutoBuyResearchLtpRoutingPolicy.useBetaBatch(
-                        index, true, protectAlphaForFixedAutoBuy
+                    com.multify.traderpro.engine.FixedBetaFirstResearchPolicy.preferBetaBatch(
+                        index, true, BetaResearchGate.latestLiveStatus().activeGapMs
                     )
                 // Re-check the ACTUAL category cooldown immediately before the
                 // network call. A 429 in another concurrent Alpha batch should
@@ -7692,17 +7777,29 @@ class TradingRepository @Inject constructor(
             .groupBy { it.symbol.uppercase(Locale.US) }
             .values.mapNotNull { events -> events.maxByOrNull { it.generatedAtMs } }
             .sortedBy { it.generatedAtMs }
-        // Do not waste execution traffic on stale recommendations, even when
-        // Alpha LIVE_DATA is in cooldown. A fresh broker quote does NOT revive
-        // a recommendation older than the existing five-minute execution TTL.
-        val rows = candidateRows.filter {
-            AutoBuyEntrySafetyPolicy.isFreshFixedEntry(it.generatedAtMs, System.currentTimeMillis())
-        }
-        if (candidateRows.isNotEmpty() && rows.isEmpty()) {
-            auditLogger.logAsync("FIXED_AUTO_BUY", "NO_FRESH_POST_ACTIVATION_BUYS", mapOf(
-                "stale_count" to candidateRows.size, "cooldown_bypass" to false,
-                "existing_max_age_ms" to AutoBuyEntrySafetyPolicy.FIXED_AUTO_BUY_MAX_AGE_MS
-            ))
+        // Frozen generatedAtMs is SCAN START for ranking/confirmation, NOT
+        // the publication timestamp. Require independently captured source
+        // quote and actual publication time; both retain original 5m expiry.
+        val rows = candidateRows.filter { row ->
+            val freshness = com.multify.traderpro.engine
+                .FixedAutoBuyPublicationEvidencePolicy.decide(
+                    fixedAutoBuyPublicationEvidence.find(row.id), row.id,
+                    row.symbol, row.generatedAtMs, settings.fixedAutoBuyActivatedAtMs,
+                    System.currentTimeMillis()
+                )
+            if (!freshness.eligible) {
+                auditLogger.logAsync("FIXED_AUTO_BUY", "NO_FRESH_POST_ACTIVATION_BUYS", mapOf(
+                    "recommendation_id" to row.id, "symbol" to row.symbol,
+                    "reason" to freshness.reason, "expiry_ms" to freshness.expiresAtMs,
+                    "scan_start_is_not_publication_time" to true,
+                    "cooldown_bypass" to false
+                ))
+                if (notifiedFixedAutoBuyTerminalSkips.add(row.id))
+                    _fixedAutoBuyTerminalSkips.tryEmit(FixedAutoBuyTerminalSkipNotice(
+                        row.id, row.symbol, freshness.reason
+                    ))
+            }
+            freshness.eligible
         }
         fixedAutoBuyActivationForQueue = settings.fixedAutoBuyActivatedAtMs
 
@@ -7741,11 +7838,20 @@ class TradingRepository @Inject constructor(
                         "fixed_model_unchanged" to true))
                 continue
             }
-            if (!AutoBuyEntrySafetyPolicy.isFreshFixedEntry(row.generatedAtMs, symbolStartedAtMs)) {
+            val freshnessAtQuote = com.multify.traderpro.engine
+                .FixedAutoBuyPublicationEvidencePolicy.decide(
+                    fixedAutoBuyPublicationEvidence.find(row.id), row.id,
+                    row.symbol, row.generatedAtMs, liveSettings.fixedAutoBuyActivatedAtMs,
+                    symbolStartedAtMs
+                )
+            if (!freshnessAtQuote.eligible) {
                 auditLogger.logAsync("FIXED_AUTO_BUY", "ENTRY_SKIPPED_STALE_RECOMMENDATION", mapOf(
-                    "symbol" to row.symbol,
-                    "recommendation_age_ms" to recommendationAgeAtStartMs,
-                    "max_age_ms" to AutoBuyEntrySafetyPolicy.FIXED_AUTO_BUY_MAX_AGE_MS
+                    "recommendation_id" to row.id, "symbol" to row.symbol,
+                    "reason" to freshnessAtQuote.reason,
+                    "expiry_ms" to freshnessAtQuote.expiresAtMs,
+                    "scan_start_age_ms" to recommendationAgeAtStartMs,
+                    "max_source_and_publication_age_ms" to
+                        AutoBuyEntrySafetyPolicy.FIXED_AUTO_BUY_MAX_AGE_MS
                 ))
                 continue
             }
@@ -7773,8 +7879,11 @@ class TradingRepository @Inject constructor(
                 "recommendation_id" to row.id,
                 "symbol" to row.symbol,
                 "recommendation_at_ms" to row.generatedAtMs,
-                "expires_at_ms" to (row.generatedAtMs +
-                    AutoBuyEntrySafetyPolicy.FIXED_AUTO_BUY_MAX_AGE_MS),
+                "expires_at_ms" to freshnessAtQuote.expiresAtMs,
+                "source_quote_at_ms" to
+                    fixedAutoBuyPublicationEvidence.find(row.id)?.sourceQuoteReceivedAtMs,
+                "publication_at_ms" to
+                    fixedAutoBuyPublicationEvidence.find(row.id)?.publishedAtMs,
                 "activation_at_ms" to liveSettings.fixedAutoBuyActivatedAtMs,
                 "fresh_alpha_quote_required" to true,
                 "no_beta_trading_permissions" to true
@@ -7900,8 +8009,18 @@ class TradingRepository @Inject constructor(
                     "activated_at_ms" to executionSettings.fixedAutoBuyActivatedAtMs))
                 continue
             }
-            if (!AutoBuyEntrySafetyPolicy.isFreshFixedEntry(row.generatedAtMs, System.currentTimeMillis())) {
-                auditLogger.logAsync("FIXED_AUTO_BUY", "ENTRY_SKIPPED_EXPIRED_DURING_PREP", mapOf("symbol" to row.symbol))
+            val freshnessAtOrder = com.multify.traderpro.engine
+                .FixedAutoBuyPublicationEvidencePolicy.decide(
+                    fixedAutoBuyPublicationEvidence.find(row.id), row.id,
+                    row.symbol, row.generatedAtMs, executionSettings.fixedAutoBuyActivatedAtMs,
+                    System.currentTimeMillis()
+                )
+            if (!freshnessAtOrder.eligible) {
+                auditLogger.logAsync("FIXED_AUTO_BUY", "ENTRY_SKIPPED_EXPIRED_DURING_PREP", mapOf(
+                    "recommendation_id" to row.id, "symbol" to row.symbol,
+                    "reason" to freshnessAtOrder.reason,
+                    "expiry_ms" to freshnessAtOrder.expiresAtMs
+                ))
                 continue
             }
             if (fixedRecommendationStore.recommendations(today).firstOrNull { it.id == row.id }?.status != "ACTIVE") continue

@@ -66,6 +66,7 @@ class TradingEngineService : Service() {
     private var fixedAutoBuyWakeObserverJob: Job? = null
     private var fixedAutoBuyWakeDelayJob: Job? = null
     private var fixedAutoBuyBlockedObserverJob: Job? = null
+    private var fixedAutoBuyTerminalSkipObserverJob: Job? = null
     // V907_AUTOBUY_WAKE_FIELD_END
     // Service startup and watchdog can run concurrently. A single-flight owner
     // atomically publishes/starts the LAZY Fixed worker, never two workers.
@@ -205,6 +206,35 @@ class TradingEngineService : Service() {
                 }
             }
         }
+        // Separate informational status for a permanently expired or
+        // non-recoverable event. No execution permission is changed.
+        fixedAutoBuyTerminalSkipObserverJob = scope.launch(Dispatchers.IO) {
+            repository.fixedAutoBuyTerminalSkips.collect { notice ->
+                val message = notice.symbol + " · " + notice.reason +
+                    " · no automatic order placed; fresh signal required"
+                runCatching {
+                    getSystemService(NotificationManager::class.java).notify(
+                        (notice.recommendationId xor 908_008L).toInt() and Int.MAX_VALUE,
+                        NotificationCompat.Builder(this@TradingEngineService, FIXED_CHANNEL_ID)
+                            .setSmallIcon(R.drawable.ic_stat_trader)
+                            .setContentTitle("Fixed Auto Buy skipped")
+                            .setContentText(message)
+                            .setStyle(NotificationCompat.BigTextStyle().bigText(message))
+                            .setAutoCancel(true)
+                            .build()
+                    )
+                }.onSuccess {
+                    auditLogger.logAsync("FIXED_AUTO_BUY", "TERMINAL_SKIP_ALERT_POSTED_V908", mapOf(
+                        "recommendation_id" to notice.recommendationId,
+                        "symbol" to notice.symbol, "reason" to notice.reason,
+                        "no_broker_request" to true
+                    ))
+                }.onFailure {
+                    auditLogger.logAsync("FIXED_AUTO_BUY", "TERMINAL_SKIP_ALERT_FAILED_V908",
+                        mapOf("type" to it.javaClass.simpleName))
+                }
+            }
+        }
         // V907_AUTOBUY_WAKE_OBSERVER_END
         startEngineLoop()
     }
@@ -230,6 +260,7 @@ class TradingEngineService : Service() {
         fixedAutoBuyWakeDelayJob?.cancel()
         fixedAutoBuyWakeObserverJob?.cancel()
         fixedAutoBuyBlockedObserverJob?.cancel()
+        fixedAutoBuyTerminalSkipObserverJob?.cancel()
         // V907_AUTOBUY_WAKE_DESTROY_END
         fixedScanJob?.cancel()
         forecastScanJob?.cancel()

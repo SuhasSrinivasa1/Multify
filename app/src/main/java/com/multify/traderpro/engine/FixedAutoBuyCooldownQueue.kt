@@ -13,7 +13,9 @@ class FixedAutoBuyCooldownQueue {
         val recommendationId: Long,
         val symbol: String,
         val publishedAtMs: Long,
-        val activatedAtMs: Long
+        val activatedAtMs: Long,
+        val scanStartedAtMs: Long = publishedAtMs,
+        val sourceQuoteAtMs: Long = publishedAtMs
     )
     data class Plan(
         val pending: List<Pending>,
@@ -27,8 +29,15 @@ class FixedAutoBuyCooldownQueue {
     fun afterCooldown(candidates: List<Pending>, nowMs: Long, nextAllowedAtMs: Long): Plan {
         val accepted = candidates.filter {
             AutoBuyEntrySafetyPolicy.isPublishedAfterFixedAutoBuyEnabled(
-                it.publishedAtMs, it.activatedAtMs
-            ) && AutoBuyEntrySafetyPolicy.isFreshFixedEntry(it.publishedAtMs, nowMs)
+                it.scanStartedAtMs, it.activatedAtMs
+            ) &&
+                FixedAutoBuyPublicationEvidencePolicy.decide(
+                    FixedAutoBuyPublicationEvidencePolicy.Evidence(
+                        it.recommendationId, it.symbol, it.scanStartedAtMs,
+                        it.sourceQuoteAtMs, it.publishedAtMs
+                    ), it.recommendationId, it.symbol, it.scanStartedAtMs,
+                    it.activatedAtMs, nowMs
+                ).eligible
         }
         val validIds = accepted.map { it.recommendationId }.toHashSet()
         waiting.keys.retainAll(validIds)
@@ -40,7 +49,8 @@ class FixedAutoBuyCooldownQueue {
             waiting.values.count { candidate ->
                 // We must have time to re-fetch a FRESH Alpha execution quote
                 // and re-run broker-side inventory before the original 5m limit.
-                candidate.publishedAtMs + AutoBuyEntrySafetyPolicy.FIXED_AUTO_BUY_MAX_AGE_MS >=
+                minOf(candidate.publishedAtMs, candidate.sourceQuoteAtMs) +
+                    AutoBuyEntrySafetyPolicy.FIXED_AUTO_BUY_MAX_AGE_MS >=
                     at + MIN_REVALIDATION_HEADROOM_MS
             }
         } ?: 0
