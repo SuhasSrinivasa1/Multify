@@ -365,6 +365,11 @@ class TradingRepository @Inject constructor(
     private val fixedAutoBuySubmissionMutex = Mutex()
     private val fixedAutoBuyCooldownQueue =
         com.multify.traderpro.engine.FixedAutoBuyCooldownQueue()
+    // Execution-only event timing; original Fixed generatedAtMs remains scan start.
+    private val fixedAutoBuyPublicationEvidence =
+        com.multify.traderpro.engine.FixedAutoBuyPublicationEvidenceLedger()
+    private data class FixedResearchQuoteReceipt(val scanStartMs: Long, val receivedAtMs: Long)
+    private val fixedResearchQuoteReceipts = ConcurrentHashMap<String, FixedResearchQuoteReceipt>()
     @Volatile private var fixedAutoBuyWakeScheduledForMs = 0L
     private val fixedAutoBuyLastBlockedNoticeAtMs = AtomicLong(0L)
     private val scanApiCycleMutex = Mutex()
@@ -1578,10 +1583,14 @@ class TradingRepository @Inject constructor(
     ) {
         val activatedAtMs = fixedAutoBuyActivationForQueue
         val plan = fixedAutoBuyCooldownQueue.afterCooldown(
-            rows.map {
-                com.multify.traderpro.engine.FixedAutoBuyCooldownQueue.Pending(
-                    it.id, it.symbol, it.generatedAtMs, activatedAtMs
-                )
+            rows.mapNotNull { row ->
+                fixedAutoBuyPublicationEvidence.find(row.id)?.let { evidence ->
+                    com.multify.traderpro.engine.FixedAutoBuyCooldownQueue.Pending(
+                        row.id, row.symbol, evidence.publishedAtMs, activatedAtMs,
+                        scanStartedAtMs = row.generatedAtMs,
+                        sourceQuoteAtMs = evidence.sourceQuoteReceivedAtMs
+                    )
+                }
             }, atMs, blocked.nextAllowedAtMs
         )
         val previousAlertAt = fixedAutoBuyLastBlockedNoticeAtMs.get()
@@ -1615,6 +1624,7 @@ class TradingRepository @Inject constructor(
         preferences.setFixedAutoBuy(enabled)
         // OFF/ON cannot inherit any old pending intent or a previous session wake.
         fixedAutoBuyCooldownQueue.clear()
+        fixedAutoBuyPublicationEvidence.clear() // Toggles must never revive prior events.
         fixedAutoBuyWakeScheduledForMs = 0L
         fixedAutoBuyActivationForQueue =
             if (enabled) preferences.settings.first().fixedAutoBuyActivatedAtMs else 0L
@@ -2463,10 +2473,60 @@ class TradingRepository @Inject constructor(
                 }
                 val previousScanAtMs = lastFixedScanAtMs
                 val recommendationStartedAtMs = System.currentTimeMillis()
+                val priorIds = fixedRecommendationStore.recommendations(
+                    LocalDate.now(INDIA).toString()
+                ).mapTo(mutableSetOf()) { it.id }
                 generateFixedForecasts(false)
                 val recommendationCompletedAtMs = System.currentTimeMillis()
                 val scanned = lastFixedScanAtMs != previousScanAtMs && !fixedScanDeferredBroker
                 if (scanned) {
+                    // The byte-locked Fixed model still timestamps every event at
+                    // SCAN START. This separate, ephemeral clock records the first
+                    // actual publication and quote-source receipt for BUY safety.
+                    val freshPublished = fixedRecommendationStore.recommendations(
+                        LocalDate.now(INDIA).toString()
+                    ).filter { it.id !in priorIds }
+                    for (row in freshPublished) {
+                        val ref = fixedResearchQuoteReceipts[row.symbol.uppercase(Locale.US)]
+                        if (ref != null && ref.scanStartMs == row.generatedAtMs &&
+                            ref.receivedAtMs in row.generatedAtMs..recommendationCompletedAtMs) {
+                            fixedAutoBuyPublicationEvidence.record(
+                                com.multify.traderpro.engine
+                                    .FixedAutoBuyPublicationEvidencePolicy.Evidence(
+                                        row.id, row.symbol, row.generatedAtMs,
+                                        ref.receivedAtMs, recommendationCompletedAtMs
+                                    )
+                            )
+                            auditLogger.logAsync("FIXED_AUTO_BUY", "PUBLICATION_SOURCE_EVIDENCE_V908", mapOf(
+                                "recommendation_id" to row.id, "symbol" to row.symbol,
+                                "scan_started_at_ms" to row.generatedAtMs,
+                                "source_quote_received_at_ms" to ref.receivedAtMs,
+                                "publication_at_ms" to recommendationCompletedAtMs,
+                                "source_age_at_publication_ms" to
+                                    (recommendationCompletedAtMs - ref.receivedAtMs),
+                                "exchange_tick_timestamp_verified" to false,
+                                "source_and_publication_expiry" to "MIN_OF_TWO_5_MIN_CLOCKS",
+                                "fixed_selection_changed" to false
+                            ))
+                        } else auditLogger.logAsync(
+                            "FIXED_AUTO_BUY", "PUBLICATION_SOURCE_EVIDENCE_MISSING_V908",
+                            mapOf("recommendation_id" to row.id, "symbol" to row.symbol,
+                                "auto_buy_fails_closed" to true)
+                        )
+                    }
+                    val scanElapsedMs = (recommendationCompletedAtMs -
+                        recommendationStartedAtMs).coerceAtLeast(0L)
+                    auditLogger.logAsync("FIXED_PERFORMANCE", "SCAN_HEALTH_V908", mapOf(
+                        "elapsed_ms" to scanElapsedMs,
+                        "classification" to when {
+                            scanElapsedMs > 300_000L -> "EXTREME_DATA_FRESHNESS_AUDIT"
+                            scanElapsedMs > 120_000L -> "CRITICAL"
+                            scanElapsedMs > 90_000L -> "WARNING"
+                            else -> "NORMAL"
+                        },
+                        "performance_warning_never_filters_stocks_or_buy" to true,
+                        "new_recommendation_count" to freshPublished.size
+                    ))
                     // Evidence-based execution actionability is outside frozen Fixed scoring.
                     auditFixedActionabilityAfterScan()
                     // Outside FIXED_FINAL_LOCK: read-only publication diagnostics.
