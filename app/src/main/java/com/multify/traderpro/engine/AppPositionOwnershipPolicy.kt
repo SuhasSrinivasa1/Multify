@@ -21,6 +21,7 @@ object AppPositionOwnershipPolicy {
 
     private val enginePrefixes = mapOf(
         "MULTIFY_HOLDING" to setOf("MLH"),
+        "UNIVEST_HOLDING" to setOf("UVH"),
         "FORECAST_HOLDING" to setOf("FLH"),
         "FIXED_HOLDING" to setOf("FXH", "FXM")
     )
