@@ -204,22 +204,25 @@ class BetaResearchGate @Inject constructor() {
         val w = windows.getValue(Type.HISTORICAL)
         val now = SystemClock.elapsedRealtime()
         while (w.minute.isNotEmpty() && w.minute.first() <= now - 60_000L) w.minute.removeFirst()
+        w.calendar = DualMinuteAdmissionPolicy.normalize(w.calendar, System.currentTimeMillis())
         w.cooldownUntil <= now && !w.probeInFlight &&
-            !historicalInFlight.isLocked && w.minute.size < (histMinute - 1)
+            !historicalInFlight.isLocked && w.minute.size < (histMinute - 1) &&
+            w.calendar.used < (histMinute - 1)
     }
 
     /** Beta cooldown is account-local. Alpha trading and market-data are independent. */
     suspend fun healthyForFixed(type: Type): Boolean = lock.withLock {
         val w = windows.getValue(type)
         val now = SystemClock.elapsedRealtime()
-        if (type == Type.LIVE) {
-            while (w.minute.isNotEmpty() && w.minute.first() <= now - 60_000L) w.minute.removeFirst()
-            updateLiveStatus(now, w)
-        }
+        while (w.minute.isNotEmpty() && w.minute.first() <= now - 60_000L)
+            w.minute.removeFirst()
         w.calendar = DualMinuteAdmissionPolicy.normalize(w.calendar, System.currentTimeMillis())
-        w.cooldownUntil <= now && !w.probeInFlight && (
-            type != Type.LIVE || (w.minute.size < liveMinute && w.calendar.used < liveMinute)
-        )
+        if (type == Type.LIVE) updateLiveStatus(now, w)
+        w.cooldownUntil <= now && !w.probeInFlight && when (type) {
+            Type.LIVE -> w.minute.size < liveMinute && w.calendar.used < liveMinute
+            Type.HISTORICAL -> w.minute.size < histMinute &&
+                w.calendar.used < histMinute
+        }
     }
 
     fun snapshot() = UsageSnapshot(
