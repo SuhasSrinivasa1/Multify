@@ -97,6 +97,7 @@ import com.multify.traderpro.engine.ForecastNewsPublicationGate
 import com.multify.traderpro.engine.ForecastExpectedAverageGainPolicy
 import com.multify.traderpro.engine.ForecastNotificationFreshnessPolicy
 import com.multify.traderpro.engine.ForecastUnivestLearningPolicy
+import com.multify.traderpro.engine.UnivestAutoBuyPolicy
 import com.multify.traderpro.engine.ForecastQualityPolicy
 import com.multify.traderpro.engine.ForecastTargetExpansionPolicy
 import com.multify.traderpro.engine.ForecastUniversalPositiveEvidencePolicy
@@ -5741,9 +5742,10 @@ class TradingRepository @Inject constructor(
     }
 
     /**
-     * Independent, official-package-only Univest RESEARCH input. No order is ever placed.
-     * Only 1–3 month ENTRY + official same-NSE-session EXIT with two observed quote
-     * prices and 48 entry-time features may join Forecast learning. Never feeds Fixed.
+     * Official Univest cash-equity ENTRY notifications also use the existing Fixed Auto Buy
+     * activation as their execution switch. Univest EXIT remains learning-only; every owned
+     * position is sold exclusively by the shared hard-stop/GTT/stepped-trail monitor.
+     * Historical research evidence never authorizes an order or modifies Fixed selection.
      */
     suspend fun captureUnivestNotification(title: String, body: String, postedAtMs: Long) {
         val at = postedAtMs.takeIf { it > 0L } ?: System.currentTimeMillis()
@@ -5787,7 +5789,8 @@ class TradingRepository @Inject constructor(
                 "DUPLICATE_OR_NO_SAME_DAY_ENTRY", title, body)
             auditLogger.logAsync("FORECAST_UNIVEST", "PAIRING_SKIPPED", mapOf(
                 "type" to signal.type.name, "symbol" to signal.symbol, "date" to date,
-                "reason" to "DUPLICATE_ENTRY_OR_NO_MATCHING_SAME_DAY_ENTRY", "no_order_path" to true))
+                "reason" to "DUPLICATE_ENTRY_OR_NO_MATCHING_SAME_DAY_ENTRY",
+                "duplicate_order_suppressed" to true))
             return
         }
         captureState(
@@ -5801,7 +5804,28 @@ class TradingRepository @Inject constructor(
             "duration_months" to signal.durationMonths, "source_package" to ForecastUnivestLearningPolicy.OFFICIAL_PACKAGE,
             "posted_ms" to at, "received_ms" to received,
             "same_day_pair" to (signal.type == ForecastUnivestLearningPolicy.Type.EXIT),
-            "entry_price_recorded" to (candidate.entryPrice != null), "no_order_path" to true))
+            "entry_price_recorded" to (candidate.entryPrice != null),
+            "univest_entry_uses_fixed_toggle" to true, "univest_exit_orders_allowed" to false))
+        // Place eligible Alpha BUY ahead of all optional Beta research. The journal's atomic
+        // one-entry-per-symbol/day claim prevents duplicate Android notification deliveries.
+        // A rejected BUY is never blindly replayed after an ambiguous broker response.
+        if (signal.type == ForecastUnivestLearningPolicy.Type.ENTRY) {
+            val outcome = try {
+                autoBuyUnivestViaFixedToggle(signal.symbol, at, key)
+            } catch (cancel: CancellationException) {
+                throw cancel
+            } catch (error: Throwable) {
+                auditLogger.log("UNIVEST_AUTO_BUY", "BUY_FAILED_OR_RECONCILIATION_NEEDED", mapOf(
+                    "symbol" to signal.symbol, "notification_key" to key,
+                    "error" to error.javaClass.simpleName,
+                    "message" to (error.message ?: "").take(200),
+                    "automatic_retry" to false,
+                    "check_alpha_order_reference_before_manual_action" to true
+                ))
+                "FAILED_RECONCILE_IN_GROWW"
+            }
+            capturePrefs.edit().putString("last_univest_order_status", outcome).apply()
+        }
         val token = runCatching { forecastMarketToken() }.getOrNull()
         val betaConfigured = secretStore.hasBetaCredentials()
         if (token.isNullOrBlank() || (betaConfigured && !forecastUsesBeta(token))) {
@@ -5864,6 +5888,111 @@ class TradingRepository @Inject constructor(
             "within_three_minutes" to (snapshot != null), "research_account" to
                 (if (forecastUsesBeta(token)) "BETA" else "ALPHA_FALLBACK"),
             "entry_features_used_only_after_verified_same_day_exit" to true))
+    }
+
+    /**
+     * Univest supplies ONLY the opening recommendation. No Univest target, duration,
+     * profit-booking alert or EXIT notification is consulted for SELL decisions.
+     * All broker requests below are Alpha-only; Beta is read-only research.
+     */
+    private suspend fun autoBuyUnivestViaFixedToggle(
+        symbol: String,
+        postedAtMs: Long,
+        notificationKey: String
+    ): String {
+        val startMs = System.currentTimeMillis()
+        val settings = preferences.settings.first()
+        fun rejection(settings: AppSettings, nowMs: Long): String? =
+            UnivestAutoBuyPolicy.rejectionReason(
+                ForecastUnivestLearningPolicy.Type.ENTRY,
+                postedAtMs, nowMs, settings.fixedAutoBuyEnabled,
+                settings.fixedAutoBuyActivatedAtMs
+            )
+        val blocked = rejection(settings, startMs)
+        if (blocked != null) {
+            auditLogger.logAsync("UNIVEST_AUTO_BUY", "ENTRY_NOT_EXECUTED", mapOf(
+                "symbol" to symbol, "reason" to blocked, "fixed_toggle" to settings.fixedAutoBuyEnabled,
+                "notification_at_ms" to postedAtMs, "received_at_ms" to startMs
+            ))
+            return blocked
+        }
+        if (!com.multify.traderpro.engine.NseEquitySessionCalendar.isFixedNewEntryWindow(ZonedDateTime.now(INDIA))) {
+            auditLogger.logAsync("UNIVEST_AUTO_BUY", "ENTRY_NOT_EXECUTED", mapOf(
+                "symbol" to symbol, "reason" to "OUTSIDE_NEW_ENTRY_WINDOW"))
+            return "OUTSIDE_NEW_ENTRY_WINDOW"
+        }
+        preFixedAutoBuyExecutionGuard(settings)
+        if (managedDao.openPositionForSymbol(symbol) != null) return "APP_HOLDING_ALREADY_OPEN"
+        val token = ensureToken() ?: return "ALPHA_AUTH_REQUIRED"
+        // A fresh Alpha trading quote, not the later Beta learning quote, sizes the order.
+        val quote = apiFactory.groww.quote(
+            bearer(token), tradingSymbol = symbol,
+            trafficPriority = MarketDataPriorityAdmissionPolicy.PROTECTION
+        ).requirePayload("Univest Alpha entry quote $symbol")
+        val quoteAtMs = System.currentTimeMillis()
+        preferences.recordMarketData()
+        val ltp = quote.lastPrice?.takeIf { it.isFinite() && it > 0.0 }
+            ?: error("Univest BUY requires a valid Alpha price for $symbol")
+        val quantity = com.multify.traderpro.engine.BudgetOnlyCncSizing
+            .size(settings.holdingBudgetRupees.toDouble(), ltp).quantity
+        require(quantity > 0) { "Univest BUY blocked: budget cannot fund one share of $symbol" }
+        // Switching Fixed OFF during quote retrieval must also stop a Univest BUY.
+        val latest = preferences.settings.first()
+        val changed = rejection(latest, System.currentTimeMillis())
+        if (changed != null || latest.fixedAutoBuyActivatedAtMs != settings.fixedAutoBuyActivatedAtMs) {
+            auditLogger.logAsync("UNIVEST_AUTO_BUY", "ENTRY_NOT_EXECUTED", mapOf(
+                "symbol" to symbol, "reason" to (changed ?: "TOGGLE_SESSION_CHANGED")))
+            return changed ?: "TOGGLE_SESSION_CHANGED"
+        }
+        preFixedAutoBuyExecutionGuard(latest)
+        val reference = stableRef("UVH", notificationKey + "|" + postedAtMs)
+        val order = placeCncBuy(
+            token, symbol, quantity, reference, entryQuote = quote,
+            quoteReceivedAtMs = quoteAtMs
+        )
+        // placeCncBuy confirms the broker fill before returning. A pending/ambiguous
+        // order is NOT adopted as an owned holding; it needs reference reconciliation.
+        val filled = order.filledQuantity?.takeIf { it > 0 }
+            ?: error("Univest filled quantity unverified: reconcile $reference in Groww")
+        val actualEntry = order.averageFillPrice?.takeIf { it.isFinite() && it > 0.0 } ?: ltp
+        val openedAt = System.currentTimeMillis()
+        registerBoughtPositionAndProtect(
+            ManagedPositionEntity(
+                engine = ENGINE_UNIVEST_HOLDING, symbol = symbol, product = "CNC",
+                side = "LONG", quantity = filled, entryPrice = actualEntry,
+                stopPrice = HardStopLossPolicy.stopPrice(actualEntry), targetPrice = null,
+                strategy = "Official Univest ENTRY via Fixed Auto Buy · Alpha CNC · hard -2% · common stepped trailing exit",
+                regime = "UNIVEST_LONG", confidence = 1.0, sourceEventId = null,
+                openOrderId = order.growwOrderId, openReferenceId = reference,
+                openedAtMs = openedAt, lastPrice = actualEntry,
+                maxFavourablePrice = actualEntry, maxAdversePrice = actualEntry,
+                lastEvaluatedAtMs = openedAt,
+                trailingArmPct = SteppedTrailingPolicy.ARM_TRIGGER_PCT,
+                trailingLastRatchetPrice = 0.0,
+                smartOrderMode = HoldingSmartOrderPolicy.MODE_NONE
+            ),
+            allowFreshPostFillProof = true,
+            deferProtectionRetryToMonitor = true
+        )
+        val holding = managedDao.openPosition(ENGINE_UNIVEST_HOLDING, symbol)
+        val protected = holding?.let {
+            com.multify.traderpro.engine.GttProtectionReadinessPolicy.verified(
+                it.smartOrderMode, it.smartOrderId, it.smartOrderStatus)
+        } == true
+        auditLogger.log("UNIVEST_AUTO_BUY",
+            if (protected) "ALPHA_CNC_BOUGHT_GTT_VERIFIED" else "ALPHA_CNC_BOUGHT_GTT_UNVERIFIED_CRITICAL",
+            mapOf("symbol" to symbol, "notification_key" to notificationKey,
+                "broker_order_id" to order.growwOrderId, "reference" to reference,
+                "quantity" to filled, "actual_entry" to actualEntry,
+                "hard_stop_price" to HardStopLossPolicy.stopPrice(actualEntry),
+                "trail_arm_gain_pct" to SteppedTrailingPolicy.ARM_TRIGGER_PCT,
+                "initial_protected_gain_pct" to SteppedTrailingPolicy.INITIAL_STOP_GAIN_PCT,
+                "trailing_step_pct" to SteppedTrailingPolicy.STEP_PCT,
+                "broker_protection_verified" to protected,
+                "univest_exit_can_sell" to false,
+                "execution_account" to "ALPHA",
+                "elapsed_ms" to (System.currentTimeMillis() - startMs)))
+        return if (protected) "ALPHA_BOUGHT_GTT_VERIFIED" else "ALPHA_BOUGHT_GTT_CRITICAL"
     }
 
     private suspend fun recoverUnivestExitPrices(token: String): Int {
@@ -12462,6 +12591,7 @@ class TradingRepository @Inject constructor(
         private const val UPLOADED_THREE_MONTH_REALIZED_PCT = 0.49019417475728155
         private const val DEFAULT_LONG_REALIZED_PCT = 0.33
         const val ENGINE_MULTIFY_HOLDING = "MULTIFY_HOLDING"
+        const val ENGINE_UNIVEST_HOLDING = "UNIVEST_HOLDING"
         const val ENGINE_FORECAST_HOLDING = "FORECAST_HOLDING"
         const val ENGINE_FIXED_HOLDING = "FIXED_HOLDING"
         const val ENGINE_PORTFOLIO_HOLDING = "PORTFOLIO_HOLDING"
