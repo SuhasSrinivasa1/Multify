@@ -833,6 +833,21 @@ class TradingEngineService : Service() {
                                 return (after - before).coerceAtLeast(0L)
                             }
                             val historicalAfter = repository.fixedHistoricalRequestCounters()
+                            val live429Delta = (
+                                usageAfter.categories.first { it.category == GrowwApiUsageLedger.Category.LIVE_DATA }.rateLimitResponses -
+                                    usageBefore.categories.first { it.category == GrowwApiUsageLedger.Category.LIVE_DATA }.rateLimitResponses
+                                ).coerceAtLeast(0L)
+                            val historical429Delta = (
+                                usageAfter.categories.first { it.category == GrowwApiUsageLedger.Category.HISTORICAL }.rateLimitResponses -
+                                    usageBefore.categories.first { it.category == GrowwApiUsageLedger.Category.HISTORICAL }.rateLimitResponses
+                                ).coerceAtLeast(0L)
+                            val scanTimingGuardrail = com.multify.traderpro.engine.FixedScanTimingGuardrail.assess(
+                                scanStartedAtMs = startedAt,
+                                elapsedMs = elapsed,
+                                startSpacingMs = actualStartSpacingMs,
+                                live429s = live429Delta,
+                                historical429s = historical429Delta
+                            )
                             auditLogger.logAsync("RUNTIME", "FIXED_SCAN_PROFILE", mapOf(
                                 "elapsed_ms" to elapsed,
                                 "scan_id" to scanId,
@@ -845,17 +860,23 @@ class TradingEngineService : Service() {
                                 },
                                 "previous_successful_scan_age_unknown_after_service_restart" to
                                     (actualStartSpacingMs == null),
+                                // V908_SCAN_TIMING_GUARDRAIL_BEGIN
+                                "scan_time_guardrail_status" to scanTimingGuardrail.status,
+                                "scan_time_of_day_bucket_ist" to scanTimingGuardrail.timeOfDayBucket,
+                                "scan_duration_budget_ms" to com.multify.traderpro.engine.FixedScanTimingGuardrail.MAX_NORMAL_ELAPSED_MS,
+                                "scan_start_spacing_budget_ms" to com.multify.traderpro.engine.FixedScanTimingGuardrail.MAX_NORMAL_START_SPACING_MS,
+                                "scan_elapsed_within_budget" to scanTimingGuardrail.scanElapsedWithinBudget,
+                                "scan_start_spacing_within_budget" to scanTimingGuardrail.startSpacingWithinBudget,
+                                "scan_guardrail_broker_rate_limited" to scanTimingGuardrail.brokerRateLimited,
+                                "scan_guardrail_action" to scanTimingGuardrail.action,
+                                "scan_guardrail_production_buy_veto" to scanTimingGuardrail.productionBuyVeto,
+                                "scan_guardrail_fixed_strategy_changed" to scanTimingGuardrail.fixedStrategyChanged,
+                                // V908_SCAN_TIMING_GUARDRAIL_END
                                 "live_network_requests" to requestDelta(GrowwApiUsageLedger.Category.LIVE_DATA),
                                 "historical_network_requests" to requestDelta(GrowwApiUsageLedger.Category.HISTORICAL),
                                 "non_trading_network_requests" to requestDelta(GrowwApiUsageLedger.Category.NON_TRADING),
-                                "live_429s" to (
-                                    usageAfter.categories.first { it.category == GrowwApiUsageLedger.Category.LIVE_DATA }.rateLimitResponses -
-                                        usageBefore.categories.first { it.category == GrowwApiUsageLedger.Category.LIVE_DATA }.rateLimitResponses
-                                    ).coerceAtLeast(0L),
-                                "historical_429s" to (
-                                    usageAfter.categories.first { it.category == GrowwApiUsageLedger.Category.HISTORICAL }.rateLimitResponses -
-                                        usageBefore.categories.first { it.category == GrowwApiUsageLedger.Category.HISTORICAL }.rateLimitResponses
-                                    ).coerceAtLeast(0L),
+                                "live_429s" to live429Delta,
+                                "historical_429s" to historical429Delta,
                                 "governor_wait_ms" to (
                                     (usageAfter.categories.first { it.category == GrowwApiUsageLedger.Category.LIVE_DATA }.permitWaitMs -
                                         usageBefore.categories.first { it.category == GrowwApiUsageLedger.Category.LIVE_DATA }.permitWaitMs).coerceAtLeast(0L) +
