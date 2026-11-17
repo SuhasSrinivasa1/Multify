@@ -1,14 +1,14 @@
-name: Multify v9.0.8 Frozen Fixed Beta-first execution evidence
+name: Multify v9.0.9 dual-window API control / source safety TEST
 on:
   push:
-    branches: [v908-beta-first-fixed-execution-freshness-20261117]
+    branches: [v909-dual-window-api-governor-20261117]
   pull_request:
-    branches: [v907-fixed-auto-buy-throttle-safe-recovery-20261117]
+    branches: [v908-beta-first-fixed-execution-freshness-20261117]
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  source-replay-android:
+  verify-build:
     runs-on: ubuntu-latest
     timeout-minutes: 50
     steps:
@@ -29,236 +29,97 @@ jobs:
         run: |
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
-      - name: Verify 7.4.1 golden baseline, v19 frozen LIVE and exact v16 research copy
+      - name: Verify Frozen Fixed model, original BUY/GTT and unchanged trailing
         run: |
           python - <<'PY'
           from pathlib import Path
           import subprocess
-          import re
-          ref19=["30d3ab4f474fc1ed4103da5e1247b0078f484eaf",
-                 "af87c4126572c6aca9a8fadea940011a13bf0ab8"]
-          ref16="1e167cf64b4931c0c4eb9cdfd5756c1bc252c450"
-          base28="309b50c297964bf313b26c651a1287e1795e5807"
           root="app/src/main/java/com/multify/traderpro/"
           repo=root+"data/repository/TradingRepository.kt"
-          service=root+"service/TradingEngineService.kt"
+          ref19=["30d3ab4f474fc1ed4103da5e1247b0078f484eaf",
+                 "af87c4126572c6aca9a8fadea940011a13bf0ab8"]
+          base28="309b50c297964bf313b26c651a1287e1795e5807"
+          ref907="67cb146b057f17cc2366941e4b1597b664d8e195"
           def old(ref,path):
-              return subprocess.check_output(["git","show",f"{ref}:{path}"],text=True)
-          def part(s,a,b):
-              i=s.index(a)
-              return s[i:s.index(b,i)]
-          current=Path(repo).read_text()
-          for v in ref19:
-              prev=old(v,repo)
+              return subprocess.check_output(["git","show",f"{ref}:{path}"])
+          def seg(blob,from_,to_):
+              a=blob.index(from_.encode())
+              return blob[a:blob.index(to_.encode(),a)]
+          current=Path(repo).read_bytes()
+          for ref in ref19:
+              source=old(ref,repo)
               for a,b in [
-                ("suspend fun generateFixedForecasts(","private fun fixedSnapshotMultifyMfeAverage("),
-                ("private suspend fun discoverFixedMarketWideCandidates(","private suspend fun fetchFixedDiscoveryLtpBatch(")]:
-                  assert part(current,a,b)==part(prev,a,b), (v,a,"Fixed changed!")
+                  ("suspend fun generateFixedForecasts(","private fun fixedSnapshotMultifyMfeAverage("),
+                  ("private suspend fun discoverFixedMarketWideCandidates(","private suspend fun fetchFixedDiscoveryLtpBatch(")]:
+                  assert seg(current,a,b)==seg(source,a,b),(ref,a,"FROZEN_LIVE_FIXED_MODIFIED")
               for rel in (
-                "engine/FixedFinalContract.kt",
-                "engine/FixedMarketDiscoveryPolicy.kt",
-                "engine/FixedForecastPublicationPolicy.kt",
-                "engine/FixedForecastQualityPolicy.kt",
-                "engine/FixedLocalStrategyEngine.kt",
-                "engine/FixedFastCandidateSelectionPolicy.kt",
-                "engine/FixedEntryActionabilityPolicy.kt",
-                "engine/RecommendationPriceBandPolicy.kt",
-                "engine/FixedMultifyFactorFamilies.kt"):
-                  file=root+rel
-                  assert Path(file).read_bytes()==subprocess.check_output(["git","show",f"{v}:{file}"]), (v,file)
-          for original,clone,orig_label,new_label in [
-             ("FixedLocalStrategyEngine.kt","V9Fixed8316StrategyShadow.kt",
-               "object FixedLocalStrategyEngine","internal object V9Fixed8316StrategyShadow"),
-             ("FixedForecastQualityPolicy.kt","V9Fixed8316QualityShadow.kt",
-               "object FixedForecastQualityPolicy","internal object V9Fixed8316QualityShadow")
-          ]:
-              prev=old(ref16,root+"engine/"+original)
-              cloned=Path(root+"engine/"+clone).read_text()
-              assert prev[prev.index(orig_label):].replace(orig_label,new_label,1)==cloned[cloned.index(new_label):], clone
-          assert "v9MasterShadowCollector.offer(" in current
-          assert "v9MasterShadowCollector.offer(" not in part(
-              current,"suspend fun generateFixedForecasts(","private fun fixedSnapshotMultifyMfeAverage(")
-          # All original Fixed worker/BUY/SELL/GTT code must be EXACT, allowing
-          # only the three precisely marked service-lifetime prefetch insertions.
-          service_now=Path(service).read_text()
-          assert service_now.count("import kotlinx.coroutines.flow.collect\n")==1
-          service_now=service_now.replace("import kotlinx.coroutines.flow.collect\n","",1)
-          for marker in ("FIELD","OBSERVER","DESTROY"):
-              expression=r"(?ms)^[ \t]*// V907_AUTOBUY_WAKE_"+marker+r"_BEGIN\n.*?^[ \t]*// V907_AUTOBUY_WAKE_"+marker+r"_END\n"
-              service_now,count=re.subn(expression,"",service_now)
-              assert count==1, ("MISSING_V907_AUTOBUY_WAKE_BOUNDARY",marker)
-          for marker in ("FIELD","OBSERVER","DESTROY"):
-              expression=r"(?ms)^[ \t]*// V902_PREFETCH_"+marker+r"_BEGIN\n.*?^[ \t]*// V902_PREFETCH_"+marker+r"_END\n"
-              service_now,count=re.subn(expression,"",service_now)
-              assert count==1, ("MISSING_SERVICE_PREFETCH_BOUNDARY",marker)
-          # Normalize exactly one additional bounded service preflight extension.
-          # Original worker, order and protection byte-level logic stays untouched.
-          gate_pattern=r"(?ms)^[ \t]*// V904_READONLY_BETA_GATE_BEGIN\n.*?^[ \t]*// V904_READONLY_BETA_GATE_END\n"
-          original_gate="                        if (readiness != FixedDataPipelinePolicy.Readiness.READY) {\n"
-          service_now,count=re.subn(gate_pattern,original_gate,service_now)
-          assert count==1, "BETA_GATE_CHANGE_SCOPE"
-          assert service_now==old(base28,service), "TRADING_SERVICE_UNAUTHORIZED_EDIT"
-          # Broker transport already had endpoint 1s/60s tracing; preserve it
-          # BYTE-IDENTICALLY rather than reimplementing duplicate counters.
-          for p in ("data/network/GrowwRateLimitInterceptor.kt",
-                    "data/network/BetaHttpTraceInterceptor.kt",
-                    "data/network/GrowwHttpTraceLedger.kt"):
-              f=root+p
-              assert Path(f).read_bytes()==subprocess.check_output(["git","show",f"{base28}:{f}"]), f
-          assert not Path(root+"engine/V9EndpointPressureWindow.kt").exists()
-          for rel in ("engine/HardStopLossPolicy.kt","engine/ReleaseIntegrityManifest.kt",
-                      "engine/SteppedTrailingPolicy.kt","engine/NetGainTrailingPolicy.kt",
-                      "engine/FixedSingleWorkerStartGate.kt","engine/HardStopGttTighteningPolicy.kt"):
-              file=root+rel
-              assert Path(file).read_bytes()==subprocess.check_output(["git","show",f"{base28}:{file}"]), file
+                  "engine/FixedFinalContract.kt",
+                  "engine/FixedMarketDiscoveryPolicy.kt",
+                  "engine/FixedForecastPublicationPolicy.kt",
+                  "engine/FixedForecastQualityPolicy.kt",
+                  "engine/FixedLocalStrategyEngine.kt",
+                  "engine/FixedFastCandidateSelectionPolicy.kt",
+                  "engine/FixedEntryActionabilityPolicy.kt",
+                  "engine/RecommendationPriceBandPolicy.kt",
+                  "engine/FixedMultifyFactorFamilies.kt"):
+                  p=root+rel
+                  assert Path(p).read_bytes()==old(ref,p),p
+          for rel in (
+              "engine/HardStopLossPolicy.kt",
+              "engine/ReleaseIntegrityManifest.kt",
+              "engine/SteppedTrailingPolicy.kt",
+              "engine/NetGainTrailingPolicy.kt",
+              "engine/HardStopGttTighteningPolicy.kt"):
+              p=root+rel
+              assert Path(p).read_bytes()==old(base28,p),p
+          assert seg(current,"private suspend fun placeCncBuy(",
+                  "private fun LongForecastEntity.toForecastDto(")==seg(
+              old(ref907,repo),"private suspend fun placeCncBuy(",
+              "private fun LongForecastEntity.toForecastDto("),"ORDER_OR_GTT_MODIFIED"
           assert "const val MAX_LOSS_PCT = 2.0" in Path(root+"engine/HardStopLossPolicy.kt").read_text()
-          assert "const val HARD_STOP_LOSS_PCT = 2.0" in Path(root+"engine/ReleaseIntegrityManifest.kt").read_text()
           assert "const val CANONICAL_LEARNING_CALLS = 107" in Path(root+"engine/FixedFinalContract.kt").read_text()
-          assert 'versionCode = 9008' in Path('app/build.gradle.kts').read_text()
-          assert 'versionName = "9.0.8-beta-first-fixed-auto-buy-timing-test"' in Path("app/build.gradle.kts").read_text()
-          budgets=(Path(root+"engine/GrowwApiBudgetPolicy.kt").read_text())
-          beta_policy=Path(root+"engine/FixedDualAccountPolicy.kt").read_text()
-          beta_governor=Path(root+"data/network/BetaResearchGate.kt").read_text()
-          assert "const val FIXED_LIVE_DATA_PERCENT = 60" in budgets
-          assert "const val SELL_MONITOR_RESERVED_PER_SECOND = 4" in budgets
-          assert "const val SELL_MONITOR_RESERVED_PER_MINUTE = 120" in budgets
-          assert "const val BETA_LIVE_PER_SECOND = 6" in beta_policy
-          assert "const val BETA_LIVE_PER_MINUTE = 180" in beta_policy
-          assert "private val liveSec = FixedDualAccountPolicy.BETA_LIVE_PER_SECOND" in beta_governor
-          assert "private val histSec = 1" in beta_governor
-          assert "private val histMinute = FixedDualAccountPolicy.BETA_HISTORICAL_PER_MINUTE" in beta_governor
-          fixed_repo=Path(repo).read_text()
-          quote_iface=Path(root+"data/network/GrowwApi.kt").read_text()
-          assert '@Header("X-Multify-Request-Priority") trafficPriority: String? = null' in quote_iface
-          assert "trafficPriority = MarketDataPriorityAdmissionPolicy.PROTECTION" in fixed_repo
-          assert 'apiFactory.groww.quote(bearer(token), tradingSymbol = symbol).requirePayload("Fixed quote $symbol")' in fixed_repo
-          # The existing interceptor must strip the internal priority before wire dispatch.
-          assert '.removeHeader(MarketDataPriorityAdmissionPolicy.HEADER)' in Path(
-              root+"data/network/GrowwRateLimitInterceptor.kt").read_text()
-          assert Path(root+"data/network/GrowwHistoricalThrottlePolicy.kt").read_bytes()==subprocess.check_output(["git","show",f"{base28}:{root+'data/network/GrowwHistoricalThrottlePolicy.kt'}"])
-          # Only transport helpers can change: full v19 scoring and v16 shadow remain locked.
-          assert "alphaBatchesRescuedOnBeta" in current
-          assert "fixedReadOnlyTransportIncomplete = true" in current
-          assert "ALPHA_QUOTE_429_BETA_QUOTE_ONLY" in current
-          assert "ALPHA_HISTORY_429_BETA_HISTORY_ONLY" in current
-          assert "ALPHA_QUOTE_PACE_BETA_LIVE" in current
-          assert "BUY_COOLDOWN_PENDING_DECISION" in current
-          assert "FRESH_EXECUTION_PREFLIGHT_STARTED" in current
-          assert "FixedAutoBuyCooldownQueue" in current
-          assert "FixedBetaFirstResearchPolicy.preferBetaBatch(" in current
-          assert "FixedBetaFirstResearchPolicy.preferBetaDetail(" in current
-          assert "FixedAutoBuyPublicationEvidencePolicy.decide(" in current
-          assert "PUBLICATION_SOURCE_EVIDENCE_V908" in current
-          assert "SOURCE_QUOTE_OR_PUBLICATION_EXPIRED" in Path(
-              root+"engine/FixedAutoBuyPublicationEvidencePolicy.kt").read_text()
-          assert "SCAN_HEALTH_V908" in current
-          # Order submission and protection must remain byte identical to v9.0.7.
-          prior_v907=old("67cb146b057f17cc2366941e4b1597b664d8e195",repo)
-          assert part(current,"private suspend fun placeCncBuy(",
-                      "private fun LongForecastEntity.toForecastDto(")==part(
-              prior_v907,"private suspend fun placeCncBuy(",
-              "private fun LongForecastEntity.toForecastDto("), "UNAUTHORIZED_BUY_GTT_CHANGE"
-          assert "fixedSweepAdaptiveLead.record(" in current
-          assert "preferBetaLiveForQuote" in Path(root+"engine/FixedCategoryAccountRoutingPolicy.kt").read_text()
-          assert "SPLIT_LIVE_HISTORY_ROUTING" in current
-          assert "fixedReadOnlyCategoriesAvailable()" in current
-          assert "fixedReadOnlyTransportIncomplete = true" in current
-          route=Path(root+"engine/FixedCategoryAccountRoutingPolicy.kt").read_text()
-          assert "alphaHistoricalReady -> Account.ALPHA" in route
-          assert "(alphaLiveReady || betaLiveReady) && (alphaHistoricalReady || betaHistoricalReady)" in route
-          store=Path(root+"engine/FixedHistoricalWindowStore.kt").read_text()
-          assert "private const val MIN_BASE_ROWS = 5" in store
-          assert "oldTimes.count { it in newTimes } < 2" in store
-          assert "private const val MAX_REUSE_AGE_MS = 12L * 60_000L" in store
-          assert "historicalHasSpareFixedCapacity()" in Path(root+"data/network/BetaResearchGate.kt").read_text()
-          assert "ALPHA_COOLDOWN_BETA_RESEARCH_CONTINUES" in Path(service).read_text()
-          assert "const val BETA_ONLY_EXPECTED_SWEEP_MS = 76_000L" in Path(
-              root+"engine/FixedSweepPrefetchPolicy.kt").read_text()
-          ui=Path(root+"ui/screens/TraderApp.kt").read_text()
-          assert "Fixed max 240/min" not in ui
-          assert "Last completed market sweep" not in ui
-          assert "BETA_READ_ONLY_RECOVERY" in ui
-
-          changed=set(subprocess.check_output(["git","diff","--name-only",base28,"HEAD"],text=True).splitlines())
-          allowed={
-              repo,"app/build.gradle.kts",
-              root+"engine/V9Fixed8316StrategyShadow.kt",
-              root+"engine/V9Fixed8316QualityShadow.kt",
-              root+"engine/V9MasterShadowCollector.kt",
-              "app/src/test/java/com/multify/traderpro/engine/V9VersionedShadowReplayTest.kt",
-              "backend/app/v9_master_log_replay.py",
-              "backend/tests/test_v9_master_log_replay.py",
-              "docs/V9_MASTER_VALIDATION.md",
-              "docs/V9_MASTER_100_QUESTION_VALIDATION.md",
-              root+"engine/Fixed15mHistoryRepair.kt",
-              root+"engine/FixedSweepPrefetchPolicy.kt",
-              root+"engine/FixedEarlyPrefetchPolicy.kt",
-              root+"engine/FixedSweepAdaptiveLeadPolicy.kt",
-              root+"engine/AlphaReadPacingPolicy.kt",
-              root+"data/logging/FixedMarketPathTelemetry.kt",
-              root+"engine/FixedAutoBuyCooldownQueue.kt",
-              root+"engine/FixedAutoBuyResearchLtpRoutingPolicy.kt",
-              root+"engine/FixedAutoBuyResearchQuoteRoutingPolicy.kt",
-              root+"engine/FixedAutoBuyPublicationEvidencePolicy.kt",
-              root+"engine/FixedBetaFirstResearchPolicy.kt",
-              root+"engine/FixedAccountResearchRecoveryPolicy.kt",
-              root+"engine/FixedDiscoveryDisplayPolicy.kt",
-              root+"engine/FixedCategoryAccountRoutingPolicy.kt",
-              root+"engine/FixedHistoricalWindowStore.kt",
-              root+"ui/screens/TraderApp.kt",
-              root+"engine/GrowwApiBudgetPolicy.kt",
-              root+"engine/FixedDualAccountPolicy.kt",
-              root+"data/network/BetaResearchGate.kt",
-              root+"data/network/GrowwApi.kt",
-              root+"engine/MarketDataPriorityAdmissionPolicy.kt",
-              "app/src/test/java/com/multify/traderpro/engine/GrowwApiBudgetPolicyTest.kt",
-              "app/src/test/java/com/multify/traderpro/engine/MarketDataPriorityAdmissionPolicyTest.kt",
-              "app/src/test/java/com/multify/traderpro/engine/FixedDualAccountPolicyTest.kt",
-              service,
-              "app/src/test/java/com/multify/traderpro/engine/Fixed15mHistoryRepairTest.kt",
-              "app/src/test/java/com/multify/traderpro/engine/FixedEarlyPrefetchPolicyTest.kt",
-              "app/src/test/java/com/multify/traderpro/engine/FixedSweepAdaptiveLeadPolicyTest.kt",
-              "app/src/test/java/com/multify/traderpro/engine/AlphaReadPacingPolicyTest.kt",
-              "app/src/test/java/com/multify/traderpro/engine/FixedAutoBuyCooldownQueueTest.kt",
-              "app/src/test/java/com/multify/traderpro/engine/FixedAutoBuyResearchLtpRoutingPolicyTest.kt",
-              "app/src/test/java/com/multify/traderpro/engine/FixedAutoBuyResearchQuoteRoutingPolicyTest.kt",
-              "app/src/test/java/com/multify/traderpro/engine/FixedAutoBuyPublicationEvidencePolicyTest.kt",
-              "app/src/test/java/com/multify/traderpro/engine/FixedBetaFirstResearchPolicyTest.kt",
-              "app/src/test/java/com/multify/traderpro/engine/FixedAccountResearchRecoveryPolicyTest.kt",
-              "app/src/test/java/com/multify/traderpro/engine/FixedDiscoveryDisplayPolicyTest.kt",
-              "app/src/test/java/com/multify/traderpro/engine/FixedCategoryAccountRoutingPolicyTest.kt",
-              "app/src/test/java/com/multify/traderpro/engine/FixedHistoricalWindowStoreTest.kt",
-              "docs/V904_INDEPENDENT_ALPHA_BETA_RECOVERY_VALIDATION.md",
-              "docs/V905_FIXED_SPLIT_CATEGORY_RECOVERY.md",
-              "docs/V906_API_RECOVERY_RESEARCH_INTEGRITY.md",
-              "docs/V907_FIXED_AUTO_BUY_SAFE_RECOVERY.md",
-              "docs/V908_BETA_FIRST_FIXED_EXECUTION_TIMING.md",
-              ".github/workflows/multify-v9-master.yml"}
-          assert changed<=allowed, ("UNAUTHORIZED_LIVE_EDIT",changed-allowed)
-          print("PASS original v19 live selection, original v16 shadow, original service trading code, -2% GTT, bounded sweep scope")
+          build=Path("app/build.gradle.kts").read_text()
+          assert "versionCode = 9009" in build
+          assert 'versionName = "9.0.9-dual-window-api-governor-test"' in build
+          assert "const val BETA_SAFE_LIVE_60S = 40" in Path(root+"engine/FixedResearchCapacityPolicy.kt").read_text()
+          assert "const val MIN_RESEARCH_GAP_MS = 1_000L" in Path(root+"engine/FixedResearchLtpPacingPolicy.kt").read_text()
+          assert "const val APP_PER_MINUTE = 45" in Path(root+"data/network/GrowwHistoricalThrottlePolicy.kt").read_text()
+          assert "const val BETA_HISTORICAL_PER_MINUTE = 8" in Path(root+"engine/FixedDualAccountPolicy.kt").read_text()
+          alpha=Path(root+"data/network/GrowwRateLimitInterceptor.kt").read_text()
+          beta=Path(root+"data/network/BetaResearchGate.kt").read_text()
+          assert "DualMinuteAdmissionPolicy.calendarWaitMs(" in alpha
+          assert "DualMinuteAdmissionPolicy.calendarWaitMs(" in beta
+          assert ".betaDiscoveryPreferred(" in Path(repo).read_text()
+          assert "PREFETCH_YIELDED_TO_FOREGROUND_V909" in Path(repo).read_text()
+          assert "INDICATOR_WARMUP_SHADOW_V909" in Path(repo).read_text()
+          assert "fixed_selection_unchanged" in Path(repo).read_text()
+          net=Path(root+"data/network/GrowwApiFactory.kt").read_text()
+          assert net.count("BrokerWireAuditInterceptor(")==2
+          assert net.count(".retryOnConnectionFailure(false)") == 2
+          assert net.count(".followRedirects(false)") == 2
+          assert "wire_api_usage_snapshot.json" in Path(repo).read_text()
+          print("PASS: Frozen Fixed v19, unchanged live selection, unchanged order/GTT/trail, v909 quota and wire observability")
           PY
-      - name: Matched historical replay plus cumulative ZIP test
+      - name: Historical/replay policy tests
         run: |
           python -m unittest discover -s backend/tests -p 'test_adaptive_timeframe_replay.py' -v
           python -m unittest discover -s backend/tests -p 'test_v9_master_log_replay.py' -v
-      - name: Full Android unit tests and v9 Master TEST APK
+      - name: Full Android unit tests / v9.0.9 TEST APK
         env:
-          # Use the repository's stable signing key when the matching secret
-          # is configured. NEVER log or export this secret or the keystore.
           MULTIFY_KEYSTORE_PASSWORD: ${{ secrets.MULTIFY_KEYSTORE_PASSWORD }}
         run: gradle :app:testDebugUnitTest :app:assembleDebug --no-daemon --stacktrace
-      - name: Verify installable APK certificate and create checksum report
+      - name: Verify APK signing and SHA-256
         run: |
           apk=$(find app/build/outputs/apk/debug -maxdepth 1 -name '*.apk' -type f | head -n 1)
           test -n "$apk" && test -s "$apk"
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$apk" \
-            | tee app/build/outputs/apk/debug/v908-signature-verification.txt
-          sha256sum "$apk" | tee app/build/outputs/apk/debug/v908-SHA256SUMS.txt
-      - name: Upload verified-by-CI TEST artifact
+            | tee app/build/outputs/apk/debug/v909-signature-verification.txt
+          sha256sum "$apk" | tee app/build/outputs/apk/debug/v909-SHA256SUMS.txt
+      - name: Upload CI verified package
         uses: actions/upload-artifact@v4
         with:
-          name: Multify-v9.0.8-Beta-First-Fixed-Timing-TEST-debug
+          name: Multify-v9.0.9-Dual-Minute-API-TEST-debug
           path: |
             app/build/outputs/apk/debug/*.apk
-            app/build/outputs/apk/debug/v908-signature-verification.txt
-            app/build/outputs/apk/debug/v908-SHA256SUMS.txt
+            app/build/outputs/apk/debug/v909-signature-verification.txt
+            app/build/outputs/apk/debug/v909-SHA256SUMS.txt

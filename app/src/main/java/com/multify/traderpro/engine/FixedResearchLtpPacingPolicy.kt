@@ -5,7 +5,7 @@ package com.multify.traderpro.engine
  * holding-protection LTP admission retain their existing priority and policy.
  */
 object FixedResearchLtpPacingPolicy {
-    const val MIN_RESEARCH_GAP_MS = 1_500L
+    const val MIN_RESEARCH_GAP_MS = 1_000L
     fun effectiveGapMs(currentAdaptiveGapMs: Long, isProtectionLtp: Boolean): Long =
         if (isProtectionLtp) currentAdaptiveGapMs
         else maxOf(currentAdaptiveGapMs, MIN_RESEARCH_GAP_MS)

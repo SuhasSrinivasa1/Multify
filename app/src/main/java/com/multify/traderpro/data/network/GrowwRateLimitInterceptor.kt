@@ -9,6 +9,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import okhttp3.Request
 import java.io.IOException
+import com.multify.traderpro.engine.DualMinuteAdmissionPolicy
 import com.multify.traderpro.engine.GrowwApiBudgetPolicy
 import com.multify.traderpro.engine.MarketDataPriorityAdmissionPolicy
 import com.multify.traderpro.engine.GrowwRetryAfterPolicy
@@ -32,7 +33,9 @@ internal class GrowwRateLimitInterceptor(
     private data class State(
         val second: ArrayDeque<Long> = ArrayDeque(),
         val minute: ArrayDeque<Long> = ArrayDeque(),
-        var cooldownUntilMs: Long = 0L
+        var cooldownUntilMs: Long = 0L,
+        var calendar: DualMinuteAdmissionPolicy.CalendarState =
+            DualMinuteAdmissionPolicy.CalendarState()
     )
     /** An Alpha request granted a coroutine permit before occupying an OkHttp dispatcher thread. */
     internal class PreAdmitted
@@ -50,7 +53,7 @@ internal class GrowwRateLimitInterceptor(
         }
     }
     private var lastAlphaLtpGrantedAtMs = 0L
-    private var alphaLtpPace = LtpAdaptivePacingPolicy.State(LtpAdaptivePacingPolicy.START_GAP_MS, SystemClock.elapsedRealtime())
+    private var alphaLtpPace = LtpAdaptivePacingPolicy.State(1_050L, SystemClock.elapsedRealtime())
     private val lastBlockedAuditMs = EnumMap<GrowwApiUsageLedger.Category, Long>(GrowwApiUsageLedger.Category::class.java)
     private val states = EnumMap<GrowwApiUsageLedger.Category, State>(GrowwApiUsageLedger.Category::class.java).apply {
         GrowwApiUsageLedger.Category.values().forEach { put(it, State()) }
@@ -216,6 +219,10 @@ internal class GrowwRateLimitInterceptor(
                 } else limits(category)
                 prune(state.second, now - 1_000L)
                 prune(state.minute, now - 60_000L)
+                val calendarNow = System.currentTimeMillis()
+                state.calendar = DualMinuteAdmissionPolicy.normalize(state.calendar, calendarNow)
+                val fixedMinuteWait = DualMinuteAdmissionPolicy.calendarWaitMs(
+                    state.calendar, calendarNow, limits.perMinute)
                 val cooldownWait = (state.cooldownUntilMs - now).coerceAtLeast(0L)
                 val secondWait = if (state.second.size >= limits.perSecond)
                     (state.second.peekFirst() + 1_000L - now).coerceAtLeast(1L) else 0L
@@ -235,7 +242,8 @@ internal class GrowwRateLimitInterceptor(
                 } ?: 0L
                 val protectionYield = MarketDataPriorityAdmissionPolicy.ltpPriorityYieldMs(
                     isAlphaLtp, protection, pendingProtectionLtps.get())
-                val wait = maxOf(cooldownWait, secondWait, minuteWait, ltpWait, readWait, protectionYield)
+                val wait = maxOf(cooldownWait, secondWait, minuteWait,
+                    fixedMinuteWait, ltpWait, readWait, protectionYield)
                 reason = when {
                     protectionYield > 0L && wait == protectionYield -> "YIELD_TO_HOLDING_PROTECTION"
                     cooldownWait > 0L && wait == cooldownWait -> "429_COOLDOWN"
@@ -245,13 +253,16 @@ internal class GrowwRateLimitInterceptor(
                         AlphaReadPacingPolicy.Lane.ACCOUNT_READ -> "ALPHA_ACCOUNT_READ_PACING"
                         null -> "NONE"
                     }
-                    minuteWait > 0L && wait == minuteWait -> "APP_PER_MINUTE"
+                    minuteWait > 0L && wait == minuteWait -> "APP_ROLLING_60S"
+                    fixedMinuteWait > 0L && wait == fixedMinuteWait -> "APP_FIXED_CALENDAR_MINUTE"
                     secondWait > 0L && wait == secondWait -> "APP_PER_SECOND"
                     else -> "NONE"
                 }
                 if (wait <= 0L) {
                     state.second.addLast(now)
                     state.minute.addLast(now)
+                    state.calendar = DualMinuteAdmissionPolicy.reserve(
+                        state.calendar, calendarNow)
                     if (isAlphaLtp) {
                         alphaLtpMinute.addLast(now)
                         lastAlphaLtpGrantedAtMs = now
@@ -273,7 +284,12 @@ internal class GrowwRateLimitInterceptor(
                             "app_limit_1s" to row.appPerSecondLimit,
                             "app_limit_60s" to row.appPerMinuteLimit,
                             "hard_limit_1s" to row.hardPerSecondLimit,
-                            "hard_limit_60s" to row.hardPerMinuteLimit
+                            "hard_limit_60s" to row.hardPerMinuteLimit,
+                            "calendar_minute_utc_bucket" to DualMinuteAdmissionPolicy
+                                .minuteId(System.currentTimeMillis()),
+                            "calendar_minute_count_at_admission" to
+                                synchronized(lock) { states.getValue(category).calendar.used },
+                            "broker_wire_budget_not_inferred" to true
                         ))
                     }
                 }

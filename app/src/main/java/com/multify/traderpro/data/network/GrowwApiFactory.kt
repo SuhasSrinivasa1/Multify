@@ -28,9 +28,14 @@ class GrowwApiFactory @Inject constructor(
             .connectTimeout(8, TimeUnit.SECONDS)
             .readTimeout(12, TimeUnit.SECONDS)
             .writeTimeout(12, TimeUnit.SECONDS)
-            .retryOnConnectionFailure(true)
+            .retryOnConnectionFailure(false)
+            // No transport retry/redirect may consume another wire attempt
+            // without re-entering our per-account governor.
+            .followRedirects(false)
+            .followSslRedirects(false)
             .addInterceptor(alphaHotCache)
             .addInterceptor(alphaGovernor)
+            .addNetworkInterceptor(BrokerWireAuditInterceptor("ALPHA", auditLogger))
             .addInterceptor { chain ->
                 val req = chain.request().newBuilder()
                     .header("Accept", "application/json")
@@ -61,10 +66,13 @@ class GrowwApiFactory @Inject constructor(
             .connectTimeout(8, TimeUnit.SECONDS)
             .readTimeout(12, TimeUnit.SECONDS)
             .writeTimeout(12, TimeUnit.SECONDS)
-            .retryOnConnectionFailure(true)
+            .retryOnConnectionFailure(false)
+            .followRedirects(false)
+            .followSslRedirects(false)
             .addInterceptor(GrowwHotDataCacheInterceptor(account = "BETA", recordAlphaStats = false))
             .addInterceptor(BetaReadOnlyInterceptor())
             .addInterceptor(BetaHttpTraceInterceptor(auditLogger))
+            .addNetworkInterceptor(BrokerWireAuditInterceptor("BETA", auditLogger))
             .addInterceptor { chain ->
                 chain.proceed(chain.request().newBuilder()
                     .header("Accept", "application/json")
