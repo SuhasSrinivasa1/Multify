@@ -2,6 +2,8 @@ name: Multify v9.0.9 dual-window API control / source safety TEST
 on:
   push:
     branches: [v909-dual-window-api-governor-20261117]
+  pull_request:
+    branches: [v908-beta-first-fixed-execution-freshness-20261117]
   workflow_dispatch:
 permissions:
   contents: read
