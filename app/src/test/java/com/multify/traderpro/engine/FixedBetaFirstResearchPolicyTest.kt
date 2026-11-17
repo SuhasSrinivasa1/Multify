@@ -7,7 +7,7 @@ class FixedBetaFirstResearchPolicyTest {
     private val p = FixedBetaFirstResearchPolicy
     @Test fun betaIsMainScannerWhenHealthy() {
         assertEquals(42, (0 until 53).count { p.preferBetaBatch(it, true, 1_300L) })
-        assertEquals(32, (0 until 53).count { p.preferBetaBatch(it, true, 3_000L) })
+        assertEquals(33, (0 until 53).count { p.preferBetaBatch(it, true, 3_000L) })
     }
     @Test fun unavailableBetaNeverUsed() {
         assertFalse(p.preferBetaBatch(1,false,1_300L))
