@@ -4814,23 +4814,35 @@ class TradingRepository @Inject constructor(
             return PrecomputedFixedSweep(emptyMap(), 1, true, System.currentTimeMillis(), 0)
         }
         val betaToken = if (betaHealthyAtStart) connectedBetaToken else null
-        // While execution is enabled, protect Alpha quote capacity by shifting
-        // 35 rather than 26 of the ORIGINAL 53 discovery slots to read-only Beta.
-        // No duplicate sweep or additional broker request is introduced.
-        val protectAlphaForFixedAutoBuy = preferences.settings.first().let {
-            it.fixedAutoBuyEnabled && !it.safetyHalt
-        } && betaToken != null
-        if (protectAlphaForFixedAutoBuy) {
-            auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "FIXED_AUTO_BUY_ALPHA_LIVE_HEADROOM", mapOf(
-                "preferred_beta_ltp_slots" to chunks.indices.count { index ->
-                    com.multify.traderpro.engine.FixedAutoBuyResearchLtpRoutingPolicy
-                        .useBetaBatch(index, true, true)
-                },
-                "original_batch_count" to chunks.size,
-                "beta_read_only" to true,
-                "alpha_order_quote_reserved" to true,
-                "research_limits_unchanged" to true
+        // Beta becomes the primary read-only LIVE research lane regardless of
+        // Fixed Auto Buy toggle. Alpha retains exclusive execution and a small
+        // optional research share ONLY with independent spare LIVE capacity.
+        val initialBetaGapMs = BetaResearchGate.latestLiveStatus().activeGapMs
+        val alphaLiveReadyForResearch = runCatching {
+            recoveryGate.checkRequestAllowed(GrowwApiUsageLedger.Category.LIVE_DATA)
+        }.isSuccess
+        auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "BETA_FIRST_SWEEP_PLAN_V908", mapOf(
+            "preferred_beta_ltp_slots" to chunks.indices.count { index ->
+                com.multify.traderpro.engine.FixedBetaFirstResearchPolicy
+                    .preferBetaBatch(index, betaToken != null, initialBetaGapMs)
+            },
+            "original_batch_count" to chunks.size,
+            "beta_live_gap_ms" to initialBetaGapMs,
+            "alpha_live_ready_for_research" to alphaLiveReadyForResearch,
+            "beta_read_only" to true,
+            "alpha_order_account_unchanged" to true,
+            "broker_limits_unchanged" to true
+        ))
+        if (com.multify.traderpro.engine.FixedBetaFirstResearchPolicy
+                .shouldDeferBetaOnlySweep(betaToken != null,
+                    alphaLiveReadyForResearch, initialBetaGapMs)) {
+            auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "BETA_PRESSURE_SWEEP_DEFERRED_V908", mapOf(
+                "beta_gap_ms" to initialBetaGapMs,
+                "reason" to "UNUSABLE_BETA_ONLY_REQUEST_PACE",
+                "no_partial_sweep_published" to true,
+                "strategy_and_primary_rules_unchanged" to true
             ))
+            return PrecomputedFixedSweep(emptyMap(), 1, true, System.currentTimeMillis(), 0)
         }
         if (connectedBetaToken != null && betaToken == null) {
             auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "BETA_UNHEALTHY_ALPHA_ONLY_SWEEP", mapOf(
@@ -4862,8 +4874,8 @@ class TradingRepository @Inject constructor(
                 chunks, windowStart
             ) { index, chunk ->
                 val betaAssigned = betaToken != null &&
-                    com.multify.traderpro.engine.FixedAutoBuyResearchLtpRoutingPolicy.useBetaBatch(
-                        index, true, protectAlphaForFixedAutoBuy
+                    com.multify.traderpro.engine.FixedBetaFirstResearchPolicy.preferBetaBatch(
+                        index, true, BetaResearchGate.latestLiveStatus().activeGapMs
                     )
                 // Re-check the ACTUAL category cooldown immediately before the
                 // network call. A 429 in another concurrent Alpha batch should
