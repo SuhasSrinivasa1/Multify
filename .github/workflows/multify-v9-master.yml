@@ -1,9 +1,9 @@
-name: Multify v9.0.6 Frozen Fixed API recovery research integrity
+name: Multify v9.0.7 Frozen Fixed auto buy safe recovery
 on:
   push:
-    branches: [v906-api-recovery-research-integrity-20261116]
+    branches: [v907-fixed-auto-buy-throttle-safe-recovery-20261117]
   pull_request:
-    branches: [v905-independent-quote-history-routing-20261116]
+    branches: [v906-api-recovery-research-integrity-20261116]
   workflow_dispatch:
 permissions:
   contents: read
@@ -84,6 +84,10 @@ jobs:
           assert service_now.count("import kotlinx.coroutines.flow.collect\n")==1
           service_now=service_now.replace("import kotlinx.coroutines.flow.collect\n","",1)
           for marker in ("FIELD","OBSERVER","DESTROY"):
+              expression=r"(?ms)^[ \t]*// V907_AUTOBUY_WAKE_"+marker+r"_BEGIN\n.*?^[ \t]*// V907_AUTOBUY_WAKE_"+marker+r"_END\n"
+              service_now,count=re.subn(expression,"",service_now)
+              assert count==1, ("MISSING_V907_AUTOBUY_WAKE_BOUNDARY",marker)
+          for marker in ("FIELD","OBSERVER","DESTROY"):
               expression=r"(?ms)^[ \t]*// V902_PREFETCH_"+marker+r"_BEGIN\n.*?^[ \t]*// V902_PREFETCH_"+marker+r"_END\n"
               service_now,count=re.subn(expression,"",service_now)
               assert count==1, ("MISSING_SERVICE_PREFETCH_BOUNDARY",marker)
@@ -110,8 +114,8 @@ jobs:
           assert "const val MAX_LOSS_PCT = 2.0" in Path(root+"engine/HardStopLossPolicy.kt").read_text()
           assert "const val HARD_STOP_LOSS_PCT = 2.0" in Path(root+"engine/ReleaseIntegrityManifest.kt").read_text()
           assert "const val CANONICAL_LEARNING_CALLS = 107" in Path(root+"engine/FixedFinalContract.kt").read_text()
-          assert 'versionCode = 9006' in Path('app/build.gradle.kts').read_text()
-          assert 'versionName = "9.0.6-api-recovery-research-integrity-test"' in Path("app/build.gradle.kts").read_text()
+          assert 'versionCode = 9007' in Path('app/build.gradle.kts').read_text()
+          assert 'versionName = "9.0.7-fixed-auto-buy-safe-recovery-test"' in Path("app/build.gradle.kts").read_text()
           budgets=(Path(root+"engine/GrowwApiBudgetPolicy.kt").read_text())
           beta_policy=Path(root+"engine/FixedDualAccountPolicy.kt").read_text()
           beta_governor=Path(root+"data/network/BetaResearchGate.kt").read_text()
@@ -138,6 +142,11 @@ jobs:
           assert "ALPHA_QUOTE_429_BETA_QUOTE_ONLY" in current
           assert "ALPHA_HISTORY_429_BETA_HISTORY_ONLY" in current
           assert "ALPHA_QUOTE_PACE_BETA_LIVE" in current
+          assert "BUY_COOLDOWN_PENDING_DECISION" in current
+          assert "FRESH_EXECUTION_PREFLIGHT_STARTED" in current
+          assert "FixedAutoBuyCooldownQueue" in current
+          assert "FixedAutoBuyResearchLtpRoutingPolicy.useBetaBatch(" in current
+          assert "FixedAutoBuyResearchQuoteRoutingPolicy.preferBetaQuote(" in current
           assert "fixedSweepAdaptiveLead.record(" in current
           assert "preferBetaLiveForQuote" in Path(root+"engine/FixedCategoryAccountRoutingPolicy.kt").read_text()
           assert "SPLIT_LIVE_HISTORY_ROUTING" in current
@@ -176,6 +185,9 @@ jobs:
               root+"engine/FixedSweepAdaptiveLeadPolicy.kt",
               root+"engine/AlphaReadPacingPolicy.kt",
               root+"data/logging/FixedMarketPathTelemetry.kt",
+              root+"engine/FixedAutoBuyCooldownQueue.kt",
+              root+"engine/FixedAutoBuyResearchLtpRoutingPolicy.kt",
+              root+"engine/FixedAutoBuyResearchQuoteRoutingPolicy.kt",
               root+"engine/FixedAccountResearchRecoveryPolicy.kt",
               root+"engine/FixedDiscoveryDisplayPolicy.kt",
               root+"engine/FixedCategoryAccountRoutingPolicy.kt",
@@ -194,6 +206,9 @@ jobs:
               "app/src/test/java/com/multify/traderpro/engine/FixedEarlyPrefetchPolicyTest.kt",
               "app/src/test/java/com/multify/traderpro/engine/FixedSweepAdaptiveLeadPolicyTest.kt",
               "app/src/test/java/com/multify/traderpro/engine/AlphaReadPacingPolicyTest.kt",
+              "app/src/test/java/com/multify/traderpro/engine/FixedAutoBuyCooldownQueueTest.kt",
+              "app/src/test/java/com/multify/traderpro/engine/FixedAutoBuyResearchLtpRoutingPolicyTest.kt",
+              "app/src/test/java/com/multify/traderpro/engine/FixedAutoBuyResearchQuoteRoutingPolicyTest.kt",
               "app/src/test/java/com/multify/traderpro/engine/FixedAccountResearchRecoveryPolicyTest.kt",
               "app/src/test/java/com/multify/traderpro/engine/FixedDiscoveryDisplayPolicyTest.kt",
               "app/src/test/java/com/multify/traderpro/engine/FixedCategoryAccountRoutingPolicyTest.kt",
@@ -201,6 +216,7 @@ jobs:
               "docs/V904_INDEPENDENT_ALPHA_BETA_RECOVERY_VALIDATION.md",
               "docs/V905_FIXED_SPLIT_CATEGORY_RECOVERY.md",
               "docs/V906_API_RECOVERY_RESEARCH_INTEGRITY.md",
+              "docs/V907_FIXED_AUTO_BUY_SAFE_RECOVERY.md",
               ".github/workflows/multify-v9-master.yml"}
           assert changed<=allowed, ("UNAUTHORIZED_LIVE_EDIT",changed-allowed)
           print("PASS original v19 live selection, original v16 shadow, original service trading code, -2% GTT, bounded sweep scope")
@@ -210,19 +226,23 @@ jobs:
           python -m unittest discover -s backend/tests -p 'test_adaptive_timeframe_replay.py' -v
           python -m unittest discover -s backend/tests -p 'test_v9_master_log_replay.py' -v
       - name: Full Android unit tests and v9 Master TEST APK
+        env:
+          # Use the repository's stable signing key when the matching secret
+          # is configured. NEVER log or export this secret or the keystore.
+          MULTIFY_KEYSTORE_PASSWORD: ${{ secrets.MULTIFY_KEYSTORE_PASSWORD }}
         run: gradle :app:testDebugUnitTest :app:assembleDebug --no-daemon --stacktrace
       - name: Verify installable APK certificate and create checksum report
         run: |
           apk=$(find app/build/outputs/apk/debug -maxdepth 1 -name '*.apk' -type f | head -n 1)
           test -n "$apk" && test -s "$apk"
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$apk" \
-            | tee app/build/outputs/apk/debug/v906-signature-verification.txt
-          sha256sum "$apk" | tee app/build/outputs/apk/debug/v906-SHA256SUMS.txt
+            | tee app/build/outputs/apk/debug/v907-signature-verification.txt
+          sha256sum "$apk" | tee app/build/outputs/apk/debug/v907-SHA256SUMS.txt
       - name: Upload verified-by-CI TEST artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Multify-v9.0.6-API-Recovery-Research-Integrity-TEST-debug
+          name: Multify-v9.0.7-Fixed-AutoBuy-Safe-Recovery-TEST-debug
           path: |
             app/build/outputs/apk/debug/*.apk
-            app/build/outputs/apk/debug/v906-signature-verification.txt
-            app/build/outputs/apk/debug/v906-SHA256SUMS.txt
+            app/build/outputs/apk/debug/v907-signature-verification.txt
+            app/build/outputs/apk/debug/v907-SHA256SUMS.txt

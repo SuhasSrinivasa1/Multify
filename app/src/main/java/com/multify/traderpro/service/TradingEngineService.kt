@@ -62,6 +62,11 @@ class TradingEngineService : Service() {
     // V902_PREFETCH_FIELD_BEGIN
     private var fixedEarlyPrefetchObserverJob: Job? = null
     // V902_PREFETCH_FIELD_END
+    // V907_AUTOBUY_WAKE_FIELD_BEGIN
+    private var fixedAutoBuyWakeObserverJob: Job? = null
+    private var fixedAutoBuyWakeDelayJob: Job? = null
+    private var fixedAutoBuyBlockedObserverJob: Job? = null
+    // V907_AUTOBUY_WAKE_FIELD_END
     // Service startup and watchdog can run concurrently. A single-flight owner
     // atomically publishes/starts the LAZY Fixed worker, never two workers.
     private val fixedScanWorkerStartGate = com.multify.traderpro.engine.FixedSingleWorkerStartGate()
@@ -132,6 +137,75 @@ class TradingEngineService : Service() {
             }
         }
         // V902_PREFETCH_OBSERVER_END
+        // V907_AUTOBUY_WAKE_OBSERVER_BEGIN
+        // Lifecycle-owned bounded wake-up, no background order job survives
+        // service shutdown. Rescheduling cancels only the waiting timer, not an
+        // already-started BUY/protection flow.
+        fixedAutoBuyWakeObserverJob = scope.launch(Dispatchers.IO) {
+            repository.fixedAutoBuyRecoveryWakeAt.collect { wakeAtMs ->
+                fixedAutoBuyWakeDelayJob?.cancel()
+                if (wakeAtMs <= 0L) return@collect
+                fixedAutoBuyWakeDelayJob = scope.launch(Dispatchers.IO) {
+                    delay((wakeAtMs - System.currentTimeMillis()).coerceAtLeast(0L))
+                    scope.launch(Dispatchers.IO) {
+                        try {
+                            val submitted = repository.autoBuyFixedRecommendations()
+                            auditLogger.logAsync("FIXED_AUTO_BUY", "COOLDOWN_WAKE_REVALIDATED", mapOf(
+                                "scheduled_wake_at_ms" to wakeAtMs,
+                                "actual_wake_at_ms" to System.currentTimeMillis(),
+                                "submitted_after_all_original_execution_checks" to submitted,
+                                "old_recommendations_not_revived" to true,
+                                "broker_cooldown_never_bypassed" to true
+                            ))
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (failure: Throwable) {
+                            auditLogger.logAsync("FIXED_AUTO_BUY", "COOLDOWN_WAKE_RECHECK_FAILED", mapOf(
+                                "type" to failure.javaClass.simpleName,
+                                "reason" to (failure.message ?: "UNKNOWN").take(160),
+                                "broker_cooldown_never_bypassed" to true
+                            ))
+                        }
+                    }
+                }
+            }
+        }
+        // A user-visible status alert reports cooldown without suggesting that
+        // an expired recommendation will be bought later. Uses the existing
+        // Fixed notification channel and does not touch trading permissions.
+        fixedAutoBuyBlockedObserverJob = scope.launch(Dispatchers.IO) {
+            repository.fixedAutoBuyBlockedNotices.collect { notice ->
+                val until = if (notice.nextAllowedAtMs > 0L)
+                    java.time.Instant.ofEpochMilli(notice.nextAllowedAtMs)
+                        .atZone(INDIA).toLocalTime().toString()
+                else "manual Groww reconnect"
+                val message = "Alpha broker paused: " + notice.reason +
+                    " · until " + until + " IST · " + notice.pendingCount +
+                    " fresh candidate(s); expired signals will NOT buy"
+                runCatching {
+                    getSystemService(NotificationManager::class.java).notify(
+                        907_007,
+                        NotificationCompat.Builder(this@TradingEngineService, FIXED_CHANNEL_ID)
+                            .setSmallIcon(R.drawable.ic_stat_trader)
+                            .setContentTitle("Fixed Auto Buy paused — broker cooldown")
+                            .setContentText(message)
+                            .setStyle(NotificationCompat.BigTextStyle().bigText(message))
+                            .setAutoCancel(true)
+                            .build()
+                    )
+                }.onSuccess {
+                    auditLogger.logAsync("FIXED_AUTO_BUY", "COOLDOWN_ALERT_POSTED", mapOf(
+                        "reason" to notice.reason,
+                        "next_allowed_at_ms" to notice.nextAllowedAtMs,
+                        "fresh_intents_at_block" to notice.pendingCount,
+                        "expired_recommendations_never_bought" to true))
+                }.onFailure {
+                    auditLogger.logAsync("FIXED_AUTO_BUY", "COOLDOWN_ALERT_FAILED", mapOf(
+                        "type" to it.javaClass.simpleName))
+                }
+            }
+        }
+        // V907_AUTOBUY_WAKE_OBSERVER_END
         startEngineLoop()
     }
 
@@ -152,6 +226,11 @@ class TradingEngineService : Service() {
         // V902_PREFETCH_DESTROY_BEGIN
         fixedEarlyPrefetchObserverJob?.cancel()
         // V902_PREFETCH_DESTROY_END
+        // V907_AUTOBUY_WAKE_DESTROY_BEGIN
+        fixedAutoBuyWakeDelayJob?.cancel()
+        fixedAutoBuyWakeObserverJob?.cancel()
+        fixedAutoBuyBlockedObserverJob?.cancel()
+        // V907_AUTOBUY_WAKE_DESTROY_END
         fixedScanJob?.cancel()
         forecastScanJob?.cancel()
         forecastNewsJob?.cancel()
