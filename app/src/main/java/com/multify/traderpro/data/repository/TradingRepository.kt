@@ -1568,11 +1568,6 @@ class TradingRepository @Inject constructor(
         blocked: GrowwRecoveryGate.LocallyBlocked,
         atMs: Long
     ) {
-        val settingsActivation = rows.firstOrNull()?.let { row ->
-            // Each row's original publication timestamp remains authoritative.
-            // The activation epoch is read again at actual order submission.
-            row.generatedAtMs
-        }
         val activatedAtMs = fixedAutoBuyActivationForQueue
         val plan = fixedAutoBuyCooldownQueue.afterCooldown(
             rows.map {
