@@ -9,8 +9,8 @@ import java.time.ZoneId
  * diagnostic export. It classifies scan timing; it does NOT change Fixed
  * selection, publication, Auto Buy, order submission or protection.
  *
- * 45s elapsed budget sits above the 38.1s maximum observed in the healthy
- * 09:15-09:45 pre-429 sample, leaving operating margin.
+ * 45s elapsed budget sits above the 38.1s maximum observed after startup warm-up in the healthy
+ * 09:18-09:45 pre-429 sample, leaving operating margin.
  * 105s start-spacing budget is the 90s cadence target plus 15s tolerance.
  */
 object FixedScanTimingGuardrail {
