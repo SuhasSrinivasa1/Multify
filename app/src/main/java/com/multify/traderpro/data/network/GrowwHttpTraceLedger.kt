@@ -54,7 +54,12 @@ object GrowwHttpTraceLedger {
     fun classify(path: String): String = when {
         path.startsWith("/v1/live-data/") -> "LIVE_DATA"
         path.startsWith("/v1/historical/") -> "HISTORICAL"
-        path.startsWith("/v1/order") || path.contains("/orders") || path.contains("/gtt") -> "ORDERS"
+        path == "/v1/order/create" || path == "/v1/order/cancel" ||
+            path == "/v1/order-advance/create" ||
+            path.startsWith("/v1/order-advance/modify/") ||
+            path.startsWith("/v1/order-advance/cancel/") -> "ORDERS"
+        // Groww's published category table identifies order status/list,
+        // positions, holdings and margins as NON_TRADING.
         path.contains("/token/") -> "AUTH"
         else -> "NON_TRADING"
     }
