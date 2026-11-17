@@ -22,6 +22,6 @@ object FixedDualAccountPolicy {
     // Beta is read-only Fixed research. Hard 60% of Groww's published
     // LIVE_DATA per-second and rolling-minute ceilings; no Alpha quota borrowing.
     const val BETA_LIVE_PER_SECOND = 6
-    const val BETA_LIVE_PER_MINUTE = 180
+    const val BETA_LIVE_PER_MINUTE = FixedResearchCapacityPolicy.BETA_SAFE_LIVE_60S
     const val BETA_HISTORICAL_PER_MINUTE = 8
 }
