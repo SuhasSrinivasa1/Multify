@@ -146,6 +146,7 @@ jobs:
           assert "FRESH_EXECUTION_PREFLIGHT_STARTED" in current
           assert "FixedAutoBuyCooldownQueue" in current
           assert "FixedAutoBuyResearchLtpRoutingPolicy.useBetaBatch(" in current
+          assert "FixedAutoBuyResearchQuoteRoutingPolicy.preferBetaQuote(" in current
           assert "fixedSweepAdaptiveLead.record(" in current
           assert "preferBetaLiveForQuote" in Path(root+"engine/FixedCategoryAccountRoutingPolicy.kt").read_text()
           assert "SPLIT_LIVE_HISTORY_ROUTING" in current
@@ -186,6 +187,7 @@ jobs:
               root+"data/logging/FixedMarketPathTelemetry.kt",
               root+"engine/FixedAutoBuyCooldownQueue.kt",
               root+"engine/FixedAutoBuyResearchLtpRoutingPolicy.kt",
+              root+"engine/FixedAutoBuyResearchQuoteRoutingPolicy.kt",
               root+"engine/FixedAccountResearchRecoveryPolicy.kt",
               root+"engine/FixedDiscoveryDisplayPolicy.kt",
               root+"engine/FixedCategoryAccountRoutingPolicy.kt",
@@ -206,6 +208,7 @@ jobs:
               "app/src/test/java/com/multify/traderpro/engine/AlphaReadPacingPolicyTest.kt",
               "app/src/test/java/com/multify/traderpro/engine/FixedAutoBuyCooldownQueueTest.kt",
               "app/src/test/java/com/multify/traderpro/engine/FixedAutoBuyResearchLtpRoutingPolicyTest.kt",
+              "app/src/test/java/com/multify/traderpro/engine/FixedAutoBuyResearchQuoteRoutingPolicyTest.kt",
               "app/src/test/java/com/multify/traderpro/engine/FixedAccountResearchRecoveryPolicyTest.kt",
               "app/src/test/java/com/multify/traderpro/engine/FixedDiscoveryDisplayPolicyTest.kt",
               "app/src/test/java/com/multify/traderpro/engine/FixedCategoryAccountRoutingPolicyTest.kt",
