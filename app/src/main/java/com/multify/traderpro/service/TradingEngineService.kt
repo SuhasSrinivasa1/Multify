@@ -833,6 +833,7 @@ class TradingEngineService : Service() {
                                 return (after - before).coerceAtLeast(0L)
                             }
                             val historicalAfter = repository.fixedHistoricalRequestCounters()
+                            // V908_SCAN_TIMING_GUARDRAIL_PREP_BEGIN
                             val live429Delta = (
                                 usageAfter.categories.first { it.category == GrowwApiUsageLedger.Category.LIVE_DATA }.rateLimitResponses -
                                     usageBefore.categories.first { it.category == GrowwApiUsageLedger.Category.LIVE_DATA }.rateLimitResponses
@@ -848,6 +849,7 @@ class TradingEngineService : Service() {
                                 live429s = live429Delta,
                                 historical429s = historical429Delta
                             )
+                            // V908_SCAN_TIMING_GUARDRAIL_PREP_END
                             auditLogger.logAsync("RUNTIME", "FIXED_SCAN_PROFILE", mapOf(
                                 "elapsed_ms" to elapsed,
                                 "scan_id" to scanId,
@@ -875,8 +877,10 @@ class TradingEngineService : Service() {
                                 "live_network_requests" to requestDelta(GrowwApiUsageLedger.Category.LIVE_DATA),
                                 "historical_network_requests" to requestDelta(GrowwApiUsageLedger.Category.HISTORICAL),
                                 "non_trading_network_requests" to requestDelta(GrowwApiUsageLedger.Category.NON_TRADING),
+                                // V908_SCAN_TIMING_GUARDRAIL_FIELDS_BEGIN
                                 "live_429s" to live429Delta,
                                 "historical_429s" to historical429Delta,
+                                // V908_SCAN_TIMING_GUARDRAIL_FIELDS_END
                                 "governor_wait_ms" to (
                                     (usageAfter.categories.first { it.category == GrowwApiUsageLedger.Category.LIVE_DATA }.permitWaitMs -
                                         usageBefore.categories.first { it.category == GrowwApiUsageLedger.Category.LIVE_DATA }.permitWaitMs).coerceAtLeast(0L) +
