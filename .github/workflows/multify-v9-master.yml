@@ -153,7 +153,7 @@ jobs:
               root+"engine/FixedAutoBuyPublicationEvidencePolicy.kt").read_text()
           assert "SCAN_HEALTH_V908" in current
           # Order submission and protection must remain byte identical to v9.0.7.
-          prior_v907=old("v907-fixed-auto-buy-throttle-safe-recovery-20261117",repo)
+          prior_v907=old("67cb146b057f17cc2366941e4b1597b664d8e195",repo)
           assert part(current,"private suspend fun placeCncBuy(",
                       "private fun LongForecastEntity.toForecastDto(")==part(
               prior_v907,"private suspend fun placeCncBuy(",
