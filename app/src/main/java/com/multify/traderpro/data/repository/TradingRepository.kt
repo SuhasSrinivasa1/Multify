@@ -9930,17 +9930,32 @@ class TradingRepository @Inject constructor(
             for (position in marked) {
                 if (position.side != "LONG" || position.symbol.uppercase(Locale.US) in blockedSymbols) continue
                 val result = runCatching { ensureHardStopProtection(token, position, "AFTER_HOURS_HARD_STOP") }
-                if (result.isSuccess) hardStopReady++ else {
+                val verified = result.getOrNull()?.let {
+                    com.multify.traderpro.engine.GttProtectionReadinessPolicy.verified(
+                        it.smartOrderMode, it.smartOrderId, it.smartOrderStatus)
+                } == true
+                if (verified) hardStopReady++ else {
                     hardStopFailures++
                     val error = result.exceptionOrNull()
-                    auditLogger.log("GTT", "AFTER_HOURS_HARD_STOP_ERROR", mapOf(
+                    auditLogger.log("GTT", "AFTER_HOURS_PROTECTION_NOT_VERIFIED", mapOf(
                         "symbol" to position.symbol,
-                        "message" to (error?.message ?: error?.javaClass?.simpleName ?: "Unknown error")
+                        "message" to (error?.message ?: "NO_VERIFIED_ACTIVE_BROKER_GTT"),
+                        "protection_counted_only_after_broker_active_state" to true
                     ))
                 }
             }
-            auditLogger.log("GTT", "OVERNIGHT_PROTECTION_PRESERVED", mapOf(
-                "tracked_holdings" to marked.size,
+            val overnightRows = managedDao.openPositions().filter(::appOwned)
+            val overnightVerified = overnightRows.count {
+                com.multify.traderpro.engine.GttProtectionReadinessPolicy.verified(
+                    it.smartOrderMode, it.smartOrderId, it.smartOrderStatus)
+            }
+            auditLogger.log("GTT",
+                if (overnightRows.isNotEmpty() && overnightVerified != overnightRows.size)
+                    "OVERNIGHT_PROTECTION_INCOMPLETE_CRITICAL"
+                else "OVERNIGHT_PROTECTION_VERIFIED", mapOf(
+                "tracked_holdings" to overnightRows.size,
+                "verified_active_broker_gtts" to overnightVerified,
+                "unprotected_holdings" to overnightRows.size - overnightVerified,
                 "hard_stop_or_trail_ready" to hardStopReady,
                 "hard_stop_failures" to hardStopFailures,
                 "hard_stop_pct" to -HardStopLossPolicy.MAX_LOSS_PCT,
