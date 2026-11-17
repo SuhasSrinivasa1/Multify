@@ -36,7 +36,10 @@ cooldown exceeds the original five-minute maximum recommendation age.
 4. Explicit event-by-event recommendation ID, symbol, original expiry,
    broker cooldown, and retry decision are emitted to audit. Already stale
    rows are filtered before any broker readiness call.
-5. CI freezes v8.3.19 score/discovery/publication and v8.3.16 shadow;
+5. When eligible Auto Buy candidates are blocked, a rate-limited status notification
+   displays the broker cooldown and explicitly states that expired signals will
+   not be bought. The notification does not place orders or bypass limits.
+6. CI freezes v8.3.19 score/discovery/publication and v8.3.16 shadow;
    the original service logic is byte-identical after stripping exactly
    the marked V902 prefetch, V904 research gate, and V907 service-scope
    observer additions. Unit tests cover cooldown/retry safety and batch routing.
