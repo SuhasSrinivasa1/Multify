@@ -1,6 +1,7 @@
 package com.multify.traderpro.data.network
 
 import android.os.SystemClock
+import com.multify.traderpro.engine.DualMinuteAdmissionPolicy
 import com.multify.traderpro.engine.FixedDualAccountPolicy
 import com.multify.traderpro.engine.GrowwRecoveryPolicy
 import com.multify.traderpro.engine.GrowwRetryAfterPolicy
@@ -36,7 +37,11 @@ class BetaResearchGate @Inject constructor() {
         val cooldownRemainingMs: Long = 0L,
         val halfOpenProbeInFlight: Boolean = false,
         val rateLimitResponses: Long = 0L,
-        val activeGapMs: Long = LtpAdaptivePacingPolicy.START_GAP_MS
+        val activeGapMs: Long = LtpAdaptivePacingPolicy.START_GAP_MS,
+        val fixedMinuteBucket: Long = Long.MIN_VALUE,
+        val fixedMinuteUsed: Int = 0,
+        val fixedMinuteRemaining: Int = FixedDualAccountPolicy.BETA_LIVE_PER_MINUTE,
+        val rollingMinuteRemaining: Int = FixedDualAccountPolicy.BETA_LIVE_PER_MINUTE
     )
     private data class Window(
         val second: ArrayDeque<Long> = ArrayDeque(),
@@ -45,7 +50,9 @@ class BetaResearchGate @Inject constructor() {
         var cooldownUntil: Long = 0L,
         var lastGrantedAt: Long = 0L,
         var probeRequired: Boolean = false,
-        var probeInFlight: Boolean = false
+        var probeInFlight: Boolean = false,
+        var calendar: DualMinuteAdmissionPolicy.CalendarState =
+            DualMinuteAdmissionPolicy.CalendarState()
     )
     private val lock = Mutex()
     private val historicalInFlight = Mutex()
@@ -79,7 +86,13 @@ class BetaResearchGate @Inject constructor() {
             cooldownRemainingMs = (w.cooldownUntil - now).coerceAtLeast(0L),
             halfOpenProbeInFlight = w.probeInFlight,
             rateLimitResponses = liveRateLimits.get(),
-            activeGapMs = livePace.gapMs
+            activeGapMs = livePace.gapMs,
+            fixedMinuteBucket = DualMinuteAdmissionPolicy.minuteId(System.currentTimeMillis()),
+            fixedMinuteUsed = DualMinuteAdmissionPolicy.normalize(
+                w.calendar, System.currentTimeMillis()).used,
+            fixedMinuteRemaining = DualMinuteAdmissionPolicy.headroom(
+                w.calendar, System.currentTimeMillis(), liveMinute),
+            rollingMinuteRemaining = (liveMinute - w.minute.size).coerceAtLeast(0)
         )
     }
 
@@ -92,12 +105,17 @@ class BetaResearchGate @Inject constructor() {
                 while (w.minute.isNotEmpty() && w.minute.first() <= now - 60_000L) w.minute.removeFirst()
                 val perSecond = if (type == Type.LIVE) liveSec else histSec
                 val perMinute = if (type == Type.LIVE) liveMinute else histMinute
+                val wallNow = System.currentTimeMillis()
+                w.calendar = DualMinuteAdmissionPolicy.normalize(w.calendar, wallNow)
+                val fixedMinuteWait = DualMinuteAdmissionPolicy.calendarWaitMs(
+                    w.calendar, wallNow, perMinute)
                 val spacingWait = if (w.lastGrantedAt > 0L)
                     (w.lastGrantedAt + (if (type == Type.LIVE) livePace.gapMs else 1_500L) - now)
                         .coerceAtLeast(0L) else 0L
                 val wait = maxOf(
                     spacingWait,
                     (w.cooldownUntil - now).coerceAtLeast(0L),
+                    fixedMinuteWait,
                     if (w.probeRequired && w.probeInFlight) 100L else 0L,
                     if (w.second.size >= perSecond) (w.second.first() + 1_000L - now).coerceAtLeast(1L) else 0L,
                     if (w.minute.size >= perMinute) (w.minute.first() + 60_000L - now).coerceAtLeast(1L) else 0L
@@ -106,6 +124,7 @@ class BetaResearchGate @Inject constructor() {
                     w.second.addLast(now)
                     w.minute.addLast(now)
                     w.lastGrantedAt = now
+                    w.calendar = DualMinuteAdmissionPolicy.reserve(w.calendar, wallNow)
                     if (w.probeRequired) w.probeInFlight = true
                 }
                 if (type == Type.LIVE) updateLiveStatus(now, w)
@@ -113,8 +132,15 @@ class BetaResearchGate @Inject constructor() {
             }
             if (waitMs <= 0L) break
             // Waiting for a Beta-only cooldown cannot stall Fixed's official scan.
-            if (waitMs > 10_000L) throw IOException("BETA_FIXED_RATE_BUDGET_OR_COOLDOWN")
-            delay(waitMs.coerceAtLeast(5L))
+            // Calendar/rolling minute exhaustion is a bounded local pause,
+            // not a broker rejection. Only genuine long cooldowns fail fast.
+            val realCooldown = lock.withLock {
+                val w = windows.getValue(type)
+                (w.cooldownUntil - SystemClock.elapsedRealtime()).coerceAtLeast(0L)
+            }
+            if (realCooldown > 10_000L)
+                throw IOException("BETA_FIXED_RATE_BUDGET_OR_COOLDOWN")
+            delay(waitMs.coerceIn(5L, 1_000L))
         }
         val started = SystemClock.elapsedRealtime()
         if (type == Type.LIVE) liveRequests.incrementAndGet() else historicalRequests.incrementAndGet()
@@ -190,7 +216,10 @@ class BetaResearchGate @Inject constructor() {
             while (w.minute.isNotEmpty() && w.minute.first() <= now - 60_000L) w.minute.removeFirst()
             updateLiveStatus(now, w)
         }
-        w.cooldownUntil <= now
+        w.calendar = DualMinuteAdmissionPolicy.normalize(w.calendar, System.currentTimeMillis())
+        w.cooldownUntil <= now && !w.probeInFlight && (
+            type != Type.LIVE || (w.minute.size < liveMinute && w.calendar.used < liveMinute)
+        )
     }
 
     fun snapshot() = UsageSnapshot(
@@ -207,11 +236,18 @@ class BetaResearchGate @Inject constructor() {
             val snapshot = liveStatusSnapshot
             val age = (SystemClock.elapsedRealtime() - liveStatusCapturedAtElapsedMs)
                 .coerceAtLeast(0L)
+            val sameCalendarMinute =
+                DualMinuteAdmissionPolicy.minuteId(System.currentTimeMillis()) ==
+                    snapshot.fixedMinuteBucket
             return snapshot.copy(
-                // These are conservative UI estimates; actual rolling HTTP
-                // counts come from GrowwHttpTraceLedger, not this cache.
+                // The trace ledger remains authoritative for outbound attempts.
                 usedLastMinute = if (age >= 60_000L) 0 else snapshot.usedLastMinute,
-                cooldownRemainingMs = (snapshot.cooldownRemainingMs - age).coerceAtLeast(0L)
+                cooldownRemainingMs = (snapshot.cooldownRemainingMs - age).coerceAtLeast(0L),
+                fixedMinuteUsed = if (sameCalendarMinute) snapshot.fixedMinuteUsed else 0,
+                fixedMinuteRemaining = if (sameCalendarMinute)
+                    snapshot.fixedMinuteRemaining else snapshot.endpointLimitPerMinute,
+                rollingMinuteRemaining = if (age >= 60_000L)
+                    snapshot.endpointLimitPerMinute else snapshot.rollingMinuteRemaining
             )
         }
     }
