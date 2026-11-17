@@ -62,6 +62,10 @@ class TradingEngineService : Service() {
     // V902_PREFETCH_FIELD_BEGIN
     private var fixedEarlyPrefetchObserverJob: Job? = null
     // V902_PREFETCH_FIELD_END
+    // V907_AUTOBUY_WAKE_FIELD_BEGIN
+    private var fixedAutoBuyWakeObserverJob: Job? = null
+    private var fixedAutoBuyWakeDelayJob: Job? = null
+    // V907_AUTOBUY_WAKE_FIELD_END
     // Service startup and watchdog can run concurrently. A single-flight owner
     // atomically publishes/starts the LAZY Fixed worker, never two workers.
     private val fixedScanWorkerStartGate = com.multify.traderpro.engine.FixedSingleWorkerStartGate()
@@ -132,6 +136,40 @@ class TradingEngineService : Service() {
             }
         }
         // V902_PREFETCH_OBSERVER_END
+        // V907_AUTOBUY_WAKE_OBSERVER_BEGIN
+        // Lifecycle-owned bounded wake-up, no background order job survives
+        // service shutdown. Rescheduling cancels only the waiting timer, not an
+        // already-started BUY/protection flow.
+        fixedAutoBuyWakeObserverJob = scope.launch(Dispatchers.IO) {
+            repository.fixedAutoBuyRecoveryWakeAt.collect { wakeAtMs ->
+                fixedAutoBuyWakeDelayJob?.cancel()
+                if (wakeAtMs <= 0L) return@collect
+                fixedAutoBuyWakeDelayJob = scope.launch(Dispatchers.IO) {
+                    delay((wakeAtMs - System.currentTimeMillis()).coerceAtLeast(0L))
+                    scope.launch(Dispatchers.IO) {
+                        try {
+                            val submitted = repository.autoBuyFixedRecommendations()
+                            auditLogger.logAsync("FIXED_AUTO_BUY", "COOLDOWN_WAKE_REVALIDATED", mapOf(
+                                "scheduled_wake_at_ms" to wakeAtMs,
+                                "actual_wake_at_ms" to System.currentTimeMillis(),
+                                "submitted_after_all_original_execution_checks" to submitted,
+                                "old_recommendations_not_revived" to true,
+                                "broker_cooldown_never_bypassed" to true
+                            ))
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (failure: Throwable) {
+                            auditLogger.logAsync("FIXED_AUTO_BUY", "COOLDOWN_WAKE_RECHECK_FAILED", mapOf(
+                                "type" to failure.javaClass.simpleName,
+                                "reason" to (failure.message ?: "UNKNOWN").take(160),
+                                "broker_cooldown_never_bypassed" to true
+                            ))
+                        }
+                    }
+                }
+            }
+        }
+        // V907_AUTOBUY_WAKE_OBSERVER_END
         startEngineLoop()
     }
 
@@ -152,6 +190,10 @@ class TradingEngineService : Service() {
         // V902_PREFETCH_DESTROY_BEGIN
         fixedEarlyPrefetchObserverJob?.cancel()
         // V902_PREFETCH_DESTROY_END
+        // V907_AUTOBUY_WAKE_DESTROY_BEGIN
+        fixedAutoBuyWakeDelayJob?.cancel()
+        fixedAutoBuyWakeObserverJob?.cancel()
+        // V907_AUTOBUY_WAKE_DESTROY_END
         fixedScanJob?.cancel()
         forecastScanJob?.cancel()
         forecastNewsJob?.cancel()
