@@ -6,8 +6,9 @@ import java.util.Locale
 import kotlin.math.abs
 
 /**
- * Research-only official Univest cash-equity notification grammar.
- * Not an order signal. The 48 features are 40 independently observed factor raws + 8
+ * Official Univest cash-equity notification grammar. ENTRY may authorize an Alpha
+ * order only through UnivestAutoBuyPolicy and the Fixed toggle; EXIT remains research-only.
+ * The 48 features are 40 independently observed factor raws + 8
  * entry-time context values. Missing factors remain null, never fabricated as zero.
  */
 object ForecastUnivestLearningPolicy {
