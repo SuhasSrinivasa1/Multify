@@ -8,6 +8,7 @@ class BrokerBuyFailureMessagePolicyTest {
         assertTrue(BrokerBuyFailureMessagePolicy.insufficientFunds("Order rejected: insufficient funds"))
         assertTrue(BrokerBuyFailureMessagePolicy.insufficientFunds("{\"message\":\"Margin shortfall\"}"))
         assertTrue(BrokerBuyFailureMessagePolicy.insufficientFunds("Not enough balance in account"))
+        assertTrue(BrokerBuyFailureMessagePolicy.insufficientFunds("RMS:Margin Exceeds"))
     }
     @Test fun unrelatedFailuresDoNotShowFalseFundsAlert() {
         assertFalse(BrokerBuyFailureMessagePolicy.insufficientFunds("429 Too Many Requests"))

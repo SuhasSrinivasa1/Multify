@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -20,6 +21,8 @@ data class AppSettings(
     val expectedStaticIp: String = "",
     val packageFilter: String = "",
     val holdingBudgetRupees: Long = 200_000L,
+    val maxTotalCapitalRupees: Long = 200_000L,
+    val maxConcurrentHoldings: Int = 3,
     val armEnabled: Boolean = false,
     val forecastScannerEnabled: Boolean = false,
     val forecastAutoBuyEnabled: Boolean = false,
@@ -57,6 +60,8 @@ class AppPreferences @Inject constructor(
         val expectedStaticIp = stringPreferencesKey("expected_static_ip")
         val packageFilter = stringPreferencesKey("package_filter")
         val holdingBudgetRupees = longPreferencesKey("daily_budget_rupees")
+        val maxTotalCapitalRupees = longPreferencesKey("v9011_max_total_capital_rupees")
+        val maxConcurrentHoldings = intPreferencesKey("v9011_max_concurrent_holdings")
         val armEnabled = booleanPreferencesKey("live_execution_enabled")
         val forecastScannerEnabled = booleanPreferencesKey("forecast_scanner_enabled")
         val forecastEarlyEntryMigration = booleanPreferencesKey("forecast_early_entry_v788_enabled")
@@ -98,6 +103,14 @@ class AppPreferences @Inject constructor(
 
     suspend fun setHoldingBudget(value: Long) {
         context.dataStore.edit { it[Keys.holdingBudgetRupees] = value.coerceIn(10_000L, 200_000L) }
+    }
+
+    suspend fun setMaxTotalCapital(value: Long) {
+        context.dataStore.edit { it[Keys.maxTotalCapitalRupees] = value.coerceIn(10_000L, 2_000_000L) }
+    }
+
+    suspend fun setMaxConcurrentHoldings(value: Int) {
+        context.dataStore.edit { it[Keys.maxConcurrentHoldings] = value.coerceIn(1, 10) }
     }
 
     suspend fun updateAuthState(
@@ -232,6 +245,8 @@ class AppPreferences @Inject constructor(
         expectedStaticIp = this[Keys.expectedStaticIp].orEmpty(),
         packageFilter = this[Keys.packageFilter].orEmpty(),
         holdingBudgetRupees = (this[Keys.holdingBudgetRupees] ?: 200_000L).coerceIn(10_000L, 200_000L),
+        maxTotalCapitalRupees = (this[Keys.maxTotalCapitalRupees] ?: 200_000L).coerceIn(10_000L, 2_000_000L),
+        maxConcurrentHoldings = (this[Keys.maxConcurrentHoldings] ?: 3).coerceIn(1, 10),
         armEnabled = this[Keys.armEnabled] ?: false,
         forecastScannerEnabled = this[Keys.forecastScannerEnabled] ?: false,
         forecastAutoBuyEnabled = this[Keys.forecastAutoBuyEnabled] ?: false,

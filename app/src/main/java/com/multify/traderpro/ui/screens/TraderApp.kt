@@ -291,6 +291,8 @@ fun TraderApp(viewModel: TraderViewModel = hiltViewModel()) {
                         if (state.settings.armEffective) viewModel.setArm(false) else showArmConfirm = true
                     },
                     onBudgetChanged = viewModel::setHoldingBudget,
+                    onTotalCapitalChanged = viewModel::setMaxTotalCapital,
+                    onMaxHoldingsChanged = viewModel::setMaxConcurrentHoldings,
                     onForecastAutoBuyChanged = viewModel::setForecastAutoBuy,
                     onForecastScannerChanged = viewModel::setForecastScannerEnabled,
                     onFixedAutoBuyChanged = viewModel::setFixedAutoBuy,
@@ -1062,7 +1064,7 @@ private fun FixedScreen(
                                 when {
                                     activeProtection -> "BROKER GTT ACTIVE · ${p.smartOrderMode.replace("_", " ")}"
                                     triggered -> "BROKER GTT TRIGGERED · RECONCILING"
-                                    else -> "PROTECTION NEEDS REVIEW · CHECK GROWW"
+                                    else -> "UNPROTECTED HOLDING · ACTION NEEDED IN GROWW"
                                 },
                                 style = MaterialTheme.typography.labelMedium,
                                 color = if (activeProtection) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
@@ -1264,6 +1266,8 @@ private fun SettingsScreen(
     onAuthenticate: () -> Unit,
     onArmRequested: () -> Unit,
     onBudgetChanged: (Long) -> Unit,
+    onTotalCapitalChanged: (Long) -> Unit,
+    onMaxHoldingsChanged: (Int) -> Unit,
     onForecastAutoBuyChanged: (Boolean) -> Unit,
     onForecastScannerChanged: (Boolean) -> Unit,
     onFixedAutoBuyChanged: (Boolean) -> Unit,
@@ -1280,6 +1284,8 @@ private fun SettingsScreen(
     var staticIp by remember(state.settings.expectedStaticIp) { mutableStateOf(state.settings.expectedStaticIp) }
     var packageFilter by remember(state.settings.packageFilter) { mutableStateOf(state.settings.packageFilter) }
     var budget by remember(state.settings.holdingBudgetRupees) { mutableStateOf(state.settings.holdingBudgetRupees.toFloat()) }
+    var totalCapital by remember(state.settings.maxTotalCapitalRupees) { mutableStateOf(state.settings.maxTotalCapitalRupees.toFloat()) }
+    var maxHoldings by remember(state.settings.maxConcurrentHoldings) { mutableStateOf(state.settings.maxConcurrentHoldings.toFloat()) }
     var manualSymbol by remember { mutableStateOf("") }
     var manualPrice by remember { mutableStateOf("") }
     // Capture health is independent of the foreground trading-engine process.
@@ -1401,6 +1407,15 @@ private fun SettingsScreen(
                         valueRange = 10_000f..200_000f,
                         steps = 18
                     )
+                    Text("Total app-owned capital limit · ₹${totalCapital.toLong()} (all engines)", style = MaterialTheme.typography.labelMedium)
+                    Slider(value = totalCapital, onValueChange = { totalCapital = it },
+                        onValueChangeFinished = { onTotalCapitalChanged(totalCapital.toLong()) },
+                        valueRange = 10_000f..2_000_000f, steps = 198)
+                    Text("Maximum concurrent app-owned holdings · ${maxHoldings.toInt()}", style = MaterialTheme.typography.labelMedium)
+                    Slider(value = maxHoldings, onValueChange = { maxHoldings = it },
+                        onValueChangeFinished = { onMaxHoldingsChanged(maxHoldings.toInt()) },
+                        valueRange = 1f..10f, steps = 8)
+                    Text("Auto BUY uses fresh Alpha CNC available cash and pending-order safety; if broker funds cannot be verified, BUY is blocked.", style = MaterialTheme.typography.bodySmall)
                     HorizontalDivider()
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {

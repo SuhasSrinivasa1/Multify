@@ -23,6 +23,16 @@ class ForecastUnivestLearningPolicyTest {
         assertNull(p.parse("com.univest.capp", "Position closed without any labelled ticker"))
     }
 
+    @Test fun emojiPrefixedReentryIsResearchOnlyNotANewBuy() {
+        val alert = "Advisory Pick back in Entry Range\n✅ Stock: INDUSINDBK\n✅ View pick details"
+        val parsed = p.parse("com.univest.capp", alert)
+        assertEquals(ForecastUnivestLearningPolicy.Type.REENTRY, parsed?.type)
+        assertEquals("INDUSINDBK", parsed?.symbol)
+        assertNull(p.parse("unknown.app", alert))
+        assertEquals(ForecastUnivestLearningPolicy.Type.ENTRY,
+            p.parse("com.univest.capp", "New Advisory Pick\n✅ Stock: KDDL")?.type)
+    }
+
     @Test fun recognizesRealYatharthAdvisoryWithoutTreatingPotentialAsProfit() {
         val message = "New Advisory Pick posted\nSTOCK: YATHARTH\nDuration: 1-3 Months\nPotential: 5.00% 📈"
         val parsed = p.parse("com.univest.capp", message)

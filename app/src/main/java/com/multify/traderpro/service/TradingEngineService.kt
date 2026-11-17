@@ -769,9 +769,14 @@ class TradingEngineService : Service() {
                             continue
                         }
                         if (previousFixedPause != null) {
-                            auditLogger.log("FIXED_DATA_PIPELINE", "FIXED_SCAN_RESUMED_AFTER_BROKER_RECOVERY", mapOf(
+                            val alphaRecovered = readiness == FixedDataPipelinePolicy.Readiness.READY
+                            auditLogger.log("FIXED_DATA_PIPELINE",
+                                if (alphaRecovered) "FIXED_SCAN_RESUMED_AFTER_BROKER_RECOVERY"
+                                else "FIXED_SCAN_RESUMED_VIA_READ_ONLY_BETA_ROUTE", mapOf(
                                 "previous_reason" to previousFixedPause!!.name,
-                                "cooldown_expired" to true
+                                "cooldown_expired" to alphaRecovered,
+                                "beta_research_route_available" to (!alphaRecovered && categoryResearchReady),
+                                "alpha_trading_route_authorized" to alphaRecovered
                             ))
                             previousFixedPause = null
                         }
