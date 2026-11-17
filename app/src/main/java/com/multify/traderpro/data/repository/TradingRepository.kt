@@ -260,6 +260,9 @@ class TradingRepository @Inject constructor(
     // background job survives service shutdown.
     private val _fixedEarlyPrefetchReady = MutableSharedFlow<Long>(extraBufferCapacity = 2)
     val fixedEarlyPrefetchReady: SharedFlow<Long> = _fixedEarlyPrefetchReady.asSharedFlow()
+    // Service-lifetime wake-up only; an event never authorizes execution.
+    private val _fixedAutoBuyRecoveryWakeAt = MutableSharedFlow<Long>(extraBufferCapacity = 4)
+    val fixedAutoBuyRecoveryWakeAt: SharedFlow<Long> = _fixedAutoBuyRecoveryWakeAt.asSharedFlow()
 
     val settings: Flow<AppSettings> = preferences.settings
     val recentEvents: Flow<List<SignalEventEntity>> = dao.observeRecent(100)
@@ -353,6 +356,9 @@ class TradingRepository @Inject constructor(
     private val multifyBuyLifecycleMutex = Mutex()
     private val forecastAutoBuySubmissionMutex = Mutex()
     private val fixedAutoBuySubmissionMutex = Mutex()
+    private val fixedAutoBuyCooldownQueue =
+        com.multify.traderpro.engine.FixedAutoBuyCooldownQueue()
+    @Volatile private var fixedAutoBuyWakeScheduledForMs = 0L
     private val scanApiCycleMutex = Mutex()
     private val betaForecastCycleMutex = Mutex()
     @Volatile private var fixedApiPriorityRequested = false
@@ -1538,17 +1544,70 @@ class TradingRepository @Inject constructor(
         return null
     }
 
-    private fun auditAutoBuyBlocked(engine: String, blocked: GrowwRecoveryGate.LocallyBlocked) {
+    private fun auditAutoBuyBlocked(
+        engine: String, blocked: GrowwRecoveryGate.LocallyBlocked,
+        recommendationId: Long? = null, symbol: String? = null
+    ) {
         auditLogger.logAsync(engine, "BUY_BLOCKED_BROKER_NOT_READY", mapOf(
             "reason" to blocked.reason,
+            "recommendation_id" to recommendationId,
+            "symbol" to symbol,
             "next_allowed_at_ms" to blocked.nextAllowedAtMs,
             "broker_request_suppressed" to true,
             "safety_checks_bypassed" to false
         ))
     }
 
+    /**
+     * Only fresh post-activation intents can be queued. Pending intents are
+     * NOT orders: a wake re-enters the complete original broker BUY path.
+     * A 15m cooldown cannot turn a 5m recommendation into an eligible BUY.
+     */
+    private fun scheduleFixedAutoBuyCooldownWake(
+        rows: List<FixedRecommendationRecord>,
+        blocked: GrowwRecoveryGate.LocallyBlocked,
+        atMs: Long
+    ) {
+        val settingsActivation = rows.firstOrNull()?.let { row ->
+            // Each row's original publication timestamp remains authoritative.
+            // The activation epoch is read again at actual order submission.
+            row.generatedAtMs
+        }
+        val activatedAtMs = fixedAutoBuyActivationForQueue
+        val plan = fixedAutoBuyCooldownQueue.afterCooldown(
+            rows.map {
+                com.multify.traderpro.engine.FixedAutoBuyCooldownQueue.Pending(
+                    it.id, it.symbol, it.generatedAtMs, activatedAtMs
+                )
+            }, atMs, blocked.nextAllowedAtMs
+        )
+        auditLogger.logAsync("FIXED_AUTO_BUY", "BUY_COOLDOWN_PENDING_DECISION", mapOf(
+            "reason" to blocked.reason,
+            "pending_count" to plan.pending.size,
+            "pending_ids" to plan.pending.take(48).map { it.recommendationId },
+            "pending_symbols" to plan.pending.take(48).map { it.symbol },
+            "earliest_retry_at_ms" to plan.retryAtMs,
+            "retryable_before_original_5min_expiry" to plan.retryableCount,
+            "expired_or_ineligible" to plan.expiredOrIneligible,
+            "cooldown_cannot_override_freshness" to true,
+            "no_broker_request" to true,
+            "no_orders_queued_at_broker" to true
+        ))
+        val dueAt = plan.retryAtMs ?: return
+        if (dueAt != fixedAutoBuyWakeScheduledForMs) {
+            fixedAutoBuyWakeScheduledForMs = dueAt
+            _fixedAutoBuyRecoveryWakeAt.tryEmit(dueAt)
+        }
+    }
+    @Volatile private var fixedAutoBuyActivationForQueue = 0L
+
     suspend fun setFixedAutoBuy(enabled: Boolean) {
         preferences.setFixedAutoBuy(enabled)
+        // OFF/ON cannot inherit any old pending intent or a previous session wake.
+        fixedAutoBuyCooldownQueue.clear()
+        fixedAutoBuyWakeScheduledForMs = 0L
+        fixedAutoBuyActivationForQueue =
+            if (enabled) preferences.settings.first().fixedAutoBuyActivatedAtMs else 0L
         auditLogger.log(
             "SETTINGS",
             if (enabled) "FIXED_AUTO_BUY_ENABLED" else "FIXED_AUTO_BUY_DISABLED",
@@ -4669,6 +4728,24 @@ class TradingRepository @Inject constructor(
             return PrecomputedFixedSweep(emptyMap(), 1, true, System.currentTimeMillis(), 0)
         }
         val betaToken = if (betaHealthyAtStart) connectedBetaToken else null
+        // While execution is enabled, protect Alpha quote capacity by shifting
+        // 35 rather than 26 of the ORIGINAL 53 discovery slots to read-only Beta.
+        // No duplicate sweep or additional broker request is introduced.
+        val protectAlphaForFixedAutoBuy = preferences.settings.first().let {
+            it.fixedAutoBuyEnabled && !it.safetyHalt
+        } && betaToken != null
+        if (protectAlphaForFixedAutoBuy) {
+            auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "FIXED_AUTO_BUY_ALPHA_LIVE_HEADROOM", mapOf(
+                "preferred_beta_ltp_slots" to chunks.indices.count { index ->
+                    com.multify.traderpro.engine.FixedAutoBuyResearchLtpRoutingPolicy
+                        .useBetaBatch(index, true, true)
+                },
+                "original_batch_count" to chunks.size,
+                "beta_read_only" to true,
+                "alpha_order_quote_reserved" to true,
+                "research_limits_unchanged" to true
+            ))
+        }
         if (connectedBetaToken != null && betaToken == null) {
             auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "BETA_UNHEALTHY_ALPHA_ONLY_SWEEP", mapOf(
                 "alpha_headroom_checked" to true, "beta_requests_dispatched" to 0,
@@ -4699,7 +4776,9 @@ class TradingRepository @Inject constructor(
                 chunks, windowStart
             ) { index, chunk ->
                 val betaAssigned = betaToken != null &&
-                    com.multify.traderpro.engine.FixedDualAccountPolicy.betaDiscoveryBatch(index, true)
+                    com.multify.traderpro.engine.FixedAutoBuyResearchLtpRoutingPolicy.useBetaBatch(
+                        index, true, protectAlphaForFixedAutoBuy
+                    )
                 // Re-check the ACTUAL category cooldown immediately before the
                 // network call. A 429 in another concurrent Alpha batch should
                 // redirect subsequent read-only batches to healthy Beta, not
@@ -7578,7 +7657,7 @@ class TradingRepository @Inject constructor(
         val today = now.toLocalDate().toString()
 
         // Legacy entry GTTs migrate in the maintenance worker; normal direct buys do no pre-order broker reconciliation.
-        val rows = fixedRecommendationStore.recommendations(today)
+        val candidateRows = fixedRecommendationStore.recommendations(today)
             .filter {
                 it.status == "ACTIVE" &&
                     it.executionEligible &&
@@ -7590,6 +7669,19 @@ class TradingRepository @Inject constructor(
             .groupBy { it.symbol.uppercase(Locale.US) }
             .values.mapNotNull { events -> events.maxByOrNull { it.generatedAtMs } }
             .sortedBy { it.generatedAtMs }
+        // Do not waste execution traffic on stale recommendations, even when
+        // Alpha LIVE_DATA is in cooldown. A fresh broker quote does NOT revive
+        // a recommendation older than the existing five-minute execution TTL.
+        val rows = candidateRows.filter {
+            AutoBuyEntrySafetyPolicy.isFreshFixedEntry(it.generatedAtMs, System.currentTimeMillis())
+        }
+        if (candidateRows.isNotEmpty() && rows.isEmpty()) {
+            auditLogger.logAsync("FIXED_AUTO_BUY", "NO_FRESH_POST_ACTIVATION_BUYS", mapOf(
+                "stale_count" to candidateRows.size, "cooldown_bypass" to false,
+                "existing_max_age_ms" to AutoBuyEntrySafetyPolicy.FIXED_AUTO_BUY_MAX_AGE_MS
+            ))
+        }
+        fixedAutoBuyActivationForQueue = settings.fixedAutoBuyActivatedAtMs
 
         // An activation with only previously published recommendations should not
         // trigger a broker token refresh or any order-preparation API traffic.
@@ -7597,6 +7689,7 @@ class TradingRepository @Inject constructor(
         val preflightCooldown = buyApiCooldownOrNull(GrowwApiUsageLedger.Category.LIVE_DATA)
         if (preflightCooldown != null) {
             auditAutoBuyBlocked("FIXED_AUTO_BUY", preflightCooldown)
+            scheduleFixedAutoBuyCooldownWake(rows, preflightCooldown, System.currentTimeMillis())
             return 0
         }
         preFixedAutoBuyExecutionGuard(settings)
@@ -7635,7 +7728,8 @@ class TradingRepository @Inject constructor(
             }
             val cooldown = buyApiCooldownOrNull(GrowwApiUsageLedger.Category.LIVE_DATA)
             if (cooldown != null) {
-                auditAutoBuyBlocked("FIXED_AUTO_BUY", cooldown)
+                auditAutoBuyBlocked("FIXED_AUTO_BUY", cooldown, row.id, row.symbol)
+                scheduleFixedAutoBuyCooldownWake(rows, cooldown, System.currentTimeMillis())
                 break
             }
             if (managedDao.openPosition(ENGINE_FIXED_HOLDING, row.symbol) != null) continue
@@ -7652,6 +7746,16 @@ class TradingRepository @Inject constructor(
                 continue
             }
 
+            auditLogger.logAsync("FIXED_AUTO_BUY", "FRESH_EXECUTION_PREFLIGHT_STARTED", mapOf(
+                "recommendation_id" to row.id,
+                "symbol" to row.symbol,
+                "recommendation_at_ms" to row.generatedAtMs,
+                "expires_at_ms" to (row.generatedAtMs +
+                    AutoBuyEntrySafetyPolicy.FIXED_AUTO_BUY_MAX_AGE_MS),
+                "activation_at_ms" to liveSettings.fixedAutoBuyActivatedAtMs,
+                "fresh_alpha_quote_required" to true,
+                "no_beta_trading_permissions" to true
+            ))
             val quoteStartedAtMs = System.currentTimeMillis()
             val quote = runCatching {
                 apiFactory.groww.quote(
@@ -7667,7 +7771,8 @@ class TradingRepository @Inject constructor(
             if (quote == null) {
                 val cooldown = buyApiCooldownOrNull(GrowwApiUsageLedger.Category.LIVE_DATA)
                 if (cooldown != null) {
-                    auditAutoBuyBlocked("FIXED_AUTO_BUY", cooldown)
+                    auditAutoBuyBlocked("FIXED_AUTO_BUY", cooldown, row.id, row.symbol)
+                    scheduleFixedAutoBuyCooldownWake(rows, cooldown, System.currentTimeMillis())
                     break
                 }
                 continue
@@ -7734,7 +7839,8 @@ class TradingRepository @Inject constructor(
                 GrowwApiUsageLedger.Category.ORDERS
             )
             if (executionCooldown != null) {
-                auditAutoBuyBlocked("FIXED_AUTO_BUY", executionCooldown)
+                auditAutoBuyBlocked("FIXED_AUTO_BUY", executionCooldown, row.id, row.symbol)
+                scheduleFixedAutoBuyCooldownWake(rows, executionCooldown, System.currentTimeMillis())
                 break
             }
             val sizing = com.multify.traderpro.engine.BudgetOnlyCncSizing.size(
