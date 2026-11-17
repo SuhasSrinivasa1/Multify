@@ -9,6 +9,8 @@ class AppPositionOwnershipPolicyTest {
 
     @Test fun appBuyRequiresKnownEngineAndApplicationReference() {
         assertTrue(allowed("MULTIFY_HOLDING", "MLH1234567890abcd"))
+        assertTrue(allowed("UNIVEST_HOLDING", "UVH1234567890abcd"))
+        assertFalse(allowed("UNIVEST_HOLDING", "MLH1234567890abcd"))
         assertTrue(allowed("FORECAST_HOLDING", "FLH1234567890abcd"))
         assertTrue(allowed("FIXED_HOLDING", "FXH1234567890abcd"))
         assertTrue(allowed("FIXED_HOLDING", "FXM1234567890abcd"))

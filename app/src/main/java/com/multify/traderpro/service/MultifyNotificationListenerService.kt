@@ -135,7 +135,9 @@ class MultifyNotificationListenerService : NotificationListenerService() {
                 ?.joinToString("\n").orEmpty()
             val subText = extras.getCharSequence(Notification.EXTRA_SUB_TEXT)?.toString().orEmpty()
             val body = listOf(text, bigText, subText, lines).filter { it.isNotBlank() }.distinct().joinToString("\n")
-            scope.launch {
+            // Actionable Univest ENTRY is dispatched on the priority lane, not delayed
+            // behind optional research or background monitoring.
+            priorityScope.launch {
                 runCatching { repository.captureUnivestNotification(title, body, sbn.postTime) }
                     .onFailure { auditLogger.log("FORECAST_UNIVEST", "NOTIFICATION_CAPTURE_ERROR", mapOf(
                         "exception" to it.javaClass.simpleName, "message" to (it.message ?: "").take(160))) }

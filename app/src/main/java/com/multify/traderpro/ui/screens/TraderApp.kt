@@ -676,7 +676,7 @@ private fun ForecastScreen(
         item {
             SectionTitle(
                 "LONG holding forecast",
-                "EARLY ENTRY · NSE market scanning, NSE news intelligence, Multify positive-pattern research, Fixed outcome transfer, and official Univest cash-equity calls closed the same day. Univest is research-only, capturing 48 entry-time factors and learning only after verified entry/exit quotes; it never places Univest orders."
+                "EARLY ENTRY · NSE market scanning, NSE news intelligence, Multify positive-pattern research, Fixed outcome transfer, and official Univest cash-equity calls closed the same day. Univest entry recommendations can buy through Groww Alpha while Fixed Auto Buy is ON; official Univest EXIT remains research-only. Learning evidence stays separate from execution."
             )
         }
         item {
@@ -784,7 +784,7 @@ private fun ForecastScreen(
                 shape = RoundedCornerShape(20.dp)) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
                     Text("Univest · official alerts / same-day closes", fontWeight = FontWeight.SemiBold)
-                    Text("Research only · no Univest orders. Entry-time factors and matched exit evidence are shown below. A market-price estimate is not a verified provider exit.",
+                    Text("Official Univest ENTRY uses Groww Alpha only when Fixed Auto Buy is ON and safeguards pass. Univest EXIT never triggers a SELL; the shared -2% stop and trailing GTT manage holdings. Research prices below are not broker fills.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                     if (official.isEmpty()) {
@@ -954,7 +954,7 @@ private fun FixedScreen(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Text(
-                        if (state.settings.fixedAutoBuyEnabled) "Fixed Auto Buy · ON" else "Fixed Auto Buy · OFF",
+                        if (state.settings.fixedAutoBuyEnabled) "Fixed + Univest Auto Buy · ON" else "Fixed + Univest Auto Buy · OFF",
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.Medium
                     )
@@ -1299,6 +1299,7 @@ private fun SettingsScreen(
     val lastParsedAt = listenerPrefs.getLong("last_univest_parsed_at_ms", 0L)
     val lastParsedSymbol = listenerPrefs.getString("last_univest_parsed_symbol", "").orEmpty()
     val lastParsedStatus = listenerPrefs.getString("last_univest_parse_status", "NOT_CAPTURED").orEmpty()
+    val lastUnivestOrderStatus = listenerPrefs.getString("last_univest_order_status", "NO_ENTRY_ATTEMPT").orEmpty()
     fun captureTime(ms: Long): String = if (ms <= 0L) "Never"
         else SimpleDateFormat("dd MMM HH:mm:ss", Locale.US).format(Date(ms))
     val notificationAccess = notificationAccessEnabled(context)
@@ -1437,9 +1438,9 @@ private fun SettingsScreen(
                     HorizontalDivider()
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
-                            Text("Auto-buy Fixed recommendations", fontWeight = FontWeight.SemiBold)
+                            Text("Auto-buy Fixed + Univest", fontWeight = FontWeight.SemiBold)
                             Text(
-                                "Only NEW PRIMARY recommendations published AFTER you switch this ON can trigger a Groww CNC MARKET BUY. Existing ACTIVE recommendations are never bought automatically. Multify ARM is independent; broker readiness and safety checks still apply.",
+                                "Fixed: only new PRIMARY recommendations published after you enable this switch can buy. Univest: only fresh official NSE equity ENTRY alerts received after enabling it can buy through Groww Alpha. No separate Univest switch or Multify ARM is needed. Both use the existing broker safety and SELL/GTT rules.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -1450,11 +1451,11 @@ private fun SettingsScreen(
                         )
                     }
                     KeyValueRow(
-                        "Fixed auto-buy",
-                        if (state.settings.fixedAutoBuyEnabled) "ON · waiting for a new recommendation" else "OFF · manual BUY only"
+                        "Fixed + Univest auto-buy",
+                        if (state.settings.fixedAutoBuyEnabled) "ON · waiting for new Fixed/Univest signals" else "OFF · no new Fixed/Univest auto BUY"
                     )
                     Text(
-                        "Fixed remains immutable. Forecast may read prior positive Fixed outcomes, but can never write into Fixed or change its v7.4.1 rules. Every app-owned Multify, Fixed and Forecast LONG uses the same sell protection: hard -2% loss floor, then the existing +0.55% arm → +0.50% protected gain → +0.10% ratchet when profitable. No averaging down.",
+                        "Fixed remains immutable. Forecast may read prior positive Fixed outcomes, but can never write into Fixed or change its v7.4.1 rules. Every app-owned Multify, Fixed, Univest and Forecast LONG uses the same sell protection: hard -2% loss floor, then the existing +0.55% arm → +0.50% protected gain → +0.10% ratchet when profitable. No averaging down.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -1517,8 +1518,9 @@ private fun SettingsScreen(
                     KeyValueRow("Univest parse result",
                         if (lastParsedSymbol.isBlank()) lastParsedStatus
                         else "$lastParsedSymbol · $lastParsedStatus")
+                    KeyValueRow("Univest Alpha entry", lastUnivestOrderStatus)
                     Text(
-                        "Univest is research-only. A running trading engine does not prove the Android notification listener is connected. Only an Android-delivered verified notification can be captured automatically.",
+                        "Univest buys require a fresh official notification and Fixed Auto Buy ON. SELL remains managed only by the common -2% hard stop and trailing GTT. A running engine does not prove Android notification access is connected.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )

@@ -1,9 +1,9 @@
-name: Multify v9.0.9 dual-window API control / source safety TEST
+name: Multify v9.0.10 Univest Alpha Auto Buy / source safety TEST
 on:
   push:
-    branches: [v909-dual-window-api-governor-20261117]
+    branches: [v9010-univest-alpha-fixed-toggle-20261117]
   pull_request:
-    branches: [v908-beta-first-fixed-execution-freshness-20261117]
+    branches: [v909-dual-window-api-governor-20261117]
   workflow_dispatch:
 permissions:
   contents: read
@@ -79,8 +79,8 @@ jobs:
           assert "const val MAX_LOSS_PCT = 2.0" in Path(root+"engine/HardStopLossPolicy.kt").read_text()
           assert "const val CANONICAL_LEARNING_CALLS = 107" in Path(root+"engine/FixedFinalContract.kt").read_text()
           build=Path("app/build.gradle.kts").read_text()
-          assert "versionCode = 9009" in build
-          assert 'versionName = "9.0.9-dual-window-api-governor-test"' in build
+          assert "versionCode = 9010" in build
+          assert 'versionName = "9.0.10-univest-alpha-fixed-toggle-test"' in build
           assert "const val BETA_SAFE_LIVE_60S = 40" in Path(root+"engine/FixedResearchCapacityPolicy.kt").read_text()
           assert "const val MIN_RESEARCH_GAP_MS = 1_000L" in Path(root+"engine/FixedResearchLtpPacingPolicy.kt").read_text()
           assert "const val APP_PER_MINUTE = 45" in Path(root+"data/network/GrowwHistoricalThrottlePolicy.kt").read_text()
@@ -98,13 +98,23 @@ jobs:
           assert net.count(".retryOnConnectionFailure(false)") == 2
           assert net.count(".followRedirects(false)") == 2
           assert "wire_api_usage_snapshot.json" in Path(repo).read_text()
-          print("PASS: Frozen Fixed v19, unchanged live selection, unchanged order/GTT/trail, v909 quota and wire observability")
+          owner=Path(root+"engine/AppPositionOwnershipPolicy.kt").read_text()
+          univest=Path(root+"engine/UnivestAutoBuyPolicy.kt").read_text()
+          assert '"UNIVEST_HOLDING" to setOf("UVH")' in owner
+          assert 'const val MAX_NOTIFICATION_AGE_MS = 120_000L' in univest
+          assert 'ALERT_PREDATES_FIXED_TOGGLE' in univest
+          assert 'NOT_UNIVEST_ENTRY' in univest
+          assert 'autoBuyUnivestViaFixedToggle(signal.symbol, at, key)' in Path(repo).read_text()
+          assert 'engine = ENGINE_UNIVEST_HOLDING' in Path(repo).read_text()
+          assert 'HardStopLossPolicy.stopPrice(actualEntry)' in Path(repo).read_text()
+          assert 'univest_exit_can_sell" to false' in Path(repo).read_text()
+          print("PASS: Frozen Fixed v19, unchanged live selection/order/GTT/trail, Univest Alpha source/ownership checks")
           PY
       - name: Historical/replay policy tests
         run: |
           python -m unittest discover -s backend/tests -p 'test_adaptive_timeframe_replay.py' -v
           python -m unittest discover -s backend/tests -p 'test_v9_master_log_replay.py' -v
-      - name: Full Android unit tests / v9.0.9 TEST APK
+      - name: Full Android unit tests / v9.0.10 TEST APK
         env:
           MULTIFY_KEYSTORE_PASSWORD: ${{ secrets.MULTIFY_KEYSTORE_PASSWORD }}
         run: gradle :app:testDebugUnitTest :app:assembleDebug --no-daemon --stacktrace
@@ -113,13 +123,13 @@ jobs:
           apk=$(find app/build/outputs/apk/debug -maxdepth 1 -name '*.apk' -type f | head -n 1)
           test -n "$apk" && test -s "$apk"
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$apk" \
-            | tee app/build/outputs/apk/debug/v909-signature-verification.txt
-          sha256sum "$apk" | tee app/build/outputs/apk/debug/v909-SHA256SUMS.txt
+            | tee app/build/outputs/apk/debug/v9010-signature-verification.txt
+          sha256sum "$apk" | tee app/build/outputs/apk/debug/v9010-SHA256SUMS.txt
       - name: Upload CI verified package
         uses: actions/upload-artifact@v4
         with:
-          name: Multify-v9.0.9-Dual-Minute-API-TEST-debug
+          name: Multify-v9.0.10-Univest-Alpha-Auto-Buy-TEST-debug
           path: |
             app/build/outputs/apk/debug/*.apk
-            app/build/outputs/apk/debug/v909-signature-verification.txt
-            app/build/outputs/apk/debug/v909-SHA256SUMS.txt
+            app/build/outputs/apk/debug/v9010-signature-verification.txt
+            app/build/outputs/apk/debug/v9010-SHA256SUMS.txt
