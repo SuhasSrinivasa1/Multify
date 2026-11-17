@@ -4604,6 +4604,20 @@ class TradingRepository @Inject constructor(
             val signal = ParsedSignal(SignalType.TRADE_RELEASE, symbol = symbol, rawText = "fixed-forecast", confidence = 1.0)
             FixedLocalStrategyEngine.evaluateLong(signal, features, includeEventPrior = false)
         }
+        // Research-only warm-up diagnostic. Original v8.3.19 indicator formulas,
+        // factor scores and live PRIMARY criteria remain byte-identical until
+        // an out-of-sample versioned strategy trial proves a change useful.
+        val warmup = com.multify.traderpro.engine.FixedIndicatorWarmupDiagnosticPolicy
+            .assess(evaluation.features.candles.size, 15)
+        if (warmup.missing.isNotEmpty()) auditLogger.logAsync(
+            "FIXED_SELECTION_QUALITY", "INDICATOR_WARMUP_SHADOW_V909", mapOf(
+                "symbol" to symbol,
+                "complete_15m_candles" to warmup.completeBars,
+                "not_warmed_or_unavailable" to warmup.missing,
+                "live_indicator_values_changed" to false,
+                "original_primary_filter_unchanged" to true,
+                "future_strategy_validation_required" to true
+            ))
         // Diagnostic-only, O(1) non-blocking queue offer. All 40 factor calculations and disk
         // writes execute later on a low-priority worker; never delay Fixed recommendations.
         val referenceAt = System.currentTimeMillis()
@@ -11988,6 +12002,11 @@ class TradingRepository @Inject constructor(
                         "early_watch_no_trade_allowed")
                 ))
                 add("api_usage_snapshot.json", GrowwApiUsageLedger.snapshot())
+                add("wire_api_usage_snapshot.json",
+                    com.multify.traderpro.data.network.BrokerWireAttemptLedger.summary())
+                add("beta_api_gate_snapshot.json", betaResearchGate.snapshot())
+                add("beta_live_minute_status.json",
+                    BetaResearchGate.latestLiveStatus())
                 add("groww_recovery_state.json", recoveryGate.status())
                 add("telemetry_metadata.json", mapOf(
                     "exported_at_ms" to System.currentTimeMillis(),
@@ -12034,6 +12053,13 @@ class TradingRepository @Inject constructor(
                     "trailing_profile_event" to "TRAILING_MONITOR_PROFILE",
                     "multify_pipeline_event" to "MULTIFY_PIPELINE_PROFILE",
                     "broker_rate_limit_event" to "HTTP_429",
+                    "actual_wire_attempt_event" to "ACTUAL_WIRE_ATTEMPT_V909",
+                    "wire_account_category_endpoint_dual_minutes" to true,
+                    "wire_attempts_distinct_from_logical_calls" to true,
+                    "wire_audit_export" to "wire_api_usage_snapshot.json",
+                    "beta_rolling_and_fixed_minute_account_quota" to 40,
+                    "Alpha_LTP_gap_min_ms" to 1000,
+                    "indicator_warmup_shadow_only" to true,
                     "client_governor_wait_event" to "CLIENT_GOVERNOR_WAIT",
                     "forecast_replay_event" to "UNIVERSAL_POSITIVE_EVIDENCE_REFRESH",
                     "positive_evidence_file" to "forecast_positive_evidence.json",
