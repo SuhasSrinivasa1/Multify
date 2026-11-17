@@ -1,9 +1,9 @@
-name: Multify v9.0.7 Frozen Fixed auto buy safe recovery
+name: Multify v9.0.8 Fixed scan timing guardrail shadow
 on:
   push:
-    branches: [v907-fixed-auto-buy-throttle-safe-recovery-20261117]
+    branches: [v908-fixed-scan-timing-guardrail-shadow-20261117]
   pull_request:
-    branches: [v906-api-recovery-research-integrity-20261116]
+    branches: [v907-fixed-auto-buy-throttle-safe-recovery-20261117]
   workflow_dispatch:
 permissions:
   contents: read
@@ -87,6 +87,18 @@ jobs:
               expression=r"(?ms)^[ \t]*// V907_AUTOBUY_WAKE_"+marker+r"_BEGIN\n.*?^[ \t]*// V907_AUTOBUY_WAKE_"+marker+r"_END\n"
               service_now,count=re.subn(expression,"",service_now)
               assert count==1, ("MISSING_V907_AUTOBUY_WAKE_BOUNDARY",marker)
+          expression=r"(?ms)^[ \t]*// V908_SCAN_TIMING_GUARDRAIL_BEGIN\n.*?^[ \t]*// V908_SCAN_TIMING_GUARDRAIL_END\n"
+          service_now,count=re.subn(expression,"",service_now)
+          assert count==1, "MISSING_V908_SCAN_TIMING_GUARDRAIL_FIELDS"
+          expression=r"(?ms)^[ \t]*// V908_SCAN_TIMING_GUARDRAIL_PREP_BEGIN\n.*?^[ \t]*// V908_SCAN_TIMING_GUARDRAIL_PREP_END\n"
+          service_now,count=re.subn(expression,"",service_now)
+          assert count==1, "MISSING_V908_SCAN_TIMING_GUARDRAIL_PREP_BOUNDARY"
+          original_429_fields=part(old(base28,service),
+              '                                "live_429s" to (',
+              '                                "governor_wait_ms" to (')
+          expression=r"(?ms)^[ \t]*// V908_SCAN_TIMING_GUARDRAIL_FIELDS_BEGIN\n.*?^[ \t]*// V908_SCAN_TIMING_GUARDRAIL_FIELDS_END\n"
+          service_now,count=re.subn(expression,original_429_fields,service_now)
+          assert count==1, "MISSING_V908_SCAN_TIMING_GUARDRAIL_FIELDS_BOUNDARY"
           for marker in ("FIELD","OBSERVER","DESTROY"):
               expression=r"(?ms)^[ \t]*// V902_PREFETCH_"+marker+r"_BEGIN\n.*?^[ \t]*// V902_PREFETCH_"+marker+r"_END\n"
               service_now,count=re.subn(expression,"",service_now)
@@ -114,8 +126,8 @@ jobs:
           assert "const val MAX_LOSS_PCT = 2.0" in Path(root+"engine/HardStopLossPolicy.kt").read_text()
           assert "const val HARD_STOP_LOSS_PCT = 2.0" in Path(root+"engine/ReleaseIntegrityManifest.kt").read_text()
           assert "const val CANONICAL_LEARNING_CALLS = 107" in Path(root+"engine/FixedFinalContract.kt").read_text()
-          assert 'versionCode = 9007' in Path('app/build.gradle.kts').read_text()
-          assert 'versionName = "9.0.7-fixed-auto-buy-safe-recovery-test"' in Path("app/build.gradle.kts").read_text()
+          assert 'versionCode = 9008' in Path('app/build.gradle.kts').read_text()
+          assert 'versionName = "9.0.8-fixed-scan-timing-guardrail-shadow-test"' in Path("app/build.gradle.kts").read_text()
           budgets=(Path(root+"engine/GrowwApiBudgetPolicy.kt").read_text())
           beta_policy=Path(root+"engine/FixedDualAccountPolicy.kt").read_text()
           beta_governor=Path(root+"data/network/BetaResearchGate.kt").read_text()
@@ -188,6 +200,7 @@ jobs:
               root+"engine/FixedAutoBuyCooldownQueue.kt",
               root+"engine/FixedAutoBuyResearchLtpRoutingPolicy.kt",
               root+"engine/FixedAutoBuyResearchQuoteRoutingPolicy.kt",
+              root+"engine/FixedScanTimingGuardrail.kt",
               root+"engine/FixedAccountResearchRecoveryPolicy.kt",
               root+"engine/FixedDiscoveryDisplayPolicy.kt",
               root+"engine/FixedCategoryAccountRoutingPolicy.kt",
@@ -209,6 +222,7 @@ jobs:
               "app/src/test/java/com/multify/traderpro/engine/FixedAutoBuyCooldownQueueTest.kt",
               "app/src/test/java/com/multify/traderpro/engine/FixedAutoBuyResearchLtpRoutingPolicyTest.kt",
               "app/src/test/java/com/multify/traderpro/engine/FixedAutoBuyResearchQuoteRoutingPolicyTest.kt",
+              "app/src/test/java/com/multify/traderpro/engine/FixedScanTimingGuardrailTest.kt",
               "app/src/test/java/com/multify/traderpro/engine/FixedAccountResearchRecoveryPolicyTest.kt",
               "app/src/test/java/com/multify/traderpro/engine/FixedDiscoveryDisplayPolicyTest.kt",
               "app/src/test/java/com/multify/traderpro/engine/FixedCategoryAccountRoutingPolicyTest.kt",
@@ -217,6 +231,7 @@ jobs:
               "docs/V905_FIXED_SPLIT_CATEGORY_RECOVERY.md",
               "docs/V906_API_RECOVERY_RESEARCH_INTEGRITY.md",
               "docs/V907_FIXED_AUTO_BUY_SAFE_RECOVERY.md",
+              "docs/V908_FIXED_SCAN_TIMING_GUARDRAIL.md",
               ".github/workflows/multify-v9-master.yml"}
           assert changed<=allowed, ("UNAUTHORIZED_LIVE_EDIT",changed-allowed)
           print("PASS original v19 live selection, original v16 shadow, original service trading code, -2% GTT, bounded sweep scope")
@@ -236,12 +251,12 @@ jobs:
           apk=$(find app/build/outputs/apk/debug -maxdepth 1 -name '*.apk' -type f | head -n 1)
           test -n "$apk" && test -s "$apk"
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$apk" \
-            | tee app/build/outputs/apk/debug/v907-signature-verification.txt
-          sha256sum "$apk" | tee app/build/outputs/apk/debug/v907-SHA256SUMS.txt
+            | tee app/build/outputs/apk/debug/v908-signature-verification.txt
+          sha256sum "$apk" | tee app/build/outputs/apk/debug/v908-SHA256SUMS.txt
       - name: Upload verified-by-CI TEST artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Multify-v9.0.7-Fixed-AutoBuy-Safe-Recovery-TEST-debug
+          name: Multify-v9.0.8-Fixed-Scan-Timing-Guardrail-TEST-debug
           path: |
             app/build/outputs/apk/debug/*.apk
             app/build/outputs/apk/debug/v907-signature-verification.txt
