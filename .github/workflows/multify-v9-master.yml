@@ -87,6 +87,9 @@ jobs:
               expression=r"(?ms)^[ \t]*// V907_AUTOBUY_WAKE_"+marker+r"_BEGIN\n.*?^[ \t]*// V907_AUTOBUY_WAKE_"+marker+r"_END\n"
               service_now,count=re.subn(expression,"",service_now)
               assert count==1, ("MISSING_V907_AUTOBUY_WAKE_BOUNDARY",marker)
+          expression=r"(?ms)^[ \t]*// V908_SCAN_TIMING_GUARDRAIL_BEGIN\n.*?^[ \t]*// V908_SCAN_TIMING_GUARDRAIL_END\n"
+          service_now,count=re.subn(expression,"",service_now)
+          assert count==1, "MISSING_V908_SCAN_TIMING_GUARDRAIL_FIELDS"
           expression=r"(?ms)^[ \t]*// V908_SCAN_TIMING_GUARDRAIL_PREP_BEGIN\n.*?^[ \t]*// V908_SCAN_TIMING_GUARDRAIL_PREP_END\n"
           service_now,count=re.subn(expression,"",service_now)
           assert count==1, "MISSING_V908_SCAN_TIMING_GUARDRAIL_PREP_BOUNDARY"
