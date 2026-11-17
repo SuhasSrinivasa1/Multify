@@ -226,6 +226,10 @@ jobs:
           python -m unittest discover -s backend/tests -p 'test_adaptive_timeframe_replay.py' -v
           python -m unittest discover -s backend/tests -p 'test_v9_master_log_replay.py' -v
       - name: Full Android unit tests and v9 Master TEST APK
+        env:
+          # Use the repository's stable signing key when the matching secret
+          # is configured. NEVER log or export this secret or the keystore.
+          MULTIFY_KEYSTORE_PASSWORD: ${{ secrets.MULTIFY_KEYSTORE_PASSWORD }}
         run: gradle :app:testDebugUnitTest :app:assembleDebug --no-daemon --stacktrace
       - name: Verify installable APK certificate and create checksum report
         run: |
