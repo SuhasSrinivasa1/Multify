@@ -8064,7 +8064,7 @@ class TradingRepository @Inject constructor(
             }
             if (managedDao.openPosition(ENGINE_FIXED_HOLDING, row.symbol) != null) continue
             val fundsRejectPrefs = appContext.getSharedPreferences("fixed_broker_funds_rejections_v9011", Context.MODE_PRIVATE)
-            val rejectedUntil = fundsRejectPrefs.getLong(row.id, 0L)
+            val rejectedUntil = fundsRejectPrefs.getLong(row.id.toString(), 0L)
             if (rejectedUntil > System.currentTimeMillis()) {
                 auditLogger.logAsync("FIXED_AUTO_BUY", "BROKER_FUNDS_REJECTION_NOT_RETRIED", mapOf(
                     "symbol" to row.symbol, "recommendation_id" to row.id,
@@ -8292,7 +8292,7 @@ class TradingRepository @Inject constructor(
                 ))
                 if (insufficient) {
                     appContext.getSharedPreferences("fixed_broker_funds_rejections_v9011", Context.MODE_PRIVATE)
-                        .edit().putLong(row.id, System.currentTimeMillis() + 15L * 60_000L).apply()
+                        .edit().putLong(row.id.toString(), System.currentTimeMillis() + 15L * 60_000L).apply()
                     notifyInsufficientFundsIfConfirmed(row.symbol)
                 }
             }.getOrNull() ?: continue
