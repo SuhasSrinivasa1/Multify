@@ -130,5 +130,5 @@ jobs:
           name: Multify-v9.0.11-Protect-Capital-Timing-TEST-debug
           path: |
             app/build/outputs/apk/debug/*.apk
-            app/build/outputs/apk/debug/v9010-signature-verification.txt
-            app/build/outputs/apk/debug/v9010-SHA256SUMS.txt
+            app/build/outputs/apk/debug/v9011-signature-verification.txt
+            app/build/outputs/apk/debug/v9011-SHA256SUMS.txt
