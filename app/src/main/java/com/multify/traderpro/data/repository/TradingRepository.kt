@@ -2507,6 +2507,37 @@ class TradingRepository @Inject constructor(
                     ).filter { it.id !in priorIds }
                     for (row in freshPublished) {
                         val ref = fixedResearchQuoteReceipts[row.symbol.uppercase(Locale.US)]
+                        val first = fixedEarlyWatchJournal.recent(row.recommendationDate, 1000)
+                            .firstOrNull { it.symbol.equals(row.symbol, true) }
+                        val features = fixedShadowReferences[row.symbol.uppercase(Locale.US)]?.takeIf {
+                            it.quoteCapturedAtMs in row.generatedAtMs..recommendationCompletedAtMs
+                        }?.evaluation?.features
+                        val study = com.multify.traderpro.engine.FixedEntryTimingStudyPolicy.assess(
+                            first?.firstPrimaryScanAtMs, first?.firstPrimaryPrice,
+                            ref?.receivedAtMs?.takeIf { ref.scanStartMs == row.generatedAtMs },
+                            recommendationCompletedAtMs, row.entryPrice, row.targetPct,
+                            features?.atr14, features?.vwap)
+                        auditLogger.logAsync("FIXED_ENTRY_TIMING", "PUBLISHED_RECOMMENDATION_STUDY_V9011", mapOf(
+                            "recommendation_id" to row.id, "symbol" to row.symbol,
+                            "scan_started_at_ms" to row.generatedAtMs,
+                            "published_at_ms" to recommendationCompletedAtMs,
+                            "published_entry_price" to row.entryPrice,
+                            "published_target_pct" to row.targetPct,
+                            "first_primary_at_ms" to first?.firstPrimaryScanAtMs,
+                            "first_primary_price" to first?.firstPrimaryPrice,
+                            "first_primary_to_publication_ms" to study.firstPrimaryToPublicationMs,
+                            "source_quote_to_publication_ms" to study.sourceQuoteToPublicationMs,
+                            "runup_since_first_primary_pct" to study.firstPrimaryRunupPct,
+                            "target_required_15m_atr_units" to study.requiredAtrUnits,
+                            "vwap_extension_atr" to study.vwapExtensionAtr,
+                            "minutes_remaining" to study.remainingSessionMinutes,
+                            "shadow_last_30_minutes" to study.caution30Minutes,
+                            "shadow_last_45_minutes" to study.caution45Minutes,
+                            "shadow_target_capacity_warning" to study.wouldWarnTargetCapacity,
+                            "shadow_overextension_warning" to study.wouldWarnExtended,
+                            "read_only" to true, "fixed_selection_unchanged" to true,
+                            "exchange_quote_timestamp_available" to false
+                        ))
                         if (ref != null && ref.scanStartMs == row.generatedAtMs &&
                             ref.receivedAtMs in row.generatedAtMs..recommendationCompletedAtMs) {
                             fixedAutoBuyPublicationEvidence.record(
