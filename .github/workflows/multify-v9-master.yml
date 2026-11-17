@@ -87,9 +87,15 @@ jobs:
               expression=r"(?ms)^[ \t]*// V907_AUTOBUY_WAKE_"+marker+r"_BEGIN\n.*?^[ \t]*// V907_AUTOBUY_WAKE_"+marker+r"_END\n"
               service_now,count=re.subn(expression,"",service_now)
               assert count==1, ("MISSING_V907_AUTOBUY_WAKE_BOUNDARY",marker)
-          expression=r"(?ms)^[ \t]*// V908_SCAN_TIMING_GUARDRAIL_BEGIN\n.*?^[ \t]*// V908_SCAN_TIMING_GUARDRAIL_END\n"
+          expression=r"(?ms)^[ \t]*// V908_SCAN_TIMING_GUARDRAIL_PREP_BEGIN\n.*?^[ \t]*// V908_SCAN_TIMING_GUARDRAIL_PREP_END\n"
           service_now,count=re.subn(expression,"",service_now)
-          assert count==1, "MISSING_V908_SCAN_TIMING_GUARDRAIL_BOUNDARY"
+          assert count==1, "MISSING_V908_SCAN_TIMING_GUARDRAIL_PREP_BOUNDARY"
+          original_429_fields=part(old(base28,service),
+              '                                "live_429s" to (',
+              '                                "governor_wait_ms" to (')
+          expression=r"(?ms)^[ \t]*// V908_SCAN_TIMING_GUARDRAIL_FIELDS_BEGIN\n.*?^[ \t]*// V908_SCAN_TIMING_GUARDRAIL_FIELDS_END\n"
+          service_now,count=re.subn(expression,original_429_fields,service_now)
+          assert count==1, "MISSING_V908_SCAN_TIMING_GUARDRAIL_FIELDS_BOUNDARY"
           for marker in ("FIELD","OBSERVER","DESTROY"):
               expression=r"(?ms)^[ \t]*// V902_PREFETCH_"+marker+r"_BEGIN\n.*?^[ \t]*// V902_PREFETCH_"+marker+r"_END\n"
               service_now,count=re.subn(expression,"",service_now)
