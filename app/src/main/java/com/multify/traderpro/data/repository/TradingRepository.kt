@@ -263,6 +263,13 @@ class TradingRepository @Inject constructor(
     // Service-lifetime wake-up only; an event never authorizes execution.
     private val _fixedAutoBuyRecoveryWakeAt = MutableSharedFlow<Long>(extraBufferCapacity = 4)
     val fixedAutoBuyRecoveryWakeAt: SharedFlow<Long> = _fixedAutoBuyRecoveryWakeAt.asSharedFlow()
+    data class FixedAutoBuyCooldownNotice(
+        val reason: String, val nextAllowedAtMs: Long, val pendingCount: Int
+    )
+    private val _fixedAutoBuyBlockedNotices =
+        MutableSharedFlow<FixedAutoBuyCooldownNotice>(extraBufferCapacity = 4)
+    val fixedAutoBuyBlockedNotices: SharedFlow<FixedAutoBuyCooldownNotice> =
+        _fixedAutoBuyBlockedNotices.asSharedFlow()
 
     val settings: Flow<AppSettings> = preferences.settings
     val recentEvents: Flow<List<SignalEventEntity>> = dao.observeRecent(100)
@@ -359,6 +366,7 @@ class TradingRepository @Inject constructor(
     private val fixedAutoBuyCooldownQueue =
         com.multify.traderpro.engine.FixedAutoBuyCooldownQueue()
     @Volatile private var fixedAutoBuyWakeScheduledForMs = 0L
+    private val fixedAutoBuyLastBlockedNoticeAtMs = AtomicLong(0L)
     private val scanApiCycleMutex = Mutex()
     private val betaForecastCycleMutex = Mutex()
     @Volatile private var fixedApiPriorityRequested = false
@@ -1576,6 +1584,13 @@ class TradingRepository @Inject constructor(
                 )
             }, atMs, blocked.nextAllowedAtMs
         )
+        val previousAlertAt = fixedAutoBuyLastBlockedNoticeAtMs.get()
+        if (atMs - previousAlertAt >= 120_000L &&
+            fixedAutoBuyLastBlockedNoticeAtMs.compareAndSet(previousAlertAt, atMs)) {
+            _fixedAutoBuyBlockedNotices.tryEmit(FixedAutoBuyCooldownNotice(
+                blocked.reason, blocked.nextAllowedAtMs, plan.pending.size
+            ))
+        }
         auditLogger.logAsync("FIXED_AUTO_BUY", "BUY_COOLDOWN_PENDING_DECISION", mapOf(
             "reason" to blocked.reason,
             "pending_count" to plan.pending.size,
