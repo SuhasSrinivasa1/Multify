@@ -10163,7 +10163,7 @@ class TradingRepository @Inject constructor(
                 .setStyle(NotificationCompat.BigTextStyle().bigText(
                     "A ${position.engine} BUY was confirmed, but its protective SELL GTT could not be verified. " +
                     "Do not rely on an in-app stop. Check Groww's holdings and active GTT orders. " +
-                    "Fixed Auto Buy may continue for distinct eligible symbols while this holding is reconciled."))
+                    "All new auto BUYs are blocked while this holding lacks verified broker protection."))
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
                 .setAutoCancel(true)
                 .build()
@@ -12585,12 +12585,14 @@ class TradingRepository @Inject constructor(
         // An unresolved order from any engine must be reconciled, not doubled.
         val recentBrokerOrders = apiFactory.groww.orderList(bearer(token), page = 0)
             .requirePayload("Alpha pending orders before BUY ${symbol}").orderList
-        require(recentBrokerOrders.none { row ->
-            row.tradingSymbol.equals(symbol, true) && row.transactionType.equals("BUY", true) &&
-                row.product.equals("CNC", true) &&
+        val unresolvedBrokerCncBuys = recentBrokerOrders.filter { row ->
+            row.transactionType.equals("BUY", true) && row.product.equals("CNC", true) &&
                 row.orderStatus.orEmpty().uppercase(Locale.US) !in
                     setOf("EXECUTED", "COMPLETED", "REJECTED", "CANCELLED", "FAILED")
-        }) { "BUY blocked: pending broker BUY requires reconciliation for ${symbol}" }
+        }
+        require(unresolvedBrokerCncBuys.isEmpty()) {
+            "BUY blocked: ${unresolvedBrokerCncBuys.size} pending broker CNC BUY order(s) require reconciliation"
+        }
         auditLogger.log("EXECUTION", "CIRCUIT_SAFE_LIMIT_BUY", mapOf(
             "symbol" to symbol, "qty" to qty, "limit_price" to price.limitPrice,
             "upper_circuit" to price.upperCircuit, "best_offer" to price.bestOffer,
