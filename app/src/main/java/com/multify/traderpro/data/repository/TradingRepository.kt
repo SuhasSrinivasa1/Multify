@@ -1190,6 +1190,14 @@ class TradingRepository @Inject constructor(
         armHotState = null
         auditLogger.log("SETTINGS", "HOLDING_BUDGET", mapOf("rupees" to value))
     }
+    suspend fun setMaxTotalCapital(value: Long) {
+        preferences.setMaxTotalCapital(value)
+        auditLogger.log("SETTINGS", "MAX_TOTAL_APP_CAPITAL", mapOf("rupees" to value))
+    }
+    suspend fun setMaxConcurrentHoldings(value: Int) {
+        preferences.setMaxConcurrentHoldings(value)
+        auditLogger.log("SETTINGS", "MAX_CONCURRENT_APP_HOLDINGS", mapOf("count" to value))
+    }
 
     suspend fun setArm(enabled: Boolean) {
         if (enabled) {
@@ -5776,6 +5784,17 @@ class TradingRepository @Inject constructor(
                 "symbol" to signal.symbol, "type" to signal.type.name, "nse_only" to true))
             return
         }
+        if (signal.type == ForecastUnivestLearningPolicy.Type.REENTRY) {
+            // Re-entry alerts refer to a prior advisory. No verified original entry range or
+            // independent NEW BUY event is present: do not create an order or claim an EXIT.
+            captureState("REENTRY_RESEARCH_ONLY", signal.symbol)
+            forecastSourceNotificationJournal.append(at, received, signal.type.name, signal.symbol,
+                "REENTRY_RESEARCH_ONLY", title, body)
+            auditLogger.log("FORECAST_UNIVEST", "REENTRY_NOT_AUTOTRADED", mapOf(
+                "symbol" to signal.symbol, "reason" to "ORIGINAL_ENTRY_RANGE_UNVERIFIED",
+                "new_buy_allowed" to false, "univest_exit_can_sell" to false))
+            return
+        }
         val date = ForecastUnivestLearningPolicy.date(at)
         val key = "$date|${signal.symbol}"
         val candidate = if (signal.type == ForecastUnivestLearningPolicy.Type.ENTRY) {
@@ -8044,6 +8063,15 @@ class TradingRepository @Inject constructor(
                 break
             }
             if (managedDao.openPosition(ENGINE_FIXED_HOLDING, row.symbol) != null) continue
+            val fundsRejectPrefs = appContext.getSharedPreferences("fixed_broker_funds_rejections_v9011", Context.MODE_PRIVATE)
+            val rejectedUntil = fundsRejectPrefs.getLong(row.id, 0L)
+            if (rejectedUntil > System.currentTimeMillis()) {
+                auditLogger.logAsync("FIXED_AUTO_BUY", "BROKER_FUNDS_REJECTION_NOT_RETRIED", mapOf(
+                    "symbol" to row.symbol, "recommendation_id" to row.id,
+                    "retry_after_ms" to rejectedUntil - System.currentTimeMillis(),
+                    "no_duplicate_order" to true))
+                continue
+            }
 
             // If broker reconciliation cannot prove an old entry GTT is gone, skip only this symbol
             // rather than risk a duplicate position. Other recommendations in the same scan continue.
@@ -8114,6 +8142,39 @@ class TradingRepository @Inject constructor(
                     "fixed_scoring_changed" to false))
                 continue
             }
+            val publishedEvidence = fixedAutoBuyPublicationEvidence.find(row.id)
+            val firstPrimary = fixedEarlyWatchJournal.recent(today, 1000)
+                .firstOrNull { it.symbol.equals(row.symbol, true) }
+            val shadowFeatures = fixedShadowReferences[row.symbol.uppercase(Locale.US)]?.takeIf {
+                it.quoteCapturedAtMs in row.generatedAtMs..System.currentTimeMillis()
+            }?.evaluation?.features
+            val timingStudy = com.multify.traderpro.engine.FixedEntryTimingStudyPolicy.assess(
+                firstPrimary?.firstPrimaryScanAtMs, firstPrimary?.firstPrimaryPrice,
+                publishedEvidence?.sourceQuoteReceivedAtMs,
+                publishedEvidence?.publishedAtMs ?: System.currentTimeMillis(),
+                ltp, row.targetPct, shadowFeatures?.atr14, shadowFeatures?.vwap
+            )
+            auditLogger.logAsync("FIXED_ENTRY_TIMING", "EXECUTABLE_QUOTE_RESEARCH_SHADOW", mapOf(
+                "symbol" to row.symbol, "recommendation_id" to row.id,
+                "scan_started_at_ms" to row.generatedAtMs,
+                "published_at_ms" to publishedEvidence?.publishedAtMs,
+                "first_primary_at_ms" to firstPrimary?.firstPrimaryScanAtMs,
+                "first_primary_price" to firstPrimary?.firstPrimaryPrice,
+                "alpha_quote_received_at_ms" to (quoteStartedAtMs + quoteElapsedMs),
+                "alpha_quote_price" to ltp,
+                "first_primary_to_publication_ms" to timingStudy.firstPrimaryToPublicationMs,
+                "source_quote_to_publication_ms" to timingStudy.sourceQuoteToPublicationMs,
+                "runup_from_first_primary_pct" to timingStudy.firstPrimaryRunupPct,
+                "target_required_15m_atr_units" to timingStudy.requiredAtrUnits,
+                "session_minutes_remaining" to timingStudy.remainingSessionMinutes,
+                "would_warn_last_30m" to timingStudy.caution30Minutes,
+                "would_warn_last_45m" to timingStudy.caution45Minutes,
+                "vwap_extension_atr" to timingStudy.vwapExtensionAtr,
+                "would_warn_target_capacity" to timingStudy.wouldWarnTargetCapacity,
+                "would_warn_overextended" to timingStudy.wouldWarnExtended,
+                "production_selection_and_buy_gate_unchanged" to true,
+                "source_exchange_timestamp_provided" to false
+            ))
             val entryActionability = fixedEntryVerdict(row, quote)
             if (!entryActionability.actionable) {
                 auditLogger.logAsync("FIXED_AUTO_BUY", "ENTRY_QUALITY_BLOCKED", mapOf(
@@ -8212,7 +8273,7 @@ class TradingRepository @Inject constructor(
             val order = runCatching {
                 placeCncBuy(token, row.symbol, sizing.quantity, reference, entryQuote = quote,
                     quoteReceivedAtMs = quoteStartedAtMs + quoteElapsedMs,
-                    allowOtherSymbolProtectionRecovery = true)
+                    allowOtherSymbolProtectionRecovery = false)
             }.onFailure {
                 // Response body is already available locally; this does not request wallet
                 // balance or make another broker call. Never persist the raw broker body.
@@ -8229,7 +8290,11 @@ class TradingRepository @Inject constructor(
                     "insufficient_funds" to insufficient,
                     "wallet_api_calls" to 0
                 ))
-                if (insufficient) notifyInsufficientFundsIfConfirmed(row.symbol)
+                if (insufficient) {
+                    appContext.getSharedPreferences("fixed_broker_funds_rejections_v9011", Context.MODE_PRIVATE)
+                        .edit().putLong(row.id, System.currentTimeMillis() + 15L * 60_000L).apply()
+                    notifyInsufficientFundsIfConfirmed(row.symbol)
+                }
             }.getOrNull() ?: continue
 
             val orderElapsedMs = (System.currentTimeMillis() - orderStartedAtMs).coerceAtLeast(0L)
@@ -9768,6 +9833,18 @@ class TradingRepository @Inject constructor(
         }
 
         val open = managedDao.openPositions()
+        open.filter(::appOwned).filterNot {
+            com.multify.traderpro.engine.GttProtectionReadinessPolicy.verified(
+                it.smartOrderMode, it.smartOrderId, it.smartOrderStatus)
+        }.forEach { unprotected ->
+            val alertKey = "UNPROTECTED_ALERT:${unprotected.id}"
+            val previous = lastPortfolioConflictAuditAtMs[alertKey] ?: 0L
+            if (now - previous >= 60_000L) {
+                lastPortfolioConflictAuditAtMs[alertKey] = now
+                reportCriticalUnprotected(unprotected, unprotected.id,
+                    "BROKER_GTT_NOT_ACTIVE_OR_UNVERIFIED_DURING_MONITOR")
+            }
+        }
         val reconciled = mutableListOf<ManagedPositionEntity>()
         for (position in open) {
             if (!appOwned(position) || position.symbol.uppercase(Locale.US) in blockedSymbols) continue
@@ -10039,7 +10116,7 @@ class TradingRepository @Inject constructor(
             "symbol" to position.symbol, "engine" to position.engine,
             "position_id" to id, "quantity" to position.quantity,
             "reason" to reason, "new_buys_blocked" to true,
-            "fixed_auto_buy_distinct_symbols_may_continue" to true,
+            "fixed_auto_buy_distinct_symbols_may_continue" to false,
             "manual_broker_review_required" to true
         ))
         runCatching {
@@ -10658,7 +10735,7 @@ class TradingRepository @Inject constructor(
                     ?: position.smartOrderTriggerPrice
             )
             managedDao.updatePosition(confirmed)
-            if (parentStatus !in setOf("TRIGGERED", "COMPLETED")) {
+            if (parentStatus !in setOf("TRIGGERED", "COMPLETED", "FAILED")) {
                 auditLogger.log("GTT", "EXIT_WAITING_PARENT_TRIGGER", mapOf(
                     "symbol" to position.symbol,
                     "parent_status" to parentStatus,
@@ -10762,6 +10839,31 @@ class TradingRepository @Inject constructor(
         val refreshed = runCatching { refreshKnownSmartOrderStatus(token, position, force = false) }
             .getOrDefault(position)
         if (refreshed.smartOrderStatus?.uppercase(Locale.US) in setOf("FAILED", "CANCELLED", "EXPIRED")) {
+            // A FAILED parent may have dispatched a child SELL. A terminal parent is not
+            // proof that its shares are free to sell again. Require an accessible order book.
+            val sameSymbolOrders = runCatching {
+                apiFactory.groww.orderList(bearer(token), page = 0)
+                    .requirePayload("Reconcile failed GTT child orders ${refreshed.symbol}").orderList
+            }.getOrElse { err ->
+                auditLogger.log("GTT", "FAILED_GTT_ORDER_BOOK_UNAVAILABLE_QUARANTINED", mapOf(
+                    "symbol" to refreshed.symbol, "gtt_id" to refreshed.smartOrderId,
+                    "reason" to (err.message ?: err.javaClass.simpleName),
+                    "direct_sell_allowed" to false))
+                return null
+            }
+            val unsettledSell = sameSymbolOrders.any { row ->
+                row.tradingSymbol.equals(refreshed.symbol, true) &&
+                    row.transactionType.equals("SELL", true) &&
+                    row.product.equals("CNC", true) &&
+                    row.orderStatus.orEmpty().uppercase(Locale.US) !in
+                        setOf("EXECUTED", "COMPLETED", "CANCELLED", "REJECTED", "FAILED")
+            }
+            if (unsettledSell) {
+                auditLogger.log("GTT", "FAILED_GTT_CHILD_SELL_POSSIBLE_QUARANTINED", mapOf(
+                    "symbol" to refreshed.symbol, "gtt_id" to refreshed.smartOrderId,
+                    "direct_sell_allowed" to false, "manual_reconciliation" to true))
+                return null
+            }
             val cleared = refreshed.copy(
                 smartOrderId = null,
                 smartOrderMode = HoldingSmartOrderPolicy.MODE_NONE,
@@ -11106,8 +11208,13 @@ class TradingRepository @Inject constructor(
             closePositionMutexes.remove(local.id, closeMutex)
             return@withLock null
         }
-        if (brokerRetryGuard.sellBlockedUntil(local.symbol) > System.currentTimeMillis()) {
-            closePositionMutexes.remove(local.id, closeMutex)
+        val sellRetryAt = brokerRetryGuard.sellBlockedUntil(local.symbol)
+        if (sellRetryAt > System.currentTimeMillis()) {
+            runCatching { reconcilePositionWithBroker(token, local, preferredMark = mark, force = true) }
+            auditLogger.logAsync("EXECUTION", "SELL_RECOVERY_RECONCILIATION_COOLDOWN", mapOf(
+                "symbol" to local.symbol, "retry_after_ms" to sellRetryAt - System.currentTimeMillis(),
+                "max_cooldown_ms" to 180_000L, "requires_fresh_inventory_and_order_book" to true,
+                "blind_24h_block" to false))
             return@withLock null
         }
 
@@ -11126,6 +11233,30 @@ class TradingRepository @Inject constructor(
             local = cleared
         }
 
+        // No duplicate SELL if a failed GTT or ambiguous HTTP acknowledgement already
+        // generated a pending SELL. The broker order book must be readable to proceed.
+        val pendingSells = runCatching {
+            apiFactory.groww.orderList(bearer(token), page = 0)
+                .requirePayload("SELL preflight order book ${local.symbol}").orderList
+        }.getOrElse { error ->
+            auditLogger.log("SAFETY", "SELL_BLOCKED_ORDER_BOOK_UNAVAILABLE", mapOf(
+                "symbol" to local.symbol, "error" to (error.message ?: error.javaClass.simpleName),
+                "duplicate_sell_sent" to false))
+            return@withLock null
+        }.filter { row ->
+            row.tradingSymbol.equals(local.symbol, true) &&
+                row.transactionType.equals("SELL", true) &&
+                row.product.equals("CNC", true) &&
+                row.orderStatus.orEmpty().uppercase(Locale.US) !in
+                    setOf("EXECUTED", "COMPLETED", "CANCELLED", "REJECTED", "FAILED")
+        }
+        if (pendingSells.isNotEmpty()) {
+            auditLogger.log("SAFETY", "SELL_QUARANTINED_PENDING_BROKER_CHILD", mapOf(
+                "symbol" to local.symbol,
+                "pending_sell_orders" to pendingSells.size,
+                "duplicate_sell_sent" to false))
+            return@withLock null
+        }
         val snapshot = try { brokerInventory(token, force = true) } catch (t: Throwable) {
             closePositionMutexes.remove(local.id, closeMutex)
             return@withLock null
@@ -11154,8 +11285,10 @@ class TradingRepository @Inject constructor(
                 brokerError.contains("Groww order REJECTED", true) ||
                 brokerError.contains("Groww order CANCELLED", true)) {
                 val until = brokerRetryGuard.blockSell(local.symbol)
-                auditLogger.log("EXECUTION", "TERMINAL_SELL_FAILURE_COOLDOWN", mapOf(
-                    "symbol" to local.symbol, "blocked_until_ms" to until, "message" to brokerError
+                auditLogger.log("EXECUTION", "SELL_BROKER_REJECTION_RECONCILE_REQUIRED", mapOf(
+                    "symbol" to local.symbol, "blocked_until_ms" to until, "message" to brokerError,
+                    "retry_requires_broker_inventory_and_child_order_preflight" to true,
+                    "blind_24h_block" to false
                 ))
             }
             runCatching { reconcilePositionWithBroker(token, local, preferredMark = mark, force = true) }
@@ -11269,8 +11402,26 @@ class TradingRepository @Inject constructor(
             "dispatch_target_met" to (notificationStartedNs == null || dispatchPrepMicros < 100_000L),
             "broker_ack_ms" to brokerAckLatencyMs
         ))
-        val id = response.growwOrderId
-        require(id.isNotBlank()) { "Groww did not return an order ID" }
+        val resolvedResponse = if (com.multify.traderpro.engine.BrokerOrderAcknowledgementPolicy
+                .usableId(response.growwOrderId) == null) {
+            auditLogger.log("EXECUTION", "BROKER_HTTP_200_ORDER_ID_MISSING_RECONCILING", mapOf(
+                "symbol" to symbol, "transaction" to transaction,
+                "reference" to reference, "blind_resubmission" to false))
+            runCatching {
+                apiFactory.groww.orderStatusByReference(bearer(token), referenceId = reference)
+                    .requirePayload("Resolve $transaction $symbol order by reference")
+            }.getOrNull() ?: error(
+                com.multify.traderpro.engine.BrokerOrderAcknowledgementPolicy
+                    .unresolvedMessage(transaction, symbol, reference)
+            )
+        } else response
+        val id = com.multify.traderpro.engine.BrokerOrderAcknowledgementPolicy
+            .usableId(resolvedResponse.growwOrderId)
+            ?: error(com.multify.traderpro.engine.BrokerOrderAcknowledgementPolicy
+                .unresolvedMessage(transaction, symbol, reference))
+        auditLogger.logAsync("EXECUTION", "BROKER_ORDER_REFERENCE_VERIFIED", mapOf(
+            "symbol" to symbol, "transaction" to transaction,
+            "reference" to reference, "groww_order_id" to id))
 
         suspend fun acceptFilled(status: OrderPayload): OrderPayload {
             val filledAtMs = System.currentTimeMillis()
@@ -11310,11 +11461,11 @@ class TradingRepository @Inject constructor(
             return status.copy(growwOrderId = id, orderReferenceId = reference, filledQuantity = effectiveFilled)
         }
 
-        if (response.orderStatus.equals("EXECUTED", true) || (response.filledQuantity ?: 0) >= qty) {
-            return acceptFilled(response)
+        if (resolvedResponse.orderStatus.equals("EXECUTED", true) || (resolvedResponse.filledQuantity ?: 0) >= qty) {
+            return acceptFilled(resolvedResponse)
         }
-        if (response.orderStatus.uppercase(Locale.US) in setOf("REJECTED", "FAILED", "CANCELLED")) {
-            error("Groww order ${response.orderStatus}: ${response.remark.orEmpty()}")
+        if (resolvedResponse.orderStatus.orEmpty().uppercase(Locale.US) in setOf("REJECTED", "FAILED", "CANCELLED")) {
+            error("Groww order ${resolvedResponse.orderStatus}: ${resolvedResponse.remark.orEmpty()}")
         }
         for (pollDelayMs in MARKET_ORDER_FILL_POLL_DELAYS_MS) {
             delay(pollDelayMs)
@@ -12342,7 +12493,8 @@ class TradingRepository @Inject constructor(
         require(demat <= 0 && cnc <= 0 && managedDao.openPositions().none { it.symbol.equals(symbol, true) }) {
             "BUY blocked: $symbol already exists in Groww/app holdings; ownership must stay separate"
         }
-        val unprotected = managedDao.openPositions().filter(::appOwned).filterNot {
+        val allOwnedOpen = managedDao.openPositions().filter(::appOwned)
+        val unprotected = allOwnedOpen.filterNot {
             com.multify.traderpro.engine.GttProtectionReadinessPolicy.verified(
                 it.smartOrderMode, it.smartOrderId, it.smartOrderStatus)
         }
@@ -12376,6 +12528,38 @@ class TradingRepository @Inject constructor(
             freshAt = quoteReceivedAtMs
         }
         val price = CircuitAwareBuyPolicy.decide(freshQuote, freshAt, System.currentTimeMillis())
+        val latestRiskSettings = preferences.settings.first()
+        val brokerFunds = apiFactory.groww.margins(bearer(token))
+            .requirePayload("Alpha available CNC cash for ${symbol}")
+        val freeCncCash = com.multify.traderpro.engine.BrokerEntryCapitalPolicy.brokerCncCash(
+            brokerFunds.clearCash, brokerFunds.equity?.cncBalanceAvailable ?: 0.0)
+        // Include every app-owned strategy, including Univest and Fixed. A broker-side
+        // cash check is mandatory; unknown or zero funds fail CLOSED.
+        val capitalVerdict = com.multify.traderpro.engine.BrokerEntryCapitalPolicy.decide(
+            qty, price.lastPrice, latestRiskSettings.holdingBudgetRupees.toDouble(),
+            latestRiskSettings.maxTotalCapitalRupees.toDouble(),
+            latestRiskSettings.maxConcurrentHoldings, allOwnedOpen.size,
+            allOwnedOpen.sumOf { it.quantity.toDouble() * it.entryPrice }, freeCncCash)
+        auditLogger.log("EXECUTION", "ALPHA_CAPITAL_ADMISSION", mapOf(
+            "symbol" to symbol, "requested_quantity" to qty,
+            "allowed_quantity" to capitalVerdict.allowedQuantity,
+            "reason" to capitalVerdict.reason, "available_cnc_cash" to freeCncCash,
+            "already_deployed_app_capital" to capitalVerdict.estimatedOpenCapital,
+            "total_capital_ceiling" to latestRiskSettings.maxTotalCapitalRupees,
+            "max_concurrent_holdings" to latestRiskSettings.maxConcurrentHoldings,
+            "pending_order_guard" to true))
+        require(capitalVerdict.allowedQuantity > 0) {
+            "BUY blocked: ${capitalVerdict.reason} for ${symbol}"
+        }
+        // An unresolved order from any engine must be reconciled, not doubled.
+        val recentBrokerOrders = apiFactory.groww.orderList(bearer(token), page = 0)
+            .requirePayload("Alpha pending orders before BUY ${symbol}").orderList
+        require(recentBrokerOrders.none { row ->
+            row.tradingSymbol.equals(symbol, true) && row.transactionType.equals("BUY", true) &&
+                row.product.equals("CNC", true) &&
+                row.orderStatus.orEmpty().uppercase(Locale.US) !in
+                    setOf("EXECUTED", "COMPLETED", "REJECTED", "CANCELLED", "FAILED")
+        }) { "BUY blocked: pending broker BUY requires reconciliation for ${symbol}" }
         auditLogger.log("EXECUTION", "CIRCUIT_SAFE_LIMIT_BUY", mapOf(
             "symbol" to symbol, "qty" to qty, "limit_price" to price.limitPrice,
             "upper_circuit" to price.upperCircuit, "best_offer" to price.bestOffer,
@@ -12383,7 +12567,7 @@ class TradingRepository @Inject constructor(
             "single_symbol_quote_refresh" to (freshAt != quoteReceivedAtMs),
             "full_market_refresh" to false, "max_slippage_bps" to CircuitAwareBuyPolicy.MAX_BUY_SLIPPAGE_BPS
         ))
-        submitMarketOrder(token, symbol, "BUY", qty, "CNC", reference,
+        submitMarketOrder(token, symbol, "BUY", capitalVerdict.allowedQuantity, "CNC", reference,
             notificationStartedNs, buyLimitPrice = price.limitPrice)
     }
 
