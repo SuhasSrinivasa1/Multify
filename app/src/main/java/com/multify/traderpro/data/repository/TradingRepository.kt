@@ -7767,17 +7767,25 @@ class TradingRepository @Inject constructor(
             .groupBy { it.symbol.uppercase(Locale.US) }
             .values.mapNotNull { events -> events.maxByOrNull { it.generatedAtMs } }
             .sortedBy { it.generatedAtMs }
-        // Do not waste execution traffic on stale recommendations, even when
-        // Alpha LIVE_DATA is in cooldown. A fresh broker quote does NOT revive
-        // a recommendation older than the existing five-minute execution TTL.
-        val rows = candidateRows.filter {
-            AutoBuyEntrySafetyPolicy.isFreshFixedEntry(it.generatedAtMs, System.currentTimeMillis())
-        }
-        if (candidateRows.isNotEmpty() && rows.isEmpty()) {
-            auditLogger.logAsync("FIXED_AUTO_BUY", "NO_FRESH_POST_ACTIVATION_BUYS", mapOf(
-                "stale_count" to candidateRows.size, "cooldown_bypass" to false,
-                "existing_max_age_ms" to AutoBuyEntrySafetyPolicy.FIXED_AUTO_BUY_MAX_AGE_MS
-            ))
+        // Frozen generatedAtMs is SCAN START for ranking/confirmation, NOT
+        // the publication timestamp. Require independently captured source
+        // quote and actual publication time; both retain original 5m expiry.
+        val rows = candidateRows.filter { row ->
+            val freshness = com.multify.traderpro.engine
+                .FixedAutoBuyPublicationEvidencePolicy.decide(
+                    fixedAutoBuyPublicationEvidence.find(row.id), row.id,
+                    row.symbol, row.generatedAtMs, settings.fixedAutoBuyActivatedAtMs,
+                    System.currentTimeMillis()
+                )
+            if (!freshness.eligible) auditLogger.logAsync(
+                "FIXED_AUTO_BUY", "NO_FRESH_POST_ACTIVATION_BUYS", mapOf(
+                    "recommendation_id" to row.id, "symbol" to row.symbol,
+                    "reason" to freshness.reason, "expiry_ms" to freshness.expiresAtMs,
+                    "scan_start_is_not_publication_time" to true,
+                    "cooldown_bypass" to false
+                )
+            )
+            freshness.eligible
         }
         fixedAutoBuyActivationForQueue = settings.fixedAutoBuyActivatedAtMs
 
@@ -7816,11 +7824,20 @@ class TradingRepository @Inject constructor(
                         "fixed_model_unchanged" to true))
                 continue
             }
-            if (!AutoBuyEntrySafetyPolicy.isFreshFixedEntry(row.generatedAtMs, symbolStartedAtMs)) {
+            val freshnessAtQuote = com.multify.traderpro.engine
+                .FixedAutoBuyPublicationEvidencePolicy.decide(
+                    fixedAutoBuyPublicationEvidence.find(row.id), row.id,
+                    row.symbol, row.generatedAtMs, liveSettings.fixedAutoBuyActivatedAtMs,
+                    symbolStartedAtMs
+                )
+            if (!freshnessAtQuote.eligible) {
                 auditLogger.logAsync("FIXED_AUTO_BUY", "ENTRY_SKIPPED_STALE_RECOMMENDATION", mapOf(
-                    "symbol" to row.symbol,
-                    "recommendation_age_ms" to recommendationAgeAtStartMs,
-                    "max_age_ms" to AutoBuyEntrySafetyPolicy.FIXED_AUTO_BUY_MAX_AGE_MS
+                    "recommendation_id" to row.id, "symbol" to row.symbol,
+                    "reason" to freshnessAtQuote.reason,
+                    "expiry_ms" to freshnessAtQuote.expiresAtMs,
+                    "scan_start_age_ms" to recommendationAgeAtStartMs,
+                    "max_source_and_publication_age_ms" to
+                        AutoBuyEntrySafetyPolicy.FIXED_AUTO_BUY_MAX_AGE_MS
                 ))
                 continue
             }
@@ -7848,8 +7865,11 @@ class TradingRepository @Inject constructor(
                 "recommendation_id" to row.id,
                 "symbol" to row.symbol,
                 "recommendation_at_ms" to row.generatedAtMs,
-                "expires_at_ms" to (row.generatedAtMs +
-                    AutoBuyEntrySafetyPolicy.FIXED_AUTO_BUY_MAX_AGE_MS),
+                "expires_at_ms" to freshnessAtQuote.expiresAtMs,
+                "source_quote_at_ms" to
+                    fixedAutoBuyPublicationEvidence.find(row.id)?.sourceQuoteReceivedAtMs,
+                "publication_at_ms" to
+                    fixedAutoBuyPublicationEvidence.find(row.id)?.publishedAtMs,
                 "activation_at_ms" to liveSettings.fixedAutoBuyActivatedAtMs,
                 "fresh_alpha_quote_required" to true,
                 "no_beta_trading_permissions" to true
@@ -7975,8 +7995,18 @@ class TradingRepository @Inject constructor(
                     "activated_at_ms" to executionSettings.fixedAutoBuyActivatedAtMs))
                 continue
             }
-            if (!AutoBuyEntrySafetyPolicy.isFreshFixedEntry(row.generatedAtMs, System.currentTimeMillis())) {
-                auditLogger.logAsync("FIXED_AUTO_BUY", "ENTRY_SKIPPED_EXPIRED_DURING_PREP", mapOf("symbol" to row.symbol))
+            val freshnessAtOrder = com.multify.traderpro.engine
+                .FixedAutoBuyPublicationEvidencePolicy.decide(
+                    fixedAutoBuyPublicationEvidence.find(row.id), row.id,
+                    row.symbol, row.generatedAtMs, executionSettings.fixedAutoBuyActivatedAtMs,
+                    System.currentTimeMillis()
+                )
+            if (!freshnessAtOrder.eligible) {
+                auditLogger.logAsync("FIXED_AUTO_BUY", "ENTRY_SKIPPED_EXPIRED_DURING_PREP", mapOf(
+                    "recommendation_id" to row.id, "symbol" to row.symbol,
+                    "reason" to freshnessAtOrder.reason,
+                    "expiry_ms" to freshnessAtOrder.expiresAtMs
+                ))
                 continue
             }
             if (fixedRecommendationStore.recommendations(today).firstOrNull { it.id == row.id }?.status != "ACTIVE") continue
