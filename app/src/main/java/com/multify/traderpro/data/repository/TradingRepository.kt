@@ -4307,22 +4307,29 @@ class TradingRepository @Inject constructor(
             betaResearchGate.healthyForFixed(BetaResearchGate.Type.HISTORICAL)
         val betaHistoricalHeadroom = betaHistoricalReady &&
             betaResearchGate.historicalHasSpareFixedCapacity()
+        val betaLiveStatus = BetaResearchGate.latestLiveStatus()
+        val betaHasDetailCapacity = minOf(betaLiveStatus.rollingMinuteRemaining,
+            betaLiveStatus.fixedMinuteRemaining) >
+            com.multify.traderpro.engine.FixedResearchCapacityPolicy.BETA_DETAIL_RESERVE
         val deterministicBeta = com.multify.traderpro.engine.FixedDualAccountPolicy
-            .betaDetailedEvaluation(symbol, betaToken != null)
+            .betaDetailedEvaluation(symbol, betaLiveReady && betaHasDetailCapacity)
         // If Alpha's independently verified quote pace is still in post-429
         // slowdown, use available read-only Beta LIVE without moving healthy
         // Alpha HISTORICAL into Beta's scarce 8/minute historical bucket.
         val alphaQuoteSlow = com.multify.traderpro.engine.AlphaReadPacingPolicy
             .preferHealthyBetaQuoteForFixedResearch()
         val preferBetaToProtectAlphaExecution = com.multify.traderpro.engine
-            .FixedBetaFirstResearchPolicy.preferBetaDetail(
-                symbol, betaLiveReady, BetaResearchGate.latestLiveStatus().activeGapMs
+            .FixedResearchCapacityPolicy.betaDetailPreferred(
+                symbol, betaLiveReady,
+                betaLiveStatus.rollingMinuteRemaining,
+                betaLiveStatus.fixedMinuteRemaining,
+                betaLiveStatus.activeGapMs
             )
         val route = com.multify.traderpro.engine.FixedCategoryAccountRoutingPolicy.choose(
             deterministicBeta, alphaLiveReady, alphaHistoricalReady,
             betaLiveReady, betaHistoricalReady, betaHistoricalHeadroom,
-            preferBetaLiveForQuote = (alphaQuoteSlow || preferBetaToProtectAlphaExecution) &&
-                betaLiveReady
+            preferBetaLiveForQuote = (preferBetaToProtectAlphaExecution ||
+                (alphaQuoteSlow && betaHasDetailCapacity)) && betaLiveReady
         )
         if (preferBetaToProtectAlphaExecution && betaLiveReady &&
             route.live.name == "BETA" && !deterministicBeta) {
@@ -4332,7 +4339,8 @@ class TradingRepository @Inject constructor(
                 "same_original_candidate_and_scoring" to true
             ))
         }
-        if (alphaQuoteSlow && route.live.name == "BETA" && !deterministicBeta) {
+        if (alphaQuoteSlow && betaHasDetailCapacity &&
+            route.live.name == "BETA" && !deterministicBeta) {
             auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "ALPHA_QUOTE_PACE_BETA_LIVE", mapOf(
                 "symbol" to symbol, "historical_account" to route.historical.name,
                 "alpha_order_account_unchanged" to true, "fixed_score_unchanged" to true
@@ -4618,6 +4626,26 @@ class TradingRepository @Inject constructor(
         val clock = ZonedDateTime.now(INDIA)
         if (!com.multify.traderpro.engine.NseEquitySessionCalendar.mayPrepareNextFixedSweep(clock) || lastFixedScanAtMs <= 0L ||
             marketCriticalTradeInFlight || !marketDataAvailableForFixed()) return false
+        // Yield completely to foreground Fixed detail evaluation and Alpha
+        // order/protection. Prefetch cannot steal quota from current signals.
+        val betaIdle = BetaResearchGate.latestLiveStatus()
+        val alphaResearchSpare = alphaCanTakeBetaDiscoveryFallback()
+        val canPrefetch = com.multify.traderpro.engine.FixedResearchCapacityPolicy
+            .prefetchMayStart(
+                fixedApiPriorityRequested || marketCriticalTradeInFlight,
+                alphaResearchSpare,
+                betaIdle.rollingMinuteRemaining,
+                betaIdle.fixedMinuteRemaining)
+        if (!canPrefetch) {
+            auditLogger.logAsync("FIXED_PERFORMANCE", "PREFETCH_YIELDED_TO_FOREGROUND_V909",
+                mapOf("foreground_fixed_evaluation" to fixedApiPriorityRequested,
+                    "beta_rolling_remaining" to betaIdle.rollingMinuteRemaining,
+                    "beta_calendar_remaining" to betaIdle.fixedMinuteRemaining,
+                    "alpha_research_spare" to alphaResearchSpare,
+                    "additional_full_market_sweeps" to 0,
+                    "frozen_selection_unchanged" to true))
+            return false
+        }
         val nowMs = System.currentTimeMillis()
         val dueAtMs = lastFixedScanAtMs + FIXED_V741_FORECAST_SCAN_INTERVAL_MS
         if (!com.multify.traderpro.engine.FixedSweepPrefetchPolicy.canStart(
@@ -4665,7 +4693,8 @@ class TradingRepository @Inject constructor(
             "fixed_scoring_changed" to false))
         try {
             if (startDelay > 0L) delay(startDelay)
-            if (marketCriticalTradeInFlight || !marketDataAvailableForFixed() ||
+            if (marketCriticalTradeInFlight || fixedApiPriorityRequested ||
+                !marketDataAvailableForFixed() ||
                 ZonedDateTime.now(INDIA).toLocalDate().toString() != date ||
                 System.currentTimeMillis() > dueAtMs +
                     com.multify.traderpro.engine.FixedSweepPrefetchPolicy.MAX_OVERRUN_MS) {
@@ -4833,9 +4862,16 @@ class TradingRepository @Inject constructor(
         }.isSuccess
         auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "BETA_FIRST_SWEEP_PLAN_V908", mapOf(
             "preferred_beta_ltp_slots" to chunks.indices.count { index ->
-                com.multify.traderpro.engine.FixedBetaFirstResearchPolicy
-                    .preferBetaBatch(index, betaToken != null, initialBetaGapMs)
+                val status = BetaResearchGate.latestLiveStatus()
+                com.multify.traderpro.engine.FixedResearchCapacityPolicy
+                    .betaDiscoveryPreferred(index, betaToken != null,
+                        status.rollingMinuteRemaining,
+                        status.fixedMinuteRemaining, initialBetaGapMs)
             },
+            "beta_live_safe_quota_rolling_and_calendar" to
+                com.multify.traderpro.engine.FixedResearchCapacityPolicy.BETA_SAFE_LIVE_60S,
+            "beta_remaining_rolling" to BetaResearchGate.latestLiveStatus().rollingMinuteRemaining,
+            "beta_remaining_calendar" to BetaResearchGate.latestLiveStatus().fixedMinuteRemaining,
             "original_batch_count" to chunks.size,
             "beta_live_gap_ms" to initialBetaGapMs,
             "alpha_live_ready_for_research" to alphaLiveReadyForResearch,
@@ -4883,10 +4919,13 @@ class TradingRepository @Inject constructor(
             val results = FixedDiscoveryWindowScheduler.fetchOrdered(
                 chunks, windowStart
             ) { index, chunk ->
+                val betaStatus = BetaResearchGate.latestLiveStatus()
                 val betaAssigned = betaToken != null &&
-                    com.multify.traderpro.engine.FixedBetaFirstResearchPolicy.preferBetaBatch(
-                        index, true, BetaResearchGate.latestLiveStatus().activeGapMs
-                    )
+                    com.multify.traderpro.engine.FixedResearchCapacityPolicy
+                        .betaDiscoveryPreferred(index, true,
+                            betaStatus.rollingMinuteRemaining,
+                            betaStatus.fixedMinuteRemaining,
+                            betaStatus.activeGapMs)
                 // Re-check the ACTUAL category cooldown immediately before the
                 // network call. A 429 in another concurrent Alpha batch should
                 // redirect subsequent read-only batches to healthy Beta, not
