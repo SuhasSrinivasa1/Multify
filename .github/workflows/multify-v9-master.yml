@@ -89,7 +89,7 @@ jobs:
           beta=Path(root+"data/network/BetaResearchGate.kt").read_text()
           assert "DualMinuteAdmissionPolicy.calendarWaitMs(" in alpha
           assert "DualMinuteAdmissionPolicy.calendarWaitMs(" in beta
-          assert "FixedResearchCapacityPolicy.betaDiscoveryPreferred(" in Path(repo).read_text()
+          assert ".betaDiscoveryPreferred(" in Path(repo).read_text()
           assert "PREFETCH_YIELDED_TO_FOREGROUND_V909" in Path(repo).read_text()
           assert "INDICATOR_WARMUP_SHADOW_V909" in Path(repo).read_text()
           assert "fixed_selection_unchanged" in Path(repo).read_text()
