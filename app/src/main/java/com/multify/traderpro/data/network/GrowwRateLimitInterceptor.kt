@@ -50,7 +50,7 @@ internal class GrowwRateLimitInterceptor(
         }
     }
     private var lastAlphaLtpGrantedAtMs = 0L
-    private var alphaLtpPace = LtpAdaptivePacingPolicy.State(LtpAdaptivePacingPolicy.START_GAP_MS, SystemClock.elapsedRealtime())
+    private var alphaLtpPace = LtpAdaptivePacingPolicy.State(1_050L, SystemClock.elapsedRealtime())
     private val lastBlockedAuditMs = EnumMap<GrowwApiUsageLedger.Category, Long>(GrowwApiUsageLedger.Category::class.java)
     private val states = EnumMap<GrowwApiUsageLedger.Category, State>(GrowwApiUsageLedger.Category::class.java).apply {
         GrowwApiUsageLedger.Category.values().forEach { put(it, State()) }
