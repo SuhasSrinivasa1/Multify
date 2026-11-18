@@ -16,11 +16,13 @@ object FixedResearchCapacityPolicy {
         if (!betaReady || index < 0) return false
         val available = minOf(betaRemaining60s, betaRemainingCalendar)
         if (available <= BETA_DISCOVERY_RESERVE) return false
-        // A long adaptive gap after 429 previously made Beta permanently ineligible:
-        // no request could be sent to prove recovery, so the gap could never normalize.
-        // After its broker cooldown, permit exactly one read-only half-open probe batch.
-        if (betaGapMs >= 4_000L)
-            return recoveryProbeRequired && index == BETA_RECOVERY_PROBE_BATCH_INDEX
+        // After a broker cooldown, permit exactly one read-only half-open probe
+        // before normal batch routing resumes. This also prevents multiple parallel
+        // batches from all mistaking themselves for the recovery probe.
+        if (recoveryProbeRequired)
+            return index == BETA_RECOVERY_PROBE_BATCH_INDEX
+        // A long adaptive gap without an outstanding probe remains ineligible.
+        if (betaGapMs >= 4_000L) return false
         return index % 2 == 1
     }
 
