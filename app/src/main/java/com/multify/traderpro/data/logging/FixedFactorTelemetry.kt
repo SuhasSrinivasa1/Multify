@@ -11,6 +11,7 @@ import com.multify.traderpro.data.network.QuotePayload
 import com.multify.traderpro.data.network.FixedQuoteTimingRegistry
 import com.multify.traderpro.engine.FixedMarketQualityShadowPolicy
 import com.multify.traderpro.engine.FixedIntradayPatternResearchPolicy
+import com.multify.traderpro.engine.FixedWorkingRangeShadowPolicy
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
 import java.time.Instant
@@ -154,6 +155,8 @@ class FixedFactorTelemetry @Inject constructor(@ApplicationContext context: Cont
             ),
             "intraday_pattern_research" to FixedIntradayPatternResearchPolicy.analyse(
                 e, model, quoteCapturedAtMs ?: completedAtMs),
+            "working_range_shadow_v9017" to FixedWorkingRangeShadowPolicy.observe(
+                e, quoteCapturedAtMs ?: completedAtMs),
             "diagnostic_metrics" to mapOf(
                 "vwap_distance_atr" to if (atr != null) f.vwap?.let { clean((f.ltp - it) / atr) } else null,
                 "ema9_ema20_separation_atr" to if (atr != null && f.ema9 != null && f.ema20 != null)
