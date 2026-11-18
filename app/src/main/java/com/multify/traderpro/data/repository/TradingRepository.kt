@@ -10002,14 +10002,30 @@ class TradingRepository @Inject constructor(
             val warningKey = if (quantityMismatch) "BROKER_QTY_MISMATCH:${observed.id}"
                 else "UNPROTECTED_ALERT:${observed.id}"
             val previous = lastPortfolioConflictAuditAtMs[warningKey] ?: 0L
-            if ((quantityMismatch || !localProtected || !brokerActive) &&
-                (previous == 0L || now - previous >= 10L * 60_000L)) {
-                lastPortfolioConflictAuditAtMs[warningKey] = now
-                if (quantityMismatch)
-                    reportCriticalBrokerQuantityMismatch(observed, visibleQty)
-                else reportCriticalUnprotected(observed, observed.id,
-                    if (activeGttsResult.isFailure) "BROKER_GTT_READ_UNAVAILABLE"
-                    else "BROKER_GTT_NOT_ACTIVE_OR_UNVERIFIED_DURING_MONITOR")
+            val unverified = quantityMismatch || !localProtected || !brokerActive
+            val resolvedKey = "STOP_ALERT_VERIFIED:${observed.id}"
+            if (unverified) {
+                lastPortfolioConflictAuditAtMs.remove(resolvedKey)
+                if (previous == 0L || now - previous >= 10L * 60_000L) {
+                    lastPortfolioConflictAuditAtMs[warningKey] = now
+                    if (quantityMismatch)
+                        reportCriticalBrokerQuantityMismatch(observed, visibleQty)
+                    else reportCriticalUnprotected(observed, observed.id,
+                        if (activeGttsResult.isFailure) "BROKER_GTT_READ_UNAVAILABLE"
+                        else "BROKER_GTT_NOT_ACTIVE_OR_UNVERIFIED_DURING_MONITOR")
+                }
+            } else if (lastPortfolioConflictAuditAtMs.putIfAbsent(resolvedKey, now) == null) {
+                // A broker-verified ACTIVE GTT is the only reason to clear the
+                // persistent protection warning for a genuinely open holding.
+                runCatching {
+                    appContext.getSystemService(NotificationManager::class.java)
+                        .cancel(510_000 + (observed.id % 10_000L).toInt())
+                }
+                lastPortfolioConflictAuditAtMs.remove("UNPROTECTED_ALERT:${observed.id}")
+                lastPortfolioConflictAuditAtMs.remove("BROKER_QTY_MISMATCH:${observed.id}")
+                auditLogger.logAsync("PROTECTION", "UNPROTECTED_ALERT_CLEARED_BROKER_VERIFIED", mapOf(
+                    "symbol" to symbol, "gtt_id" to observed.smartOrderId,
+                    "broker_quantity" to visibleQty, "broker_active" to true))
             }
         }
 
