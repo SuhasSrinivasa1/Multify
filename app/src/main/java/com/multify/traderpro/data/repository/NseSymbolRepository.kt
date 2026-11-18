@@ -92,16 +92,18 @@ class NseSymbolRepository @Inject constructor(
         return updated == 0L || System.currentTimeMillis() - updated > maxAgeMs
     }
 
-    private fun request(url: String, csv: Boolean): Request =
-        Request.Builder()
+    private fun request(url: String, csv: Boolean): Request {
+        val builder = Request.Builder()
             .url(url)
             .header("User-Agent",
                 "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36")
             .header("Accept", if (csv) "text/csv,text/plain,*/*" else
                 "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
             .header("Accept-Language", "en-US,en;q=0.9")
-            .header("Referer", NSE_HOME_URL)
-            .build()
+        // Do not send an NSE referrer to Groww's independent official CDN.
+        if (url.contains("nseindia.com")) builder.header("Referer", NSE_HOME_URL)
+        return builder.build()
+    }
 
     private fun nseSymbols(): List<String> {
         // Warm the in-memory cookie jar before reaching the separate NSE archive host.
