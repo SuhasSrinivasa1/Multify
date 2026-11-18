@@ -5058,7 +5058,18 @@ class TradingRepository @Inject constructor(
                 }
                 when {
                     useBeta -> betaRead(if (betaAssigned) "NORMAL_BETA_SLOT" else "ALPHA_ALREADY_COOLING")
-                    betaAssigned -> null // Beta is unavailable; do not crowd Alpha.
+                    betaAssigned -> {
+                        // A failed Beta read has already consumed its own slot; never retry
+                        // that batch or burst parallel requests across accounts. Continue
+                        // the remaining as-yet-unrequested batches on Alpha only when its
+                        // independent LIVE_DATA recovery gate allows admission. Every Alpha
+                        // request still passes endpoint pacing and protection priority.
+                        if (betaStopped.get() && alphaLiveReady) {
+                            fetchFixedDiscoveryLtpBatch(token, chunk, index).also {
+                                if (it != null) alphaSuccess.incrementAndGet()
+                            }
+                        } else null
+                    }
                     !alphaLiveReady -> null // Alpha is locally cooling; never retry it.
                     else -> {
                         val alphaData = fetchFixedDiscoveryLtpBatch(token, chunk, index)
@@ -5120,15 +5131,20 @@ class TradingRepository @Inject constructor(
                 }
                 if (index + 1 < chunks.size) delay(FIXED_V741_DISCOVERY_BATCH_PACING_MS)
             }
-            // Stop immediately after a mid-sweep Beta outage instead of continuing
-            // to spend Alpha quota on an unusably incomplete snapshot. The next
-            // sweep can start Alpha-only after Beta is confirmed unhealthy.
+            // Previously every Beta HTTP 429 immediately discarded the entire
+            // full-market sweep, even if Alpha had enough independently admitted
+            // capacity to finish the other batches. Do not publish partial data:
+            // only the unchanged downstream 85% coverage and baseline gates can
+            // accept the completed sweep. Never retry the failed Beta request.
             if (betaStopped.get()) {
-                aborted = true
-                auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "BETA_SWEEP_ABORTED_EARLY", mapOf(
+                auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "BETA_SWEEP_ALPHA_CONTINUATION_V9016", mapOf(
                     "successful_alpha_batches" to alphaSuccess.get(),
                     "successful_beta_batches" to betaSuccess.get(),
-                    "partial_coverage_must_not_publish" to true))
+                    "batch_errors" to errors,
+                    "broker_fallback_for_failed_beta_batches" to 0,
+                    "future_batch_alpha_admission_only" to true,
+                    "unverified_coverage_must_not_publish" to true,
+                    "alpha_order_and_gtt_priority_unchanged" to true))
             }
             if (aborted) break
         }
