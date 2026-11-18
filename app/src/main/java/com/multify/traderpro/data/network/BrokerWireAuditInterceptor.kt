@@ -74,14 +74,25 @@ internal object BrokerWireAttemptLedger {
                 DualMinuteAdmissionPolicy.minuteId(epoch))
         }
     }
+    /** Update both account-wide and category counters from the same actual response. */
+    internal fun recordResponse(t: Ticket, status: Int?) {
+        synchronized(lock) {
+            val accountState = accounts.getValue(t.account)
+            val categoryState = categories.getValue(t.account + "/" + t.category)
+            if (status == 429) {
+                accountState.status429++
+                categoryState.status429++
+            }
+            if (status == null || status >= 400) {
+                accountState.failures++
+                categoryState.failures++
+            }
+        }
+    }
+
     fun finish(t: Ticket, status: Int?, audit: AuditLogger,
                exception: String? = null) {
-        synchronized(lock) {
-            val key = t.account + "/" + t.category
-            val state = categories.getValue(key)
-            if (status==429) state.status429++
-            if (status==null || status>=400) state.failures++
-        }
+        recordResponse(t, status)
         audit.logAsync("API_WIRE", "ACTUAL_WIRE_ATTEMPT_V909", mapOf(
             "wire_attempt_id" to t.id, "account" to t.account,
             "category" to t.category, "method" to t.method,
