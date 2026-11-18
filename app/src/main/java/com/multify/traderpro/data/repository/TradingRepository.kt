@@ -4985,6 +4985,10 @@ class TradingRepository @Inject constructor(
                 "protective_orders_preserved" to true))
         }
         val betaStopped = AtomicBoolean(false)
+        // Failed Beta LTP slots are retried at most once each, serially on Alpha,
+        // after all other scheduled batches, only if Alpha's independent governor
+        // admits them. Never treat a failed slot as a completed market scan.
+        val unresolvedBetaChunks = java.util.concurrent.ConcurrentLinkedQueue<Pair<Int, List<String>>>()
         val betaSuccess = AtomicInteger(0)
         val alphaSuccess = AtomicInteger(0)
         val alphaFallbackBatches = AtomicInteger(0)
@@ -5044,6 +5048,9 @@ class TradingRepository @Inject constructor(
                         throw cancelled
                     } catch (failed: Throwable) {
                         // No spillover burst back to Alpha on a Beta failure.
+                        // Collect an exact failed-slot identity for a bounded,
+                        // serialized post-sweep repair, never concurrent retry.
+                        unresolvedBetaChunks.add(index to chunk)
                         betaStopped.set(true)
                         auditLogger.logAsync("FIXED_DUAL_ACCOUNT",
                             "BETA_RECOVERY_FAILED_NO_ALPHA_BURST", mapOf(
@@ -5058,7 +5065,18 @@ class TradingRepository @Inject constructor(
                 }
                 when {
                     useBeta -> betaRead(if (betaAssigned) "NORMAL_BETA_SLOT" else "ALPHA_ALREADY_COOLING")
-                    betaAssigned -> null // Beta is unavailable; do not crowd Alpha.
+                    betaAssigned -> {
+                        // A failed Beta read has already consumed its own slot; never retry
+                        // that batch or burst parallel requests across accounts. Continue
+                        // the remaining as-yet-unrequested batches on Alpha only when its
+                        // independent LIVE_DATA recovery gate allows admission. Every Alpha
+                        // request still passes endpoint pacing and protection priority.
+                        if (betaStopped.get() && alphaLiveReady) {
+                            fetchFixedDiscoveryLtpBatch(token, chunk, index).also {
+                                if (it != null) alphaSuccess.incrementAndGet()
+                            }
+                        } else null
+                    }
                     !alphaLiveReady -> null // Alpha is locally cooling; never retry it.
                     else -> {
                         val alphaData = fetchFixedDiscoveryLtpBatch(token, chunk, index)
@@ -5120,18 +5138,62 @@ class TradingRepository @Inject constructor(
                 }
                 if (index + 1 < chunks.size) delay(FIXED_V741_DISCOVERY_BATCH_PACING_MS)
             }
-            // Stop immediately after a mid-sweep Beta outage instead of continuing
-            // to spend Alpha quota on an unusably incomplete snapshot. The next
-            // sweep can start Alpha-only after Beta is confirmed unhealthy.
+            // Previously every Beta HTTP 429 immediately discarded the entire
+            // full-market sweep, even if Alpha had enough independently admitted
+            // capacity to finish the other batches. Do not publish partial data:
+            // only the unchanged downstream 85% coverage and baseline gates can
+            // accept the completed sweep. Never retry the failed Beta request.
             if (betaStopped.get()) {
-                aborted = true
-                auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "BETA_SWEEP_ABORTED_EARLY", mapOf(
+                auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "BETA_SWEEP_ALPHA_CONTINUATION_V9016", mapOf(
                     "successful_alpha_batches" to alphaSuccess.get(),
                     "successful_beta_batches" to betaSuccess.get(),
-                    "partial_coverage_must_not_publish" to true))
+                    "batch_errors" to errors,
+                    "broker_fallback_for_failed_beta_batches" to 0,
+                    "future_batch_alpha_admission_only" to true,
+                    "unverified_coverage_must_not_publish" to true,
+                    "alpha_order_and_gtt_priority_unchanged" to true))
             }
             if (aborted) break
         }
+        // Reconcile only failed *read-only* Beta batches. No extra discovery
+        // sweeps, no parallel cross-account fallback and no order API calls.
+        // The Alpha research governor still reserves protection traffic.
+        var recoveredBetaSlotsOnAlpha = 0
+        if (!aborted && unresolvedBetaChunks.isNotEmpty()) {
+            val missed = unresolvedBetaChunks.toList()
+            if (missed.size > 3) {
+                aborted = true
+            } else {
+                for ((failedIndex, failedChunk) in missed) {
+                    val alphaReady = runCatching {
+                        recoveryGate.checkRequestAllowed(GrowwApiUsageLedger.Category.LIVE_DATA)
+                    }.isSuccess
+                    if (!alphaReady) { aborted = true; break }
+                    val restored = fetchFixedDiscoveryLtpBatch(token, failedChunk, failedIndex)
+                    if (restored == null) { aborted = true; break }
+                    alphaSuccess.incrementAndGet()
+                    recoveredBetaSlotsOnAlpha++
+                    restored.forEach { (key, price) ->
+                        if (price.isFinite() && price >= 10.0) {
+                            current[key.removePrefix("NSE_").uppercase(Locale.US)] = price
+                        }
+                    }
+                    // Clear precisely the error of the recovered Beta slot.
+                    errors = (errors - 1).coerceAtLeast(0)
+                }
+            }
+            auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "BETA_FAILED_SLOTS_SEQUENTIAL_ALPHA_REPAIR_V9016", mapOf(
+                "failed_beta_slots" to missed.size,
+                "recovered_on_alpha" to recoveredBetaSlotsOnAlpha,
+                "max_sequential_repair_slots" to 3,
+                "no_concurrent_retries" to true,
+                "alpha_governor_and_protection_priority_preserved" to true,
+                "all_unresolved_errors_block_completed_scan" to true
+            ))
+        }
+        // Stronger fail-closed semantics than the historical 85% sample threshold:
+        // missing a network batch does not qualify as a complete discovery sweep.
+        if (errors > 0) aborted = true
         val sortedWindowLatenciesMs = batchWindowLatenciesMs.sorted()
         val elapsedSweepMs = (SystemClock.elapsedRealtime() - sweepStartedElapsedMs).coerceAtLeast(0L)
         val validForTiming = !aborted && master.isNotEmpty() &&
