@@ -14,7 +14,7 @@ class HardStopGttTighteningPolicyTest {
 
     @Test fun existingFivePercentHardStopIsUpgradeCandidate() {
         assertTrue(modify(95.0))
-        assertTrue(modify(97.5))
+        assertFalse(modify(97.5))
         assertTrue(modify(95.0, mode = HoldingSmartOrderPolicy.MODE_TRAILING_GTT))
         assertTrue(modify(95.0, status = "OPEN"))
     }
