@@ -2544,11 +2544,28 @@ class TradingRepository @Inject constructor(
                         val ref = fixedResearchQuoteReceipts[row.symbol.uppercase(Locale.US)]
                         val first = fixedEarlyWatchJournal.recent(row.recommendationDate, 1000)
                             .firstOrNull { it.symbol.equals(row.symbol, true) }
+                        // v9.0.17 READ-ONLY: Early Watch can be empty even though the
+                        // official tier store recorded PRIMARY observations. Recover
+                        // those scan-start observations without inventing quote times.
+                        val persistedFirstPrimary = fixedRecommendationStore.observations(
+                            row.recommendationDate
+                        ).asSequence().filter { observation ->
+                            observation.symbol.equals(row.symbol, true) &&
+                                observation.scanAtMs <= row.generatedAtMs &&
+                                observation.qualityTier == "PRIMARY" &&
+                                observation.publishEligible && observation.executionEligible
+                        }.minByOrNull { it.scanAtMs }
+                        val firstPrimaryAtMs = first?.firstPrimaryScanAtMs
+                            ?: persistedFirstPrimary?.scanAtMs
+                        val firstPrimaryPrice = first?.firstPrimaryPrice
+                            ?: persistedFirstPrimary?.observedPrice?.takeIf {
+                                it.isFinite() && it > 0.0
+                            }
                         val features = fixedShadowReferences[row.symbol.uppercase(Locale.US)]?.takeIf {
                             it.quoteCapturedAtMs in row.generatedAtMs..recommendationCompletedAtMs
                         }?.evaluation?.features
                         val study = com.multify.traderpro.engine.FixedEntryTimingStudyPolicy.assess(
-                            first?.firstPrimaryScanAtMs, first?.firstPrimaryPrice,
+                            firstPrimaryAtMs, firstPrimaryPrice,
                             ref?.receivedAtMs?.takeIf { ref.scanStartMs == row.generatedAtMs },
                             recommendationCompletedAtMs, row.entryPrice, row.targetPct,
                             features?.atr14, features?.vwap)
@@ -2558,8 +2575,11 @@ class TradingRepository @Inject constructor(
                             "published_at_ms" to recommendationCompletedAtMs,
                             "published_entry_price" to row.entryPrice,
                             "published_target_pct" to row.targetPct,
-                            "first_primary_at_ms" to first?.firstPrimaryScanAtMs,
-                            "first_primary_price" to first?.firstPrimaryPrice,
+                            "first_primary_at_ms" to firstPrimaryAtMs,
+                            "first_primary_price" to firstPrimaryPrice,
+                            "first_primary_source" to (if (first != null)
+                                "PERSISTED_EARLY_WATCH" else if (persistedFirstPrimary != null)
+                                "PERSISTED_QUALIFIED_TIER_SCAN_START" else "UNAVAILABLE"),
                             "first_primary_to_publication_ms" to study.firstPrimaryToPublicationMs,
                             "source_quote_to_publication_ms" to study.sourceQuoteToPublicationMs,
                             "runup_since_first_primary_pct" to study.firstPrimaryRunupPct,
@@ -12507,6 +12527,12 @@ class TradingRepository @Inject constructor(
                 // Include ALL recorded 5-day per-scan tier observations; without
                 // this file offline studies cannot reconstruct confirmations.
                 add("fixed_scan_observations.json", fixedRecommendationStore.archivedObservations())
+                // v9.0.17: replayable first-PRIMARY timeline independent of the
+                // optional Early Watch journal. All prices are sampled research
+                // observations; no execution or selection logic consumes this.
+                add("fixed_primary_progression_v9017.json",
+                    FixedPrimaryProgressionResearch.export(
+                        fixedRecommendationStore.archivedObservations(), fixedRecommendations))
                 fixedHistoricalEvidenceArchive.capture(fixedRecommendations)
                 addText("fixed_historical_research.json", fixedHistoricalEvidenceArchive.archive())
                 addText("fixed_imported_same_day_dedup.json", fixedImportedSameDayDedupJournal.archive())
@@ -12626,6 +12652,10 @@ class TradingRepository @Inject constructor(
                     "fixed_scan_observation_file" to "fixed_scan_observations.json",
                     "publication_candidate_timeline_event" to "ALL_CANDIDATE_CONFIRMATION_TIMELINE",
                     "fixed_factor_telemetry_file" to "fixed_factor_snapshots.jsonl",
+                            "fixed_working_range_shadow_schema" to "fixed_working_range_shadow_v9017",
+                            "fixed_primary_progression_v9017_file" to "fixed_primary_progression_v9017.json",
+                            "working_range_trading_effect" to "NONE",
+                            "working_range_extra_broker_calls" to 0,
                     "fixed_early_watch_file" to "fixed_early_watch.json",
                     "fixed_early_watch_read_only" to true,
                     "fixed_quality_shadow_no_buy_filter" to true,

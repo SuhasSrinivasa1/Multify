@@ -1,9 +1,9 @@
-name: Multify v9.0.16 Beta Sweep Recovery / Fixed source safety TEST
+name: Multify v9.0.17 Working Range Evidence / Fixed source safety TEST
 on:
   push:
-    branches: [v9016-beta-sweep-recovery-20261118]
+    branches: [v9017-working-range-evidence-20261118]
   pull_request:
-    branches: [v9015-nse-master-recovery-20261118]
+    branches: [v9016-beta-sweep-recovery-20261118]
   workflow_dispatch:
 permissions:
   contents: read
@@ -110,8 +110,8 @@ jobs:
           assert "const val HARD_STOP_LOSS_PCT = 3.0" in Path(root+"engine/ReleaseIntegrityManifest.kt").read_text()
           assert "const val CANONICAL_LEARNING_CALLS = 107" in Path(root+"engine/FixedFinalContract.kt").read_text()
           build=Path("app/build.gradle.kts").read_text()
-          assert "versionCode = 9016" in build
-          assert 'versionName = "9.0.16-beta-sweep-recovery"' in build
+          assert "versionCode = 9017" in build
+          assert 'versionName = "9.0.17-working-range-evidence"' in build
           assert "const val BETA_SAFE_LIVE_60S = 40" in Path(root+"engine/FixedResearchCapacityPolicy.kt").read_text()
           assert "const val MIN_RESEARCH_GAP_MS = 1_000L" in Path(root+"engine/FixedResearchLtpPacingPolicy.kt").read_text()
           assert "const val APP_PER_MINUTE = 45" in Path(root+"data/network/GrowwHistoricalThrottlePolicy.kt").read_text()
@@ -129,6 +129,19 @@ jobs:
           assert net.count(".retryOnConnectionFailure(false)") == 2
           assert net.count(".followRedirects(false)") == 2
           assert "wire_api_usage_snapshot.json" in Path(repo).read_text()
+          # v9.0.17 instrumentation must stay OUTSIDE the byte-locked
+          # discovery/evaluation functions, all execution and GTT policy.
+          factor=Path(root+"data/logging/FixedFactorTelemetry.kt").read_text()
+          assert '"working_range_shadow_v9017"' in factor
+          assert 'FixedWorkingRangeShadowPolicy.observe(' in factor
+          assert 'fixed_primary_progression_v9017.json' in source_text
+          assert 'PERSISTED_QUALIFIED_TIER_SCAN_START' in source_text
+          working=Path(root+"engine/FixedWorkingRangeShadowPolicy.kt").read_text()
+          assert 'does_not_approve_or_reject_trades' in working
+          assert 'no_extra_broker_calls' in working
+          assert 'working_range_qualified" to false' in working
+          assert 'no_extra_broker_calls" to true' in working
+
           owner=Path(root+"engine/AppPositionOwnershipPolicy.kt").read_text()
           univest=Path(root+"engine/UnivestAutoBuyPolicy.kt").read_text()
           assert '"UNIVEST_HOLDING" to setOf("UVH")' in owner
@@ -145,7 +158,7 @@ jobs:
         run: |
           python -m unittest discover -s backend/tests -p 'test_adaptive_timeframe_replay.py' -v
           python -m unittest discover -s backend/tests -p 'test_v9_master_log_replay.py' -v
-      - name: Full Android unit tests / v9.0.16 TEST APK
+      - name: Full Android unit tests / v9.0.17 TEST APK
         env:
           MULTIFY_KEYSTORE_PASSWORD: ${{ secrets.MULTIFY_KEYSTORE_PASSWORD }}
         run: gradle :app:testDebugUnitTest :app:assembleDebug --no-daemon --stacktrace
@@ -154,23 +167,18 @@ jobs:
           apk=$(find app/build/outputs/apk/debug -maxdepth 1 -name '*.apk' -type f | head -n 1)
           test -n "$apk" && test -s "$apk"
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$apk" \
-            | tee app/build/outputs/apk/debug/v9016-signature-verification.txt
-          # Preserve exact certificate mismatch in the artifact: a verified debug
-          # signature alone does NOT mean the installed v9.0.14 can be upgraded.
-          if grep -Fq 'Signer #1 certificate SHA-256 digest: c2efc37795ecc261d15637fa45e3549c1c412cc3e995241ce3821fefecb5855b' \
-              app/build/outputs/apk/debug/v9016-signature-verification.txt; then
-            echo "IN_PLACE_UPDATE_COMPATIBLE_WITH_V9015=true" | tee app/build/outputs/apk/debug/v9016-install-compatibility.txt
-          else
-            echo "IN_PLACE_UPDATE_COMPATIBLE_WITH_V9015=false" | tee app/build/outputs/apk/debug/v9016-install-compatibility.txt
-            echo "Do not uninstall a trading app with open broker holdings or unexported state."
-          fi
-          sha256sum "$apk" | tee app/build/outputs/apk/debug/v9016-SHA256SUMS.txt
+            | tee app/build/outputs/apk/debug/v9017-signature-verification.txt
+          # Build signing is verified, but a successful debug signature does
+          # NOT prove this binary can update the installed v9.0.16 certificate.
+          echo "IN_PLACE_UPDATE_COMPATIBLE_WITH_V9016=UNVERIFIED" | tee app/build/outputs/apk/debug/v9017-install-compatibility.txt
+          echo "Before installing, compare signer certificate against the currently installed APK. Do not uninstall with open holdings or unexported state."
+          sha256sum "$apk" | tee app/build/outputs/apk/debug/v9017-SHA256SUMS.txt
       - name: Upload CI verified package
         uses: actions/upload-artifact@v4
         with:
-          name: Multify-v9.0.16-Beta-Sweep-Recovery-TEST-debug
+          name: Multify-v9.0.17-Working-Range-Evidence-TEST-debug
           path: |
             app/build/outputs/apk/debug/*.apk
-            app/build/outputs/apk/debug/v9016-signature-verification.txt
-            app/build/outputs/apk/debug/v9016-SHA256SUMS.txt
-            app/build/outputs/apk/debug/v9016-install-compatibility.txt
+            app/build/outputs/apk/debug/v9017-signature-verification.txt
+            app/build/outputs/apk/debug/v9017-SHA256SUMS.txt
+            app/build/outputs/apk/debug/v9017-install-compatibility.txt
