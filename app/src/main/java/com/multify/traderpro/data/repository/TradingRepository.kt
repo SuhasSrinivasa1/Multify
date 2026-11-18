@@ -9535,6 +9535,57 @@ class TradingRepository @Inject constructor(
             }
         }
 
+    /**
+     * Repair only the exact v9.0.11 failure: an old broker BUY ID was reused to
+     * create a second local position AFTER the same original order had already been
+     * broker-confirmed sold. Never infer an exit from a missing holding alone.
+     * Requires an existing closed trade, fresh Alpha inventory, fresh GTT conflict
+     * list, and broker-confirmed original BUY and SELL IDs. Does not place any order
+     * or create another trade/P&L entry. Ambiguity leaves the row and BUY halt intact.
+     */
+    private suspend fun clearHistoricExecutedOrderReplayGhost(
+        token: String, position: ManagedPositionEntity
+    ): Boolean {
+        if (!appOwned(position) || position.side != "LONG" || position.product != "CNC") return false
+        val buyId = position.openOrderId?.takeIf { it.isNotBlank() } ?: return false
+        val symbol = position.symbol.uppercase(Locale.US)
+        val prior = managedDao.allTrades().firstOrNull { trade ->
+            trade.symbol.equals(symbol, true) && trade.openOrderId == buyId &&
+                trade.quantity == position.quantity && trade.closedAtMs < position.openedAtMs &&
+                trade.closeOrderId.isNotBlank() && trade.closeOrderId != "EXTERNAL"
+        } ?: return false
+        val freshInventory = brokerInventory(token, force = true)
+        val brokerQty = max(
+            freshInventory.holdings[symbol]?.quantity ?: 0,
+            freshInventory.positions[symbol]?.quantity ?: 0
+        )
+        if (brokerQty != 0) return false
+        // An active user-owned or app-owned GTT for this symbol is a hard veto.
+        if (activeGttsBySymbol(token, force = true)[symbol].orEmpty().isNotEmpty()) return false
+        val buy = apiFactory.groww.orderStatus(bearer(token), buyId)
+            .requirePayload("Verify historical replay BUY $symbol")
+        val sell = apiFactory.groww.orderStatus(bearer(token), prior.closeOrderId)
+            .requirePayload("Verify historical replay SELL $symbol")
+        val brokerTerminal = setOf("EXECUTED", "COMPLETED")
+        if (buy.orderStatus.uppercase(Locale.US) !in brokerTerminal ||
+            sell.orderStatus.uppercase(Locale.US) !in brokerTerminal ||
+            buy.growwOrderId != buyId || sell.growwOrderId != prior.closeOrderId ||
+            (buy.filledQuantity != null && buy.filledQuantity < position.quantity) ||
+            (sell.filledQuantity != null && sell.filledQuantity < position.quantity)
+        ) return false
+        val stillOpen = managedDao.openPositionById(position.id) ?: return false
+        if (stillOpen.openOrderId != buyId || stillOpen.quantity != position.quantity) return false
+        managedDao.deletePosition(position.id)
+        auditLogger.log("SAFETY", "HISTORIC_BUY_REPLAY_GHOST_CLEARED_BROKER_VERIFIED", mapOf(
+            "symbol" to symbol, "app_position_id" to position.id,
+            "reused_buy_id" to buyId, "verified_existing_sell_id" to prior.closeOrderId,
+            "broker_stock_quantity" to 0, "broker_active_gtt_count" to 0,
+            "additional_broker_order_posted" to false, "new_realized_pnl_inserted" to false,
+            "corrective_action" to "LOCAL_DUPLICATE_ROW_ONLY"
+        ))
+        return true
+    }
+
     private suspend fun reconcilePositionWithBroker(
         token: String,
         position: ManagedPositionEntity,
@@ -9868,6 +9919,18 @@ class TradingRepository @Inject constructor(
                             "new_buys_allowed_until_reconciled" to false
                         ))
                     }
+                }
+                if (brokerQty <= 0) {
+                    val repaired = runCatching {
+                        clearHistoricExecutedOrderReplayGhost(token, position)
+                    }.onFailure { error ->
+                        auditLogger.log("SAFETY", "HISTORIC_REPLAY_GHOST_CHECK_DEFERRED", mapOf(
+                            "symbol" to symbol, "position_id" to position.id,
+                            "error_type" to error.javaClass.simpleName,
+                            "local_row_preserved" to true, "new_buys_blocked" to true
+                        ))
+                    }.getOrDefault(false)
+                    if (repaired) continue
                 }
                 val gttStatus = position.smartOrderStatus.orEmpty().uppercase(Locale.US)
                 // Broker child fills must be reconciled before ordinary ownership checks:
