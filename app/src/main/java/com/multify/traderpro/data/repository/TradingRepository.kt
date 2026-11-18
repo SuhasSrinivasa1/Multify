@@ -4718,13 +4718,17 @@ class TradingRepository @Inject constructor(
         // Yield completely to foreground Fixed detail evaluation and Alpha
         // order/protection. Prefetch cannot steal quota from current signals.
         val betaIdle = BetaResearchGate.latestLiveStatus()
+        val betaLiveReadyForPrefetch = fixedBetaMarketTokenOrNull() != null &&
+            betaResearchGate.healthyForFixed(BetaResearchGate.Type.LIVE)
         val alphaResearchSpare = alphaCanTakeBetaDiscoveryFallback()
         val canPrefetch = com.multify.traderpro.engine.FixedResearchCapacityPolicy
             .prefetchMayStart(
                 fixedApiPriorityRequested || marketCriticalTradeInFlight,
                 alphaResearchSpare,
                 betaIdle.rollingMinuteRemaining,
-                betaIdle.fixedMinuteRemaining)
+                betaIdle.fixedMinuteRemaining,
+                betaLiveHealthy = betaLiveReadyForPrefetch
+            )
         if (!canPrefetch) {
             auditLogger.logAsync("FIXED_PERFORMANCE", "PREFETCH_YIELDED_TO_FOREGROUND_V909",
                 mapOf("foreground_fixed_evaluation" to fixedApiPriorityRequested,
@@ -4762,8 +4766,7 @@ class TradingRepository @Inject constructor(
         // An 82s dual-account lead made valid snapshots 40+ seconds old at the
         // next scan and often invalidated the prefetch. Use measured account-aware
         // lead time; no extra requests or change to accepted snapshot freshness.
-        val betaLiveReadyForTiming = fixedBetaMarketTokenOrNull() != null &&
-            betaResearchGate.healthyForFixed(BetaResearchGate.Type.LIVE)
+        val betaLiveReadyForTiming = betaLiveReadyForPrefetch
         val alphaLiveReadyForTiming = runCatching {
             recoveryGate.checkRequestAllowed(GrowwApiUsageLedger.Category.LIVE_DATA)
         }.isSuccess
@@ -4955,7 +4958,8 @@ class TradingRepository @Inject constructor(
                 com.multify.traderpro.engine.FixedResearchCapacityPolicy
                     .betaDiscoveryPreferred(index, betaToken != null,
                         status.rollingMinuteRemaining,
-                        status.fixedMinuteRemaining, initialBetaGapMs)
+                        status.fixedMinuteRemaining, initialBetaGapMs,
+                        status.recoveryProbeRequired)
             },
             "beta_live_safe_quota_rolling_and_calendar" to
                 com.multify.traderpro.engine.FixedResearchCapacityPolicy.BETA_SAFE_LIVE_60S,
@@ -5014,7 +5018,8 @@ class TradingRepository @Inject constructor(
                         .betaDiscoveryPreferred(index, true,
                             betaStatus.rollingMinuteRemaining,
                             betaStatus.fixedMinuteRemaining,
-                            betaStatus.activeGapMs)
+                            betaStatus.activeGapMs,
+                            betaStatus.recoveryProbeRequired)
                 // Re-check the ACTUAL category cooldown immediately before the
                 // network call. A 429 in another concurrent Alpha batch should
                 // redirect subsequent read-only batches to healthy Beta, not
