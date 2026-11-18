@@ -163,7 +163,7 @@ jobs:
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$apk" \
             | tee app/build/outputs/apk/debug/v9016-signature-verification.txt
           # Preserve exact certificate mismatch in the artifact: a verified debug
-          # signature alone does NOT mean the installed v9.0.14 can be upgraded.
+          # signature alone does NOT mean the installed v9.0.15 can be upgraded.
           if grep -Fq 'Signer #1 certificate SHA-256 digest: c2efc37795ecc261d15637fa45e3549c1c412cc3e995241ce3821fefecb5855b' \
               app/build/outputs/apk/debug/v9016-signature-verification.txt; then
             echo "IN_PLACE_UPDATE_COMPATIBLE_WITH_V9015=true" | tee app/build/outputs/apk/debug/v9016-install-compatibility.txt
