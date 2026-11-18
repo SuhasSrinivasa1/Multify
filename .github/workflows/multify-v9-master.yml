@@ -72,7 +72,12 @@ jobs:
               assert Path(p).read_bytes()==old(base28,p),p
           assert "appOwnedBuyMutex.withLock" in Path(repo).read_text()
           assert "CircuitAwareBuyPolicy.decide" in Path(repo).read_text()
-          assert "GttProtectionReadinessPolicy.verified" in Path(repo).read_text()
+          source_text=Path(repo).read_text()
+          assert "GttProtectionReadinessPolicy.verified" in source_text
+          assert "fixed_recommendation_execution_v9013" in source_text
+          assert "!isFixedRecommendationExecutionConsumed(it.id)" in source_text
+          assert "RECOMMENDATION_EVENT_CONSUMED" in source_text
+          assert "recommendationId = row.id" in source_text
           assert "const val MAX_LOSS_PCT = 3.0" in Path(root+"engine/HardStopLossPolicy.kt").read_text()
           assert "const val HARD_STOP_LOSS_PCT = 3.0" in Path(root+"engine/ReleaseIntegrityManifest.kt").read_text()
           assert "const val CANONICAL_LEARNING_CALLS = 107" in Path(root+"engine/FixedFinalContract.kt").read_text()
