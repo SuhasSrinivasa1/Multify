@@ -4733,6 +4733,9 @@ class TradingRepository @Inject constructor(
         if (!canPrefetch) {
             auditLogger.logAsync("FIXED_PERFORMANCE", "PREFETCH_YIELDED_TO_FOREGROUND_V909",
                 mapOf("foreground_fixed_evaluation" to fixedApiPriorityRequested,
+                    "beta_live_healthy" to betaLiveReadyForPrefetch,
+                    "beta_recovery_probe_required" to betaIdle.recoveryProbeRequired,
+                    "beta_live_gap_ms" to betaIdle.activeGapMs,
                     "beta_rolling_remaining" to betaIdle.rollingMinuteRemaining,
                     "beta_calendar_remaining" to betaIdle.fixedMinuteRemaining,
                     "alpha_research_spare" to alphaResearchSpare,
@@ -4777,6 +4780,12 @@ class TradingRepository @Inject constructor(
         val startDelay = (dueAtMs - System.currentTimeMillis() - expectedSweepMs).coerceAtLeast(0L)
         auditLogger.logAsync("FIXED_PERFORMANCE", "NEXT_SWEEP_PREFETCH_TIMING", mapOf(
             "beta_healthy_at_schedule" to betaLiveReadyForTiming,
+            "beta_recovery_probe_required" to betaIdle.recoveryProbeRequired,
+            "beta_live_gap_ms" to betaIdle.activeGapMs,
+            "beta_remaining_rolling" to betaIdle.rollingMinuteRemaining,
+            "beta_remaining_calendar" to betaIdle.fixedMinuteRemaining,
+            "alpha_research_spare" to alphaResearchSpare,
+            "foreground_fixed_evaluation" to fixedApiPriorityRequested,
             "alpha_live_ready_at_schedule" to alphaLiveReadyForTiming,
             "planned_lead_ms" to expectedSweepMs,
             "adaptive_valid_samples" to fixedSweepAdaptiveLead.sampleCount(
