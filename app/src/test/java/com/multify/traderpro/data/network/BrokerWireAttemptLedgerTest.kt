@@ -5,6 +5,9 @@ import org.junit.Test
 
 class BrokerWireAttemptLedgerTest {
     @Test fun accountWide429AndFailureCountsIncludeCategoryResponses() {
+        // Initialize the Alpha account/category counters before taking the baseline.
+        val seed = BrokerWireAttemptLedger.start("ALPHA", "GET", "/v1/live-data/ltp")
+        BrokerWireAttemptLedger.recordResponse(seed, 200)
         val before = BrokerWireAttemptLedger.summary()
         @Suppress("UNCHECKED_CAST")
         val beforeAccounts = before["accounts"] as Map<String, Map<String, Any>>
