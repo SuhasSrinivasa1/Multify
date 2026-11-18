@@ -134,5 +134,5 @@ jobs:
           name: Multify-v9.0.13-Recommendation-Consumption-Minus3-TEST-debug
           path: |
             app/build/outputs/apk/debug/*.apk
-            app/build/outputs/apk/debug/v9012-signature-verification.txt
-            app/build/outputs/apk/debug/v9012-SHA256SUMS.txt
+            app/build/outputs/apk/debug/v9013-signature-verification.txt
+            app/build/outputs/apk/debug/v9013-SHA256SUMS.txt
