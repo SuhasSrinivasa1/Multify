@@ -87,6 +87,8 @@ jobs:
           assert "headlineUsesFixedDiscovery" in source_text
           assert "WAITING · NSE MASTER HTTP 403" in source_text
           assert "BETA_SWEEP_ALPHA_CONTINUATION_V9016" in source_text
+          assert "BETA_FAILED_SLOTS_SEQUENTIAL_ALPHA_REPAIR_V9016" in source_text
+          assert "if (errors > 0) aborted = true" in source_text
           assert "broker_fallback_for_failed_beta_batches" in source_text
           assert "if (betaStopped.get() && alphaLiveReady)" in source_text
           master=Path(root+"data/repository/NseSymbolRepository.kt").read_text()
