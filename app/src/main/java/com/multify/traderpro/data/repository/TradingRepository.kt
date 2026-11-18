@@ -4798,9 +4798,15 @@ class TradingRepository @Inject constructor(
             // Revalidate both independent research budgets immediately before dispatch.
             // Foreground overlap is permitted only for a healthy dual-account sweep;
             // a cooldown or lost Alpha headroom returns to the original post-cycle path.
+            val betaHeadroomBeforeDispatch = BetaResearchGate.latestLiveStatus()
+            val betaStillHasPrefetchHeadroom =
+                minOf(betaHeadroomBeforeDispatch.rollingMinuteRemaining,
+                    betaHeadroomBeforeDispatch.fixedMinuteRemaining) >=
+                    com.multify.traderpro.engine.FixedResearchCapacityPolicy.MIN_PREFETCH_SPARE_REQUESTS
             val foregroundPrefetchStillSafe = !fixedApiPriorityRequested ||
                 (fixedBetaMarketTokenOrNull() != null &&
                     betaResearchGate.healthyForFixed(BetaResearchGate.Type.LIVE) &&
+                    betaStillHasPrefetchHeadroom &&
                     alphaCanTakeBetaDiscoveryFallback())
             if (marketCriticalTradeInFlight || !foregroundPrefetchStillSafe ||
                 !marketDataAvailableForFixed() ||
