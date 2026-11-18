@@ -114,6 +114,10 @@ jobs:
           beta_gate=Path(root+"data/network/BetaResearchGate.kt").read_text()
           assert "recoveryProbeRequired = w.probeRequired" in beta_gate
           assert "onRecoveryProbeSuccess" in beta_gate
+          trading_repo=Path(root+"data/repository/TradingRepository.kt").read_text()
+          assert "foregroundPrefetchStillSafe" in trading_repo
+          assert "BETA_RECOVERY_PROBE_SUCCEEDED" in trading_repo
+          assert '"beta_recovery_probe_required" to betaIdle.recoveryProbeRequired' in trading_repo
           pacing=Path(root+"engine/LtpAdaptivePacingPolicy.kt").read_text()
           assert "RECOVERY_PROBE_GAP_MS = 2_000L" in pacing
           wire=Path(root+"data/network/BrokerWireAuditInterceptor.kt").read_text()
