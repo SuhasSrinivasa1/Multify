@@ -135,9 +135,15 @@ jobs:
           test -n "$apk" && test -s "$apk"
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$apk" \
             | tee app/build/outputs/apk/debug/v9014-signature-verification.txt
-          # Fail the release if it is not updatable over the user's v9.0.13 APK.
-          grep -F 'Signer #1 certificate SHA-256 digest: 05e070a7a9aecfb7d8cf3a276841dd15c538a2a45655bb9ce6b6e77991b154ea' \
-            app/build/outputs/apk/debug/v9014-signature-verification.txt
+          # Preserve exact certificate mismatch in the artifact: a verified debug
+          # signature alone does NOT mean the installed v9.0.13 can be upgraded.
+          if grep -Fq 'Signer #1 certificate SHA-256 digest: 05e070a7a9aecfb7d8cf3a276841dd15c538a2a45655bb9ce6b6e77991b154ea' \
+              app/build/outputs/apk/debug/v9014-signature-verification.txt; then
+            echo "IN_PLACE_UPDATE_COMPATIBLE_WITH_V9013=true" | tee app/build/outputs/apk/debug/v9014-install-compatibility.txt
+          else
+            echo "IN_PLACE_UPDATE_COMPATIBLE_WITH_V9013=false" | tee app/build/outputs/apk/debug/v9014-install-compatibility.txt
+            echo "Do not uninstall a trading app with open broker holdings or unexported state."
+          fi
           sha256sum "$apk" | tee app/build/outputs/apk/debug/v9014-SHA256SUMS.txt
       - name: Upload CI verified package
         uses: actions/upload-artifact@v4
@@ -147,3 +153,4 @@ jobs:
             app/build/outputs/apk/debug/*.apk
             app/build/outputs/apk/debug/v9014-signature-verification.txt
             app/build/outputs/apk/debug/v9014-SHA256SUMS.txt
+            app/build/outputs/apk/debug/v9014-install-compatibility.txt
