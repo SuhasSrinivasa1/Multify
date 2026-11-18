@@ -1321,7 +1321,11 @@ class TradingEngineService : Service() {
         val monitorStatus = when {
             recoveryGate.requiresReconnect() -> "Groww login expired — RECONNECT in Settings; broker orders paused · " +
                 "$managedCount last-known holding(s); verify GTT in Groww"
-            !managedMonitorSucceeded -> "Monitor error · $managedCount last-known holding(s) · " +
+            !managedMonitorSucceeded &&
+                recoveryGate.status().categoryCooldownUntilMs.values.any { it > System.currentTimeMillis() } ->
+                "Groww API cooldown · $managedCount last-known app row(s); verify holdings/GTT in Groww · " +
+                    if (positionMonitoringWakeLock?.isHeld == true) "CPU awake; retrying" else "CPU wake lock unavailable"
+            !managedMonitorSucceeded -> "Monitor error · $managedCount last-known app row(s); verify holdings/GTT in Groww · " +
                 if (positionMonitoringWakeLock?.isHeld == true) "CPU awake; retrying" else "CPU wake lock unavailable"
             managedCount <= 0 -> "No open holdings"
             positionMonitoringWakeLock?.isHeld == true -> "Monitoring $managedCount holding(s) · CPU awake"
