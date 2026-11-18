@@ -365,7 +365,7 @@ class TradingRepository @Inject constructor(
     private var lastFixedCandidateOnlyLtpAtMs = 0L
     private var lastFixedPreMarketWarmupAtMs = 0L
     private var lastFixedHotPrewarmForDueAtMs = 0L
-    private var brokerInventorySnapshot: BrokerInventorySnapshot? = null
+    @Volatile private var brokerInventorySnapshot: BrokerInventorySnapshot? = null
     @Volatile private var activeGttSnapshot: ActiveGttSnapshot? = null
     private var lastClosedSessionReconcileAtMs = 0L
     private var lastIdlePortfolioAuditAtMs = 0L
@@ -378,6 +378,9 @@ class TradingRepository @Inject constructor(
     private var lastArmHotAuditArmed: Boolean? = null
     private val closePositionMutexes = ConcurrentHashMap<Long, Mutex>()
     private val appOwnedBuyMutex = Mutex()
+    // Coalesce concurrent read-only broker snapshots. Forced BUY/SELL checks remain fresh.
+    private val brokerInventoryReadMutex = Mutex()
+    private val activeGttReadMutex = Mutex()
     private val protectiveGttCreationMutex = Mutex()
     // One symbol's confirmed fill/protection lifecycle cannot race trailing management.
     private val positionLifecycleMutexes = ConcurrentHashMap<String, Mutex>()
@@ -9501,23 +9504,29 @@ class TradingRepository @Inject constructor(
         return ResearchDto(today, entity.title, report)
     }
 
-    private suspend fun brokerInventory(token: String, force: Boolean): BrokerInventorySnapshot {
-        val now = System.currentTimeMillis()
-        brokerInventorySnapshot?.takeIf { !force && now - it.atMs <= BROKER_INVENTORY_REFRESH_MS }?.let { return it }
-        // Gson can decode a null trading_symbol despite the non-null model declaration.
-        // Never crash portfolio monitoring; omit malformed rows and fail closed during
-        // app-owned ownership reconciliation instead of assuming an unknown symbol.
-        val holdings = apiFactory.groww.holdings(bearer(token)).requirePayload("Groww holdings").holdings
-            .mapNotNull { holding ->
-                BrokerInventorySymbolPolicy.normalize(holding.tradingSymbol)?.let { symbol -> symbol to holding }
-            }.toMap()
-        val positions = apiFactory.groww.positions(bearer(token)).requirePayload("Groww positions").positions
-            .filter { it.product.equals("CNC", true) }
-            .mapNotNull { position ->
-                BrokerInventorySymbolPolicy.normalize(position.tradingSymbol)?.let { symbol -> symbol to position }
-            }.toMap()
-        return BrokerInventorySnapshot(holdings, positions, now).also { brokerInventorySnapshot = it }
-    }
+    private suspend fun brokerInventory(token: String, force: Boolean): BrokerInventorySnapshot =
+        brokerInventoryReadMutex.withLock {
+            val now = System.currentTimeMillis()
+            brokerInventorySnapshot?.takeIf {
+                !force && now - it.atMs in 0L..BROKER_INVENTORY_REFRESH_MS
+            }?.let { return@withLock it }
+            // BUY/SELL paths always use force=true and obtain fresh Alpha holdings+positions.
+            val holdings = apiFactory.groww.holdings(bearer(token)).requirePayload("Groww holdings").holdings
+                .mapNotNull { holding ->
+                    BrokerInventorySymbolPolicy.normalize(holding.tradingSymbol)
+                        ?.let { symbol -> symbol to holding }
+                }.toMap()
+            val positions = apiFactory.groww.positions(bearer(token))
+                .requirePayload("Groww positions").positions
+                .filter { it.product.equals("CNC", true) }
+                .mapNotNull { position ->
+                    BrokerInventorySymbolPolicy.normalize(position.tradingSymbol)
+                        ?.let { symbol -> symbol to position }
+                }.toMap()
+            BrokerInventorySnapshot(holdings, positions, System.currentTimeMillis()).also {
+                brokerInventorySnapshot = it
+            }
+        }
 
     private suspend fun reconcilePositionWithBroker(
         token: String,
@@ -9568,33 +9577,35 @@ class TradingRepository @Inject constructor(
             )
         )
     }
-    private suspend fun activeGttsBySymbol(token: String, force: Boolean = false): Map<String, List<SmartOrderPayload>> {
-        val now = System.currentTimeMillis()
-        activeGttSnapshot?.takeIf { !force && now - it.atMs < ACTIVE_GTT_REFRESH_MS }?.let { return it.bySymbol }
+    private suspend fun activeGttsBySymbol(token: String, force: Boolean = false): Map<String, List<SmartOrderPayload>> =
+        activeGttReadMutex.withLock {
+            val now = System.currentTimeMillis()
+            activeGttSnapshot?.takeIf {
+                !force && now - it.atMs in 0L until ACTIVE_GTT_REFRESH_MS
+            }?.let { return@withLock it.bySymbol }
 
-        val all = mutableListOf<SmartOrderPayload>()
-        var complete = false
-        for (page in 0 until MAX_ACTIVE_GTT_PAGES) {
-            val orders = apiFactory.groww.listSmartOrders(
-                bearer(token),
-                segment = "CASH",
-                smartOrderType = "GTT",
-                status = "ACTIVE",
-                page = page,
-                pageSize = ACTIVE_GTT_PAGE_SIZE
-            ).requirePayload("Active Groww GTT list").orders
-            all += orders
-            if (orders.size < ACTIVE_GTT_PAGE_SIZE) {
-                complete = true
-                break
+            val all = mutableListOf<SmartOrderPayload>()
+            var complete = false
+            for (page in 0 until MAX_ACTIVE_GTT_PAGES) {
+                val orders = apiFactory.groww.listSmartOrders(
+                    bearer(token), segment = "CASH", smartOrderType = "GTT",
+                    status = "ACTIVE", page = page, pageSize = ACTIVE_GTT_PAGE_SIZE
+                ).requirePayload("Active Groww GTT list").orders
+                all += orders
+                if (orders.size < ACTIVE_GTT_PAGE_SIZE) {
+                    complete = true
+                    break
+                }
             }
+            check(complete) {
+                "Active Groww GTT list exceeded the safe pagination limit; portfolio import paused to avoid duplicate sell orders"
+            }
+            val grouped = all.filter { it.tradingSymbol.isNotBlank() }
+                .groupBy { it.tradingSymbol.uppercase(Locale.US) }
+            ActiveGttSnapshot(grouped, System.currentTimeMillis()).also {
+                activeGttSnapshot = it
+            }.bySymbol
         }
-        check(complete) { "Active Groww GTT list exceeded the safe pagination limit; portfolio import paused to avoid duplicate sell orders" }
-        val grouped = all.filter { it.tradingSymbol.isNotBlank() }
-            .groupBy { it.tradingSymbol.uppercase(Locale.US) }
-        activeGttSnapshot = ActiveGttSnapshot(grouped, now)
-        return grouped
-    }
 
     private fun logPortfolioConflict(symbol: String, message: String, extra: Map<String, Any?> = emptyMap()) {
         val now = System.currentTimeMillis()
