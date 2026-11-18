@@ -1862,6 +1862,11 @@ class TradingRepository @Inject constructor(
             alphaReadCooldown = alphaReadCooldown,
             betaReadOnlyReady = betaReadOnlyReady
         )
+        // When Forecast has not performed independent discovery, use the ACTIVE Fixed
+        // engine's verified sweep status for the shared headline instead of WAITING.
+        // Only a complete Fixed baseline with adequate coverage is HEALTHY.
+        val headlineUsesFixedDiscovery = discoveryHealth == null && fixedDiscoveryHealth != null
+        val headlineDiscoveryStatus = if (headlineUsesFixedDiscovery) fixedDiscoveryStatus else discoveryStatus
 
         return DashboardDto(
             armed = settings.armEffective,
@@ -1909,11 +1914,11 @@ class TradingRepository @Inject constructor(
                 marketData = if (dataAge <= 15_000L) "FRESH" else "STALE",
                 symbolMaster = if (nseSymbols.isStale()) "STALE" else "FRESH",
                 foregroundService = if (heartbeatAge <= 30_000L) "RUNNING" else "NOT_HEARTBEATING",
-                discovery = discoveryStatus,
-                discoveryCoveragePct = (discoveryHealth?.coverageRatio ?: 0.0) * 100.0,
-                discoveryBaselineAgeMs = discoveryAge,
-                discoveryBatchErrors = discoveryHealth?.batchErrors ?: 0,
-                discoveryBaselineReady = discoveryHealth?.baselineReady ?: false,
+                discovery = headlineDiscoveryStatus,
+                discoveryCoveragePct = ((if (headlineUsesFixedDiscovery) fixedDiscoveryHealth?.coverageRatio else discoveryHealth?.coverageRatio) ?: 0.0) * 100.0,
+                discoveryBaselineAgeMs = if (headlineUsesFixedDiscovery) fixedDiscoveryAge else discoveryAge,
+                discoveryBatchErrors = (if (headlineUsesFixedDiscovery) fixedDiscoveryHealth?.batchErrors else discoveryHealth?.batchErrors) ?: 0,
+                discoveryBaselineReady = (if (headlineUsesFixedDiscovery) fixedDiscoveryHealth?.baselineReady else discoveryHealth?.baselineReady) ?: false,
                 lastNotificationAtMs = settings.lastNotificationAtMs,
                 reconnectCount = settings.listenerReconnectCount,
                 lastReconnectAtMs = settings.lastListenerReconnectAtMs,
@@ -2042,6 +2047,8 @@ class TradingRepository @Inject constructor(
                 alphaReadCooldown = alphaReadCooldown,
                 betaReadOnlyReady = betaReadOnlyReady
             )
+            val headlineUsesFixedDiscovery = discoveryHealth == null && fixedDiscoveryHealth != null
+            val headlineDiscoveryStatus = if (headlineUsesFixedDiscovery) fixedDiscoveryStatus else discoveryStatus
             DashboardDto(
                 armed = settings.armEffective, halted = settings.safetyHalt, marketSession = marketSession(),
                 asOf = ZonedDateTime.now(INDIA).format(DateTimeFormatter.ISO_OFFSET_DATE_TIME),
@@ -2073,11 +2080,11 @@ class TradingRepository @Inject constructor(
                     marketData = if (dataAge <= 15_000L) "FRESH" else "STALE",
                     symbolMaster = if (nseSymbols.isStale()) "STALE" else "FRESH",
                     foregroundService = if (heartbeatAge <= 30_000L) "RUNNING" else "NOT_HEARTBEATING",
-                    discovery = discoveryStatus,
-                    discoveryCoveragePct = (discoveryHealth?.coverageRatio ?: 0.0) * 100.0,
-                    discoveryBaselineAgeMs = discoveryAge,
-                    discoveryBatchErrors = discoveryHealth?.batchErrors ?: 0,
-                    discoveryBaselineReady = discoveryHealth?.baselineReady ?: false,
+                    discovery = headlineDiscoveryStatus,
+                    discoveryCoveragePct = ((if (headlineUsesFixedDiscovery) fixedDiscoveryHealth?.coverageRatio else discoveryHealth?.coverageRatio) ?: 0.0) * 100.0,
+                    discoveryBaselineAgeMs = if (headlineUsesFixedDiscovery) fixedDiscoveryAge else discoveryAge,
+                    discoveryBatchErrors = (if (headlineUsesFixedDiscovery) fixedDiscoveryHealth?.batchErrors else discoveryHealth?.batchErrors) ?: 0,
+                    discoveryBaselineReady = (if (headlineUsesFixedDiscovery) fixedDiscoveryHealth?.baselineReady else discoveryHealth?.baselineReady) ?: false,
                     lastNotificationAtMs = settings.lastNotificationAtMs,
                     reconnectCount = settings.listenerReconnectCount,
                     lastReconnectAtMs = settings.lastListenerReconnectAtMs,
