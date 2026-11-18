@@ -22,6 +22,9 @@ class FixedResearchCapacityPolicyTest {
         assertFalse(p.betaDiscoveryPreferred(3,true,40,40,6900L,recoveryProbeRequired=true))
         assertFalse(p.betaDiscoveryPreferred(1,true,40,40,6900L,recoveryProbeRequired=false))
         assertFalse(p.betaDiscoveryPreferred(1,false,40,40,6900L,recoveryProbeRequired=true))
+        // Even when the old gap is below 4s, only the first post-cooldown batch probes.
+        assertTrue(p.betaDiscoveryPreferred(1,true,40,40,2600L,recoveryProbeRequired=true))
+        assertFalse(p.betaDiscoveryPreferred(3,true,40,40,2600L,recoveryProbeRequired=true))
     }
 
     @Test fun earlyPrefetchMayOverlapOnlyWhenBothAccountsHaveHeadroom() {
