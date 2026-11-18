@@ -365,7 +365,7 @@ class TradingRepository @Inject constructor(
     private var lastFixedCandidateOnlyLtpAtMs = 0L
     private var lastFixedPreMarketWarmupAtMs = 0L
     private var lastFixedHotPrewarmForDueAtMs = 0L
-    private var brokerInventorySnapshot: BrokerInventorySnapshot? = null
+    @Volatile private var brokerInventorySnapshot: BrokerInventorySnapshot? = null
     @Volatile private var activeGttSnapshot: ActiveGttSnapshot? = null
     private var lastClosedSessionReconcileAtMs = 0L
     private var lastIdlePortfolioAuditAtMs = 0L
@@ -378,6 +378,9 @@ class TradingRepository @Inject constructor(
     private var lastArmHotAuditArmed: Boolean? = null
     private val closePositionMutexes = ConcurrentHashMap<Long, Mutex>()
     private val appOwnedBuyMutex = Mutex()
+    // Coalesce concurrent read-only broker snapshots. Forced BUY/SELL checks remain fresh.
+    private val brokerInventoryReadMutex = Mutex()
+    private val activeGttReadMutex = Mutex()
     private val protectiveGttCreationMutex = Mutex()
     // One symbol's confirmed fill/protection lifecycle cannot race trailing management.
     private val positionLifecycleMutexes = ConcurrentHashMap<String, Mutex>()
@@ -1859,6 +1862,11 @@ class TradingRepository @Inject constructor(
             alphaReadCooldown = alphaReadCooldown,
             betaReadOnlyReady = betaReadOnlyReady
         )
+        // When Forecast has not performed independent discovery, use the ACTIVE Fixed
+        // engine's verified sweep status for the shared headline instead of WAITING.
+        // Only a complete Fixed baseline with adequate coverage is HEALTHY.
+        val headlineUsesFixedDiscovery = discoveryHealth == null && fixedDiscoveryHealth != null
+        val headlineDiscoveryStatus = if (headlineUsesFixedDiscovery) fixedDiscoveryStatus else discoveryStatus
 
         return DashboardDto(
             armed = settings.armEffective,
@@ -1906,11 +1914,11 @@ class TradingRepository @Inject constructor(
                 marketData = if (dataAge <= 15_000L) "FRESH" else "STALE",
                 symbolMaster = if (nseSymbols.isStale()) "STALE" else "FRESH",
                 foregroundService = if (heartbeatAge <= 30_000L) "RUNNING" else "NOT_HEARTBEATING",
-                discovery = discoveryStatus,
-                discoveryCoveragePct = (discoveryHealth?.coverageRatio ?: 0.0) * 100.0,
-                discoveryBaselineAgeMs = discoveryAge,
-                discoveryBatchErrors = discoveryHealth?.batchErrors ?: 0,
-                discoveryBaselineReady = discoveryHealth?.baselineReady ?: false,
+                discovery = headlineDiscoveryStatus,
+                discoveryCoveragePct = ((if (headlineUsesFixedDiscovery) fixedDiscoveryHealth?.coverageRatio else discoveryHealth?.coverageRatio) ?: 0.0) * 100.0,
+                discoveryBaselineAgeMs = if (headlineUsesFixedDiscovery) fixedDiscoveryAge else discoveryAge,
+                discoveryBatchErrors = (if (headlineUsesFixedDiscovery) fixedDiscoveryHealth?.batchErrors else discoveryHealth?.batchErrors) ?: 0,
+                discoveryBaselineReady = (if (headlineUsesFixedDiscovery) fixedDiscoveryHealth?.baselineReady else discoveryHealth?.baselineReady) ?: false,
                 lastNotificationAtMs = settings.lastNotificationAtMs,
                 reconnectCount = settings.listenerReconnectCount,
                 lastReconnectAtMs = settings.lastListenerReconnectAtMs,
@@ -2039,6 +2047,8 @@ class TradingRepository @Inject constructor(
                 alphaReadCooldown = alphaReadCooldown,
                 betaReadOnlyReady = betaReadOnlyReady
             )
+            val headlineUsesFixedDiscovery = discoveryHealth == null && fixedDiscoveryHealth != null
+            val headlineDiscoveryStatus = if (headlineUsesFixedDiscovery) fixedDiscoveryStatus else discoveryStatus
             DashboardDto(
                 armed = settings.armEffective, halted = settings.safetyHalt, marketSession = marketSession(),
                 asOf = ZonedDateTime.now(INDIA).format(DateTimeFormatter.ISO_OFFSET_DATE_TIME),
@@ -2070,11 +2080,11 @@ class TradingRepository @Inject constructor(
                     marketData = if (dataAge <= 15_000L) "FRESH" else "STALE",
                     symbolMaster = if (nseSymbols.isStale()) "STALE" else "FRESH",
                     foregroundService = if (heartbeatAge <= 30_000L) "RUNNING" else "NOT_HEARTBEATING",
-                    discovery = discoveryStatus,
-                    discoveryCoveragePct = (discoveryHealth?.coverageRatio ?: 0.0) * 100.0,
-                    discoveryBaselineAgeMs = discoveryAge,
-                    discoveryBatchErrors = discoveryHealth?.batchErrors ?: 0,
-                    discoveryBaselineReady = discoveryHealth?.baselineReady ?: false,
+                    discovery = headlineDiscoveryStatus,
+                    discoveryCoveragePct = ((if (headlineUsesFixedDiscovery) fixedDiscoveryHealth?.coverageRatio else discoveryHealth?.coverageRatio) ?: 0.0) * 100.0,
+                    discoveryBaselineAgeMs = if (headlineUsesFixedDiscovery) fixedDiscoveryAge else discoveryAge,
+                    discoveryBatchErrors = (if (headlineUsesFixedDiscovery) fixedDiscoveryHealth?.batchErrors else discoveryHealth?.batchErrors) ?: 0,
+                    discoveryBaselineReady = (if (headlineUsesFixedDiscovery) fixedDiscoveryHealth?.baselineReady else discoveryHealth?.baselineReady) ?: false,
                     lastNotificationAtMs = settings.lastNotificationAtMs,
                     reconnectCount = settings.listenerReconnectCount,
                     lastReconnectAtMs = settings.lastListenerReconnectAtMs,
@@ -8311,7 +8321,7 @@ class TradingRepository @Inject constructor(
             }
             if (fixedRecommendationStore.recommendations(today).firstOrNull { it.id == row.id }?.status != "ACTIVE") continue
 
-            val reference = stableRef("FXM", "${row.recommendationDate}-${row.id}-${row.symbol}")
+            val reference = stableRef("FXM", "${row.recommendationDate}-${row.id}-${row.symbol}-ORDER_INTENT_V9014")
             val orderStartedAtMs = System.currentTimeMillis()
             val order = runCatching {
                 placeCncBuy(token, row.symbol, sizing.quantity, reference, entryQuote = quote,
@@ -9501,22 +9511,79 @@ class TradingRepository @Inject constructor(
         return ResearchDto(today, entity.title, report)
     }
 
-    private suspend fun brokerInventory(token: String, force: Boolean): BrokerInventorySnapshot {
-        val now = System.currentTimeMillis()
-        brokerInventorySnapshot?.takeIf { !force && now - it.atMs <= BROKER_INVENTORY_REFRESH_MS }?.let { return it }
-        // Gson can decode a null trading_symbol despite the non-null model declaration.
-        // Never crash portfolio monitoring; omit malformed rows and fail closed during
-        // app-owned ownership reconciliation instead of assuming an unknown symbol.
-        val holdings = apiFactory.groww.holdings(bearer(token)).requirePayload("Groww holdings").holdings
-            .mapNotNull { holding ->
-                BrokerInventorySymbolPolicy.normalize(holding.tradingSymbol)?.let { symbol -> symbol to holding }
-            }.toMap()
-        val positions = apiFactory.groww.positions(bearer(token)).requirePayload("Groww positions").positions
-            .filter { it.product.equals("CNC", true) }
-            .mapNotNull { position ->
-                BrokerInventorySymbolPolicy.normalize(position.tradingSymbol)?.let { symbol -> symbol to position }
-            }.toMap()
-        return BrokerInventorySnapshot(holdings, positions, now).also { brokerInventorySnapshot = it }
+    private suspend fun brokerInventory(token: String, force: Boolean): BrokerInventorySnapshot =
+        brokerInventoryReadMutex.withLock {
+            val now = System.currentTimeMillis()
+            brokerInventorySnapshot?.takeIf {
+                !force && now - it.atMs in 0L..BROKER_INVENTORY_REFRESH_MS
+            }?.let { return@withLock it }
+            // BUY/SELL paths always use force=true and obtain fresh Alpha holdings+positions.
+            val holdings = apiFactory.groww.holdings(bearer(token)).requirePayload("Groww holdings").holdings
+                .mapNotNull { holding ->
+                    BrokerInventorySymbolPolicy.normalize(holding.tradingSymbol)
+                        ?.let { symbol -> symbol to holding }
+                }.toMap()
+            val positions = apiFactory.groww.positions(bearer(token))
+                .requirePayload("Groww positions").positions
+                .filter { it.product.equals("CNC", true) }
+                .mapNotNull { position ->
+                    BrokerInventorySymbolPolicy.normalize(position.tradingSymbol)
+                        ?.let { symbol -> symbol to position }
+                }.toMap()
+            BrokerInventorySnapshot(holdings, positions, System.currentTimeMillis()).also {
+                brokerInventorySnapshot = it
+            }
+        }
+
+    /**
+     * Repair only the exact v9.0.11 failure: an old broker BUY ID was reused to
+     * create a second local position AFTER the same original order had already been
+     * broker-confirmed sold. Never infer an exit from a missing holding alone.
+     * Requires an existing closed trade, fresh Alpha inventory, fresh GTT conflict
+     * list, and broker-confirmed original BUY and SELL IDs. Does not place any order
+     * or create another trade/P&L entry. Ambiguity leaves the row and BUY halt intact.
+     */
+    private suspend fun clearHistoricExecutedOrderReplayGhost(
+        token: String, position: ManagedPositionEntity
+    ): Boolean {
+        if (!appOwned(position) || position.side != "LONG" || position.product != "CNC") return false
+        val buyId = position.openOrderId?.takeIf { it.isNotBlank() } ?: return false
+        val symbol = position.symbol.uppercase(Locale.US)
+        val prior = managedDao.allTrades().firstOrNull { trade ->
+            trade.symbol.equals(symbol, true) && trade.openOrderId == buyId &&
+                trade.quantity == position.quantity && trade.closedAtMs < position.openedAtMs &&
+                trade.closeOrderId.isNotBlank() && trade.closeOrderId != "EXTERNAL"
+        } ?: return false
+        val freshInventory = brokerInventory(token, force = true)
+        val brokerQty = max(
+            freshInventory.holdings[symbol]?.quantity ?: 0,
+            freshInventory.positions[symbol]?.quantity ?: 0
+        )
+        if (brokerQty != 0) return false
+        // An active user-owned or app-owned GTT for this symbol is a hard veto.
+        if (activeGttsBySymbol(token, force = true)[symbol].orEmpty().isNotEmpty()) return false
+        val buy = apiFactory.groww.orderStatus(bearer(token), buyId)
+            .requirePayload("Verify historical replay BUY $symbol")
+        val sell = apiFactory.groww.orderStatus(bearer(token), prior.closeOrderId)
+            .requirePayload("Verify historical replay SELL $symbol")
+        val brokerTerminal = setOf("EXECUTED", "COMPLETED")
+        if (buy.orderStatus.uppercase(Locale.US) !in brokerTerminal ||
+            sell.orderStatus.uppercase(Locale.US) !in brokerTerminal ||
+            buy.growwOrderId != buyId || sell.growwOrderId != prior.closeOrderId ||
+            (buy.filledQuantity != null && buy.filledQuantity < position.quantity) ||
+            (sell.filledQuantity != null && sell.filledQuantity < position.quantity)
+        ) return false
+        val stillOpen = managedDao.openPositionById(position.id) ?: return false
+        if (stillOpen.openOrderId != buyId || stillOpen.quantity != position.quantity) return false
+        managedDao.deletePosition(position.id)
+        auditLogger.log("SAFETY", "HISTORIC_BUY_REPLAY_GHOST_CLEARED_BROKER_VERIFIED", mapOf(
+            "symbol" to symbol, "app_position_id" to position.id,
+            "reused_buy_id" to buyId, "verified_existing_sell_id" to prior.closeOrderId,
+            "broker_stock_quantity" to 0, "broker_active_gtt_count" to 0,
+            "additional_broker_order_posted" to false, "new_realized_pnl_inserted" to false,
+            "corrective_action" to "LOCAL_DUPLICATE_ROW_ONLY"
+        ))
+        return true
     }
 
     private suspend fun reconcilePositionWithBroker(
@@ -9568,33 +9635,35 @@ class TradingRepository @Inject constructor(
             )
         )
     }
-    private suspend fun activeGttsBySymbol(token: String, force: Boolean = false): Map<String, List<SmartOrderPayload>> {
-        val now = System.currentTimeMillis()
-        activeGttSnapshot?.takeIf { !force && now - it.atMs < ACTIVE_GTT_REFRESH_MS }?.let { return it.bySymbol }
+    private suspend fun activeGttsBySymbol(token: String, force: Boolean = false): Map<String, List<SmartOrderPayload>> =
+        activeGttReadMutex.withLock {
+            val now = System.currentTimeMillis()
+            activeGttSnapshot?.takeIf {
+                !force && now - it.atMs in 0L until ACTIVE_GTT_REFRESH_MS
+            }?.let { return@withLock it.bySymbol }
 
-        val all = mutableListOf<SmartOrderPayload>()
-        var complete = false
-        for (page in 0 until MAX_ACTIVE_GTT_PAGES) {
-            val orders = apiFactory.groww.listSmartOrders(
-                bearer(token),
-                segment = "CASH",
-                smartOrderType = "GTT",
-                status = "ACTIVE",
-                page = page,
-                pageSize = ACTIVE_GTT_PAGE_SIZE
-            ).requirePayload("Active Groww GTT list").orders
-            all += orders
-            if (orders.size < ACTIVE_GTT_PAGE_SIZE) {
-                complete = true
-                break
+            val all = mutableListOf<SmartOrderPayload>()
+            var complete = false
+            for (page in 0 until MAX_ACTIVE_GTT_PAGES) {
+                val orders = apiFactory.groww.listSmartOrders(
+                    bearer(token), segment = "CASH", smartOrderType = "GTT",
+                    status = "ACTIVE", page = page, pageSize = ACTIVE_GTT_PAGE_SIZE
+                ).requirePayload("Active Groww GTT list").orders
+                all += orders
+                if (orders.size < ACTIVE_GTT_PAGE_SIZE) {
+                    complete = true
+                    break
+                }
             }
+            check(complete) {
+                "Active Groww GTT list exceeded the safe pagination limit; portfolio import paused to avoid duplicate sell orders"
+            }
+            val grouped = all.filter { it.tradingSymbol.isNotBlank() }
+                .groupBy { it.tradingSymbol.uppercase(Locale.US) }
+            ActiveGttSnapshot(grouped, System.currentTimeMillis()).also {
+                activeGttSnapshot = it
+            }.bySymbol
         }
-        check(complete) { "Active Groww GTT list exceeded the safe pagination limit; portfolio import paused to avoid duplicate sell orders" }
-        val grouped = all.filter { it.tradingSymbol.isNotBlank() }
-            .groupBy { it.tradingSymbol.uppercase(Locale.US) }
-        activeGttSnapshot = ActiveGttSnapshot(grouped, now)
-        return grouped
-    }
 
     private fun logPortfolioConflict(symbol: String, message: String, extra: Map<String, Any?> = emptyMap()) {
         val now = System.currentTimeMillis()
@@ -9834,6 +9903,35 @@ class TradingRepository @Inject constructor(
                     inventory.holdings[symbol]?.quantity ?: 0,
                     inventory.positions[symbol]?.quantity ?: 0
                 )
+                if (appOwned(position) && brokerQty <= 0) {
+                    val reviewKey = "BROKER_FLAT_APP_ROW:${position.id}"
+                    val lastReview = lastPortfolioConflictAuditAtMs[reviewKey] ?: 0L
+                    if (now - lastReview >= 60_000L) {
+                        lastPortfolioConflictAuditAtMs[reviewKey] = now
+                        auditLogger.log("SAFETY", "BROKER_FLAT_APP_ROW_RECONCILIATION_REQUIRED", mapOf(
+                            "symbol" to symbol, "position_id" to position.id,
+                            "local_qty" to position.quantity, "broker_qty" to brokerQty,
+                            "original_buy_id" to position.openOrderId,
+                            "original_buy_reference" to position.openReferenceId,
+                            "gtt_id" to position.smartOrderId, "gtt_status" to position.smartOrderStatus,
+                            "blind_sell_allowed" to false, "silent_local_close_allowed" to false,
+                            "exact_sell_child_and_order_reconciliation_required" to true,
+                            "new_buys_allowed_until_reconciled" to false
+                        ))
+                    }
+                }
+                if (brokerQty <= 0) {
+                    val repaired = runCatching {
+                        clearHistoricExecutedOrderReplayGhost(token, position)
+                    }.onFailure { error ->
+                        auditLogger.log("SAFETY", "HISTORIC_REPLAY_GHOST_CHECK_DEFERRED", mapOf(
+                            "symbol" to symbol, "position_id" to position.id,
+                            "error_type" to error.javaClass.simpleName,
+                            "local_row_preserved" to true, "new_buys_blocked" to true
+                        ))
+                    }.getOrDefault(false)
+                    if (repaired) continue
+                }
                 val gttStatus = position.smartOrderStatus.orEmpty().uppercase(Locale.US)
                 // Broker child fills must be reconciled before ordinary ownership checks:
                 // a successful GTT SELL legitimately reduces the broker's share count to zero.
@@ -12605,6 +12703,22 @@ class TradingRepository @Inject constructor(
         fixedRecommendationExecutionPrefs.contains(recommendationId.toString())
 
     /**
+     * Record the first broker POST intent synchronously before calling Groww.
+     * If a response is ambiguous or the process dies, this exact recommendation
+     * cannot dispatch a second BUY. A later distinct recommendation stays eligible.
+     */
+    private fun reserveFixedRecommendationExecution(
+        recommendationId: Long, symbol: String, reference: String
+    ): Boolean {
+        val key = recommendationId.toString()
+        if (fixedRecommendationExecutionPrefs.contains(key)) return false
+        val value = "PENDING|" + listOf(
+            System.currentTimeMillis(), symbol.uppercase(Locale.US), reference
+        ).joinToString("|")
+        return fixedRecommendationExecutionPrefs.edit().putString(key, value).commit()
+    }
+
+    /**
      * This write is deliberately synchronous: once Groww has confirmed the BUY, the
      * recommendation event becomes non-executable before post-fill GTT work begins.
      * A persistence failure fails closed by engaging the global safety halt, but the
@@ -12619,7 +12733,8 @@ class TradingRepository @Inject constructor(
         fillPrice: Double
     ): FixedRecommendationExecutionMark {
         val key = recommendationId.toString()
-        if (fixedRecommendationExecutionPrefs.contains(key)) {
+        val existing = fixedRecommendationExecutionPrefs.getString(key, null)
+        if (existing == null || !existing.startsWith("PENDING|")) {
             return FixedRecommendationExecutionMark.ALREADY_CONSUMED
         }
         val value = listOf(
@@ -12767,6 +12882,16 @@ class TradingRepository @Inject constructor(
             "single_symbol_quote_refresh" to (freshAt != quoteReceivedAtMs),
             "full_market_refresh" to false, "max_slippage_bps" to CircuitAwareBuyPolicy.MAX_BUY_SLIPPAGE_BPS
         ))
+        if (recommendationId != null) {
+            require(reserveFixedRecommendationExecution(recommendationId, symbol, reference)) {
+                "FIXED_RECOMMENDATION_ALREADY_PENDING_OR_CONSUMED: $recommendationId; no blind broker resubmission"
+            }
+            auditLogger.log("EXECUTION", "FIXED_BUY_ORDER_INTENT_RESERVED", mapOf(
+                "recommendation_id" to recommendationId, "symbol" to symbol,
+                "reference" to reference, "broker_posts_for_event_max" to 1,
+                "crash_replay_allowed" to false
+            ))
+        }
         val order = submitMarketOrder(token, symbol, "BUY", capitalVerdict.allowedQuantity, "CNC", reference,
             notificationStartedNs, buyLimitPrice = price.limitPrice)
         if (recommendationId != null) {
@@ -12777,14 +12902,15 @@ class TradingRepository @Inject constructor(
             )) {
                 FixedRecommendationExecutionMark.CONSUMED -> Unit
                 FixedRecommendationExecutionMark.ALREADY_CONSUMED -> {
-                    auditLogger.log("SAFETY", "RECOMMENDATION_EVENT_CONSUMPTION_RACE", mapOf(
+                    // A broker-confirmed BUY still needs registration and GTT. Do not
+                    // throw after fill and strand real shares without protection.
+                    preferences.setSafetyHalt(true)
+                    auditLogger.log("SAFETY", "RECOMMENDATION_EVENT_LEDGER_CONFLICT_AFTER_FILL", mapOf(
                         "recommendation_id" to recommendationId,
-                        "symbol" to symbol,
-                        "order_id" to order.growwOrderId,
-                        "reference" to reference,
-                        "same_event_rebuy_blocked" to true
+                        "symbol" to symbol, "order_id" to order.growwOrderId,
+                        "reference" to reference, "new_buys_halted" to true,
+                        "current_position_registration_continues" to true
                     ))
-                    error("FIXED_RECOMMENDATION_EVENT_ALREADY_CONSUMED: $recommendationId")
                 }
                 FixedRecommendationExecutionMark.PERSISTENCE_FAILED -> {
                     auditLogger.log("SAFETY", "RECOMMENDATION_EVENT_LEDGER_WRITE_FAILED", mapOf(

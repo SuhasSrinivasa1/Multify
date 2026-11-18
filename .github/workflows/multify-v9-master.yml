@@ -1,9 +1,9 @@
-name: Multify v9.0.13 Recommendation Consumption / minus-3 source safety TEST
+name: Multify v9.0.14 Protection / discovery / read pacing safety TEST
 on:
   push:
-    branches: [v9013-recommendation-consumption-fix-20261118]
+    branches: [v9014-protection-discovery-pacing-20261118]
   pull_request:
-    branches: [v9011-execution-protection-entry-audit-20261117]
+    branches: [v9013-recommendation-consumption-fix-20261118]
   workflow_dispatch:
 permissions:
   contents: read
@@ -78,12 +78,20 @@ jobs:
           assert "!isFixedRecommendationExecutionConsumed(it.id)" in source_text
           assert "RECOMMENDATION_EVENT_CONSUMED" in source_text
           assert "recommendationId = row.id" in source_text
+          assert "reserveFixedRecommendationExecution(recommendationId, symbol, reference)" in source_text
+          assert "FIXED_BUY_ORDER_INTENT_RESERVED" in source_text
+          assert "ORDER_INTENT_V9014" in source_text
+          assert "HISTORIC_BUY_REPLAY_GHOST_CLEARED_BROKER_VERIFIED" in source_text
+          assert "brokerInventoryReadMutex.withLock" in source_text
+          assert "activeGttReadMutex.withLock" in source_text
+          assert "headlineUsesFixedDiscovery" in source_text
+          assert "allowOtherSymbolProtectionRecovery = false" in source_text
           assert "const val MAX_LOSS_PCT = 3.0" in Path(root+"engine/HardStopLossPolicy.kt").read_text()
           assert "const val HARD_STOP_LOSS_PCT = 3.0" in Path(root+"engine/ReleaseIntegrityManifest.kt").read_text()
           assert "const val CANONICAL_LEARNING_CALLS = 107" in Path(root+"engine/FixedFinalContract.kt").read_text()
           build=Path("app/build.gradle.kts").read_text()
-          assert "versionCode = 9013" in build
-          assert 'versionName = "9.0.13-recommendation-consumption-fix"' in build
+          assert "versionCode = 9014" in build
+          assert 'versionName = "9.0.14-protection-discovery-pacing-fix"' in build
           assert "const val BETA_SAFE_LIVE_60S = 40" in Path(root+"engine/FixedResearchCapacityPolicy.kt").read_text()
           assert "const val MIN_RESEARCH_GAP_MS = 1_000L" in Path(root+"engine/FixedResearchLtpPacingPolicy.kt").read_text()
           assert "const val APP_PER_MINUTE = 45" in Path(root+"data/network/GrowwHistoricalThrottlePolicy.kt").read_text()
@@ -117,7 +125,7 @@ jobs:
         run: |
           python -m unittest discover -s backend/tests -p 'test_adaptive_timeframe_replay.py' -v
           python -m unittest discover -s backend/tests -p 'test_v9_master_log_replay.py' -v
-      - name: Full Android unit tests / v9.0.13 TEST APK
+      - name: Full Android unit tests / v9.0.14 TEST APK
         env:
           MULTIFY_KEYSTORE_PASSWORD: ${{ secrets.MULTIFY_KEYSTORE_PASSWORD }}
         run: gradle :app:testDebugUnitTest :app:assembleDebug --no-daemon --stacktrace
@@ -126,13 +134,23 @@ jobs:
           apk=$(find app/build/outputs/apk/debug -maxdepth 1 -name '*.apk' -type f | head -n 1)
           test -n "$apk" && test -s "$apk"
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$apk" \
-            | tee app/build/outputs/apk/debug/v9013-signature-verification.txt
-          sha256sum "$apk" | tee app/build/outputs/apk/debug/v9013-SHA256SUMS.txt
+            | tee app/build/outputs/apk/debug/v9014-signature-verification.txt
+          # Preserve exact certificate mismatch in the artifact: a verified debug
+          # signature alone does NOT mean the installed v9.0.13 can be upgraded.
+          if grep -Fq 'Signer #1 certificate SHA-256 digest: 05e070a7a9aecfb7d8cf3a276841dd15c538a2a45655bb9ce6b6e77991b154ea' \
+              app/build/outputs/apk/debug/v9014-signature-verification.txt; then
+            echo "IN_PLACE_UPDATE_COMPATIBLE_WITH_V9013=true" | tee app/build/outputs/apk/debug/v9014-install-compatibility.txt
+          else
+            echo "IN_PLACE_UPDATE_COMPATIBLE_WITH_V9013=false" | tee app/build/outputs/apk/debug/v9014-install-compatibility.txt
+            echo "Do not uninstall a trading app with open broker holdings or unexported state."
+          fi
+          sha256sum "$apk" | tee app/build/outputs/apk/debug/v9014-SHA256SUMS.txt
       - name: Upload CI verified package
         uses: actions/upload-artifact@v4
         with:
-          name: Multify-v9.0.13-Recommendation-Consumption-Minus3-TEST-debug
+          name: Multify-v9.0.14-Protection-Discovery-Pacing-TEST-debug
           path: |
             app/build/outputs/apk/debug/*.apk
-            app/build/outputs/apk/debug/v9013-signature-verification.txt
-            app/build/outputs/apk/debug/v9013-SHA256SUMS.txt
+            app/build/outputs/apk/debug/v9014-signature-verification.txt
+            app/build/outputs/apk/debug/v9014-SHA256SUMS.txt
+            app/build/outputs/apk/debug/v9014-install-compatibility.txt
