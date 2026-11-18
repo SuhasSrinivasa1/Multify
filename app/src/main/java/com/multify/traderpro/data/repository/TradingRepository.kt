@@ -2309,7 +2309,7 @@ class TradingRepository @Inject constructor(
                 engine = ENGINE_MULTIFY_HOLDING, symbol = symbol, product = "CNC", side = "LONG", quantity = filled,
                 entryPrice = entry, stopPrice = HardStopLossPolicy.stopPrice(entry),
                 targetPrice = signal.target,
-                strategy = "Multify ARM holding · hard -2% floor · common trail 0.55→0.50, 0.75→0.60, 0.85→0.70 then +0.10%",
+                strategy = "Multify ARM holding · hard -3% floor · common trail 0.55→0.50, 0.75→0.60, 0.85→0.70 then +0.10%",
                 regime = "HOLDING_LONG", confidence = 1.0, sourceEventId = eventId,
                 openOrderId = order.growwOrderId, openReferenceId = ref, openedAtMs = System.currentTimeMillis(),
                 lastPrice = entry, maxFavourablePrice = entry, maxAdversePrice = entry, lastEvaluatedAtMs = System.currentTimeMillis(),
@@ -2371,7 +2371,7 @@ class TradingRepository @Inject constructor(
 
         dao.updateForwarding(
             eventId, "ANALYZED", "MULTIFY_EXIT_TRAIL_CONTINUES",
-            "Multify Book Profit recorded for MFE learning only. $symbol remains held; the common -2% hard stop and fixed stepped profitable trail remain the mandatory sell logic.",
+            "Multify Book Profit recorded for MFE learning only. $symbol remains held; the common -3% hard stop and fixed stepped profitable trail remain the mandatory sell logic.",
             null
         )
         auditLogger.log("HOLDING", "MULTIFY_BOOK_PROFIT_IGNORED_FOR_EXECUTION", mapOf(
@@ -6011,7 +6011,7 @@ class TradingRepository @Inject constructor(
                 engine = ENGINE_UNIVEST_HOLDING, symbol = symbol, product = "CNC",
                 side = "LONG", quantity = filled, entryPrice = actualEntry,
                 stopPrice = HardStopLossPolicy.stopPrice(actualEntry), targetPrice = null,
-                strategy = "Official Univest ENTRY via Fixed Auto Buy · Alpha CNC · hard -2% · common stepped trailing exit",
+                strategy = "Official Univest ENTRY via Fixed Auto Buy · Alpha CNC · hard -3% · common stepped trailing exit",
                 regime = "UNIVEST_LONG", confidence = 1.0, sourceEventId = null,
                 openOrderId = order.growwOrderId, openReferenceId = reference,
                 openedAtMs = openedAt, lastPrice = actualEntry,
@@ -9105,7 +9105,7 @@ class TradingRepository @Inject constructor(
                         outcomeMfePct = mfe,
                         outcomeMaePct = mae,
                         outcomeClosePct = closePct,
-                        // Do not label a historical Forecast success when the -2% research stop
+                        // Do not label a historical Forecast success when the -3% research stop
                         // was observed first or the one-minute sequence is ambiguous.
                         outcomeTargetHit = chronological.firstTouch == "TARGET_FIRST_1M",
                         outcomeUpdatedAtMs = System.currentTimeMillis()
@@ -9923,7 +9923,7 @@ class TradingRepository @Inject constructor(
 
         if (!marketOpen) {
             // Keep every managed LONG protected overnight. Existing profitable trailing GTTs are
-            // preserved; an unarmed holding receives the common -2% server-side hard stop. This
+            // preserved; an unarmed holding receives the common -3% server-side hard stop. This
             // also self-recovers protection after an app/service restart or a prior GTT failure.
             var hardStopReady = 0
             var hardStopFailures = 0
@@ -10087,13 +10087,64 @@ class TradingRepository @Inject constructor(
             try {
                 val current = managedDao.openPositionById(id) ?: return@withLock id
                 val protected = if (!current.smartOrderId.isNullOrBlank()) {
-                    refreshKnownSmartOrderStatus(token, current, force = true)
+                    // A broker-confirmed ACTIVE/OPEN GTT already proves protection. Do not spend
+                    // another Non-Trading request on an immediate status read after every BUY.
+                    // This avoids turning a successful GTT creation into a false "unprotected"
+                    // state when the status endpoint is rate-limited or temporarily unavailable.
+                    if (com.multify.traderpro.engine.GttProtectionReadinessPolicy.verified(
+                            current.smartOrderMode, current.smartOrderId, current.smartOrderStatus
+                        )
+                    ) {
+                        current
+                    } else {
+                        runCatching {
+                            refreshKnownSmartOrderStatus(token, current, force = true)
+                        }.onFailure {
+                            auditLogger.log("PROTECTION", "GTT_STATUS_REFRESH_DEFERRED", mapOf(
+                                "symbol" to current.symbol,
+                                "gtt_id" to current.smartOrderId,
+                                "known_status" to current.smartOrderStatus,
+                                "reason" to (it.message ?: it.javaClass.simpleName),
+                                "existing_broker_gtt_reference_preserved" to true,
+                                "new_buy_allowed" to false
+                            ))
+                        }.getOrDefault(current)
+                    }
                 } else {
-                    createPositionGtt(
+                    val created = createPositionGtt(
                         token, current, HardStopLossPolicy.stopPrice(current.entryPrice),
                         "DOWN", HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT,
                         allowFreshPostFillProof = allowFreshPostFillProof
-                    ).let { refreshKnownSmartOrderStatus(token, it, force = true) }
+                    )
+                    // Groww's create-GTT response itself contains the smart-order id and current
+                    // ACTIVE/OPEN status. That is broker confirmation; a second status request is
+                    // diagnostic, not a prerequisite for protection verification.
+                    if (com.multify.traderpro.engine.GttProtectionReadinessPolicy.verified(
+                            created.smartOrderMode, created.smartOrderId, created.smartOrderStatus
+                        )
+                    ) {
+                        auditLogger.log("PROTECTION", "POST_FILL_GTT_CREATE_RESPONSE_VERIFIED", mapOf(
+                            "symbol" to created.symbol,
+                            "gtt_id" to created.smartOrderId,
+                            "trigger" to created.smartOrderTriggerPrice,
+                            "status" to created.smartOrderStatus,
+                            "status_endpoint_call_skipped" to true
+                        ))
+                        created
+                    } else {
+                        runCatching {
+                            refreshKnownSmartOrderStatus(token, created, force = true)
+                        }.onFailure {
+                            auditLogger.log("PROTECTION", "GTT_STATUS_REFRESH_DEFERRED", mapOf(
+                                "symbol" to created.symbol,
+                                "gtt_id" to created.smartOrderId,
+                                "known_status" to created.smartOrderStatus,
+                                "reason" to (it.message ?: it.javaClass.simpleName),
+                                "create_response_id_present" to true,
+                                "new_buy_allowed" to false
+                            ))
+                        }.getOrDefault(created)
+                    }
                 }
                 if (com.multify.traderpro.engine.GttProtectionReadinessPolicy.verified(
                         protected.smartOrderMode, protected.smartOrderId, protected.smartOrderStatus)) {
@@ -10205,7 +10256,7 @@ class TradingRepository @Inject constructor(
             existingTrigger != null && existingTrigger + SMART_ORDER_PRICE_EPSILON >= hardStop
         ) return position
 
-        // Upgrade existing broker GTTs to the new -2% floor without cancelling
+        // Upgrade existing broker GTTs to the new -3% floor without cancelling
         // the protective SELL order first. On API failure retain the older
         // server GTT for continued position-monitor retries.
         if (com.multify.traderpro.engine.HardStopGttTighteningPolicy.shouldModifyExisting(
@@ -10221,7 +10272,7 @@ class TradingRepository @Inject constructor(
                 val modified = modifyPositionGtt(
                     token, position, hardStop, "DOWN", position.smartOrderMode
                 )
-                auditLogger.log("PROTECTION", "HARD_STOP_MINUS_2_EXISTING_GTT_UPGRADED", mapOf(
+                auditLogger.log("PROTECTION", "HARD_STOP_MINUS_3_EXISTING_GTT_UPGRADED", mapOf(
                     "symbol" to position.symbol, "position_id" to position.id,
                     "old_trigger" to existingTrigger, "new_trigger" to modified.smartOrderTriggerPrice,
                     "gtt_id" to position.smartOrderId,
@@ -10231,7 +10282,7 @@ class TradingRepository @Inject constructor(
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Throwable) {
-                auditLogger.log("PROTECTION", "HARD_STOP_MINUS_2_GTT_UPGRADE_DEFERRED", mapOf(
+                auditLogger.log("PROTECTION", "HARD_STOP_MINUS_3_GTT_UPGRADE_DEFERRED", mapOf(
                     "symbol" to position.symbol, "position_id" to position.id,
                     "existing_active_gtt_preserved" to true,
                     "existing_trigger" to existingTrigger, "desired_trigger" to hardStop,
@@ -10335,7 +10386,7 @@ class TradingRepository @Inject constructor(
                 working,
                 ltp,
                 if (desiredMode == HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT)
-                    "COMMON_HARD_STOP_MINUS_2_LOCAL_FALLBACK"
+                    "COMMON_HARD_STOP_MINUS_3_LOCAL_FALLBACK"
                 else "LONG_TRAILING_PROFIT_STOP_V7_1_LOCAL_FALLBACK",
                 decisionStartedNs
             )
@@ -10360,7 +10411,7 @@ class TradingRepository @Inject constructor(
                             protected,
                             ltp,
                             if (desiredMode == HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT)
-                                "COMMON_HARD_STOP_MINUS_2_STALE_GTT_FALLBACK"
+                                "COMMON_HARD_STOP_MINUS_3_STALE_GTT_FALLBACK"
                             else "LONG_TRAILING_PROFIT_STOP_V7_1_STALE_GTT_FALLBACK",
                             decisionStartedNs
                         )
@@ -10429,7 +10480,7 @@ class TradingRepository @Inject constructor(
                             cleared,
                             ltp,
                             if (working.smartOrderMode == HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT)
-                                "COMMON_HARD_STOP_MINUS_2_GTT_FAILED_FALLBACK"
+                                "COMMON_HARD_STOP_MINUS_3_GTT_FAILED_FALLBACK"
                             else "LONG_TRAILING_PROFIT_STOP_V7_1_GTT_FAILED_FALLBACK",
                             decisionStartedNs
                         )
@@ -10464,7 +10515,7 @@ class TradingRepository @Inject constructor(
             position.smartOrderMode != HoldingSmartOrderPolicy.MODE_TRAILING_GTT
         if (stopRaised || trailJustArmed) {
             val event = when {
-                desiredMode == HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT && previousProtected == null -> "HARD_STOP_MINUS_2_ARMED"
+                desiredMode == HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT && previousProtected == null -> "HARD_STOP_MINUS_3_ARMED"
                 trailJustArmed -> "V7_1_TRAIL_ARMED"
                 else -> "V7_1_STEP_RATCHET"
             }
