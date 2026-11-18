@@ -51,17 +51,28 @@ class MultifyApp : Application(), Configuration.Provider {
         // November 8 14:00 IST Muhurat warmup. The existing sticky foreground
         // service remains primary; WorkManager start time is not exact.
         TradingSessionStartScheduler.scheduleNext(this)
+        // v9.0.14 ran initial and periodic workers together, doubling NSE 403s.
+        // Retire both legacy jobs. One unique one-off performs recovery now;
+        // a monthly periodic maintenance job first runs 30 days later.
+        wm.cancelUniqueWork("nse-symbol-master-initial")
+        wm.cancelUniqueWork("nse-symbol-master-monthly")
         wm.enqueueUniqueWork(
-            "nse-symbol-master-initial",
+            "nse-symbol-master-sync-v9015",
             ExistingWorkPolicy.KEEP,
-            OneTimeWorkRequestBuilder<NseSymbolSyncWorker>().setConstraints(network).build()
+            OneTimeWorkRequestBuilder<NseSymbolSyncWorker>()
+                .setConstraints(network)
+                .setBackoffCriteria(androidx.work.BackoffPolicy.EXPONENTIAL, 60, TimeUnit.SECONDS)
+                .build()
         )
         // Cancel previously scheduled Forecast news jobs, including pending runs.
         wm.cancelUniqueWork("forecast-news-fallback-15m")
         wm.enqueueUniquePeriodicWork(
-            "nse-symbol-master-monthly",
-            ExistingPeriodicWorkPolicy.UPDATE,
-            PeriodicWorkRequestBuilder<NseSymbolSyncWorker>(30, TimeUnit.DAYS).setConstraints(network).build()
+            "nse-symbol-master-monthly-v9015",
+            ExistingPeriodicWorkPolicy.KEEP,
+            PeriodicWorkRequestBuilder<NseSymbolSyncWorker>(30, TimeUnit.DAYS)
+                .setInitialDelay(30, TimeUnit.DAYS)
+                .setConstraints(network)
+                .build()
         )
     }
 }

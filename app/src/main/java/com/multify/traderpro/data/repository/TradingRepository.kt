@@ -1851,7 +1851,13 @@ class TradingRepository @Inject constructor(
             (fixedAlphaRecovery.categoryCooldownUntilMs[GrowwApiUsageLedger.Category.LIVE_DATA] ?: 0L) > nowMs ||
             (fixedAlphaRecovery.categoryCooldownUntilMs[GrowwApiUsageLedger.Category.HISTORICAL] ?: 0L) > nowMs
         val betaReadOnlyReady = betaAvailableForFixedReadOnlyResearch()
-        val fixedDiscoveryStatus = com.multify.traderpro.engine.FixedDiscoveryDisplayPolicy.label(
+        val nseMaster = nseSymbols.status()
+        val fixedDiscoveryStatus = if (nseMaster.count <= NseSymbolRepository.MIN_SYMBOL_COUNT) {
+            if ((nseMaster.lastError + nseMaster.nsePrimaryError).contains("403"))
+                "WAITING · NSE MASTER HTTP 403"
+            else "WAITING · NSE MASTER UNAVAILABLE"
+        } else if (nseSymbols.isStale()) "STALE · NSE MASTER"
+        else com.multify.traderpro.engine.FixedDiscoveryDisplayPolicy.label(
             hasScan = fixedDiscoveryHealth != null,
             lastSweepAborted = fixedDiscoveryHealth?.abortedForNetwork ?: false,
             lastSweepCoverage = fixedDiscoveryHealth?.coverageRatio ?: 0.0,
@@ -1866,7 +1872,8 @@ class TradingRepository @Inject constructor(
         // engine's verified sweep status for the shared headline instead of WAITING.
         // Only a complete Fixed baseline with adequate coverage is HEALTHY.
         val headlineUsesFixedDiscovery = discoveryHealth == null && fixedDiscoveryHealth != null
-        val headlineDiscoveryStatus = if (headlineUsesFixedDiscovery) fixedDiscoveryStatus else discoveryStatus
+        val headlineDiscoveryStatus = if (nseMaster.count <= NseSymbolRepository.MIN_SYMBOL_COUNT)
+                fixedDiscoveryStatus else if (headlineUsesFixedDiscovery) fixedDiscoveryStatus else discoveryStatus
 
         return DashboardDto(
             armed = settings.armEffective,
@@ -2036,7 +2043,13 @@ class TradingRepository @Inject constructor(
                 (fixedAlphaRecovery.categoryCooldownUntilMs[GrowwApiUsageLedger.Category.LIVE_DATA] ?: 0L) > nowMs ||
                 (fixedAlphaRecovery.categoryCooldownUntilMs[GrowwApiUsageLedger.Category.HISTORICAL] ?: 0L) > nowMs
             val betaReadOnlyReady = betaAvailableForFixedReadOnlyResearch()
-            val fixedDiscoveryStatus = com.multify.traderpro.engine.FixedDiscoveryDisplayPolicy.label(
+            val nseMaster = nseSymbols.status()
+            val fixedDiscoveryStatus = if (nseMaster.count <= NseSymbolRepository.MIN_SYMBOL_COUNT) {
+                if ((nseMaster.lastError + nseMaster.nsePrimaryError).contains("403"))
+                    "WAITING · NSE MASTER HTTP 403"
+                else "WAITING · NSE MASTER UNAVAILABLE"
+            } else if (nseSymbols.isStale()) "STALE · NSE MASTER"
+            else com.multify.traderpro.engine.FixedDiscoveryDisplayPolicy.label(
                 hasScan = fixedDiscoveryHealth != null,
                 lastSweepAborted = fixedDiscoveryHealth?.abortedForNetwork ?: false,
                 lastSweepCoverage = fixedDiscoveryHealth?.coverageRatio ?: 0.0,
@@ -2048,7 +2061,8 @@ class TradingRepository @Inject constructor(
                 betaReadOnlyReady = betaReadOnlyReady
             )
             val headlineUsesFixedDiscovery = discoveryHealth == null && fixedDiscoveryHealth != null
-            val headlineDiscoveryStatus = if (headlineUsesFixedDiscovery) fixedDiscoveryStatus else discoveryStatus
+            val headlineDiscoveryStatus = if (nseMaster.count <= NseSymbolRepository.MIN_SYMBOL_COUNT)
+                fixedDiscoveryStatus else if (headlineUsesFixedDiscovery) fixedDiscoveryStatus else discoveryStatus
             DashboardDto(
                 armed = settings.armEffective, halted = settings.safetyHalt, marketSession = marketSession(),
                 asOf = ZonedDateTime.now(INDIA).format(DateTimeFormatter.ISO_OFFSET_DATE_TIME),
