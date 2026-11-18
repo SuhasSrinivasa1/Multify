@@ -4715,8 +4715,11 @@ class TradingRepository @Inject constructor(
         val clock = ZonedDateTime.now(INDIA)
         if (!com.multify.traderpro.engine.NseEquitySessionCalendar.mayPrepareNextFixedSweep(clock) || lastFixedScanAtMs <= 0L ||
             marketCriticalTradeInFlight || !marketDataAvailableForFixed()) return false
-        // Yield completely to foreground Fixed detail evaluation and Alpha
-        // order/protection. Prefetch cannot steal quota from current signals.
+        // During foreground detail, overlap the next sweep only if Alpha has
+        // research headroom after its protection reserve AND Beta is healthy with
+        // spare read-only capacity. The per-request governors remain authoritative.
+        val betaLiveReadyForPrefetch = fixedBetaMarketTokenOrNull() != null &&
+            betaResearchGate.healthyForFixed(BetaResearchGate.Type.LIVE)
         val betaIdle = BetaResearchGate.latestLiveStatus()
         val alphaResearchSpare = alphaCanTakeBetaDiscoveryFallback()
         val canPrefetch = com.multify.traderpro.engine.FixedResearchCapacityPolicy
@@ -4724,10 +4727,15 @@ class TradingRepository @Inject constructor(
                 fixedApiPriorityRequested || marketCriticalTradeInFlight,
                 alphaResearchSpare,
                 betaIdle.rollingMinuteRemaining,
-                betaIdle.fixedMinuteRemaining)
+                betaIdle.fixedMinuteRemaining,
+                betaLiveHealthy = betaLiveReadyForPrefetch
+            )
         if (!canPrefetch) {
             auditLogger.logAsync("FIXED_PERFORMANCE", "PREFETCH_YIELDED_TO_FOREGROUND_V909",
                 mapOf("foreground_fixed_evaluation" to fixedApiPriorityRequested,
+                    "beta_live_healthy" to betaLiveReadyForPrefetch,
+                    "beta_recovery_probe_required" to betaIdle.recoveryProbeRequired,
+                    "beta_live_gap_ms" to betaIdle.activeGapMs,
                     "beta_rolling_remaining" to betaIdle.rollingMinuteRemaining,
                     "beta_calendar_remaining" to betaIdle.fixedMinuteRemaining,
                     "alpha_research_spare" to alphaResearchSpare,
@@ -4762,8 +4770,7 @@ class TradingRepository @Inject constructor(
         // An 82s dual-account lead made valid snapshots 40+ seconds old at the
         // next scan and often invalidated the prefetch. Use measured account-aware
         // lead time; no extra requests or change to accepted snapshot freshness.
-        val betaLiveReadyForTiming = fixedBetaMarketTokenOrNull() != null &&
-            betaResearchGate.healthyForFixed(BetaResearchGate.Type.LIVE)
+        val betaLiveReadyForTiming = betaLiveReadyForPrefetch
         val alphaLiveReadyForTiming = runCatching {
             recoveryGate.checkRequestAllowed(GrowwApiUsageLedger.Category.LIVE_DATA)
         }.isSuccess
@@ -4773,6 +4780,12 @@ class TradingRepository @Inject constructor(
         val startDelay = (dueAtMs - System.currentTimeMillis() - expectedSweepMs).coerceAtLeast(0L)
         auditLogger.logAsync("FIXED_PERFORMANCE", "NEXT_SWEEP_PREFETCH_TIMING", mapOf(
             "beta_healthy_at_schedule" to betaLiveReadyForTiming,
+            "beta_recovery_probe_required" to betaIdle.recoveryProbeRequired,
+            "beta_live_gap_ms" to betaIdle.activeGapMs,
+            "beta_remaining_rolling" to betaIdle.rollingMinuteRemaining,
+            "beta_remaining_calendar" to betaIdle.fixedMinuteRemaining,
+            "alpha_research_spare" to alphaResearchSpare,
+            "foreground_fixed_evaluation" to fixedApiPriorityRequested,
             "alpha_live_ready_at_schedule" to alphaLiveReadyForTiming,
             "planned_lead_ms" to expectedSweepMs,
             "adaptive_valid_samples" to fixedSweepAdaptiveLead.sampleCount(
@@ -4782,7 +4795,20 @@ class TradingRepository @Inject constructor(
             "fixed_scoring_changed" to false))
         try {
             if (startDelay > 0L) delay(startDelay)
-            if (marketCriticalTradeInFlight || fixedApiPriorityRequested ||
+            // Revalidate both independent research budgets immediately before dispatch.
+            // Foreground overlap is permitted only for a healthy dual-account sweep;
+            // a cooldown or lost Alpha headroom returns to the original post-cycle path.
+            val betaHeadroomBeforeDispatch = BetaResearchGate.latestLiveStatus()
+            val betaStillHasPrefetchHeadroom =
+                minOf(betaHeadroomBeforeDispatch.rollingMinuteRemaining,
+                    betaHeadroomBeforeDispatch.fixedMinuteRemaining) >=
+                    com.multify.traderpro.engine.FixedResearchCapacityPolicy.MIN_PREFETCH_SPARE_REQUESTS
+            val foregroundPrefetchStillSafe = !fixedApiPriorityRequested ||
+                (fixedBetaMarketTokenOrNull() != null &&
+                    betaResearchGate.healthyForFixed(BetaResearchGate.Type.LIVE) &&
+                    betaStillHasPrefetchHeadroom &&
+                    alphaCanTakeBetaDiscoveryFallback())
+            if (marketCriticalTradeInFlight || !foregroundPrefetchStillSafe ||
                 !marketDataAvailableForFixed() ||
                 ZonedDateTime.now(INDIA).toLocalDate().toString() != date ||
                 System.currentTimeMillis() > dueAtMs +
@@ -4955,7 +4981,8 @@ class TradingRepository @Inject constructor(
                 com.multify.traderpro.engine.FixedResearchCapacityPolicy
                     .betaDiscoveryPreferred(index, betaToken != null,
                         status.rollingMinuteRemaining,
-                        status.fixedMinuteRemaining, initialBetaGapMs)
+                        status.fixedMinuteRemaining, initialBetaGapMs,
+                        status.recoveryProbeRequired)
             },
             "beta_live_safe_quota_rolling_and_calendar" to
                 com.multify.traderpro.engine.FixedResearchCapacityPolicy.BETA_SAFE_LIVE_60S,
@@ -4963,6 +4990,7 @@ class TradingRepository @Inject constructor(
             "beta_remaining_calendar" to BetaResearchGate.latestLiveStatus().fixedMinuteRemaining,
             "original_batch_count" to chunks.size,
             "beta_live_gap_ms" to initialBetaGapMs,
+            "beta_recovery_probe_required" to BetaResearchGate.latestLiveStatus().recoveryProbeRequired,
             "alpha_live_ready_for_research" to alphaLiveReadyForResearch,
             "beta_read_only" to true,
             "alpha_order_account_unchanged" to true,
@@ -5014,7 +5042,8 @@ class TradingRepository @Inject constructor(
                         .betaDiscoveryPreferred(index, true,
                             betaStatus.rollingMinuteRemaining,
                             betaStatus.fixedMinuteRemaining,
-                            betaStatus.activeGapMs)
+                            betaStatus.activeGapMs,
+                            betaStatus.recoveryProbeRequired)
                 // Re-check the ACTUAL category cooldown immediately before the
                 // network call. A 429 in another concurrent Alpha batch should
                 // redirect subsequent read-only batches to healthy Beta, not
@@ -5029,9 +5058,19 @@ class TradingRepository @Inject constructor(
 
                 suspend fun betaRead(reason: String): Map<String, Double>? {
                     if (betaToken == null || betaStopped.get()) return null
+                    val recoveryProbe = BetaResearchGate.latestLiveStatus().recoveryProbeRequired
                     return try {
                         fixedBetaLtp(betaToken, chunk).also {
                             betaSuccess.incrementAndGet()
+                            if (recoveryProbe) auditLogger.logAsync(
+                                "FIXED_DUAL_ACCOUNT", "BETA_RECOVERY_PROBE_SUCCEEDED", mapOf(
+                                    "batch_index" to index,
+                                    "reason" to reason,
+                                    "recovery_gap_ms" to BetaResearchGate.latestLiveStatus().activeGapMs,
+                                    "beta_read_only" to true,
+                                    "alpha_order_account_unchanged" to true
+                                )
+                            )
                             if (reason == "ALPHA_BATCH_FAILED") {
                                 alphaBatchesRescuedOnBeta.incrementAndGet()
                                 alphaRecoveryExtraCalls.incrementAndGet()
@@ -5049,6 +5088,7 @@ class TradingRepository @Inject constructor(
                             "BETA_RECOVERY_FAILED_NO_ALPHA_BURST", mapOf(
                                 "batch_index" to index, "reason" to reason,
                                 "beta_http_429" to ((failed as? HttpException)?.code() == 429),
+                                "recovery_probe" to recoveryProbe,
                                 "beta_error" to failed.javaClass.simpleName,
                                 "partial_coverage_must_not_publish" to true,
                                 "alpha_fallback_requests" to 0

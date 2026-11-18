@@ -36,6 +36,7 @@ class BetaResearchGate @Inject constructor() {
         val endpointLimitPerMinute: Int = FixedDualAccountPolicy.BETA_LIVE_PER_MINUTE,
         val cooldownRemainingMs: Long = 0L,
         val halfOpenProbeInFlight: Boolean = false,
+        val recoveryProbeRequired: Boolean = false,
         val rateLimitResponses: Long = 0L,
         val activeGapMs: Long = LtpAdaptivePacingPolicy.START_GAP_MS,
         val fixedMinuteBucket: Long = Long.MIN_VALUE,
@@ -85,6 +86,7 @@ class BetaResearchGate @Inject constructor() {
             endpointLimitPerMinute = liveMinute,
             cooldownRemainingMs = (w.cooldownUntil - now).coerceAtLeast(0L),
             halfOpenProbeInFlight = w.probeInFlight,
+            recoveryProbeRequired = w.probeRequired,
             rateLimitResponses = liveRateLimits.get(),
             activeGapMs = livePace.gapMs,
             fixedMinuteBucket = DualMinuteAdmissionPolicy.minuteId(System.currentTimeMillis()),
@@ -148,13 +150,17 @@ class BetaResearchGate @Inject constructor() {
             val result = block()
             lock.withLock {
                 val w = windows.getValue(type)
-                if (w.probeInFlight) {
+                val wasRecoveryProbe = w.probeInFlight
+                if (wasRecoveryProbe) {
                     w.probeInFlight = false
                     w.probeRequired = false
                 }
                 if (type == Type.LIVE) {
-                    livePace = LtpAdaptivePacingPolicy.onSuccess(livePace, SystemClock.elapsedRealtime())
-                    updateLiveStatus(SystemClock.elapsedRealtime(), w)
+                    val now = SystemClock.elapsedRealtime()
+                    livePace = if (wasRecoveryProbe)
+                        LtpAdaptivePacingPolicy.onRecoveryProbeSuccess(livePace, now)
+                    else LtpAdaptivePacingPolicy.onSuccess(livePace, now)
+                    updateLiveStatus(now, w)
                 }
             }
             result

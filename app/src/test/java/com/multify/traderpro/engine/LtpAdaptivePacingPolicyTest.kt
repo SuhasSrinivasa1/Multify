@@ -12,6 +12,7 @@ class LtpAdaptivePacingPolicyTest {
         repeat(8) { i -> state = LtpAdaptivePacingPolicy.onSuccess(state, 242000L + i*121000L) }
         assertEquals(950L, state.gapMs)
     }
+
     @Test fun broker429ImmediatelySlowsAndRequiresNewCleanWindow() {
         val slower = LtpAdaptivePacingPolicy.on429(LtpAdaptivePacingPolicy.State(300L,1000L),31000L)
         assertEquals(1300L, slower.gapMs)
@@ -19,5 +20,15 @@ class LtpAdaptivePacingPolicyTest {
         assertEquals(1250L, LtpAdaptivePacingPolicy.onSuccess(slower,151000L).gapMs)
         assertEquals(8000L, LtpAdaptivePacingPolicy.on429(
             LtpAdaptivePacingPolicy.State(5000L,1000L),10000L).gapMs)
+    }
+
+    @Test fun successfulRecoveryProbeResumesAtConservativeTwoSecondGap() {
+        val recovered = LtpAdaptivePacingPolicy.onRecoveryProbeSuccess(
+            LtpAdaptivePacingPolicy.State(6900L,1000L), 900_000L)
+        assertEquals(2000L, recovered.gapMs)
+        assertEquals(900_000L, recovered.lastAdjustmentAtMs)
+        val alreadySlowerThanRecoveryFloor = LtpAdaptivePacingPolicy.onRecoveryProbeSuccess(
+            LtpAdaptivePacingPolicy.State(1500L,1000L), 900_000L)
+        assertEquals(1500L, alreadySlowerThanRecoveryFloor.gapMs)
     }
 }
