@@ -8314,7 +8314,7 @@ class TradingRepository @Inject constructor(
             }
             if (fixedRecommendationStore.recommendations(today).firstOrNull { it.id == row.id }?.status != "ACTIVE") continue
 
-            val reference = stableRef("FXM", "${row.recommendationDate}-${row.id}-${row.symbol}")
+            val reference = stableRef("FXM", "${row.recommendationDate}-${row.id}-${row.symbol}-ORDER_INTENT_V9014")
             val orderStartedAtMs = System.currentTimeMillis()
             val order = runCatching {
                 placeCncBuy(token, row.symbol, sizing.quantity, reference, entryQuote = quote,
@@ -9845,6 +9845,23 @@ class TradingRepository @Inject constructor(
                     inventory.holdings[symbol]?.quantity ?: 0,
                     inventory.positions[symbol]?.quantity ?: 0
                 )
+                if (appOwned(position) && brokerQty <= 0) {
+                    val reviewKey = "BROKER_FLAT_APP_ROW:${position.id}"
+                    val lastReview = lastPortfolioConflictAuditAtMs[reviewKey] ?: 0L
+                    if (now - lastReview >= 60_000L) {
+                        lastPortfolioConflictAuditAtMs[reviewKey] = now
+                        auditLogger.log("SAFETY", "BROKER_FLAT_APP_ROW_RECONCILIATION_REQUIRED", mapOf(
+                            "symbol" to symbol, "position_id" to position.id,
+                            "local_qty" to position.quantity, "broker_qty" to brokerQty,
+                            "original_buy_id" to position.openOrderId,
+                            "original_buy_reference" to position.openReferenceId,
+                            "gtt_id" to position.smartOrderId, "gtt_status" to position.smartOrderStatus,
+                            "blind_sell_allowed" to false, "silent_local_close_allowed" to false,
+                            "exact_sell_child_and_order_reconciliation_required" to true,
+                            "new_buys_allowed_until_reconciled" to false
+                        ))
+                    }
+                }
                 val gttStatus = position.smartOrderStatus.orEmpty().uppercase(Locale.US)
                 // Broker child fills must be reconciled before ordinary ownership checks:
                 // a successful GTT SELL legitimately reduces the broker's share count to zero.
@@ -12616,6 +12633,22 @@ class TradingRepository @Inject constructor(
         fixedRecommendationExecutionPrefs.contains(recommendationId.toString())
 
     /**
+     * Record the first broker POST intent synchronously before calling Groww.
+     * If a response is ambiguous or the process dies, this exact recommendation
+     * cannot dispatch a second BUY. A later distinct recommendation stays eligible.
+     */
+    private fun reserveFixedRecommendationExecution(
+        recommendationId: Long, symbol: String, reference: String
+    ): Boolean {
+        val key = recommendationId.toString()
+        if (fixedRecommendationExecutionPrefs.contains(key)) return false
+        val value = "PENDING|" + listOf(
+            System.currentTimeMillis(), symbol.uppercase(Locale.US), reference
+        ).joinToString("|")
+        return fixedRecommendationExecutionPrefs.edit().putString(key, value).commit()
+    }
+
+    /**
      * This write is deliberately synchronous: once Groww has confirmed the BUY, the
      * recommendation event becomes non-executable before post-fill GTT work begins.
      * A persistence failure fails closed by engaging the global safety halt, but the
@@ -12630,7 +12663,8 @@ class TradingRepository @Inject constructor(
         fillPrice: Double
     ): FixedRecommendationExecutionMark {
         val key = recommendationId.toString()
-        if (fixedRecommendationExecutionPrefs.contains(key)) {
+        val existing = fixedRecommendationExecutionPrefs.getString(key, null)
+        if (existing == null || !existing.startsWith("PENDING|")) {
             return FixedRecommendationExecutionMark.ALREADY_CONSUMED
         }
         val value = listOf(
@@ -12778,6 +12812,16 @@ class TradingRepository @Inject constructor(
             "single_symbol_quote_refresh" to (freshAt != quoteReceivedAtMs),
             "full_market_refresh" to false, "max_slippage_bps" to CircuitAwareBuyPolicy.MAX_BUY_SLIPPAGE_BPS
         ))
+        if (recommendationId != null) {
+            require(reserveFixedRecommendationExecution(recommendationId, symbol, reference)) {
+                "FIXED_RECOMMENDATION_ALREADY_PENDING_OR_CONSUMED: $recommendationId; no blind broker resubmission"
+            }
+            auditLogger.log("EXECUTION", "FIXED_BUY_ORDER_INTENT_RESERVED", mapOf(
+                "recommendation_id" to recommendationId, "symbol" to symbol,
+                "reference" to reference, "broker_posts_for_event_max" to 1,
+                "crash_replay_allowed" to false
+            ))
+        }
         val order = submitMarketOrder(token, symbol, "BUY", capitalVerdict.allowedQuantity, "CNC", reference,
             notificationStartedNs, buyLimitPrice = price.limitPrice)
         if (recommendationId != null) {
@@ -12788,14 +12832,15 @@ class TradingRepository @Inject constructor(
             )) {
                 FixedRecommendationExecutionMark.CONSUMED -> Unit
                 FixedRecommendationExecutionMark.ALREADY_CONSUMED -> {
-                    auditLogger.log("SAFETY", "RECOMMENDATION_EVENT_CONSUMPTION_RACE", mapOf(
+                    // A broker-confirmed BUY still needs registration and GTT. Do not
+                    // throw after fill and strand real shares without protection.
+                    preferences.setSafetyHalt(true)
+                    auditLogger.log("SAFETY", "RECOMMENDATION_EVENT_LEDGER_CONFLICT_AFTER_FILL", mapOf(
                         "recommendation_id" to recommendationId,
-                        "symbol" to symbol,
-                        "order_id" to order.growwOrderId,
-                        "reference" to reference,
-                        "same_event_rebuy_blocked" to true
+                        "symbol" to symbol, "order_id" to order.growwOrderId,
+                        "reference" to reference, "new_buys_halted" to true,
+                        "current_position_registration_continues" to true
                     ))
-                    error("FIXED_RECOMMENDATION_EVENT_ALREADY_CONSUMED: $recommendationId")
                 }
                 FixedRecommendationExecutionMark.PERSISTENCE_FAILED -> {
                     auditLogger.log("SAFETY", "RECOMMENDATION_EVENT_LEDGER_WRITE_FAILED", mapOf(
