@@ -254,6 +254,17 @@ class TradingRepository @Inject constructor(
     private val fixedMarketDiscoveryStateStore: FixedMarketDiscoveryStateStore,
     @ApplicationContext private val appContext: Context
 ) {
+    /**
+     * Persistent execution ledger for Fixed recommendation events. A recommendation event may
+     * be retried while its holding is open, and it may still be ACTIVE after a later exit.
+     * Once a broker BUY has been confirmed for that exact event, the event must never become
+     * executable again. A later same-symbol setup gets a different recommendation id and is
+     * therefore still eligible.
+     */
+    private val fixedRecommendationExecutionPrefs by lazy {
+        appContext.getSharedPreferences("fixed_recommendation_execution_v9013", Context.MODE_PRIVATE)
+    }
+
     private val _fixedDeliveryEvents = MutableSharedFlow<Long>(extraBufferCapacity = 8)
     val fixedDeliveryEvents: SharedFlow<Long> = _fixedDeliveryEvents.asSharedFlow()
     // Transport-only signal consumed by the foreground service's lifecycle scope.
@@ -8003,6 +8014,7 @@ class TradingRepository @Inject constructor(
                     it.executionEligible &&
                     it.qualityTier == "PRIMARY" &&
                     RecommendationPriceBandPolicy.eligible(it.entryPrice) &&
+                    !isFixedRecommendationExecutionConsumed(it.id) &&
                     AutoBuyEntrySafetyPolicy.isPublishedAfterFixedAutoBuyEnabled(
                         it.generatedAtMs, settings.fixedAutoBuyActivatedAtMs)
             }
@@ -8304,7 +8316,8 @@ class TradingRepository @Inject constructor(
             val order = runCatching {
                 placeCncBuy(token, row.symbol, sizing.quantity, reference, entryQuote = quote,
                     quoteReceivedAtMs = quoteStartedAtMs + quoteElapsedMs,
-                    allowOtherSymbolProtectionRecovery = false)
+                    allowOtherSymbolProtectionRecovery = false,
+                    recommendationId = row.id)
             }.onFailure {
                 // Response body is already available locally; this does not request wallet
                 // balance or make another broker call. Never persist the raw broker body.
@@ -8333,6 +8346,25 @@ class TradingRepository @Inject constructor(
             val actualFill = order.averageFillPrice?.takeIf { it.isFinite() && it > 0.0 } ?: ltp
             val executionTarget = actualFill * (1.0 + row.targetPct / 100.0)
             val openedAtMs = System.currentTimeMillis()
+            fixedRecommendationStore.update(row.copy(
+                status = "BUY_EXECUTED",
+                lastPrice = actualFill,
+                lastObservedAtMs = openedAtMs,
+                maxFavourablePct = maxOf(row.maxFavourablePct,
+                    (actualFill / row.entryPrice - 1.0) * 100.0),
+                maxAdversePct = maxOf(row.maxAdversePct,
+                    (row.entryPrice - actualFill).coerceAtLeast(0.0) / row.entryPrice * 100.0)
+            ))
+            auditLogger.logAsync("FIXED_AUTO_BUY", "RECOMMENDATION_EVENT_CONSUMED", mapOf(
+                "recommendation_id" to row.id,
+                "symbol" to row.symbol,
+                "order_id" to order.growwOrderId,
+                "reference" to reference,
+                "quantity" to filled,
+                "fill_price" to actualFill,
+                "same_event_rebuy_blocked" to true,
+                "same_symbol_new_event_still_allowed" to true
+            ))
             registerBoughtPositionAndProtect(
                 ManagedPositionEntity(
                     engine = ENGINE_FIXED_HOLDING,
@@ -12563,6 +12595,29 @@ class TradingRepository @Inject constructor(
      * still passes its own fresh broker-inventory/duplicate check, account readiness,
      * price/liquidity safeguards and immediate post-fill GTT attempt.
      */
+    private fun isFixedRecommendationExecutionConsumed(recommendationId: Long): Boolean =
+        fixedRecommendationExecutionPrefs.contains(recommendationId.toString())
+
+    /**
+     * This write is deliberately synchronous: once Groww has confirmed the BUY, the
+     * recommendation event becomes non-executable before post-fill GTT work begins.
+     */
+    private fun markFixedRecommendationExecutionConsumed(
+        recommendationId: Long,
+        symbol: String,
+        orderId: String,
+        reference: String,
+        quantity: Int,
+        fillPrice: Double
+    ): Boolean {
+        val key = recommendationId.toString()
+        if (fixedRecommendationExecutionPrefs.contains(key)) return false
+        val value = listOf(
+            System.currentTimeMillis(), symbol.uppercase(Locale.US), orderId, reference, quantity, fillPrice
+        ).joinToString("|")
+        return fixedRecommendationExecutionPrefs.edit().putString(key, value).commit()
+    }
+
     private fun preFixedAutoBuyExecutionGuard(settings: AppSettings) {
         require(settings.brokerAuthenticated) { "Groww is not authenticated" }
         require(settings.staticIpMatched) { "Static IP verification failed" }
@@ -12579,8 +12634,19 @@ class TradingRepository @Inject constructor(
         notificationStartedNs: Long? = null,
         entryQuote: QuotePayload,
         quoteReceivedAtMs: Long,
-        allowOtherSymbolProtectionRecovery: Boolean = false
+        allowOtherSymbolProtectionRecovery: Boolean = false,
+        recommendationId: Long? = null
     ): OrderPayload = appOwnedBuyMutex.withLock {
+        if (recommendationId != null && isFixedRecommendationExecutionConsumed(recommendationId)) {
+            auditLogger.log("FIXED_AUTO_BUY", "RECOMMENDATION_EVENT_ALREADY_CONSUMED", mapOf(
+                "recommendation_id" to recommendationId,
+                "symbol" to symbol,
+                "reference" to reference,
+                "broker_order_submission" to false,
+                "same_event_rebuy_blocked" to true
+            ))
+            error("FIXED_RECOMMENDATION_EVENT_ALREADY_CONSUMED: $recommendationId")
+        }
         // Serialize all application CNC entries so two independent engines cannot both buy
         // the same symbol while the first order is still awaiting broker acknowledgement.
         val key = symbol.uppercase(Locale.US)
@@ -12680,8 +12746,26 @@ class TradingRepository @Inject constructor(
             "single_symbol_quote_refresh" to (freshAt != quoteReceivedAtMs),
             "full_market_refresh" to false, "max_slippage_bps" to CircuitAwareBuyPolicy.MAX_BUY_SLIPPAGE_BPS
         ))
-        submitMarketOrder(token, symbol, "BUY", capitalVerdict.allowedQuantity, "CNC", reference,
+        val order = submitMarketOrder(token, symbol, "BUY", capitalVerdict.allowedQuantity, "CNC", reference,
             notificationStartedNs, buyLimitPrice = price.limitPrice)
+        if (recommendationId != null) {
+            val filled = order.filledQuantity?.takeIf { it > 0 } ?: capitalVerdict.allowedQuantity
+            val fillPrice = order.averageFillPrice?.takeIf { it.isFinite() && it > 0.0 } ?: price.lastPrice
+            val newlyConsumed = markFixedRecommendationExecutionConsumed(
+                recommendationId, symbol, order.growwOrderId, reference, filled, fillPrice
+            )
+            if (!newlyConsumed) {
+                auditLogger.log("SAFETY", "RECOMMENDATION_EVENT_CONSUMPTION_RACE", mapOf(
+                    "recommendation_id" to recommendationId,
+                    "symbol" to symbol,
+                    "order_id" to order.growwOrderId,
+                    "reference" to reference,
+                    "same_event_rebuy_blocked" to true
+                ))
+                error("FIXED_RECOMMENDATION_EVENT_ALREADY_CONSUMED: $recommendationId")
+            }
+        }
+        order
     }
 
     private fun LongForecastEntity.toForecastDto() = ForecastDto(
