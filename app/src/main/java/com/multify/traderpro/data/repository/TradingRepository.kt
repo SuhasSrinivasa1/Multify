@@ -4786,7 +4786,14 @@ class TradingRepository @Inject constructor(
             "fixed_scoring_changed" to false))
         try {
             if (startDelay > 0L) delay(startDelay)
-            if (marketCriticalTradeInFlight || fixedApiPriorityRequested ||
+            // Revalidate both independent research budgets immediately before dispatch.
+            // Foreground overlap is permitted only for a healthy dual-account sweep;
+            // a cooldown or lost Alpha headroom returns to the original post-cycle path.
+            val foregroundPrefetchStillSafe = !fixedApiPriorityRequested ||
+                (fixedBetaMarketTokenOrNull() != null &&
+                    betaResearchGate.healthyForFixed(BetaResearchGate.Type.LIVE) &&
+                    alphaCanTakeBetaDiscoveryFallback())
+            if (marketCriticalTradeInFlight || !foregroundPrefetchStillSafe ||
                 !marketDataAvailableForFixed() ||
                 ZonedDateTime.now(INDIA).toLocalDate().toString() != date ||
                 System.currentTimeMillis() > dueAtMs +
