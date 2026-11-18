@@ -1,9 +1,9 @@
-name: Multify v9.0.11 Protection Capital Timing / source safety TEST
+name: Multify v9.0.12 Stop3 Monitor Reconcile / source safety TEST
 on:
   push:
-    branches: [v9011-execution-protection-entry-audit-20261117]
+    branches: [v9012-monitor-reconcile-hardstop-3pct-20261118]
   pull_request:
-    branches: [v9010-univest-alpha-fixed-toggle-20261117]
+    branches: [v9011-execution-protection-entry-audit-20261117]
   workflow_dispatch:
 permissions:
   contents: read
@@ -65,21 +65,26 @@ jobs:
                   p=root+rel
                   assert Path(p).read_bytes()==old(ref,p),p
           for rel in (
-              "engine/HardStopLossPolicy.kt",
-              "engine/ReleaseIntegrityManifest.kt",
               "engine/SteppedTrailingPolicy.kt",
               "engine/NetGainTrailingPolicy.kt",
               "engine/HardStopGttTighteningPolicy.kt"):
               p=root+rel
               assert Path(p).read_bytes()==old(base28,p),p
+          # User-approved change: ONLY the numerical stop floor can differ.
+          stop=root+"engine/HardStopLossPolicy.kt"
+          assert Path(stop).read_bytes()==old(base28,stop).replace(
+              b"const val MAX_LOSS_PCT = 2.0", b"const val MAX_LOSS_PCT = 3.0")
+          manifest=root+"engine/ReleaseIntegrityManifest.kt"
+          assert Path(manifest).read_bytes()==old(base28,manifest).replace(
+              b"const val HARD_STOP_LOSS_PCT = 2.0", b"const val HARD_STOP_LOSS_PCT = 3.0")
           assert "appOwnedBuyMutex.withLock" in Path(repo).read_text()
           assert "CircuitAwareBuyPolicy.decide" in Path(repo).read_text()
           assert "GttProtectionReadinessPolicy.verified" in Path(repo).read_text()
-          assert "const val MAX_LOSS_PCT = 2.0" in Path(root+"engine/HardStopLossPolicy.kt").read_text()
+          assert "const val MAX_LOSS_PCT = 3.0" in Path(root+"engine/HardStopLossPolicy.kt").read_text()
           assert "const val CANONICAL_LEARNING_CALLS = 107" in Path(root+"engine/FixedFinalContract.kt").read_text()
           build=Path("app/build.gradle.kts").read_text()
-          assert "versionCode = 9011" in build
-          assert 'versionName = "9.0.11-protection-capital-timing-test"' in build
+          assert "versionCode = 9012" in build
+          assert 'versionName = "9.0.12-monitor-reconcile-hardstop-3pct-test"' in build
           assert "const val BETA_SAFE_LIVE_60S = 40" in Path(root+"engine/FixedResearchCapacityPolicy.kt").read_text()
           assert "const val MIN_RESEARCH_GAP_MS = 1_000L" in Path(root+"engine/FixedResearchLtpPacingPolicy.kt").read_text()
           assert "const val APP_PER_MINUTE = 45" in Path(root+"data/network/GrowwHistoricalThrottlePolicy.kt").read_text()
@@ -113,7 +118,7 @@ jobs:
         run: |
           python -m unittest discover -s backend/tests -p 'test_adaptive_timeframe_replay.py' -v
           python -m unittest discover -s backend/tests -p 'test_v9_master_log_replay.py' -v
-      - name: Full Android unit tests / v9.0.11 TEST APK
+      - name: Full Android unit tests / v9.0.12 TEST APK
         env:
           MULTIFY_KEYSTORE_PASSWORD: ${{ secrets.MULTIFY_KEYSTORE_PASSWORD }}
         run: gradle :app:testDebugUnitTest :app:assembleDebug --no-daemon --stacktrace
@@ -122,13 +127,13 @@ jobs:
           apk=$(find app/build/outputs/apk/debug -maxdepth 1 -name '*.apk' -type f | head -n 1)
           test -n "$apk" && test -s "$apk"
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$apk" \
-            | tee app/build/outputs/apk/debug/v9011-signature-verification.txt
-          sha256sum "$apk" | tee app/build/outputs/apk/debug/v9011-SHA256SUMS.txt
+            | tee app/build/outputs/apk/debug/v9012-signature-verification.txt
+          sha256sum "$apk" | tee app/build/outputs/apk/debug/v9012-SHA256SUMS.txt
       - name: Upload CI verified package
         uses: actions/upload-artifact@v4
         with:
-          name: Multify-v9.0.11-Protect-Capital-Timing-TEST-debug
+          name: Multify-v9.0.12-Monitor-Reconcile-Stop3-TEST-debug
           path: |
             app/build/outputs/apk/debug/*.apk
-            app/build/outputs/apk/debug/v9011-signature-verification.txt
-            app/build/outputs/apk/debug/v9011-SHA256SUMS.txt
+            app/build/outputs/apk/debug/v9012-signature-verification.txt
+            app/build/outputs/apk/debug/v9012-SHA256SUMS.txt
