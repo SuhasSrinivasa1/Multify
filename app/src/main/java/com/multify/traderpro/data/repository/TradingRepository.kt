@@ -254,6 +254,17 @@ class TradingRepository @Inject constructor(
     private val fixedMarketDiscoveryStateStore: FixedMarketDiscoveryStateStore,
     @ApplicationContext private val appContext: Context
 ) {
+    /**
+     * Persistent execution ledger for Fixed recommendation events. A recommendation event may
+     * be retried while its holding is open, and it may still be ACTIVE after a later exit.
+     * Once a broker BUY has been confirmed for that exact event, the event must never become
+     * executable again. A later same-symbol setup gets a different recommendation id and is
+     * therefore still eligible.
+     */
+    private val fixedRecommendationExecutionPrefs by lazy {
+        appContext.getSharedPreferences("fixed_recommendation_execution_v9013", Context.MODE_PRIVATE)
+    }
+
     private val _fixedDeliveryEvents = MutableSharedFlow<Long>(extraBufferCapacity = 8)
     val fixedDeliveryEvents: SharedFlow<Long> = _fixedDeliveryEvents.asSharedFlow()
     // Transport-only signal consumed by the foreground service's lifecycle scope.
@@ -2309,7 +2320,7 @@ class TradingRepository @Inject constructor(
                 engine = ENGINE_MULTIFY_HOLDING, symbol = symbol, product = "CNC", side = "LONG", quantity = filled,
                 entryPrice = entry, stopPrice = HardStopLossPolicy.stopPrice(entry),
                 targetPrice = signal.target,
-                strategy = "Multify ARM holding · hard -2% floor · common trail 0.55→0.50, 0.75→0.60, 0.85→0.70 then +0.10%",
+                strategy = "Multify ARM holding · hard -3% floor · common trail 0.55→0.50, 0.75→0.60, 0.85→0.70 then +0.10%",
                 regime = "HOLDING_LONG", confidence = 1.0, sourceEventId = eventId,
                 openOrderId = order.growwOrderId, openReferenceId = ref, openedAtMs = System.currentTimeMillis(),
                 lastPrice = entry, maxFavourablePrice = entry, maxAdversePrice = entry, lastEvaluatedAtMs = System.currentTimeMillis(),
@@ -2371,7 +2382,7 @@ class TradingRepository @Inject constructor(
 
         dao.updateForwarding(
             eventId, "ANALYZED", "MULTIFY_EXIT_TRAIL_CONTINUES",
-            "Multify Book Profit recorded for MFE learning only. $symbol remains held; the common -2% hard stop and fixed stepped profitable trail remain the mandatory sell logic.",
+            "Multify Book Profit recorded for MFE learning only. $symbol remains held; the common -3% hard stop and fixed stepped profitable trail remain the mandatory sell logic.",
             null
         )
         auditLogger.log("HOLDING", "MULTIFY_BOOK_PROFIT_IGNORED_FOR_EXECUTION", mapOf(
@@ -6011,7 +6022,7 @@ class TradingRepository @Inject constructor(
                 engine = ENGINE_UNIVEST_HOLDING, symbol = symbol, product = "CNC",
                 side = "LONG", quantity = filled, entryPrice = actualEntry,
                 stopPrice = HardStopLossPolicy.stopPrice(actualEntry), targetPrice = null,
-                strategy = "Official Univest ENTRY via Fixed Auto Buy · Alpha CNC · hard -2% · common stepped trailing exit",
+                strategy = "Official Univest ENTRY via Fixed Auto Buy · Alpha CNC · hard -3% · common stepped trailing exit",
                 regime = "UNIVEST_LONG", confidence = 1.0, sourceEventId = null,
                 openOrderId = order.growwOrderId, openReferenceId = reference,
                 openedAtMs = openedAt, lastPrice = actualEntry,
@@ -7387,7 +7398,7 @@ class TradingRepository @Inject constructor(
                 engine = ENGINE_FORECAST_HOLDING, symbol = row.symbol, product = "CNC", side = "LONG", quantity = filled,
                 entryPrice = entry, stopPrice = HardStopLossPolicy.stopPrice(entry),
                 targetPrice = entry * (1.0 + row.targetPct / 100.0),
-                strategy = "Forecast holding · ${row.strategy} · hard -2% floor · v7 fixed stepped trail 0.55→0.50 then +0.10%",
+                strategy = "Forecast holding · ${row.strategy} · hard -3% floor · v7 fixed stepped trail 0.55→0.50 then +0.10%",
                 regime = row.regime, confidence = row.confidence,
                 sourceEventId = null, openOrderId = order.growwOrderId, openReferenceId = ref,
                 openedAtMs = System.currentTimeMillis(), lastPrice = entry,
@@ -7727,7 +7738,7 @@ class TradingRepository @Inject constructor(
                     append(" · MARKET child · fixed target ₹")
                     append(fmt(state.fixedTargetPrice))
                     forecast?.strategy?.takeIf { it.isNotBlank() }?.let { append(" · "); append(it) }
-                    append(" · hard -2% floor · v7 fixed stepped trail 0.55→0.50 then +0.10%")
+                    append(" · hard -3% floor · v7 fixed stepped trail 0.55→0.50 then +0.10%")
                 },
                 regime = forecast?.regime ?: "FORECAST_AUTO_BUY",
                 confidence = forecast?.confidence ?: 1.0,
@@ -7821,7 +7832,7 @@ class TradingRepository @Inject constructor(
                 entryPrice = actualFill,
                 stopPrice = HardStopLossPolicy.stopPrice(actualFill),
                 targetPrice = state.fixedTargetPrice,
-                strategy = "Migrated legacy forecast LIMIT fill · fixed target ₹${fmt(state.fixedTargetPrice)} · hard -2% floor · v7 fixed stepped trail 0.55→0.50 then +0.10%",
+                strategy = "Migrated legacy forecast LIMIT fill · fixed target ₹${fmt(state.fixedTargetPrice)} · hard -3% floor · v7 fixed stepped trail 0.55→0.50 then +0.10%",
                 regime = "FORECAST_AUTO_BUY",
                 confidence = 1.0,
                 sourceEventId = null,
@@ -7948,7 +7959,7 @@ class TradingRepository @Inject constructor(
                 entryPrice = actualFill,
                 stopPrice = HardStopLossPolicy.stopPrice(actualFill),
                 targetPrice = executionTarget,
-                strategy = "Fixed ${FixedEngineSnapshotStore.SNAPSHOT_ID} manual direct MARKET BUY · published entry ₹${fmt(row.entryPrice)} · broker fill ₹${fmt(actualFill)} · execution target ₹${fmt(executionTarget)} · ${row.strategy} · hard -2% floor · v7 stepped trail 0.55→0.50 then +0.10%",
+                strategy = "Fixed ${FixedEngineSnapshotStore.SNAPSHOT_ID} manual direct MARKET BUY · published entry ₹${fmt(row.entryPrice)} · broker fill ₹${fmt(actualFill)} · execution target ₹${fmt(executionTarget)} · ${row.strategy} · hard -3% floor · v7 stepped trail 0.55→0.50 then +0.10%",
                 regime = row.regime,
                 confidence = row.confidence,
                 sourceEventId = null,
@@ -8003,6 +8014,7 @@ class TradingRepository @Inject constructor(
                     it.executionEligible &&
                     it.qualityTier == "PRIMARY" &&
                     RecommendationPriceBandPolicy.eligible(it.entryPrice) &&
+                    !isFixedRecommendationExecutionConsumed(it.id) &&
                     AutoBuyEntrySafetyPolicy.isPublishedAfterFixedAutoBuyEnabled(
                         it.generatedAtMs, settings.fixedAutoBuyActivatedAtMs)
             }
@@ -8304,7 +8316,8 @@ class TradingRepository @Inject constructor(
             val order = runCatching {
                 placeCncBuy(token, row.symbol, sizing.quantity, reference, entryQuote = quote,
                     quoteReceivedAtMs = quoteStartedAtMs + quoteElapsedMs,
-                    allowOtherSymbolProtectionRecovery = false)
+                    allowOtherSymbolProtectionRecovery = false,
+                    recommendationId = row.id)
             }.onFailure {
                 // Response body is already available locally; this does not request wallet
                 // balance or make another broker call. Never persist the raw broker body.
@@ -8333,6 +8346,25 @@ class TradingRepository @Inject constructor(
             val actualFill = order.averageFillPrice?.takeIf { it.isFinite() && it > 0.0 } ?: ltp
             val executionTarget = actualFill * (1.0 + row.targetPct / 100.0)
             val openedAtMs = System.currentTimeMillis()
+            fixedRecommendationStore.update(row.copy(
+                status = "BUY_EXECUTED",
+                lastPrice = actualFill,
+                lastObservedAtMs = openedAtMs,
+                maxFavourablePct = maxOf(row.maxFavourablePct,
+                    (actualFill / row.entryPrice - 1.0) * 100.0),
+                maxAdversePct = maxOf(row.maxAdversePct,
+                    (row.entryPrice - actualFill).coerceAtLeast(0.0) / row.entryPrice * 100.0)
+            ))
+            auditLogger.logAsync("FIXED_AUTO_BUY", "RECOMMENDATION_EVENT_CONSUMED", mapOf(
+                "recommendation_id" to row.id,
+                "symbol" to row.symbol,
+                "order_id" to order.growwOrderId,
+                "reference" to reference,
+                "quantity" to filled,
+                "fill_price" to actualFill,
+                "same_event_rebuy_blocked" to true,
+                "same_symbol_new_event_still_allowed" to true
+            ))
             registerBoughtPositionAndProtect(
                 ManagedPositionEntity(
                     engine = ENGINE_FIXED_HOLDING,
@@ -8343,7 +8375,7 @@ class TradingRepository @Inject constructor(
                     entryPrice = actualFill,
                     stopPrice = HardStopLossPolicy.stopPrice(actualFill),
                     targetPrice = executionTarget,
-                    strategy = "Fixed ${FixedEngineSnapshotStore.SNAPSHOT_ID} auto-buy · direct MARKET · published entry ₹${fmt(row.entryPrice)} · fill ₹${fmt(actualFill)} · execution target ₹${fmt(executionTarget)} · ${row.strategy} · hard -2% floor · v7 stepped trail 0.55→0.50 then +0.10%",
+                    strategy = "Fixed ${FixedEngineSnapshotStore.SNAPSHOT_ID} auto-buy · direct MARKET · published entry ₹${fmt(row.entryPrice)} · fill ₹${fmt(actualFill)} · execution target ₹${fmt(executionTarget)} · ${row.strategy} · hard -3% floor · v7 stepped trail 0.55→0.50 then +0.10%",
                     regime = row.regime,
                     confidence = row.confidence,
                     sourceEventId = null,
@@ -8581,7 +8613,7 @@ class TradingRepository @Inject constructor(
                 entryPrice = actualEntry,
                 stopPrice = HardStopLossPolicy.stopPrice(actualEntry),
                 targetPrice = executionTarget,
-                strategy = "Fixed ${FixedEngineSnapshotStore.SNAPSHOT_ID} legacy GTT migrated · actual entry ₹${fmt(actualEntry)} · execution target ₹${fmt(executionTarget)} · ${row?.strategy.orEmpty()} · hard -2% floor · v7 stepped trail 0.55→0.50 then +0.10%",
+                strategy = "Fixed ${FixedEngineSnapshotStore.SNAPSHOT_ID} legacy GTT migrated · actual entry ₹${fmt(actualEntry)} · execution target ₹${fmt(executionTarget)} · ${row?.strategy.orEmpty()} · hard -3% floor · v7 stepped trail 0.55→0.50 then +0.10%",
                 regime = row?.regime ?: "FIXED_ENGINE",
                 confidence = row?.confidence ?: 1.0,
                 sourceEventId = null,
@@ -9105,7 +9137,7 @@ class TradingRepository @Inject constructor(
                         outcomeMfePct = mfe,
                         outcomeMaePct = mae,
                         outcomeClosePct = closePct,
-                        // Do not label a historical Forecast success when the -2% research stop
+                        // Do not label a historical Forecast success when the -3% research stop
                         // was observed first or the one-minute sequence is ambiguous.
                         outcomeTargetHit = chronological.firstTouch == "TARGET_FIRST_1M",
                         outcomeUpdatedAtMs = System.currentTimeMillis()
@@ -9923,7 +9955,7 @@ class TradingRepository @Inject constructor(
 
         if (!marketOpen) {
             // Keep every managed LONG protected overnight. Existing profitable trailing GTTs are
-            // preserved; an unarmed holding receives the common -2% server-side hard stop. This
+            // preserved; an unarmed holding receives the common -3% server-side hard stop. This
             // also self-recovers protection after an app/service restart or a prior GTT failure.
             var hardStopReady = 0
             var hardStopFailures = 0
@@ -10087,13 +10119,64 @@ class TradingRepository @Inject constructor(
             try {
                 val current = managedDao.openPositionById(id) ?: return@withLock id
                 val protected = if (!current.smartOrderId.isNullOrBlank()) {
-                    refreshKnownSmartOrderStatus(token, current, force = true)
+                    // A broker-confirmed ACTIVE/OPEN GTT already proves protection. Do not spend
+                    // another Non-Trading request on an immediate status read after every BUY.
+                    // This avoids turning a successful GTT creation into a false "unprotected"
+                    // state when the status endpoint is rate-limited or temporarily unavailable.
+                    if (com.multify.traderpro.engine.GttProtectionReadinessPolicy.verified(
+                            current.smartOrderMode, current.smartOrderId, current.smartOrderStatus
+                        )
+                    ) {
+                        current
+                    } else {
+                        runCatching {
+                            refreshKnownSmartOrderStatus(token, current, force = true)
+                        }.onFailure {
+                            auditLogger.log("PROTECTION", "GTT_STATUS_REFRESH_DEFERRED", mapOf(
+                                "symbol" to current.symbol,
+                                "gtt_id" to current.smartOrderId,
+                                "known_status" to current.smartOrderStatus,
+                                "reason" to (it.message ?: it.javaClass.simpleName),
+                                "existing_broker_gtt_reference_preserved" to true,
+                                "new_buy_allowed" to false
+                            ))
+                        }.getOrDefault(current)
+                    }
                 } else {
-                    createPositionGtt(
+                    val created = createPositionGtt(
                         token, current, HardStopLossPolicy.stopPrice(current.entryPrice),
                         "DOWN", HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT,
                         allowFreshPostFillProof = allowFreshPostFillProof
-                    ).let { refreshKnownSmartOrderStatus(token, it, force = true) }
+                    )
+                    // Groww's create-GTT response itself contains the smart-order id and current
+                    // ACTIVE/OPEN status. That is broker confirmation; a second status request is
+                    // diagnostic, not a prerequisite for protection verification.
+                    if (com.multify.traderpro.engine.GttProtectionReadinessPolicy.verified(
+                            created.smartOrderMode, created.smartOrderId, created.smartOrderStatus
+                        )
+                    ) {
+                        auditLogger.log("PROTECTION", "POST_FILL_GTT_CREATE_RESPONSE_VERIFIED", mapOf(
+                            "symbol" to created.symbol,
+                            "gtt_id" to created.smartOrderId,
+                            "trigger" to created.smartOrderTriggerPrice,
+                            "status" to created.smartOrderStatus,
+                            "status_endpoint_call_skipped" to true
+                        ))
+                        created
+                    } else {
+                        runCatching {
+                            refreshKnownSmartOrderStatus(token, created, force = true)
+                        }.onFailure {
+                            auditLogger.log("PROTECTION", "GTT_STATUS_REFRESH_DEFERRED", mapOf(
+                                "symbol" to created.symbol,
+                                "gtt_id" to created.smartOrderId,
+                                "known_status" to created.smartOrderStatus,
+                                "reason" to (it.message ?: it.javaClass.simpleName),
+                                "create_response_id_present" to true,
+                                "new_buy_allowed" to false
+                            ))
+                        }.getOrDefault(created)
+                    }
                 }
                 if (com.multify.traderpro.engine.GttProtectionReadinessPolicy.verified(
                         protected.smartOrderMode, protected.smartOrderId, protected.smartOrderStatus)) {
@@ -10205,7 +10288,7 @@ class TradingRepository @Inject constructor(
             existingTrigger != null && existingTrigger + SMART_ORDER_PRICE_EPSILON >= hardStop
         ) return position
 
-        // Upgrade existing broker GTTs to the new -2% floor without cancelling
+        // Upgrade existing broker GTTs to the new -3% floor without cancelling
         // the protective SELL order first. On API failure retain the older
         // server GTT for continued position-monitor retries.
         if (com.multify.traderpro.engine.HardStopGttTighteningPolicy.shouldModifyExisting(
@@ -10221,7 +10304,7 @@ class TradingRepository @Inject constructor(
                 val modified = modifyPositionGtt(
                     token, position, hardStop, "DOWN", position.smartOrderMode
                 )
-                auditLogger.log("PROTECTION", "HARD_STOP_MINUS_2_EXISTING_GTT_UPGRADED", mapOf(
+                auditLogger.log("PROTECTION", "HARD_STOP_MINUS_3_EXISTING_GTT_UPGRADED", mapOf(
                     "symbol" to position.symbol, "position_id" to position.id,
                     "old_trigger" to existingTrigger, "new_trigger" to modified.smartOrderTriggerPrice,
                     "gtt_id" to position.smartOrderId,
@@ -10231,7 +10314,7 @@ class TradingRepository @Inject constructor(
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Throwable) {
-                auditLogger.log("PROTECTION", "HARD_STOP_MINUS_2_GTT_UPGRADE_DEFERRED", mapOf(
+                auditLogger.log("PROTECTION", "HARD_STOP_MINUS_3_GTT_UPGRADE_DEFERRED", mapOf(
                     "symbol" to position.symbol, "position_id" to position.id,
                     "existing_active_gtt_preserved" to true,
                     "existing_trigger" to existingTrigger, "desired_trigger" to hardStop,
@@ -10270,7 +10353,7 @@ class TradingRepository @Inject constructor(
 
     private suspend fun monitorLongHoldingLocked(position: ManagedPositionEntity, token: String, ltp: Double) {
         // Common sell protection for every managed CNC LONG, regardless of source:
-        // 1) hard -2% loss floor from the actual holding cost basis;
+        // 1) hard -3% loss floor from the actual holding cost basis;
         // 2) once +0.55% high-water is reached, the existing stepped profitable trail takes over;
         // 3) the active stop only moves upward. There is no averaging-down path.
         val decisionStartedNs = SystemClock.elapsedRealtimeNanos()
@@ -10335,7 +10418,7 @@ class TradingRepository @Inject constructor(
                 working,
                 ltp,
                 if (desiredMode == HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT)
-                    "COMMON_HARD_STOP_MINUS_2_LOCAL_FALLBACK"
+                    "COMMON_HARD_STOP_MINUS_3_LOCAL_FALLBACK"
                 else "LONG_TRAILING_PROFIT_STOP_V7_1_LOCAL_FALLBACK",
                 decisionStartedNs
             )
@@ -10360,7 +10443,7 @@ class TradingRepository @Inject constructor(
                             protected,
                             ltp,
                             if (desiredMode == HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT)
-                                "COMMON_HARD_STOP_MINUS_2_STALE_GTT_FALLBACK"
+                                "COMMON_HARD_STOP_MINUS_3_STALE_GTT_FALLBACK"
                             else "LONG_TRAILING_PROFIT_STOP_V7_1_STALE_GTT_FALLBACK",
                             decisionStartedNs
                         )
@@ -10429,7 +10512,7 @@ class TradingRepository @Inject constructor(
                             cleared,
                             ltp,
                             if (working.smartOrderMode == HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT)
-                                "COMMON_HARD_STOP_MINUS_2_GTT_FAILED_FALLBACK"
+                                "COMMON_HARD_STOP_MINUS_3_GTT_FAILED_FALLBACK"
                             else "LONG_TRAILING_PROFIT_STOP_V7_1_GTT_FAILED_FALLBACK",
                             decisionStartedNs
                         )
@@ -10450,7 +10533,7 @@ class TradingRepository @Inject constructor(
                     working,
                     ltp,
                     if (desiredMode == HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT)
-                        "COMMON_HARD_STOP_MINUS_2_LOCAL_FALLBACK"
+                        "COMMON_HARD_STOP_MINUS_3_LOCAL_FALLBACK"
                     else "LONG_TRAILING_PROFIT_STOP_V7_1_LOCAL_FALLBACK",
                     decisionStartedNs
                 )
@@ -10464,7 +10547,7 @@ class TradingRepository @Inject constructor(
             position.smartOrderMode != HoldingSmartOrderPolicy.MODE_TRAILING_GTT
         if (stopRaised || trailJustArmed) {
             val event = when {
-                desiredMode == HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT && previousProtected == null -> "HARD_STOP_MINUS_2_ARMED"
+                desiredMode == HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT && previousProtected == null -> "HARD_STOP_MINUS_3_ARMED"
                 trailJustArmed -> "V7_1_TRAIL_ARMED"
                 else -> "V7_1_STEP_RATCHET"
             }
@@ -12512,6 +12595,50 @@ class TradingRepository @Inject constructor(
      * still passes its own fresh broker-inventory/duplicate check, account readiness,
      * price/liquidity safeguards and immediate post-fill GTT attempt.
      */
+    private enum class FixedRecommendationExecutionMark {
+        CONSUMED,
+        ALREADY_CONSUMED,
+        PERSISTENCE_FAILED
+    }
+
+    private fun isFixedRecommendationExecutionConsumed(recommendationId: Long): Boolean =
+        fixedRecommendationExecutionPrefs.contains(recommendationId.toString())
+
+    /**
+     * This write is deliberately synchronous: once Groww has confirmed the BUY, the
+     * recommendation event becomes non-executable before post-fill GTT work begins.
+     * A persistence failure fails closed by engaging the global safety halt, but the
+     * already-confirmed broker BUY is still registered and protected.
+     */
+    private suspend fun markFixedRecommendationExecutionConsumed(
+        recommendationId: Long,
+        symbol: String,
+        orderId: String,
+        reference: String,
+        quantity: Int,
+        fillPrice: Double
+    ): FixedRecommendationExecutionMark {
+        val key = recommendationId.toString()
+        if (fixedRecommendationExecutionPrefs.contains(key)) {
+            return FixedRecommendationExecutionMark.ALREADY_CONSUMED
+        }
+        val value = listOf(
+            System.currentTimeMillis(), symbol.uppercase(Locale.US), orderId, reference, quantity, fillPrice
+        ).joinToString("|")
+        val committed = fixedRecommendationExecutionPrefs.edit().putString(key, value).commit()
+        if (committed) return FixedRecommendationExecutionMark.CONSUMED
+
+        runCatching { preferences.setSafetyHalt(true) }
+            .onFailure {
+                auditLogger.log("SAFETY", "RECOMMENDATION_EVENT_SAFETY_HALT_WRITE_FAILED", mapOf(
+                    "recommendation_id" to recommendationId,
+                    "symbol" to symbol,
+                    "message" to (it.message ?: it.javaClass.simpleName)
+                ))
+            }
+        return FixedRecommendationExecutionMark.PERSISTENCE_FAILED
+    }
+
     private fun preFixedAutoBuyExecutionGuard(settings: AppSettings) {
         require(settings.brokerAuthenticated) { "Groww is not authenticated" }
         require(settings.staticIpMatched) { "Static IP verification failed" }
@@ -12528,8 +12655,19 @@ class TradingRepository @Inject constructor(
         notificationStartedNs: Long? = null,
         entryQuote: QuotePayload,
         quoteReceivedAtMs: Long,
-        allowOtherSymbolProtectionRecovery: Boolean = false
+        allowOtherSymbolProtectionRecovery: Boolean = false,
+        recommendationId: Long? = null
     ): OrderPayload = appOwnedBuyMutex.withLock {
+        if (recommendationId != null && isFixedRecommendationExecutionConsumed(recommendationId)) {
+            auditLogger.log("FIXED_AUTO_BUY", "RECOMMENDATION_EVENT_ALREADY_CONSUMED", mapOf(
+                "recommendation_id" to recommendationId,
+                "symbol" to symbol,
+                "reference" to reference,
+                "broker_order_submission" to false,
+                "same_event_rebuy_blocked" to true
+            ))
+            error("FIXED_RECOMMENDATION_EVENT_ALREADY_CONSUMED: $recommendationId")
+        }
         // Serialize all application CNC entries so two independent engines cannot both buy
         // the same symbol while the first order is still awaiting broker acknowledgement.
         val key = symbol.uppercase(Locale.US)
@@ -12629,8 +12767,38 @@ class TradingRepository @Inject constructor(
             "single_symbol_quote_refresh" to (freshAt != quoteReceivedAtMs),
             "full_market_refresh" to false, "max_slippage_bps" to CircuitAwareBuyPolicy.MAX_BUY_SLIPPAGE_BPS
         ))
-        submitMarketOrder(token, symbol, "BUY", capitalVerdict.allowedQuantity, "CNC", reference,
+        val order = submitMarketOrder(token, symbol, "BUY", capitalVerdict.allowedQuantity, "CNC", reference,
             notificationStartedNs, buyLimitPrice = price.limitPrice)
+        if (recommendationId != null) {
+            val filled = order.filledQuantity?.takeIf { it > 0 } ?: capitalVerdict.allowedQuantity
+            val fillPrice = order.averageFillPrice?.takeIf { it.isFinite() && it > 0.0 } ?: price.lastPrice
+            when (markFixedRecommendationExecutionConsumed(
+                recommendationId, symbol, order.growwOrderId, reference, filled, fillPrice
+            )) {
+                FixedRecommendationExecutionMark.CONSUMED -> Unit
+                FixedRecommendationExecutionMark.ALREADY_CONSUMED -> {
+                    auditLogger.log("SAFETY", "RECOMMENDATION_EVENT_CONSUMPTION_RACE", mapOf(
+                        "recommendation_id" to recommendationId,
+                        "symbol" to symbol,
+                        "order_id" to order.growwOrderId,
+                        "reference" to reference,
+                        "same_event_rebuy_blocked" to true
+                    ))
+                    error("FIXED_RECOMMENDATION_EVENT_ALREADY_CONSUMED: $recommendationId")
+                }
+                FixedRecommendationExecutionMark.PERSISTENCE_FAILED -> {
+                    auditLogger.log("SAFETY", "RECOMMENDATION_EVENT_LEDGER_WRITE_FAILED", mapOf(
+                        "recommendation_id" to recommendationId,
+                        "symbol" to symbol,
+                        "order_id" to order.growwOrderId,
+                        "reference" to reference,
+                        "new_buys_halted" to true,
+                        "current_position_registration_continues" to true
+                    ))
+                }
+            }
+        }
+        order
     }
 
     private fun LongForecastEntity.toForecastDto() = ForecastDto(

@@ -471,7 +471,7 @@ private fun HoldingCard(p: PositionDto) {
             KeyValueRow("Average", money(p.averagePrice))
             KeyValueRow("LTP", p.ltp?.let(::money) ?: "—")
             KeyValueRow("Unrealised", money(p.pnl), pnlColor(p.pnl))
-            KeyValueRow("Sell protection", "hard -2.00% · then +0.55% arm → +0.50% protect · +0.10% steps")
+            KeyValueRow("Sell protection", "hard -3.00% · then +0.55% arm → +0.50% protect · +0.10% steps")
             KeyValueRow(
                 "Arm trigger",
                 p.trailArmPct?.let { "+${String.format(Locale.US, "%.2f", it)}%" } ?: "+0.55%"
@@ -786,7 +786,7 @@ private fun ForecastScreen(
                 shape = RoundedCornerShape(20.dp)) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
                     Text("Univest · official alerts / same-day closes", fontWeight = FontWeight.SemiBold)
-                    Text("Official Univest ENTRY uses Groww Alpha only when Fixed Auto Buy is ON and safeguards pass. Univest EXIT never triggers a SELL; the shared -2% stop and trailing GTT manage holdings. Research prices below are not broker fills.",
+                    Text("Official Univest ENTRY uses Groww Alpha only when Fixed Auto Buy is ON and safeguards pass. Univest EXIT never triggers a SELL; the shared -3% stop and trailing GTT manage holdings. Research prices below are not broker fills.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                     if (official.isEmpty()) {
@@ -1470,7 +1470,7 @@ private fun SettingsScreen(
                         if (state.settings.fixedAutoBuyEnabled) "ON · waiting for new Fixed/Univest signals" else "OFF · no new Fixed/Univest auto BUY"
                     )
                     Text(
-                        "Fixed remains immutable. Forecast may read prior positive Fixed outcomes, but can never write into Fixed or change its v7.4.1 rules. Every app-owned Multify, Fixed, Univest and Forecast LONG uses the same sell protection: hard -2% loss floor, then the existing +0.55% arm → +0.50% protected gain → +0.10% ratchet when profitable. No averaging down.",
+                        "Fixed remains immutable. Forecast may read prior positive Fixed outcomes, but can never write into Fixed or change its v7.4.1 rules. Every app-owned Multify, Fixed, Univest and Forecast LONG uses the same sell protection: hard -3% loss floor, then the existing +0.55% arm → +0.50% protected gain → +0.10% ratchet when profitable. No averaging down.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -1535,7 +1535,7 @@ private fun SettingsScreen(
                         else "$lastParsedSymbol · $lastParsedStatus")
                     KeyValueRow("Univest Alpha entry", lastUnivestOrderStatus)
                     Text(
-                        "Univest buys require a fresh official notification and Fixed Auto Buy ON. SELL remains managed only by the common -2% hard stop and trailing GTT. A running engine does not prove Android notification access is connected.",
+                        "Univest buys require a fresh official notification and Fixed Auto Buy ON. SELL remains managed only by the common -3% hard stop and trailing GTT. A running engine does not prove Android notification access is connected.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
