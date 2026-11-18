@@ -12595,27 +12595,48 @@ class TradingRepository @Inject constructor(
      * still passes its own fresh broker-inventory/duplicate check, account readiness,
      * price/liquidity safeguards and immediate post-fill GTT attempt.
      */
+    private enum class FixedRecommendationExecutionMark {
+        CONSUMED,
+        ALREADY_CONSUMED,
+        PERSISTENCE_FAILED
+    }
+
     private fun isFixedRecommendationExecutionConsumed(recommendationId: Long): Boolean =
         fixedRecommendationExecutionPrefs.contains(recommendationId.toString())
 
     /**
      * This write is deliberately synchronous: once Groww has confirmed the BUY, the
      * recommendation event becomes non-executable before post-fill GTT work begins.
+     * A persistence failure fails closed by engaging the global safety halt, but the
+     * already-confirmed broker BUY is still registered and protected.
      */
-    private fun markFixedRecommendationExecutionConsumed(
+    private suspend fun markFixedRecommendationExecutionConsumed(
         recommendationId: Long,
         symbol: String,
         orderId: String,
         reference: String,
         quantity: Int,
         fillPrice: Double
-    ): Boolean {
+    ): FixedRecommendationExecutionMark {
         val key = recommendationId.toString()
-        if (fixedRecommendationExecutionPrefs.contains(key)) return false
+        if (fixedRecommendationExecutionPrefs.contains(key)) {
+            return FixedRecommendationExecutionMark.ALREADY_CONSUMED
+        }
         val value = listOf(
             System.currentTimeMillis(), symbol.uppercase(Locale.US), orderId, reference, quantity, fillPrice
         ).joinToString("|")
-        return fixedRecommendationExecutionPrefs.edit().putString(key, value).commit()
+        val committed = fixedRecommendationExecutionPrefs.edit().putString(key, value).commit()
+        if (committed) return FixedRecommendationExecutionMark.CONSUMED
+
+        runCatching { preferences.setSafetyHalt(true) }
+            .onFailure {
+                auditLogger.log("SAFETY", "RECOMMENDATION_EVENT_SAFETY_HALT_WRITE_FAILED", mapOf(
+                    "recommendation_id" to recommendationId,
+                    "symbol" to symbol,
+                    "message" to (it.message ?: it.javaClass.simpleName)
+                ))
+            }
+        return FixedRecommendationExecutionMark.PERSISTENCE_FAILED
     }
 
     private fun preFixedAutoBuyExecutionGuard(settings: AppSettings) {
@@ -12751,18 +12772,30 @@ class TradingRepository @Inject constructor(
         if (recommendationId != null) {
             val filled = order.filledQuantity?.takeIf { it > 0 } ?: capitalVerdict.allowedQuantity
             val fillPrice = order.averageFillPrice?.takeIf { it.isFinite() && it > 0.0 } ?: price.lastPrice
-            val newlyConsumed = markFixedRecommendationExecutionConsumed(
+            when (markFixedRecommendationExecutionConsumed(
                 recommendationId, symbol, order.growwOrderId, reference, filled, fillPrice
-            )
-            if (!newlyConsumed) {
-                auditLogger.log("SAFETY", "RECOMMENDATION_EVENT_CONSUMPTION_RACE", mapOf(
-                    "recommendation_id" to recommendationId,
-                    "symbol" to symbol,
-                    "order_id" to order.growwOrderId,
-                    "reference" to reference,
-                    "same_event_rebuy_blocked" to true
-                ))
-                error("FIXED_RECOMMENDATION_EVENT_ALREADY_CONSUMED: $recommendationId")
+            )) {
+                FixedRecommendationExecutionMark.CONSUMED -> Unit
+                FixedRecommendationExecutionMark.ALREADY_CONSUMED -> {
+                    auditLogger.log("SAFETY", "RECOMMENDATION_EVENT_CONSUMPTION_RACE", mapOf(
+                        "recommendation_id" to recommendationId,
+                        "symbol" to symbol,
+                        "order_id" to order.growwOrderId,
+                        "reference" to reference,
+                        "same_event_rebuy_blocked" to true
+                    ))
+                    error("FIXED_RECOMMENDATION_EVENT_ALREADY_CONSUMED: $recommendationId")
+                }
+                FixedRecommendationExecutionMark.PERSISTENCE_FAILED -> {
+                    auditLogger.log("SAFETY", "RECOMMENDATION_EVENT_LEDGER_WRITE_FAILED", mapOf(
+                        "recommendation_id" to recommendationId,
+                        "symbol" to symbol,
+                        "order_id" to order.growwOrderId,
+                        "reference" to reference,
+                        "new_buys_halted" to true,
+                        "current_position_registration_continues" to true
+                    ))
+                }
             }
         }
         order
