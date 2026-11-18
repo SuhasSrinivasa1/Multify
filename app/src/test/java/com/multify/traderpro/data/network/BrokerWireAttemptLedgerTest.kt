@@ -4,11 +4,13 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class BrokerWireAttemptLedgerTest {
+    private fun monotonicNowMs(): Long = System.nanoTime() / 1_000_000L
+
     @Test fun accountWide429AndFailureCountsIncludeCategoryResponses() {
         // Initialize the Alpha account/category counters before taking the baseline.
-        val seed = BrokerWireAttemptLedger.start("ALPHA", "GET", "/v1/live-data/ltp")
+        val seed = BrokerWireAttemptLedger.start("ALPHA", "GET", "/v1/live-data/ltp", monotonicNowMs())
         BrokerWireAttemptLedger.recordResponse(seed, 200)
-        val before = BrokerWireAttemptLedger.summary()
+        val before = BrokerWireAttemptLedger.summary(monotonicNowMs())
         @Suppress("UNCHECKED_CAST")
         val beforeAccounts = before["accounts"] as Map<String, Map<String, Any>>
         @Suppress("UNCHECKED_CAST")
@@ -17,11 +19,11 @@ class BrokerWireAttemptLedgerTest {
         val beforeLive = beforeCategories.getValue("LIVE_DATA")
 
         val ticket = BrokerWireAttemptLedger.start(
-            "ALPHA", "GET", "/v1/live-data/ltp"
+            "ALPHA", "GET", "/v1/live-data/ltp", monotonicNowMs()
         )
         BrokerWireAttemptLedger.recordResponse(ticket, 429)
 
-        val after = BrokerWireAttemptLedger.summary()
+        val after = BrokerWireAttemptLedger.summary(monotonicNowMs())
         @Suppress("UNCHECKED_CAST")
         val afterAccounts = after["accounts"] as Map<String, Map<String, Any>>
         @Suppress("UNCHECKED_CAST")
