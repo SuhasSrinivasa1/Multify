@@ -60,9 +60,12 @@ internal object BrokerWireAttemptLedger {
         s.calendar = DualMinuteAdmissionPolicy.reserve(s.calendar, epoch)
         s.total++
     }
-    fun start(account: String, method: String, endpoint: String): Ticket {
+    fun start(
+        account: String, method: String, endpoint: String,
+        elapsedNowMs: Long = SystemClock.elapsedRealtime()
+    ): Ticket {
         val epoch = System.currentTimeMillis()
-        val now = SystemClock.elapsedRealtime()
+        val now = elapsedNowMs
         val category = GrowwHttpTraceLedger.classify(endpoint)
         return synchronized(lock) {
             val a = accounts.getOrPut(account) { State() }
@@ -110,9 +113,11 @@ internal object BrokerWireAttemptLedger {
         ))
     }
 
-    fun summary(): Map<String, Any> = synchronized(lock) {
+    fun summary(
+        elapsedNowMs: Long = SystemClock.elapsedRealtime()
+    ): Map<String, Any> = synchronized(lock) {
         val epoch = System.currentTimeMillis()
-        val now = SystemClock.elapsedRealtime()
+        val now = elapsedNowMs
         fun counter(s: State?): Map<String, Any> {
             if (s==null) return mapOf("total" to 0, "actual_wire_rolling_60s" to 0,
                 "actual_wire_fixed_minute" to 0, "http_429" to 0)
