@@ -4715,11 +4715,12 @@ class TradingRepository @Inject constructor(
         val clock = ZonedDateTime.now(INDIA)
         if (!com.multify.traderpro.engine.NseEquitySessionCalendar.mayPrepareNextFixedSweep(clock) || lastFixedScanAtMs <= 0L ||
             marketCriticalTradeInFlight || !marketDataAvailableForFixed()) return false
-        // Yield completely to foreground Fixed detail evaluation and Alpha
-        // order/protection. Prefetch cannot steal quota from current signals.
-        val betaIdle = BetaResearchGate.latestLiveStatus()
+        // During foreground detail, overlap the next sweep only if Alpha has
+        // research headroom after its protection reserve AND Beta is healthy with
+        // spare read-only capacity. The per-request governors remain authoritative.
         val betaLiveReadyForPrefetch = fixedBetaMarketTokenOrNull() != null &&
             betaResearchGate.healthyForFixed(BetaResearchGate.Type.LIVE)
+        val betaIdle = BetaResearchGate.latestLiveStatus()
         val alphaResearchSpare = alphaCanTakeBetaDiscoveryFallback()
         val canPrefetch = com.multify.traderpro.engine.FixedResearchCapacityPolicy
             .prefetchMayStart(
@@ -4967,6 +4968,7 @@ class TradingRepository @Inject constructor(
             "beta_remaining_calendar" to BetaResearchGate.latestLiveStatus().fixedMinuteRemaining,
             "original_batch_count" to chunks.size,
             "beta_live_gap_ms" to initialBetaGapMs,
+            "beta_recovery_probe_required" to BetaResearchGate.latestLiveStatus().recoveryProbeRequired,
             "alpha_live_ready_for_research" to alphaLiveReadyForResearch,
             "beta_read_only" to true,
             "alpha_order_account_unchanged" to true,
@@ -5034,9 +5036,19 @@ class TradingRepository @Inject constructor(
 
                 suspend fun betaRead(reason: String): Map<String, Double>? {
                     if (betaToken == null || betaStopped.get()) return null
+                    val recoveryProbe = BetaResearchGate.latestLiveStatus().recoveryProbeRequired
                     return try {
                         fixedBetaLtp(betaToken, chunk).also {
                             betaSuccess.incrementAndGet()
+                            if (recoveryProbe) auditLogger.logAsync(
+                                "FIXED_DUAL_ACCOUNT", "BETA_RECOVERY_PROBE_SUCCEEDED", mapOf(
+                                    "batch_index" to index,
+                                    "reason" to reason,
+                                    "recovery_gap_ms" to BetaResearchGate.latestLiveStatus().activeGapMs,
+                                    "beta_read_only" to true,
+                                    "alpha_order_account_unchanged" to true
+                                )
+                            )
                             if (reason == "ALPHA_BATCH_FAILED") {
                                 alphaBatchesRescuedOnBeta.incrementAndGet()
                                 alphaRecoveryExtraCalls.incrementAndGet()
@@ -5054,6 +5066,7 @@ class TradingRepository @Inject constructor(
                             "BETA_RECOVERY_FAILED_NO_ALPHA_BURST", mapOf(
                                 "batch_index" to index, "reason" to reason,
                                 "beta_http_429" to ((failed as? HttpException)?.code() == 429),
+                                "recovery_probe" to recoveryProbe,
                                 "beta_error" to failed.javaClass.simpleName,
                                 "partial_coverage_must_not_publish" to true,
                                 "alpha_fallback_requests" to 0
