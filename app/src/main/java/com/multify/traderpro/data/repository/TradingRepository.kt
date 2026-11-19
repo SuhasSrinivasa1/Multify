@@ -2817,6 +2817,7 @@ class TradingRepository @Inject constructor(
                 ?.takeIf { it < row.generatedAtMs }
         ).maxOrNull()
         val observations = fixedRecommendationStore.observations(day)
+            .filter { it.scanAtMs <= row.generatedAtMs }
         val boundary = previousAt?.let {
             FixedRepeatQualificationPolicy.resetAt(row.symbol, it, observations)
         }
