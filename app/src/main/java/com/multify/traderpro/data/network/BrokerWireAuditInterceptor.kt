@@ -77,10 +77,18 @@ internal object BrokerWireAttemptLedger {
     fun finish(t: Ticket, status: Int?, audit: AuditLogger,
                exception: String? = null) {
         synchronized(lock) {
-            val key = t.account + "/" + t.category
-            val state = categories.getValue(key)
-            if (status==429) state.status429++
-            if (status==null || status>=400) state.failures++
+            // A single real wire response must update all THREE dimensions.
+            // v9.0.17 counted status in categories only, reporting falsely zero
+            // account-wide and endpoint HTTP 429s even when category totals rose.
+            val matched = listOfNotNull(
+                accounts[t.account],
+                categories[t.account + "/" + t.category],
+                endpoints[t.account + "/" + t.endpoint]
+            )
+            for (state in matched) {
+                if (status == 429) state.status429++
+                if (status == null || status >= 400) state.failures++
+            }
         }
         audit.logAsync("API_WIRE", "ACTUAL_WIRE_ATTEMPT_V909", mapOf(
             "wire_attempt_id" to t.id, "account" to t.account,
@@ -104,7 +112,8 @@ internal object BrokerWireAttemptLedger {
         val now = SystemClock.elapsedRealtime()
         fun counter(s: State?): Map<String, Any> {
             if (s==null) return mapOf("total" to 0, "actual_wire_rolling_60s" to 0,
-                "actual_wire_fixed_minute" to 0, "http_429" to 0)
+                "actual_wire_fixed_minute" to 0, "http_429" to 0,
+                "failure_count" to 0)
             val rolling=s.minute.count { it > now-60_000L }
             return mapOf("total" to s.total,
                 "actual_wire_rolling_60s" to rolling,
