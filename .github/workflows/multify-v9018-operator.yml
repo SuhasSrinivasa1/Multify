@@ -124,8 +124,14 @@ jobs:
           test -n "$apk" && test -s "$apk"
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$apk" \
             | tee app/build/outputs/apk/debug/v9018-signature-verification.txt
-          echo "IN_PLACE_UPDATE_COMPATIBLE_WITH_V9017=UNVERIFIED" | tee app/build/outputs/apk/debug/v9018-install-compatibility.txt
-          echo "Do not uninstall or replace an installed build with open holdings/GTTs until signer compatibility and broker protection are checked."
+          V9017_SIGNER_SHA256="ad5947506afeff796564be693315ebcbe7be7dfbde61deca382059ceb43a5602"
+          V9018_SIGNER_SHA256=$(grep 'Signer #1 certificate SHA-256 digest:' app/build/outputs/apk/debug/v9018-signature-verification.txt | awk '{print $NF}')
+          if [ "$V9017_SIGNER_SHA256" = "$V9018_SIGNER_SHA256" ]; then
+            echo "IN_PLACE_UPDATE_COMPATIBLE_WITH_V9017=YES" | tee app/build/outputs/apk/debug/v9018-install-compatibility.txt
+          else
+            echo "IN_PLACE_UPDATE_COMPATIBLE_WITH_V9017=NO_SIGNER_MISMATCH" | tee app/build/outputs/apk/debug/v9018-install-compatibility.txt
+          fi
+          echo "Do not uninstall or replace an installed build with open holdings/GTTs. Export data and confirm broker positions/GTTs are terminal before any signer-mismatch reinstall."
           sha256sum "$apk" | tee app/build/outputs/apk/debug/v9018-SHA256SUMS.txt
       - name: Upload CI verified package
         uses: actions/upload-artifact@v4
