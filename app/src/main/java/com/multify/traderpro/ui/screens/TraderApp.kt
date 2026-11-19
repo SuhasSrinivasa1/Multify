@@ -1111,45 +1111,8 @@ private fun FixedScreen(
                 ) { Text("Learning locked") }
             }
         }
-        item {
-            val pending = dashboard?.fixedEarlyWatch.orEmpty()
-                .filter { !it.officialPublished &&
-                    fixedClockMs - it.latestEvaluatedAtMs in 0L..(6L * 60_000L) }
-                .take(6)
-            Card(
-                colors = CardDefaults.cardColors(containerColor =
-                    MaterialTheme.colorScheme.secondaryContainer.copy(alpha = .18f)),
-                shape = RoundedCornerShape(20.dp)
-            ) {
-                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("PRIMARY early watch · RESEARCH ONLY",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold)
-                    Text("AWAITING CONFIRMATION. Not an official BUY, not eligible for Auto Buy or manual BUY from this section. A new completed scan must requalify the stock.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    if (pending.isEmpty()) {
-                        Text("No recent unconfirmed PRIMARY candidates.",
-                            style = MaterialTheme.typography.bodySmall)
-                    } else pending.forEach { w ->
-                        HorizontalDivider()
-                        Text(w.symbol + " · AWAITING CONFIRMATION",
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.SemiBold)
-                        Text("First PRIMARY ₹" + String.format(Locale.US, "%.2f", w.firstPrimaryPrice) +
-                            " · last observed ₹" + String.format(Locale.US, "%.2f", w.latestPrice) +
-                            " · prior confirmations " + w.confirmationObservations +
-                            " · run-up " + String.format(Locale.US, "%+.2f%%", w.runupPct),
-                            style = MaterialTheme.typography.labelSmall)
-                        if (w.warnings.isNotEmpty()) {
-                            Text("Research caution: " + w.warnings.take(2).joinToString("; "),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                    }
-                }
-            }
-        }
+        // v9.0.19 operator screen shows OFFICIAL confirmed recommendations only.
+        // Early PRIMARY watch stays intact in background research and ZIP exports.
         item { ForecastTable(rows, onBuy,
             state.settings.brokerAuthenticated && state.settings.staticIpMatched && state.settings.brokerDdpiEnabled && !state.settings.safetyHalt,
             fixed = true, fixedMarketOpen = fixedMarketOpen, fixedClockMsForTable = fixedClockMs,
@@ -1181,6 +1144,7 @@ private fun ForecastTable(
     appOwnedPositions: List<com.multify.traderpro.data.network.PositionDto> = emptyList(),
     maxConcurrentHoldings: Int? = null
 ) {
+    val operatorContext = LocalContext.current
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha=.24f)),
@@ -1225,8 +1189,21 @@ private fun ForecastTable(
                         brokerReadiness = executionReady,
                         appOwnedPositionQuantity = heldShares,
                         appOwnedOpenSymbolCount = uniqueHeld,
-                        maxConcurrentHoldings = maxConcurrentHoldings
+                        maxConcurrentHoldings = maxConcurrentHoldings,
+                        quoteMarketabilityState = f.quoteMarketabilityState
                     ) else null
+                    if (fixed && operatorButton != null) {
+                        LaunchedEffect(
+                            f.generatedAtMs, f.status, f.quoteMarketabilityState,
+                            operatorButton.enabled, operatorButton.label
+                        ) {
+                            FixedUiRenderEvidenceStore.recordOperatorStateObserved(
+                                operatorContext, f.symbol, f.generatedAtMs, f.status,
+                                operatorButton.label, operatorButton.enabled,
+                                f.quoteMarketabilityState, System.currentTimeMillis()
+                            )
+                        }
+                    }
                     Row(Modifier.fillMaxWidth().padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                         Text(f.rank.toString(), Modifier.weight(.28f), style = MaterialTheme.typography.bodySmall)
                         Text(f.symbol, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
@@ -1252,6 +1229,30 @@ private fun ForecastTable(
                         maxLines = 3,
                         overflow = TextOverflow.Ellipsis
                     )
+                    if (fixed && f.qualityTier == "PRIMARY") {
+                        Text(
+                            "PRIMARY CONFIRMED · original Fixed recommendation preserved" +
+                                if (f.status == "BUY_EXECUTED") " · broker BUY recorded"
+                                else if (f.status == "TARGET_HIT") " · target reached"
+                                else "",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        val marketabilityMessage = when (f.quoteMarketabilityState) {
+                            "UPPER_BAND_NO_SELL_OFFER" ->
+                                "Latest broker quote: near upper circuit, no sell offer; entry unavailable"
+                            "NO_SELL_OFFER_OBSERVED" ->
+                                "Latest broker quote: no sell offer; entry unavailable"
+                            "OFFER_OUTSIDE_CIRCUIT" ->
+                                "Latest broker quote: sell offer outside price band"
+                            "STALE_CLIENT_QUOTE", "NO_RECENT_QUOTE" ->
+                                "Entry marketability not currently verified · broker checks on BUY"
+                            else -> "Sell offer observed; actual fill not guaranteed"
+                        }
+                        Text(marketabilityMessage, style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                     Button(
                         onClick = { onBuy(f.symbol) },
                         enabled = operatorButton?.enabled ?: ForecastBuyAvailabilityPolicy.canBuy(
