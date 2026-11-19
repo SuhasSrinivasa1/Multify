@@ -1,0 +1,215 @@
+name: Multify v9.0.19 Recommendation Evidence / Frozen Fixed regression TEST
+on:
+  push:
+    branches: [v9019-recommendation-evidence-20261119]
+  pull_request:
+    branches: [v9018-operator-clarity-20261119]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Android SDK 35
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
+      - name: Verify Frozen Fixed model, original BUY/GTT and unchanged trailing
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+          root="app/src/main/java/com/multify/traderpro/"
+          repo=root+"data/repository/TradingRepository.kt"
+          ref19=["30d3ab4f474fc1ed4103da5e1247b0078f484eaf",
+                 "af87c4126572c6aca9a8fadea940011a13bf0ab8"]
+          base28="309b50c297964bf313b26c651a1287e1795e5807"
+          ref907="67cb146b057f17cc2366941e4b1597b664d8e195"
+          def old(ref,path):
+              return subprocess.check_output(["git","show",f"{ref}:{path}"])
+          def seg(blob,from_,to_):
+              a=blob.index(from_.encode())
+              return blob[a:blob.index(to_.encode(),a)]
+          current=Path(repo).read_bytes()
+          for ref in ref19:
+              source=old(ref,repo)
+              for a,b in [
+                  ("suspend fun generateFixedForecasts(","private fun fixedSnapshotMultifyMfeAverage("),
+                  ("private suspend fun discoverFixedMarketWideCandidates(","private suspend fun fetchFixedDiscoveryLtpBatch(")]:
+                  assert seg(current,a,b)==seg(source,a,b),(ref,a,"FROZEN_LIVE_FIXED_MODIFIED")
+              for rel in (
+                  "engine/FixedFinalContract.kt",
+                  "engine/FixedMarketDiscoveryPolicy.kt",
+                  "engine/FixedForecastPublicationPolicy.kt",
+                  "engine/FixedForecastQualityPolicy.kt",
+                  "engine/FixedLocalStrategyEngine.kt",
+                  "engine/FixedFastCandidateSelectionPolicy.kt",
+                  "engine/FixedEntryActionabilityPolicy.kt",
+                  "engine/RecommendationPriceBandPolicy.kt",
+                  "engine/FixedMultifyFactorFamilies.kt"):
+                  p=root+rel
+                  assert Path(p).read_bytes()==old(ref,p),p
+          for rel in (
+              "engine/SteppedTrailingPolicy.kt",
+              "engine/NetGainTrailingPolicy.kt",
+              "engine/HardStopGttTighteningPolicy.kt"):
+              p=root+rel
+              assert Path(p).read_bytes()==old(base28,p),p
+          assert "appOwnedBuyMutex.withLock" in Path(repo).read_text()
+          assert "CircuitAwareBuyPolicy.decide" in Path(repo).read_text()
+          source_text=Path(repo).read_text()
+          assert "GttProtectionReadinessPolicy.verified" in source_text
+          assert "fixed_recommendation_execution_v9013" in source_text
+          assert "!isFixedRecommendationExecutionConsumed(it.id)" in source_text
+          assert "RECOMMENDATION_EVENT_CONSUMED" in source_text
+          assert "recommendationId = row.id" in source_text
+          assert "reserveFixedRecommendationExecution(recommendationId, symbol, reference)" in source_text
+          assert "FIXED_BUY_ORDER_INTENT_RESERVED" in source_text
+          assert "ORDER_INTENT_V9014" in source_text
+          assert "HISTORIC_BUY_REPLAY_GHOST_CLEARED_BROKER_VERIFIED" in source_text
+          assert "brokerInventoryReadMutex.withLock" in source_text
+          assert "activeGttReadMutex.withLock" in source_text
+          assert "headlineUsesFixedDiscovery" in source_text
+          assert "WAITING · NSE MASTER HTTP 403" in source_text
+          assert "BETA_SWEEP_ALPHA_CONTINUATION_V9016" in source_text
+          assert "BETA_FAILED_SLOTS_SEQUENTIAL_ALPHA_REPAIR_V9016" in source_text
+          assert "if (errors > 0) aborted = true" in source_text
+          assert "broker_fallback_for_failed_beta_batches" in source_text
+          assert "if (betaStopped.get() && alphaLiveReady)" in source_text
+          master=Path(root+"data/repository/NseSymbolRepository.kt").read_text()
+          parser=Path(root+"engine/NseInstrumentMasterParser.kt").read_text()
+          worker=Path(root+"worker/NseSymbolSyncWorker.kt").read_text()
+          app=Path(root+"MultifyApp.kt").read_text()
+          assert "https://growwapi-assets.groww.in/instruments/instrument.csv" in master
+          assert "NSE_HOME_URL" in master and "CookieJar" in master
+          assert "GROWW_OFFICIAL_NSE_CASH" in master
+          assert "parseGroww" in parser and "parseNse" in parser
+          assert "KEY_UPDATED" in master and "commit()" in master
+          assert "nse-symbol-master-sync-v9015" in app
+          assert 'wm.cancelUniqueWork("nse-symbol-master-initial")' in app
+          assert 'wm.cancelUniqueWork("nse-symbol-master-monthly")' in app
+          assert "nse-symbol-master-monthly-v9015" in app
+          assert "runAttemptCount < 2" in worker
+          assert "allowOtherSymbolProtectionRecovery = false" in source_text
+          assert "const val MAX_LOSS_PCT = 3.0" in Path(root+"engine/HardStopLossPolicy.kt").read_text()
+          assert "const val HARD_STOP_LOSS_PCT = 3.0" in Path(root+"engine/ReleaseIntegrityManifest.kt").read_text()
+          assert "const val CANONICAL_LEARNING_CALLS = 107" in Path(root+"engine/FixedFinalContract.kt").read_text()
+          build=Path("app/build.gradle.kts").read_text()
+          assert "versionCode = 9019" in build
+          assert 'versionName = "9.0.19-recommendation-evidence"' in build
+          assert "const val BETA_SAFE_LIVE_60S = 40" in Path(root+"engine/FixedResearchCapacityPolicy.kt").read_text()
+          assert "const val MIN_RESEARCH_GAP_MS = 1_000L" in Path(root+"engine/FixedResearchLtpPacingPolicy.kt").read_text()
+          assert "const val APP_PER_MINUTE = 45" in Path(root+"data/network/GrowwHistoricalThrottlePolicy.kt").read_text()
+          assert "const val BETA_HISTORICAL_PER_MINUTE = 8" in Path(root+"engine/FixedDualAccountPolicy.kt").read_text()
+          alpha=Path(root+"data/network/GrowwRateLimitInterceptor.kt").read_text()
+          beta=Path(root+"data/network/BetaResearchGate.kt").read_text()
+          assert "DualMinuteAdmissionPolicy.calendarWaitMs(" in alpha
+          assert "DualMinuteAdmissionPolicy.calendarWaitMs(" in beta
+          assert ".betaDiscoveryPreferred(" in Path(repo).read_text()
+          assert "PREFETCH_YIELDED_TO_FOREGROUND_V909" in Path(repo).read_text()
+          assert "INDICATOR_WARMUP_SHADOW_V909" in Path(repo).read_text()
+          assert "fixed_selection_unchanged" in Path(repo).read_text()
+          net=Path(root+"data/network/GrowwApiFactory.kt").read_text()
+          assert net.count("BrokerWireAuditInterceptor(")==2
+          assert net.count(".retryOnConnectionFailure(false)") == 2
+          assert net.count(".followRedirects(false)") == 2
+          assert "wire_api_usage_snapshot.json" in Path(repo).read_text()
+          # v9.0.18 instrumentation must stay OUTSIDE the byte-locked
+          # discovery/evaluation functions, all execution and GTT policy.
+          factor=Path(root+"data/logging/FixedFactorTelemetry.kt").read_text()
+          assert '"working_range_shadow_v9017"' in factor
+          assert 'FixedWorkingRangeShadowPolicy.observe(' in factor
+          assert 'fixed_primary_progression_v9017.json' in source_text
+          assert 'PERSISTED_QUALIFIED_TIER_SCAN_START' in source_text
+          working=Path(root+"engine/FixedWorkingRangeShadowPolicy.kt").read_text()
+          assert 'does_not_approve_or_reject_trades' in working
+          assert 'no_extra_broker_calls' in working
+          assert 'working_range_qualified" to false' in working
+          assert 'no_extra_broker_calls" to true' in working
+
+          # Operator-only changes must remain outside all Frozen Fixed and broker paths.
+          ui=Path(root+"ui/screens/TraderApp.kt").read_text()
+          operator=Path(root+"engine/FixedOperatorButtonPolicy.kt").read_text()
+          wire=Path(root+"data/network/BrokerWireAuditInterceptor.kt").read_text()
+          assert "FixedOperatorButtonPolicy.decide(" in ui
+          assert "appOwnedPositions = dashboard?.positions.orEmpty()" in ui
+          assert "BUY EXECUTED ·" in operator and "Holding capacity" in operator
+          assert "accounts[t.account]" in wire
+          assert "categories[t.account + \"/\" + t.category]" in wire
+          assert "endpoints[t.account + \"/\" + t.endpoint]" in wire
+          assert "fixed_working_range_shadow_v9017" in Path(root+"engine/FixedWorkingRangeShadowPolicy.kt").read_text()
+          # No automatic change from the currently broker-verified -3% stop.
+          assert "const val MAX_LOSS_PCT = 3.0" in Path(root+"engine/HardStopLossPolicy.kt").read_text()
+          # v9.0.19 exclusively adds read-only marketability and shadow MCQ.
+          ui=Path(root+"ui/screens/TraderApp.kt").read_text()
+          factor=Path(root+"data/logging/FixedFactorTelemetry.kt").read_text()
+          mcq=Path(root+"engine/FixedMomentumContinuationShadowPolicy.kt").read_text()
+          marketability=Path(root+"engine/FixedQuoteMarketabilityPresentationPolicy.kt").read_text()
+          dto=Path(root+"data/network/ApiModels.kt").read_text()
+          assert '"momentum_continuation_shadow_v9019"' in factor
+          assert '"validated_raw_book_shadow_v9019"' in factor
+          assert '"changes_fixed_selection_or_execution" to false' in mcq
+          assert '"working_range_certified" to false' in mcq
+          assert 'CLIENT_RECEIPT_WINDOW_MS = 8_000L' in marketability
+          assert '"UPPER_BAND_NO_SELL_OFFER"' in marketability
+          assert 'quoteMarketabilityState' in dto and 'quoteMarketabilityState = marketability.state' in source_text
+          assert '"fixed_operator_ui_transitions_v9019.json"' in source_text
+          assert 'FixedUiRenderEvidenceStore.recordOperatorStateObserved(' in ui
+          assert 'PRIMARY CONFIRMED · original Fixed recommendation preserved' in ui
+          assert 'val pending = dashboard?.fixedEarlyWatch.orEmpty()' not in ui
+          assert 'fixed_scan_observations.json' in source_text
+          owner=Path(root+"engine/AppPositionOwnershipPolicy.kt").read_text()
+          univest=Path(root+"engine/UnivestAutoBuyPolicy.kt").read_text()
+          assert '"UNIVEST_HOLDING" to setOf("UVH")' in owner
+          assert 'const val MAX_NOTIFICATION_AGE_MS = 120_000L' in univest
+          assert 'ALERT_PREDATES_FIXED_TOGGLE' in univest
+          assert 'NOT_UNIVEST_ENTRY' in univest
+          assert 'autoBuyUnivestViaFixedToggle(signal.symbol, at, key)' in Path(repo).read_text()
+          assert 'engine = ENGINE_UNIVEST_HOLDING' in Path(repo).read_text()
+          assert 'HardStopLossPolicy.stopPrice(actualEntry)' in Path(repo).read_text()
+          assert 'univest_exit_can_sell" to false' in Path(repo).read_text()
+          print("PASS: Frozen Fixed v19, unchanged live selection/order/GTT/trail, Univest Alpha source/ownership checks")
+          PY
+      - name: Historical/replay policy tests
+        run: |
+          python -m unittest discover -s backend/tests -p 'test_adaptive_timeframe_replay.py' -v
+          python -m unittest discover -s backend/tests -p 'test_v9_master_log_replay.py' -v
+      - name: Full Android unit tests / v9.0.19 EVIDENCE TEST APK
+        env:
+          MULTIFY_KEYSTORE_PASSWORD: ${{ secrets.MULTIFY_KEYSTORE_PASSWORD }}
+        run: gradle :app:testDebugUnitTest :app:assembleDebug --no-daemon --stacktrace
+      - name: Verify APK signing and SHA-256
+        run: |
+          apk=$(find app/build/outputs/apk/debug -maxdepth 1 -name '*.apk' -type f | head -n 1)
+          test -n "$apk" && test -s "$apk"
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$apk" \
+            | tee app/build/outputs/apk/debug/v9019-signature-verification.txt
+          # Build signing is verified, but a successful debug signature does
+          # NOT prove this binary can update the installed v9.0.16 certificate.
+          echo "IN_PLACE_UPDATE_COMPATIBLE_WITH_V9018=UNVERIFIED" | tee app/build/outputs/apk/debug/v9019-install-compatibility.txt
+          echo "Before installing, compare signer certificate against the currently installed APK. Do not uninstall with open holdings or unexported state."
+          sha256sum "$apk" | tee app/build/outputs/apk/debug/v9019-SHA256SUMS.txt
+      - name: Upload CI verified package
+        uses: actions/upload-artifact@v4
+        with:
+          name: Multify-v9.0.19-Recommendation-Evidence-TEST-debug
+          path: |
+            app/build/outputs/apk/debug/*.apk
+            app/build/outputs/apk/debug/v9019-signature-verification.txt
+            app/build/outputs/apk/debug/v9019-SHA256SUMS.txt
+            app/build/outputs/apk/debug/v9019-install-compatibility.txt
