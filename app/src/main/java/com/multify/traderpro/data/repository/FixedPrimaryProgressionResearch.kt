@@ -21,15 +21,37 @@ internal object FixedPrimaryProgressionResearch {
         val indexed = distinct.groupBy {
             it.recommendationDate to it.symbol.uppercase()
         }.mapValues { (_, rows) -> rows.sortedBy { it.scanAtMs } }
-        val rows = recommendations.map { recommendation ->
-            val series = indexed[recommendation.recommendationDate to
-                recommendation.symbol.uppercase()].orEmpty()
-                .filter { it.scanAtMs <= recommendation.generatedAtMs }
-            val firstAny = series.firstOrNull()
-            val primary = series.filter {
-                it.qualityTier == "PRIMARY" && it.publishEligible && it.executionEligible
+        val orderedRecommendations = recommendations.sortedWith(
+            compareBy<FixedRecommendationRecord> { it.recommendationDate }
+                .thenBy { it.symbol.uppercase() }.thenBy { it.generatedAtMs }
+        )
+        val rows = orderedRecommendations.map { recommendation ->
+            val key = recommendation.recommendationDate to recommendation.symbol.uppercase()
+            val symbolObservations = indexed[key].orEmpty()
+            val series = symbolObservations.filter { it.scanAtMs <= recommendation.generatedAtMs }
+            val previousAt = orderedRecommendations.asSequence().filter {
+                it.recommendationDate == recommendation.recommendationDate &&
+                    it.symbol.equals(recommendation.symbol, true) &&
+                    it.generatedAtMs < recommendation.generatedAtMs
+            }.maxOfOrNull { it.generatedAtMs }
+            // A repeat event starts a new evidence cohort after the latest explicit
+            // non-PRIMARY reset following the previous event. Never reuse the
+            // symbol's first PRIMARY from an earlier setup.
+            val resetAt = previousAt?.let {
+                com.multify.traderpro.engine.FixedRepeatQualificationPolicy.resetAt(
+                    recommendation.symbol, it, symbolObservations)
+            }
+            val eventSeries = when {
+                previousAt == null -> series
+                resetAt != null -> series.filter { it.scanAtMs >= resetAt }
+                else -> emptyList()
+            }
+            val firstAny = eventSeries.firstOrNull()
+            val primary = eventSeries.filter {
+                it.qualityTier == "PRIMARY" && it.publishEligible && it.executionEligible &&
+                    it.observedPrice?.isFinite() == true && (it.observedPrice ?: 0.0) > 0.0
             }.distinctBy { it.scanAtMs }
-            val secondary = series.firstOrNull { it.qualityTier == "SECONDARY" }
+            val secondary = eventSeries.firstOrNull { it.qualityTier == "SECONDARY" }
             val first = primary.firstOrNull()
             val firstPrice = first?.observedPrice?.takeIf { it.isFinite() && it > 0.0 }
             val drift = firstPrice?.let {
@@ -44,6 +66,10 @@ internal object FixedPrimaryProgressionResearch {
                 "actual_publication_at_ms" to null,
                 "actual_publication_time_in_system_audit" to
                     "PUBLISHED_RECOMMENDATION_STUDY_V9011",
+                "previous_event_scan_start_at_ms" to previousAt,
+                "reset_observation_scan_at_ms" to resetAt,
+                "event_anchor_scope" to if (previousAt == null)
+                    "FIRST_SETUP_OF_SESSION" else "AFTER_EXPLICIT_NON_PRIMARY_RESET",
                 "first_any_tier_scan_at_ms" to firstAny?.scanAtMs,
                 "first_any_tier" to firstAny?.qualityTier,
                 "first_secondary_scan_at_ms" to secondary?.scanAtMs,
@@ -61,7 +87,7 @@ internal object FixedPrimaryProgressionResearch {
                 "recommendation_status_at_export" to recommendation.status,
                 "earliest_first_primary_missing" to (first == null),
                 "cohort_required_no_publication_veto" to true,
-                "observation_series" to series.map {
+                "observation_series" to eventSeries.map {
                     mapOf(
                         "scan_start_at_ms" to it.scanAtMs, "tier" to it.qualityTier,
                         "observed_price" to it.observedPrice,
@@ -72,7 +98,7 @@ internal object FixedPrimaryProgressionResearch {
             )
         }
         return mapOf(
-            "schema" to "fixed_primary_progression_v9017",
+            "schema" to "fixed_primary_progression_v9018",
             "source" to "PERSISTED_FIXED_ALL_TIER_OBSERVATIONS",
             "trade_or_fixed_selection_effect" to false,
             "new_broker_requests" to 0,
