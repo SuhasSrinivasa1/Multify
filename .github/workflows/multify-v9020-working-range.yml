@@ -172,7 +172,7 @@ jobs:
           assert 'REQUIRED_CONSECUTIVE_OBSERVATIONS = 2' in wr
           assert 'MAX_CANDIDATE_AGE_MINUTES = 36.0' in wr
           assert 'MAX_DRIFT_FROM_FIRST_QUALIFIED_PCT = 1.60' in wr
-          assert 'autoBuyEnabled = false' in wrstore
+          assert '"auto_buy_enabled" to false' in wrstore
           assert 'extra_broker_requests' in wrstore and '0' in wrstore
           assert 'no Working Range Auto-Buy' in vm or 'no Working Range Auto-Buy' in ui
           assert 'BETA_CLIENT_GOVERNOR_WAIT' in beta and 'BETA_HTTP_429' in beta
