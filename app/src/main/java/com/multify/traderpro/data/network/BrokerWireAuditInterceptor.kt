@@ -77,10 +77,16 @@ internal object BrokerWireAttemptLedger {
     fun finish(t: Ticket, status: Int?, audit: AuditLogger,
                exception: String? = null) {
         synchronized(lock) {
-            val key = t.account + "/" + t.category
-            val state = categories.getValue(key)
-            if (status==429) state.status429++
-            if (status==null || status>=400) state.failures++
+            val categoryState = categories.getValue(t.account + "/" + t.category)
+            val accountState = accounts.getValue(t.account)
+            val endpointState = endpoints.getValue(t.account + "/" + t.endpoint)
+            // Keep account, category and endpoint roll-ups consistent with the
+            // actual wire event. Previously only category counters were updated,
+            // so account/endpoint summaries falsely reported zero 429s/failures.
+            listOf(categoryState, accountState, endpointState).forEach { state ->
+                if (status == 429) state.status429++
+                if (status == null || status >= 400) state.failures++
+            }
         }
         audit.logAsync("API_WIRE", "ACTUAL_WIRE_ATTEMPT_V909", mapOf(
             "wire_attempt_id" to t.id, "account" to t.account,
