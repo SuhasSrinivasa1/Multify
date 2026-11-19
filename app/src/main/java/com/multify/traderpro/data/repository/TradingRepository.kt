@@ -2408,7 +2408,7 @@ class TradingRepository @Inject constructor(
 
         dao.updateForwarding(
             eventId, "ANALYZED", "MULTIFY_EXIT_TRAIL_CONTINUES",
-            "Multify Book Profit recorded for MFE learning only. $symbol remains held; the common -3% hard stop and fixed stepped profitable trail remain the mandatory sell logic.",
+            "Multify Book Profit recorded for MFE learning only. $symbol remains held; the common -2% hard stop and fixed stepped profitable trail remain the mandatory sell logic.",
             null
         )
         auditLogger.log("HOLDING", "MULTIFY_BOOK_PROFIT_IGNORED_FOR_EXECUTION", mapOf(
@@ -9367,7 +9367,7 @@ class TradingRepository @Inject constructor(
                         outcomeMfePct = mfe,
                         outcomeMaePct = mae,
                         outcomeClosePct = closePct,
-                        // Do not label a historical Forecast success when the -3% research stop
+                        // Do not label a historical Forecast success when the -2% research stop
                         // was observed first or the one-minute sequence is ambiguous.
                         outcomeTargetHit = chronological.firstTouch == "TARGET_FIRST_1M",
                         outcomeUpdatedAtMs = System.currentTimeMillis()
@@ -10273,7 +10273,7 @@ class TradingRepository @Inject constructor(
 
         if (!marketOpen) {
             // Keep every managed LONG protected overnight. Existing profitable trailing GTTs are
-            // preserved; an unarmed holding receives the common -3% server-side hard stop. This
+            // preserved; an unarmed holding receives the common -2% server-side hard stop. This
             // also self-recovers protection after an app/service restart or a prior GTT failure.
             var hardStopReady = 0
             var hardStopFailures = 0
@@ -10761,7 +10761,7 @@ class TradingRepository @Inject constructor(
                             protected,
                             ltp,
                             if (desiredMode == HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT)
-                                "COMMON_HARD_STOP_MINUS_3_STALE_GTT_FALLBACK"
+                                "COMMON_HARD_STOP_MINUS_2_STALE_GTT_FALLBACK"
                             else "LONG_TRAILING_PROFIT_STOP_V7_1_STALE_GTT_FALLBACK",
                             decisionStartedNs
                         )
@@ -10830,7 +10830,7 @@ class TradingRepository @Inject constructor(
                             cleared,
                             ltp,
                             if (working.smartOrderMode == HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT)
-                                "COMMON_HARD_STOP_MINUS_3_GTT_FAILED_FALLBACK"
+                                "COMMON_HARD_STOP_MINUS_2_GTT_FAILED_FALLBACK"
                             else "LONG_TRAILING_PROFIT_STOP_V7_1_GTT_FAILED_FALLBACK",
                             decisionStartedNs
                         )
@@ -10865,7 +10865,7 @@ class TradingRepository @Inject constructor(
             position.smartOrderMode != HoldingSmartOrderPolicy.MODE_TRAILING_GTT
         if (stopRaised || trailJustArmed) {
             val event = when {
-                desiredMode == HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT && previousProtected == null -> "HARD_STOP_MINUS_3_ARMED"
+                desiredMode == HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT && previousProtected == null -> "HARD_STOP_MINUS_2_ARMED"
                 trailJustArmed -> "V7_1_TRAIL_ARMED"
                 else -> "V7_1_STEP_RATCHET"
             }
