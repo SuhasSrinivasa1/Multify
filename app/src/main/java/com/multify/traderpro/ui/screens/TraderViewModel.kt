@@ -190,6 +190,24 @@ class TraderViewModel @Inject constructor(
         }
     }
 
+    fun setWorkingRangeEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            remote.value = remote.value.copy(loading = true, error = null, message = null)
+            runCatching { repository.setWorkingRangeEnabled(enabled) }
+                .onSuccess {
+                    remote.value = remote.value.copy(
+                        loading = false,
+                        message = if (enabled)
+                            "Working Range pilot enabled · separate manual-review stream · Fixed remains unchanged · no Working Range Auto-Buy"
+                        else
+                            "Working Range pilot disabled · Fixed continues unchanged"
+                    )
+                    refresh(silent = true)
+                }
+                .onFailure { remote.value = remote.value.copy(loading = false, error = it.userMessage()) }
+        }
+    }
+
     fun setFixedAutoBuy(enabled: Boolean) {
         viewModelScope.launch {
             remote.value = remote.value.copy(loading = true, error = null, message = null)
