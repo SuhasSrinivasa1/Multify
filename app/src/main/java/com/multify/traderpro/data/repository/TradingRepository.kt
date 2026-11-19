@@ -7984,6 +7984,9 @@ class TradingRepository @Inject constructor(
         // Legacy entry GTTs migrate in the maintenance worker, never on the BUY hot path.
         val pendingLegacy = fixedAutoBuyOrderStore.forSymbol(today, row.symbol)
         if (pendingLegacy != null && !ForecastAutoBuyPolicy.isTerminal(pendingLegacy.status)) {
+            fixedExecutionUiStateStore.record(row.id, row.symbol,
+                FixedExecutionPresentationPolicy.BLOCKED_PENDING_GTT,
+                "A legacy entry GTT is still being reconciled; duplicate BUY remains blocked.")
             return "Legacy Fixed entry GTT is still being reconciled for ${row.symbol}; no duplicate BUY was sent"
         }
 
@@ -7994,6 +7997,9 @@ class TradingRepository @Inject constructor(
         require(RecommendationPriceBandPolicy.eligible(row.entryPrice)) { "Fixed executes only stocks strictly between ₹200 and ₹5,000" }
         require(row.executionEligible && row.qualityTier == "PRIMARY") { "Only PRIMARY Fixed recommendations can place a real BUY" }
         if (managedDao.openPosition(ENGINE_FIXED_HOLDING, row.symbol) != null) {
+            fixedExecutionUiStateStore.record(row.id, row.symbol,
+                FixedExecutionPresentationPolicy.BLOCKED_EXISTING_HOLDING,
+                "An app-owned Fixed holding is already open for this symbol.")
             return "${row.symbol} already has a Fixed holding; duplicate Fixed BUY blocked"
         }
 
@@ -8060,11 +8066,55 @@ class TradingRepository @Inject constructor(
             "Fixed BUY disabled: recommendation is no longer active"
         }
         val ref = stableRef("FXH", "${row.recommendationDate}-${row.id}-${row.symbol}")
-        val order = placeCncBuy(token, row.symbol, sizing.quantity, ref, entryQuote = quote, quoteReceivedAtMs = quoteRequestStartedAtMs + quoteRequestElapsedMs)
+        val order = try {
+            placeCncBuy(token, row.symbol, sizing.quantity, ref, entryQuote = quote,
+                quoteReceivedAtMs = quoteRequestStartedAtMs + quoteRequestElapsedMs,
+                recommendationId = row.id)
+        } catch (error: Throwable) {
+            val message = error.message.orEmpty()
+            val status = when {
+                message.contains("already exists in Groww/app holdings", true) ->
+                    FixedExecutionPresentationPolicy.BLOCKED_EXTERNAL_HOLDING
+                message.contains("MAX_CONCURRENT_HOLDINGS", true) ->
+                    FixedExecutionPresentationPolicy.BLOCKED_MAX_HOLDINGS
+                BrokerBuyFailureMessagePolicy.insufficientFunds(message) ->
+                    FixedExecutionPresentationPolicy.BLOCKED_INSUFFICIENT_FUNDS
+                else -> FixedExecutionPresentationPolicy.BROKER_REJECTED
+            }
+            val reason = when (status) {
+                FixedExecutionPresentationPolicy.BLOCKED_EXTERNAL_HOLDING ->
+                    "A Groww holding already exists outside this Fixed-owned position; ownership remains separate."
+                FixedExecutionPresentationPolicy.BLOCKED_MAX_HOLDINGS ->
+                    "Configured concurrent app-owned holding limit is currently full."
+                FixedExecutionPresentationPolicy.BLOCKED_INSUFFICIENT_FUNDS ->
+                    "Groww rejected this BUY for insufficient funds."
+                else -> "Groww did not accept this BUY; inspect the execution audit for the broker response."
+            }
+            fixedExecutionUiStateStore.record(row.id, row.symbol, status, reason,
+                requestedQuantity = sizing.quantity)
+            throw error
+        }
         val filled = order.filledQuantity?.takeIf { it > 0 } ?: sizing.quantity
         val actualFill = order.averageFillPrice?.takeIf { it.isFinite() && it > 0.0 } ?: ltp
         val executionTarget = actualFill * (1.0 + row.targetPct / 100.0)
         val nowMs = System.currentTimeMillis()
+        val partialFill = filled < sizing.quantity
+        fixedExecutionUiStateStore.record(
+            row.id, row.symbol,
+            if (partialFill) FixedExecutionPresentationPolicy.PARTIAL_FILL
+            else FixedExecutionPresentationPolicy.EXECUTED,
+            if (partialFill) "Groww reported a partial fill; only the confirmed filled quantity is registered."
+            else "Groww confirmed the full requested BUY quantity.",
+            requestedQuantity = sizing.quantity, filledQuantity = filled)
+        fixedRecommendationStore.update(row.copy(
+            status = "BUY_EXECUTED",
+            lastPrice = actualFill,
+            lastObservedAtMs = nowMs,
+            maxFavourablePct = maxOf(row.maxFavourablePct,
+                (actualFill / row.entryPrice - 1.0) * 100.0),
+            maxAdversePct = maxOf(row.maxAdversePct,
+                (row.entryPrice - actualFill).coerceAtLeast(0.0) / row.entryPrice * 100.0)
+        ))
         registerBoughtPositionAndProtect(
             ManagedPositionEntity(
                 engine = ENGINE_FIXED_HOLDING,
