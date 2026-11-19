@@ -7468,10 +7468,17 @@ class TradingRepository @Inject constructor(
             return "${row.symbol} already has a Forecast holding; duplicate Forecast BUY blocked"
         }
         val quoteRequestStartedAtMs = System.currentTimeMillis()
-        val quote = apiFactory.groww.quote(
-            bearer(token), tradingSymbol = row.symbol,
-            trafficPriority = MarketDataPriorityAdmissionPolicy.PROTECTION
-        ).requirePayload("Quote ${row.symbol}")
+        val quote = try {
+            apiFactory.groww.quote(
+                bearer(token), tradingSymbol = row.symbol,
+                trafficPriority = MarketDataPriorityAdmissionPolicy.PROTECTION
+            ).requirePayload("Quote ${row.symbol}")
+        } catch (error: Throwable) {
+            fixedExecutionUiStateStore.record(row.id, row.symbol,
+                FixedExecutionPresentationPolicy.BROKER_REJECTED,
+                "Fresh Alpha execution quote could not be obtained.")
+            throw error
+        }
         val quoteRequestElapsedMs = System.currentTimeMillis() - quoteRequestStartedAtMs
         val ltp = quote.lastPrice ?: error("Groww quote has no LTP")
         require(RecommendationPriceBandPolicy.eligible(ltp)) { "Forecast BUY requires fresh price >₹200 and <₹5,000" }
@@ -8011,13 +8018,20 @@ class TradingRepository @Inject constructor(
         ).requirePayload("Quote ${row.symbol}")
         val quoteRequestElapsedMs = System.currentTimeMillis() - quoteRequestStartedAtMs
         val ltp = quote.lastPrice ?: error("Groww quote has no LTP")
-        require(RecommendationPriceBandPolicy.eligible(ltp)) { "Fixed BUY requires fresh price >₹200 and <₹5,000" }
+        if (!RecommendationPriceBandPolicy.eligible(ltp)) {
+            fixedExecutionUiStateStore.record(row.id, row.symbol,
+                FixedExecutionPresentationPolicy.BLOCKED_PRICE_BAND,
+                "Fresh broker price is outside the approved Fixed execution price band.")
+            error("Fixed BUY requires fresh price >₹200 and <₹5,000")
+        }
         val fixedLiquidityReject = ExecutionQuoteLiquidityPolicy.rejectionReason(quote)
         if (fixedLiquidityReject != null) {
             auditLogger.logAsync("FIXED_BUY", "ENTRY_LIQUIDITY_UNVERIFIED", mapOf(
                 "symbol" to row.symbol, "reason" to fixedLiquidityReject,
                 "source" to "FRESH_EXECUTION_QUOTE", "fixed_scoring_changed" to false
             ))
+            fixedExecutionUiStateStore.record(row.id, row.symbol,
+                FixedExecutionPresentationPolicy.BLOCKED_LIQUIDITY, fixedLiquidityReject)
             error("Fixed BUY blocked: broker book not verified ($fixedLiquidityReject)")
         }
         val thinLiquidityReject = FixedExecutionThinLiquidityPolicy.rejectionReason(quote)
@@ -8027,6 +8041,8 @@ class TradingRepository @Inject constructor(
                 "reported_day_shares" to quote.volume,
                 "daily_turnover_estimate" to (ltp * (quote.volume ?: 0L)),
                 "fixed_scoring_changed" to false))
+            fixedExecutionUiStateStore.record(row.id, row.symbol,
+                FixedExecutionPresentationPolicy.BLOCKED_LIQUIDITY, thinLiquidityReject)
             error("Fixed BUY blocked: extremely thin reported turnover ($thinLiquidityReject)")
         }
         val entryActionability = fixedEntryVerdict(row, quote)
@@ -8036,6 +8052,9 @@ class TradingRepository @Inject constructor(
                 "first_primary_to_entry_pct" to entryActionability.firstPrimaryRunupPct,
                 "distance_from_day_high_pct" to entryActionability.distanceFromQuoteHighPct,
                 "fixed_model_unchanged" to true))
+            fixedExecutionUiStateStore.record(row.id, row.symbol,
+                FixedExecutionPresentationPolicy.BLOCKED_ENTRY_QUALITY,
+                entryActionability.reasons.joinToString(","))
             error("Fixed BUY held for research: " + entryActionability.reasons.joinToString(","))
         }
         val fixedExtensionReject = ExecutionEntryPriceGuardPolicy.rejectionReason(
@@ -8045,6 +8064,8 @@ class TradingRepository @Inject constructor(
                 mapOf("symbol" to row.symbol, "reason" to fixedExtensionReject,
                     "quote_network_elapsed_ms" to quoteRequestElapsedMs, "reference" to row.entryPrice,
                     "fresh_ltp" to ltp, "fixed_scoring_changed" to false))
+            fixedExecutionUiStateStore.record(row.id, row.symbol,
+                FixedExecutionPresentationPolicy.BLOCKED_PRICE_EXTENSION, fixedExtensionReject)
             error("Fixed BUY blocked: entry quote guard ($fixedExtensionReject)")
         }
         if (ltp >= row.targetPrice) {
@@ -8471,6 +8492,9 @@ class TradingRepository @Inject constructor(
             )
             if (executionCooldown != null) {
                 auditAutoBuyBlocked("FIXED_AUTO_BUY", executionCooldown, row.id, row.symbol)
+                fixedExecutionUiStateStore.record(row.id, row.symbol,
+                    FixedExecutionPresentationPolicy.BROKER_COOLDOWN,
+                    "Order/inventory API cooldown active; automatic retry is scheduled.")
                 scheduleFixedAutoBuyCooldownWake(rows, executionCooldown, System.currentTimeMillis())
                 break
             }
