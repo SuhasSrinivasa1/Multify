@@ -268,9 +268,11 @@ class TradingRepository @Inject constructor(
 
     private suspend fun workingRangeEnabledNow(): Boolean {
         workingRangeEnabledCache?.let { return it }
-        return preferences.settings.first().workingRangeEnabled.also {
-            workingRangeEnabledCache = it
-        }
+        val enabled = preferences.settings.first().workingRangeEnabled
+        workingRangeEnabledCache = enabled
+        workingRangeRecommendationStore.setEnabled(enabled,
+            "Working Range initialized from persisted operator setting")
+        return enabled
     }
 
     private val fixedRecommendationExecutionPrefs by lazy {
@@ -1669,10 +1671,9 @@ class TradingRepository @Inject constructor(
         preferences.setWorkingRangeEnabled(enabled)
         workingRangeEnabledCache = enabled
         if (previous != enabled) {
-            workingRangeRecommendationStore.resetPending(
+            workingRangeRecommendationStore.setEnabled(enabled,
                 if (enabled) "Working Range re-enabled; new candidate baseline required"
-                else "Working Range disabled by operator"
-            )
+                else "Working Range disabled by operator")
         }
         auditLogger.log("SETTINGS",
             if (enabled) "WORKING_RANGE_ENABLED" else "WORKING_RANGE_DISABLED",
