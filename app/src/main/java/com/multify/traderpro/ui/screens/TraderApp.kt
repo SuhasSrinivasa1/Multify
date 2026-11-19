@@ -81,6 +81,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.multify.traderpro.BuildConfig
 import com.multify.traderpro.engine.FixedBuyAvailabilityPolicy
+import com.multify.traderpro.engine.FixedOperatorButtonPolicy
 import com.multify.traderpro.data.network.DashboardDto
 import com.multify.traderpro.data.network.FixedScanTrendStore
 import com.multify.traderpro.data.logging.FixedUiRenderEvidenceStore
@@ -960,6 +961,22 @@ private fun FixedScreen(
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.Medium
                     )
+                    if (dashboard != null) {
+                        val appOwnedOpenSymbols = dashboard.positions
+                            .filter { it.quantity > 0 }
+                            .map { it.symbol.uppercase(Locale.US) }
+                            .distinct().size
+                        Text(
+                            "Operator app-owned positions: ${appOwnedOpenSymbols}/${state.settings.maxConcurrentHoldings} · Groww inventory and available cash checked again at execution",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Text(
+                        "Current hard-stop policy: -${com.multify.traderpro.engine.HardStopLossPolicy.MAX_LOSS_PCT}% · verify against prior -2% specification before enabling new automatic BUYs. Existing protection remains monitored.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
         }
@@ -1135,7 +1152,9 @@ private fun FixedScreen(
         }
         item { ForecastTable(rows, onBuy,
             state.settings.brokerAuthenticated && state.settings.staticIpMatched && state.settings.brokerDdpiEnabled && !state.settings.safetyHalt,
-            fixed = true, fixedMarketOpen = fixedMarketOpen, fixedClockMsForTable = fixedClockMs
+            fixed = true, fixedMarketOpen = fixedMarketOpen, fixedClockMsForTable = fixedClockMs,
+            appOwnedPositions = dashboard?.positions.orEmpty(),
+            maxConcurrentHoldings = state.settings.maxConcurrentHoldings
         ) }
         item {
             Card(
@@ -1158,7 +1177,9 @@ private fun FixedScreen(
 @Composable
 private fun ForecastTable(
     rows: List<ForecastDto>, onBuy: (String) -> Unit, executionReady: Boolean,
-    fixed: Boolean = false, fixedMarketOpen: Boolean = true, fixedClockMsForTable: Long = 0L
+    fixed: Boolean = false, fixedMarketOpen: Boolean = true, fixedClockMsForTable: Long = 0L,
+    appOwnedPositions: List<com.multify.traderpro.data.network.PositionDto> = emptyList(),
+    maxConcurrentHoldings: Int? = null
 ) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -1187,6 +1208,25 @@ private fun ForecastTable(
                 rows.forEachIndexed { index, f ->
                     val oldFixedEvent = fixed &&
                         f.generatedAtMs < (newestFixedEvent[f.symbol.uppercase(Locale.US)] ?: f.generatedAtMs)
+                    val openPositions = if (fixed) appOwnedPositions.filter { it.quantity > 0 } else emptyList()
+                    val heldShares = openPositions.filter { it.symbol.equals(f.symbol, true) }
+                        .sumOf { it.quantity }.takeIf { it > 0 }
+                    val uniqueHeld = openPositions.map { it.symbol.uppercase(Locale.US) }
+                        .distinct().size
+                    // Presentation-only: backend still performs authoritative inventory,
+                    // freshness, order deduplication and GTT-protection checks.
+                    val operatorButton = if (fixed) FixedOperatorButtonPolicy.decide(
+                        symbol = f.symbol,
+                        status = f.status,
+                        executionEligible = f.executionEligible,
+                        olderRecommendationEvent = oldFixedEvent,
+                        regularMarketOpen = fixedMarketOpen,
+                        fixedEntryWindowOpen = FixedBuyAvailabilityPolicy.fixedNewEntryWindow(fixedClockMsForTable),
+                        brokerReadiness = executionReady,
+                        appOwnedPositionQuantity = heldShares,
+                        appOwnedOpenSymbolCount = uniqueHeld,
+                        maxConcurrentHoldings = maxConcurrentHoldings
+                    ) else null
                     Row(Modifier.fillMaxWidth().padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                         Text(f.rank.toString(), Modifier.weight(.28f), style = MaterialTheme.typography.bodySmall)
                         Text(f.symbol, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
@@ -1214,15 +1254,13 @@ private fun ForecastTable(
                     )
                     Button(
                         onClick = { onBuy(f.symbol) },
-                        enabled = if (fixed) !oldFixedEvent && FixedBuyAvailabilityPolicy.canBuy(
-                            fixedClockMsForTable, executionReady, f.status, f.executionEligible
-                        ) else ForecastBuyAvailabilityPolicy.canBuy(
+                        enabled = operatorButton?.enabled ?: ForecastBuyAvailabilityPolicy.canBuy(
                             fixedClockMsForTable, executionReady, f.status, f.executionEligible
                         ),
                         modifier = Modifier.fillMaxWidth().padding(top = 7.dp)
                     ) {
                         Text(
-                            when {
+                            operatorButton?.label ?: when {
                                 oldFixedEvent -> "Earlier Fixed setup · BUY latest instead"
                                 fixed && f.status == "TARGET_HIT" -> "TARGET HIT · BUY disabled"
                                 fixed && f.status != "ACTIVE" -> "Session ended · BUY disabled"
