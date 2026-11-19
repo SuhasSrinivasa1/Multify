@@ -1,0 +1,138 @@
+name: Multify v9.0.18 Operator / Fixed safety and telemetry
+on:
+  push:
+    branches: [v9018-operator-20261119]
+  pull_request:
+    branches: [v9017-working-range-evidence-20261118]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Android SDK 35
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
+      - name: Verify frozen Fixed contract, -2% protection, execution states and event-local telemetry
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+          root="app/src/main/java/com/multify/traderpro/"
+          repo=root+"data/repository/TradingRepository.kt"
+          ref19=["30d3ab4f474fc1ed4103da5e1247b0078f484eaf",
+                 "af87c4126572c6aca9a8fadea940011a13bf0ab8"]
+          base28="309b50c297964bf313b26c651a1287e1795e5807"
+          def old(ref,path):
+              return subprocess.check_output(["git","show",f"{ref}:{path}"])
+          def seg(blob,from_,to_):
+              a=blob.index(from_.encode())
+              return blob[a:blob.index(to_.encode(),a)]
+          current=Path(repo).read_bytes()
+          for ref in ref19:
+              source=old(ref,repo)
+              for a,b in [
+                  ("suspend fun generateFixedForecasts(","private fun fixedSnapshotMultifyMfeAverage("),
+                  ("private suspend fun discoverFixedMarketWideCandidates(","private suspend fun fetchFixedDiscoveryLtpBatch(")]:
+                  assert seg(current,a,b)==seg(source,a,b),(ref,a,"FROZEN_LIVE_FIXED_MODIFIED")
+              for rel in (
+                  "engine/FixedFinalContract.kt",
+                  "engine/FixedMarketDiscoveryPolicy.kt",
+                  "engine/FixedForecastPublicationPolicy.kt",
+                  "engine/FixedForecastQualityPolicy.kt",
+                  "engine/FixedLocalStrategyEngine.kt",
+                  "engine/FixedFastCandidateSelectionPolicy.kt",
+                  "engine/FixedEntryActionabilityPolicy.kt",
+                  "engine/RecommendationPriceBandPolicy.kt",
+                  "engine/FixedMultifyFactorFamilies.kt"):
+                  p=root+rel
+                  assert Path(p).read_bytes()==old(ref,p),p
+          for rel in (
+              "engine/SteppedTrailingPolicy.kt",
+              "engine/NetGainTrailingPolicy.kt",
+              "engine/HardStopGttTighteningPolicy.kt"):
+              p=root+rel
+              assert Path(p).read_bytes()==old(base28,p),p
+          source_text=Path(repo).read_text()
+          assert "HardStopLossPolicy.stopPrice" in source_text
+          assert "HARD_STOP_MINUS_2_EXISTING_GTT_UPGRADED" in source_text
+          assert "HARD_STOP_MINUS_2_GTT_UPGRADE_DEFERRED" in source_text
+          assert "modifyPositionGtt(" in source_text
+          assert "fixedExecutionUiStateStore.record" in source_text
+          assert "FixedExecutionPresentationPolicy.PARTIAL_FILL" in source_text
+          assert "FixedExecutionPresentationPolicy.BLOCKED_MAX_HOLDINGS" in source_text
+          assert "FixedExecutionPresentationPolicy.BLOCKED_EXTERNAL_HOLDING" in source_text
+          assert "recommendationId = row.id" in source_text
+          assert "fixed_primary_progression_v9018.json" in source_text
+          assert "fixed_execution_ui_states.json" in source_text
+          assert "EVENT_LOCAL_AFTER_LAST_EXPLICIT_RESET" in source_text
+          assert "firstPrimary?.first" in source_text
+          assert "fixed_primary_progression_v9017.json" not in source_text
+          assert "hard -3%" not in source_text
+          hard=Path(root+"engine/HardStopLossPolicy.kt").read_text()
+          manifest=Path(root+"engine/ReleaseIntegrityManifest.kt").read_text()
+          assert "const val MAX_LOSS_PCT = 2.0" in hard
+          assert "const val HARD_STOP_LOSS_PCT = 2.0" in manifest
+          assert 'RELEASE_FAMILY = "v9.0.18-operator"' in manifest
+          ui=Path(root+"ui/screens/TraderApp.kt").read_text()
+          assert "FixedExecutionPresentationPolicy.buttonLabel" in ui
+          assert "Session ended · BUY disabled" not in ui
+          assert "hard -3%" not in ui
+          presentation=Path(root+"engine/FixedExecutionPresentationPolicy.kt").read_text()
+          for label in ("PARTIAL FILL", "EXTERNAL HOLDING", "MAX HOLDINGS",
+                        "BROKER COOLDOWN", "BUY EXECUTED"):
+              assert label in presentation,label
+          wire=Path(root+"data/network/BrokerWireAuditInterceptor.kt").read_text()
+          assert "val accountState = accounts.getValue(t.account)" in wire
+          assert 'endpoints.getValue(t.account + "/" + t.endpoint)' in wire
+          assert "listOf(categoryState, accountState, endpointState)" in wire
+          progression=Path(root+"data/repository/FixedPrimaryProgressionResearch.kt").read_text()
+          assert "AFTER_EXPLICIT_NON_PRIMARY_RESET" in progression
+          assert "observation.scanAtMs <= recommendation.generatedAtMs" in progression
+          build=Path("app/build.gradle.kts").read_text()
+          assert "versionCode = 9018" in build
+          assert 'versionName = "9.0.18-operator"' in build
+          print("PASS: frozen Fixed selection/15m/confirmation/target/trailing; -2% hard stop; safe GTT tightening; accurate execution UI; event-local repeat telemetry; aggregate wire 429 counters")
+          PY
+      - name: Historical/replay policy tests
+        run: |
+          python -m unittest discover -s backend/tests -p 'test_adaptive_timeframe_replay.py' -v
+          python -m unittest discover -s backend/tests -p 'test_v9_master_log_replay.py' -v
+      - name: Full Android unit tests / v9.0.18 Operator APK
+        env:
+          MULTIFY_KEYSTORE_PASSWORD: ${{ secrets.MULTIFY_KEYSTORE_PASSWORD }}
+        run: gradle :app:testDebugUnitTest :app:assembleDebug --no-daemon --stacktrace
+      - name: Verify APK signing and SHA-256
+        run: |
+          apk=$(find app/build/outputs/apk/debug -maxdepth 1 -name '*.apk' -type f | head -n 1)
+          test -n "$apk" && test -s "$apk"
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$apk" \
+            | tee app/build/outputs/apk/debug/v9018-signature-verification.txt
+          echo "IN_PLACE_UPDATE_COMPATIBLE_WITH_V9017=UNVERIFIED" | tee app/build/outputs/apk/debug/v9018-install-compatibility.txt
+          echo "Do not uninstall or replace an installed build with open holdings/GTTs until signer compatibility and broker protection are checked."
+          sha256sum "$apk" | tee app/build/outputs/apk/debug/v9018-SHA256SUMS.txt
+      - name: Upload CI verified package
+        uses: actions/upload-artifact@v4
+        with:
+          name: Multify-v9.0.18-Operator-TEST-debug
+          path: |
+            app/build/outputs/apk/debug/*.apk
+            app/build/outputs/apk/debug/v9018-signature-verification.txt
+            app/build/outputs/apk/debug/v9018-SHA256SUMS.txt
+            app/build/outputs/apk/debug/v9018-install-compatibility.txt
