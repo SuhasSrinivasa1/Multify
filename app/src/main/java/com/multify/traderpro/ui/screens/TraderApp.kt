@@ -81,6 +81,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.multify.traderpro.BuildConfig
 import com.multify.traderpro.engine.FixedBuyAvailabilityPolicy
+import com.multify.traderpro.engine.FixedExecutionPresentationPolicy
 import com.multify.traderpro.data.network.DashboardDto
 import com.multify.traderpro.data.network.FixedScanTrendStore
 import com.multify.traderpro.data.logging.FixedUiRenderEvidenceStore
@@ -933,6 +934,7 @@ private fun FixedScreen(
         }
     }
     val fixedMarketOpen = FixedBuyAvailabilityPolicy.nseRegularSession(fixedClockMs)
+    val fixedEntryWindowOpen = FixedBuyAvailabilityPolicy.fixedNewEntryWindow(fixedClockMs)
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -1212,30 +1214,51 @@ private fun ForecastTable(
                         maxLines = 3,
                         overflow = TextOverflow.Ellipsis
                     )
+                    val hasOpenPosition = dashboard?.positions?.any {
+                        it.symbol.equals(f.symbol, ignoreCase = true)
+                    } == true
                     Button(
                         onClick = { onBuy(f.symbol) },
-                        enabled = if (fixed) !oldFixedEvent && FixedBuyAvailabilityPolicy.canBuy(
-                            fixedClockMsForTable, executionReady, f.status, f.executionEligible
+                        enabled = if (fixed) FixedExecutionPresentationPolicy.canBuy(
+                            fixedClockMsForTable, executionReady, f.status, f.executionEligible,
+                            f.executionStatus, oldFixedEvent, hasOpenPosition
                         ) else ForecastBuyAvailabilityPolicy.canBuy(
                             fixedClockMsForTable, executionReady, f.status, f.executionEligible
                         ),
                         modifier = Modifier.fillMaxWidth().padding(top = 7.dp)
                     ) {
                         Text(
-                            when {
-                                oldFixedEvent -> "Earlier Fixed setup · BUY latest instead"
-                                fixed && f.status == "TARGET_HIT" -> "TARGET HIT · BUY disabled"
-                                fixed && f.status != "ACTIVE" -> "Session ended · BUY disabled"
-                                !fixed && f.status == "TARGET_HIT" -> "TARGET HIT · BUY disabled"
-                                !fixed && f.status == "WATCH_ONLY" -> "PROVISIONAL WATCH · BUY disabled"
-                                !fixed && f.status == "AWAITING_CONFIRMATION" -> "PRIMARY pending · BUY disabled"
-                                !fixed && f.status != "ACTIVE" -> "Finished · BUY disabled"
-                                !fixed && !com.multify.traderpro.engine.FixedBuyAvailabilityPolicy.nseRegularSession(fixedClockMsForTable) -> "Market closed · BUY disabled"
-                                fixed && !fixedMarketOpen -> "Market closed · BUY disabled"
+                            if (fixed) FixedExecutionPresentationPolicy.buttonLabel(
+                                symbol = f.symbol,
+                                recommendationStatus = f.status,
+                                executionStatus = f.executionStatus,
+                                filledQuantity = f.executionFilledQuantity,
+                                requestedQuantity = f.executionRequestedQuantity,
+                                oldFixedEvent = oldFixedEvent,
+                                marketOpen = fixedMarketOpen,
+                                entryWindowOpen = fixedEntryWindowOpen,
+                                brokerReady = executionReady,
+                                executionEligible = f.executionEligible,
+                                hasOpenPosition = hasOpenPosition
+                            ) else when {
+                                f.status == "TARGET_HIT" -> "TARGET HIT · BUY disabled"
+                                f.status == "WATCH_ONLY" -> "PROVISIONAL WATCH · BUY disabled"
+                                f.status == "AWAITING_CONFIRMATION" -> "PRIMARY pending · BUY disabled"
+                                f.status != "ACTIVE" -> "Finished · BUY disabled"
+                                !com.multify.traderpro.engine.FixedBuyAvailabilityPolicy.nseRegularSession(fixedClockMsForTable) -> "Market closed · BUY disabled"
                                 !f.executionEligible -> f.qualityTier + " · observation only"
                                 !executionReady -> "Broker readiness required · " + f.symbol
                                 else -> "BUY " + f.symbol + " · CNC"
                             }
+                        )
+                    }
+                    if (fixed && f.executionReason.isNotBlank()) {
+                        Text(
+                            "Execution: " + f.executionReason,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                     if (fixed) {
