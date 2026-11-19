@@ -93,7 +93,7 @@ class WorkingRangeRecommendationStore(context: Context) {
         val price = f.ltp.takeIf { it.isFinite() && it > 0.0 } ?: return
         val targetPct = WorkingRangeCandidatePolicy.TARGET_PCT
         val marketability = FixedQuoteMarketabilityPresentationPolicy.assess(
-            quote, observedAtMs, observedAtMs
+            quote, observedAtMs, System.currentTimeMillis()
         )
         val marketabilityState = when {
             marketability.state == "UPPER_BAND_NO_SELL_OFFER" -> marketability.state
@@ -109,7 +109,7 @@ class WorkingRangeRecommendationStore(context: Context) {
             val existing = rows.getOrNull(index)
             if (existing != null && existing.dto.confirmedAtMs > 0L) {
                 updateConfirmed(existing, decision.matches, decision.reasons, price,
-                    observedAtMs, marketabilityState, f)
+                    observedAtMs, marketabilityState, evaluation)
                 persistLocked()
                 return
             }
@@ -218,8 +218,9 @@ class WorkingRangeRecommendationStore(context: Context) {
         price: Double,
         observedAtMs: Long,
         marketabilityState: String,
-        f: com.multify.traderpro.engine.FixedStrategyFeatures
+        evaluation: FixedStrategyEvaluation
     ) {
+        val f = evaluation.features
         val old = row.dto
         val move = (price / old.entryPrice - 1.0) * 100.0
         val mfe = max(old.maxFavourablePct, move)
