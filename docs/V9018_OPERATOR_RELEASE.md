@@ -69,7 +69,12 @@ The repeat VEEFIN event's correct event-local first PRIMARY was 10:27:17 IST aft
 
 ## Install and operator safety
 
-This CI build is debug-signed. A valid APK signature does not prove in-place update compatibility with the installed v9.0.17 signer. Compare the certificate before updating. Do not uninstall or replace the app while it owns open holdings, active GTTs or unexported learning/evidence.
+This CI build is debug-signed and the signer was compared with the supplied v9.0.17 artifact:
+- v9.0.17 certificate SHA-256: `ad5947506afeff796564be693315ebcbe7be7dfbde61deca382059ceb43a5602`
+- v9.0.18 certificate SHA-256: `33c750476d8eda43425a199e4bd8bb533b430d92693cbffb80c9bde88fecf21e`
+- Result: **signer mismatch; Android will not allow an in-place update over that v9.0.17 APK.**
+
+Do not uninstall or replace the app while it owns open holdings, active GTTs or unexported learning/evidence. The repository does not currently contain a stable release keystore available to CI; configure a user-controlled key through secure CI secrets for future in-place updates. Never share private signing keys or passwords in chat.
 
 After installation:
 1. Authenticate Alpha and verify static IP/DDPI readiness; confirm Beta is read-only.
