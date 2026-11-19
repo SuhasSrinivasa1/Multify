@@ -148,6 +148,8 @@ data class DashboardDto(
     val fixedEarlyWatch: List<FixedEarlyWatchDto> = emptyList(),
     val fixedPulseResearch: List<FixedPulseResearchDto> = emptyList(),
     val fixedFastCandidatePrices: List<FixedFastCandidateDto> = emptyList(),
+    /** Separate Working Range pilot recommendations; never part of Fixed or Auto-Buy. */
+    val workingRangeRecommendations: List<WorkingRangeRecommendationDto> = emptyList(),
     val forecastChampions: List<ForecastChampionDto> = emptyList(),
     val research: ResearchDto = ResearchDto(),
     val univestResearch: List<UnivestResearchDto> = emptyList(),
@@ -263,6 +265,37 @@ data class ForecastDto(
     val quoteUpperCircuitPrice: Double? = null,
     val quoteBestSellOffer: Double? = null,
     val quoteClientReceivedAtMs: Long? = null
+)
+
+/**
+ * Separate, manually reviewed Working Range pilot card.
+ * It is not a Fixed recommendation, not a broker order and never Auto-Buy eligible.
+ */
+data class WorkingRangeRecommendationDto(
+    val symbol: String = "",
+    val state: String = "PENDING_CONFIRMATION",
+    val entryPrice: Double = 0.0,
+    val targetPrice: Double = 0.0,
+    val targetPct: Double = 1.1161043030113955,
+    val firstQualifiedAtMs: Long = 0L,
+    val confirmedAtMs: Long = 0L,
+    val lastObservedAtMs: Long = 0L,
+    val lastPrice: Double = 0.0,
+    val candidateAgeMinutes: Double = 0.0,
+    val driftFromFirstQualifiedPct: Double = 0.0,
+    val rsi: Double? = null,
+    val rvol: Double? = null,
+    val volumeAcceleration: Double? = null,
+    val greenVolumeShare: Double? = null,
+    val targetRequirementAtr: Double? = null,
+    val vwapExtensionAtr: Double? = null,
+    val range52Position: Double? = null,
+    val spreadBps: Double? = null,
+    val orderBookImbalance: Double? = null,
+    val marketabilityState: String = "NO_RECENT_QUOTE",
+    val reason: String = "",
+    val researchOnly: Boolean = true,
+    val autoBuyEnabled: Boolean = false
 )
 
 data class ForecastChampionDto(
