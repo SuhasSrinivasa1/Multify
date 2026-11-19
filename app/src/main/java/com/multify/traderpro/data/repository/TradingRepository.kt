@@ -2882,7 +2882,14 @@ class TradingRepository @Inject constructor(
 
     private fun fixedPresentationDto(row: FixedRecommendationRecord,
         nowMs: Long = System.currentTimeMillis()): ForecastDto {
-        val verdict = fixedEntryVerdict(row, fixedPublishedQuote(row, nowMs), nowMs)
+        val presentedQuote = fixedPublishedQuote(row, nowMs)
+        val verdict = fixedEntryVerdict(row, presentedQuote, nowMs)
+        val quoteAtMs = if (presentedQuote != null)
+            fixedShadowReferences[row.symbol.uppercase(Locale.US)]?.quoteCapturedAtMs
+        else null
+        val marketability = com.multify.traderpro.engine
+            .FixedQuoteMarketabilityPresentationPolicy.assess(
+                presentedQuote, quoteAtMs, nowMs)
         val riskPrefix = when (verdict.status) {
             "RESEARCH_ONLY" -> "FIXED RESEARCH ONLY · BUY BLOCKED: " + verdict.reasons.joinToString(",") + " · "
             "CAUTION" -> "FIXED ENTRY CAUTION: " + verdict.reasons.joinToString(",") + " · "
@@ -2890,7 +2897,11 @@ class TradingRepository @Inject constructor(
         }
         return row.toDto().copy(
             reason = riskPrefix + row.reason,
-            executionEligible = row.executionEligible && verdict.actionable
+            executionEligible = row.executionEligible && verdict.actionable,
+            quoteMarketabilityState = marketability.state,
+            quoteUpperCircuitPrice = marketability.brokerUpperCircuit,
+            quoteBestSellOffer = marketability.bestObservedOffer,
+            quoteClientReceivedAtMs = marketability.quoteClientReceivedAtMs
         )
     }
 
