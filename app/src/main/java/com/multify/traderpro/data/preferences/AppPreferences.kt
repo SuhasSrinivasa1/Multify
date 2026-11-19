@@ -181,15 +181,16 @@ class AppPreferences @Inject constructor(
         }
     }
 
+    /** Working Range is an independent optional research stream; it never changes Fixed or Auto-Buy. */
+    suspend fun setWorkingRangeEnabled(value: Boolean) {
+        context.dataStore.edit { it[Keys.workingRangeEnabled] = value }
+    }
+
     /** A new ON session is a time boundary for eligible Fixed recommendation events.
      * Persist this atomically with the toggle so a restarted service cannot re-buy
      * previously published ACTIVE recommendations. Legacy ON without a timestamp
      * is intentionally non-executable until the user toggles OFF then ON again.
      */
-    suspend fun setWorkingRangeEnabled(value: Boolean) {
-        context.dataStore.edit { it[Keys.workingRangeEnabled] = value }
-    }
-
     suspend fun setFixedAutoBuy(value: Boolean) {
         context.dataStore.edit {
             if (value) {
