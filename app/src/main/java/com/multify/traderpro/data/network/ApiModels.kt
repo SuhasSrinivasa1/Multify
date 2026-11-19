@@ -257,7 +257,12 @@ data class ForecastDto(
     val generatedAtMs: Long = 0L,
     val observedAfterPublication: Boolean = false,
     val qualityTier: String = "LEGACY",
-    val executionEligible: Boolean = false
+    val executionEligible: Boolean = false,
+    // UI-only evidence from an already fetched Alpha/Beta quote; never a permit to BUY.
+    val quoteMarketabilityState: String = "NO_RECENT_QUOTE",
+    val quoteUpperCircuitPrice: Double? = null,
+    val quoteBestSellOffer: Double? = null,
+    val quoteClientReceivedAtMs: Long? = null
 )
 
 data class ForecastChampionDto(
