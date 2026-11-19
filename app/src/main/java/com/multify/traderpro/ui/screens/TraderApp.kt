@@ -787,7 +787,7 @@ private fun ForecastScreen(
                 shape = RoundedCornerShape(20.dp)) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
                     Text("Univest · official alerts / same-day closes", fontWeight = FontWeight.SemiBold)
-                    Text("Official Univest ENTRY uses Groww Alpha only when Fixed Auto Buy is ON and safeguards pass. Univest EXIT never triggers a SELL; the shared -3% stop and trailing GTT manage holdings. Research prices below are not broker fills.",
+                    Text("Official Univest ENTRY uses Groww Alpha only when Fixed Auto Buy is ON and safeguards pass. Univest EXIT never triggers a SELL; the shared -2% stop and trailing GTT manage holdings. Research prices below are not broker fills.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                     if (official.isEmpty()) {
@@ -1562,7 +1562,7 @@ private fun SettingsScreen(
                         else "$lastParsedSymbol · $lastParsedStatus")
                     KeyValueRow("Univest Alpha entry", lastUnivestOrderStatus)
                     Text(
-                        "Univest buys require a fresh official notification and Fixed Auto Buy ON. SELL remains managed only by the common -3% hard stop and trailing GTT. A running engine does not prove Android notification access is connected.",
+                        "Univest buys require a fresh official notification and Fixed Auto Buy ON. SELL remains managed only by the common -2% hard stop and trailing GTT. A running engine does not prove Android notification access is connected.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
