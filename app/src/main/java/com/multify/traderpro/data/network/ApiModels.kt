@@ -293,6 +293,11 @@ data class WorkingRangeRecommendationDto(
     val spreadBps: Double? = null,
     val orderBookImbalance: Double? = null,
     val marketabilityState: String = "NO_RECENT_QUOTE",
+    val maxFavourablePct: Double = 0.0,
+    val maxAdversePct: Double = 0.0,
+    val targetFirstTouchAtMs: Long = 0L,
+    val stopFirstTouchAtMs: Long = 0L,
+    val sampledOutcomeNote: String = "UNRESOLVED · SPARSE CLIENT LTP SAMPLES",
     val reason: String = "",
     val researchOnly: Boolean = true,
     val autoBuyEnabled: Boolean = false
