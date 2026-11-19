@@ -297,6 +297,7 @@ fun TraderApp(viewModel: TraderViewModel = hiltViewModel()) {
                     onForecastAutoBuyChanged = viewModel::setForecastAutoBuy,
                     onForecastScannerChanged = viewModel::setForecastScannerEnabled,
                     onFixedAutoBuyChanged = viewModel::setFixedAutoBuy,
+                    onWorkingRangeChanged = viewModel::setWorkingRangeEnabled,
                     onSubmitManualSignal = viewModel::submitManualSignal,
                     onResetHalt = { showResetConfirm = true },
                     onExportLogs = { exportLauncher.launch(defaultLogFileName()) },
@@ -1120,6 +1121,12 @@ private fun FixedScreen(
             maxConcurrentHoldings = state.settings.maxConcurrentHoldings
         ) }
         item {
+            WorkingRangeTable(
+                rows = dashboard?.workingRangeRecommendations.orEmpty(),
+                enabled = state.settings.workingRangeEnabled
+            )
+        }
+        item {
             Card(
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                 shape = RoundedCornerShape(20.dp)
@@ -1137,6 +1144,74 @@ private fun FixedScreen(
     }
 }
 
+@Composable
+private fun WorkingRangeTable(
+    rows: List<com.multify.traderpro.data.network.WorkingRangeRecommendationDto>,
+    enabled: Boolean
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
+        SectionTitle(
+            "Working Range recommendations",
+            if (enabled) "Separate pilot stream · manual review only · does not alter Fixed or Auto-Buy"
+            else "OFF · Fixed recommendations continue unchanged"
+        )
+        if (!enabled) {
+            EmptyState("Working Range is OFF", "Enable Working Range in Settings to start the separate pilot shortlist.")
+        } else if (rows.isEmpty()) {
+            EmptyState("No Working Range candidate yet",
+                "The pilot requires two consecutive matching evaluations, sufficient time to close and limited drift. Fixed continues to show its own recommendations.")
+        } else {
+            rows.forEach { row ->
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.tertiary.copy(alpha = .45f)),
+                    shape = RoundedCornerShape(18.dp)
+                ) {
+                    Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically) {
+                            Text(row.symbol, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                            Text("WORKING RANGE · PILOT", style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.tertiary, fontWeight = FontWeight.Bold)
+                        }
+                        Text(row.state.replace('_', ' '), style = MaterialTheme.typography.labelMedium,
+                            color = if (row.state.startsWith("TARGET")) MaterialTheme.colorScheme.primary
+                                else if (row.state.startsWith("STOP")) MaterialTheme.colorScheme.error
+                                else MaterialTheme.colorScheme.tertiary,
+                            fontWeight = FontWeight.SemiBold)
+                        if (row.confirmedAtMs > 0L) {
+                            Text("Entry ₹${String.format(Locale.US, "%.2f", row.entryPrice)}  ·  Target ₹${String.format(Locale.US, "%.2f", row.targetPrice)} (+${String.format(Locale.US, "%.2f", row.targetPct)}%)",
+                                style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                            Text("Latest ₹${String.format(Locale.US, "%.2f", row.lastPrice)}  ·  Sampled MFE +${String.format(Locale.US, "%.2f", row.maxFavourablePct)}%  ·  MAE ${String.format(Locale.US, "%.2f", row.maxAdversePct)}%",
+                                style = MaterialTheme.typography.bodySmall)
+                        } else {
+                            Text("Confirming candidate · ${String.format(Locale.US, "%.1f", row.candidateAgeMinutes)} min · price drift ${String.format(Locale.US, "%.2f", row.driftFromFirstQualifiedPct)}%",
+                                style = MaterialTheme.typography.bodySmall)
+                        }
+                        Text("RSI ${row.rsi?.let { String.format(Locale.US, "%.1f", it) } ?: "—"} · RVOL ${row.rvol?.let { String.format(Locale.US, "%.2f", it) } ?: "—"} · Vol accel ${row.volumeAcceleration?.let { String.format(Locale.US, "%.2f", it) } ?: "—"} · Green volume ${row.greenVolumeShare?.let { String.format(Locale.US, "%.0f%%", it * 100.0) } ?: "—"}",
+                            style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("Target requirement ${row.targetRequirementAtr?.let { String.format(Locale.US, "%.2f ATR", it) } ?: "—"} · VWAP extension ${row.vwapExtensionAtr?.let { String.format(Locale.US, "%.2f ATR", it) } ?: "—"} · Spread ${row.spreadBps?.let { String.format(Locale.US, "%.1f bps", it) } ?: "unknown"}",
+                            style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("Marketability: ${row.marketabilityState.replace('_', ' ')}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (row.marketabilityState.contains("NO_SELL") || row.marketabilityState.contains("STALE") || row.marketabilityState == "WIDE_SPREAD")
+                                MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(
+                            "Upper circuit ${row.upperCircuitPrice?.let { "₹${String.format(Locale.US, "%.2f", it)}" } ?: "unknown"} · Best sell offer ${row.bestSellOffer?.let { "₹${String.format(Locale.US, "%.2f", it)}" } ?: "not observed"} · Client quote receipt age ${row.quoteClientReceiptAgeMs?.let { "${it}ms" } ?: "unknown"}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(row.reason, style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("MANUAL REVIEW ONLY · NO WORKING RANGE AUTO-BUY · sparse client LTP samples are not intrabar paths",
+                            style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.tertiary)
+                    }
+                }
+            }
+        }
+    }
+}
 @Composable
 private fun ForecastTable(
     rows: List<ForecastDto>, onBuy: (String) -> Unit, executionReady: Boolean,
@@ -1229,6 +1304,10 @@ private fun ForecastTable(
                         maxLines = 3,
                         overflow = TextOverflow.Ellipsis
                     )
+                    if (fixed) {
+                        Text("FIXED · FROZEN v7.4.1", style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                    }
                     if (fixed && f.qualityTier == "PRIMARY") {
                         Text(
                             "PRIMARY CONFIRMED · original Fixed recommendation preserved" +
@@ -1310,6 +1389,7 @@ private fun SettingsScreen(
     onForecastAutoBuyChanged: (Boolean) -> Unit,
     onForecastScannerChanged: (Boolean) -> Unit,
     onFixedAutoBuyChanged: (Boolean) -> Unit,
+    onWorkingRangeChanged: (Boolean) -> Unit,
     onSubmitManualSignal: (String, String, String) -> Unit,
     onResetHalt: () -> Unit,
     onExportLogs: () -> Unit,
@@ -1508,6 +1588,23 @@ private fun SettingsScreen(
                         "Fixed + Univest auto-buy",
                         if (state.settings.fixedAutoBuyEnabled) "ON · waiting for new Fixed/Univest signals" else "OFF · no new Fixed/Univest auto BUY"
                     )
+                    HorizontalDivider()
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Working Range", fontWeight = FontWeight.SemiBold)
+                            Text(
+                                "Independent pilot shortlist using the same already-fetched 15m evaluation and quote. Fixed keeps running unchanged. Two consecutive matching scans are required. Working Range cards are manual-review only; this switch never enables Auto-Buy.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = state.settings.workingRangeEnabled,
+                            onCheckedChange = onWorkingRangeChanged
+                        )
+                    }
+                    KeyValueRow("Working Range", if (state.settings.workingRangeEnabled)
+                        "ON · separate pilot stream · no Auto-Buy" else "OFF · Fixed only")
                     Text(
                         "Fixed remains immutable. Forecast may read prior positive Fixed outcomes, but can never write into Fixed or change its v7.4.1 rules. Every app-owned Multify, Fixed, Univest and Forecast LONG uses the same sell protection: hard -3% loss floor, then the existing +0.55% arm → +0.50% protected gain → +0.10% ratchet when profitable. No averaging down.",
                         style = MaterialTheme.typography.bodySmall,

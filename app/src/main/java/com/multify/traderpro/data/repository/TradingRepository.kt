@@ -261,6 +261,20 @@ class TradingRepository @Inject constructor(
      * executable again. A later same-symbol setup gets a different recommendation id and is
      * therefore still eligible.
      */
+    private val workingRangeRecommendationStore by lazy {
+        com.multify.traderpro.data.logging.WorkingRangeRecommendationStore(appContext)
+    }
+    @Volatile private var workingRangeEnabledCache: Boolean? = null
+
+    private suspend fun workingRangeEnabledNow(): Boolean {
+        workingRangeEnabledCache?.let { return it }
+        val enabled = preferences.settings.first().workingRangeEnabled
+        workingRangeEnabledCache = enabled
+        workingRangeRecommendationStore.setEnabled(enabled,
+            "Working Range initialized from persisted operator setting")
+        return enabled
+    }
+
     private val fixedRecommendationExecutionPrefs by lazy {
         appContext.getSharedPreferences("fixed_recommendation_execution_v9013", Context.MODE_PRIVATE)
     }
@@ -1652,6 +1666,26 @@ class TradingRepository @Inject constructor(
     }
     @Volatile private var fixedAutoBuyActivationForQueue = 0L
 
+    suspend fun setWorkingRangeEnabled(enabled: Boolean) {
+        val previous = workingRangeEnabledNow()
+        preferences.setWorkingRangeEnabled(enabled)
+        workingRangeEnabledCache = enabled
+        if (previous != enabled) {
+            workingRangeRecommendationStore.setEnabled(enabled,
+                if (enabled) "Working Range re-enabled; new candidate baseline required"
+                else "Working Range disabled by operator")
+        }
+        auditLogger.log("SETTINGS",
+            if (enabled) "WORKING_RANGE_ENABLED" else "WORKING_RANGE_DISABLED",
+            mapOf(
+                "fixed_scoring_changed" to false,
+                "fixed_recommendations_suppressed" to false,
+                "working_range_auto_buy_enabled" to false,
+                "source" to "existing_fixed_15m_evaluation_and_quote",
+                "extra_broker_requests" to 0
+            ))
+    }
+
     suspend fun setFixedAutoBuy(enabled: Boolean) {
         preferences.setFixedAutoBuy(enabled)
         // OFF/ON cannot inherit any old pending intent or a previous session wake.
@@ -1904,6 +1938,8 @@ class TradingRepository @Inject constructor(
             fixedResearchSafety = fixedResearchSafety,
             forecasts = forecasts,
             fixedForecasts = fixedForecasts,
+            workingRangeRecommendations = if (settings.workingRangeEnabled)
+                workingRangeRecommendationStore.recent(today) else emptyList(),
             forecastWatchlist = secondaryForecastWatchlist(today),
             fixedWatchlist = emptyList(),
             fixedEarlyWatch = fixedEarlyWatchJournal.recent(today),
@@ -2077,6 +2113,8 @@ class TradingRepository @Inject constructor(
                 summary = snapshot.summary, execution = execution, learning = learning, forecastLearning = forecastLearning,
                 forecastReferences = forecastReferences,
                 forecasts = forecasts, fixedForecasts = fixedForecasts,
+                workingRangeRecommendations = if (settings.workingRangeEnabled)
+                    workingRangeRecommendationStore.recent(today) else emptyList(),
                 forecastWatchlist = secondaryForecastWatchlist(today),
             fixedWatchlist = emptyList(),
             fixedEarlyWatch = fixedEarlyWatchJournal.recent(today),
@@ -4731,6 +4769,13 @@ class TradingRepository @Inject constructor(
             FixedResearchQuoteReceipt(lastFixedScanAtMs, fixedQuoteReceivedAtMs)
         fixedShadowReferences[symbol] = FixedShadowReference(quote, evaluation, referenceAt)
         fixedFactorTelemetry.tryRecord(symbol, evaluation, lastFixedScanAtMs, quote, referenceAt)
+        // Independent optional Working Range stream: reuse this already-fetched
+        // quote + completed 15m evaluation. No extra Groww calls and no Fixed mutation.
+        if (workingRangeEnabledNow()) {
+            workingRangeRecommendationStore.offer(
+                symbol, evaluation, quote, fixedQuoteReceivedAtMs, lastFixedScanAtMs
+            )
+        }
         v9MasterShadowCollector.offer(
             symbol, quote, verifiedHistory, evaluation, lastFixedScanAtMs, referenceAt
         )
@@ -12482,6 +12527,8 @@ class TradingRepository @Inject constructor(
             "arm_effective" to settings.armEffective,
             "forecast_auto_buy_enabled" to settings.forecastAutoBuyEnabled,
             "fixed_auto_buy_enabled" to settings.fixedAutoBuyEnabled,
+            "working_range_enabled" to settings.workingRangeEnabled,
+            "working_range_auto_buy_enabled" to false,
             "package_filter" to settings.packageFilter,
             "broker_authenticated" to settings.brokerAuthenticated,
             "ddpi_enabled" to settings.brokerDdpiEnabled,
@@ -12601,6 +12648,8 @@ class TradingRepository @Inject constructor(
                 add("fixed_operator_ui_transitions_v9019.json",
                     com.multify.traderpro.data.logging.FixedUiRenderEvidenceStore
                         .exportOperatorTransitions(appContext))
+                add("working_range_recommendations_v9020.json",
+                    workingRangeRecommendationStore.export())
                 add("fixed_shadow_hypotheses_manifest.json", mapOf(
                     "schema" to "fixed_hypotheses_v8322",
                     "purpose" to "OBSERVATIONAL_ONLY",
@@ -12647,6 +12696,9 @@ class TradingRepository @Inject constructor(
                     "fixed_first_primary_progression_file" to "fixed_first_primary_to_publication_study.json",
                     "fixed_screen_observation_file" to "fixed_screen_compose_observation.json",
                     "fixed_operator_ui_transitions_file" to "fixed_operator_ui_transitions_v9019.json",
+                    "working_range_enabled" to settings.workingRangeEnabled,
+                    "working_range_file" to "working_range_recommendations_v9020.json",
+                    "working_range_auto_buy_enabled" to false,
                     "momentum_continuation_shadow_schema" to "fixed_momentum_continuation_shadow_v9019",
                     "marketability_from_existing_quote_only" to true,
                     "fixed_pattern_research_schema" to "fixed_pattern_hypotheses_v8322",

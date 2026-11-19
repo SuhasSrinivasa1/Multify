@@ -1,6 +1,7 @@
 package com.multify.traderpro.data.network
 
 import android.os.SystemClock
+import com.multify.traderpro.data.logging.AuditLogger
 import com.multify.traderpro.engine.DualMinuteAdmissionPolicy
 import com.multify.traderpro.engine.FixedDualAccountPolicy
 import com.multify.traderpro.engine.GrowwRecoveryPolicy
@@ -23,13 +24,19 @@ import javax.inject.Singleton
  * these separately authenticated accounts.
  */
 @Singleton
-class BetaResearchGate @Inject constructor() {
+class BetaResearchGate @Inject constructor(
+    private val auditLogger: AuditLogger
+) {
     enum class Type { LIVE, HISTORICAL }
     data class UsageSnapshot(
         val liveRequests: Long, val historicalRequests: Long,
         val liveFailures: Long, val historicalFailures: Long,
         val liveRateLimits: Long, val historicalRateLimits: Long,
-        val lastLatencyMs: Long
+        val lastLatencyMs: Long,
+        val livePermitWaitRequests: Long,
+        val historicalPermitWaitRequests: Long,
+        val livePermitWaitMs: Long,
+        val historicalPermitWaitMs: Long
     )
     data class LiveStatus(
         val usedLastMinute: Int = 0,
@@ -73,6 +80,10 @@ class BetaResearchGate @Inject constructor() {
     private val liveRateLimits = AtomicLong()
     private val historicalRateLimits = AtomicLong()
     private val lastLatencyMs = AtomicLong()
+    private val livePermitWaitRequests = AtomicLong()
+    private val historicalPermitWaitRequests = AtomicLong()
+    private val livePermitWaitMs = AtomicLong()
+    private val historicalPermitWaitMs = AtomicLong()
 
     suspend fun <T> read(type: Type, block: suspend () -> T): T =
         if (type == Type.HISTORICAL) historicalInFlight.withLock { readRateLimited(type, block) }
@@ -97,6 +108,8 @@ class BetaResearchGate @Inject constructor() {
     }
 
     private suspend fun <T> readRateLimited(type: Type, block: suspend () -> T): T {
+        var totalWaitMs = 0L
+        var waitIterations = 0
         while (true) {
             val waitMs = lock.withLock {
                 val w = windows.getValue(type)
@@ -140,7 +153,27 @@ class BetaResearchGate @Inject constructor() {
             }
             if (realCooldown > 10_000L)
                 throw IOException("BETA_FIXED_RATE_BUDGET_OR_COOLDOWN")
-            delay(waitMs.coerceIn(5L, 1_000L))
+            val sleepMs = waitMs.coerceIn(5L, 1_000L)
+            totalWaitMs += sleepMs
+            waitIterations++
+            delay(sleepMs)
+        }
+        if (totalWaitMs > 0L) {
+            if (type == Type.LIVE) {
+                livePermitWaitRequests.incrementAndGet()
+                livePermitWaitMs.addAndGet(totalWaitMs)
+            } else {
+                historicalPermitWaitRequests.incrementAndGet()
+                historicalPermitWaitMs.addAndGet(totalWaitMs)
+            }
+            auditLogger.logAsync("API_RATE_LIMIT", "BETA_CLIENT_GOVERNOR_WAIT", mapOf(
+                "account" to "BETA", "category" to if (type == Type.LIVE) "LIVE_DATA" else "HISTORICAL",
+                "wait_ms" to totalWaitMs, "wait_iterations" to waitIterations,
+                "local_per_second_limit" to if (type == Type.LIVE) liveSec else histSec,
+                "local_per_minute_limit" to if (type == Type.LIVE) liveMinute else histMinute,
+                "wait_is_local_not_broker_429" to true,
+                "one_event_per_admitted_request_with_positive_wait" to true
+            ))
         }
         val started = SystemClock.elapsedRealtime()
         if (type == Type.LIVE) liveRequests.incrementAndGet() else historicalRequests.incrementAndGet()
@@ -160,6 +193,9 @@ class BetaResearchGate @Inject constructor() {
             result
         } catch (failure: Throwable) {
             if (type == Type.LIVE) liveFailures.incrementAndGet() else historicalFailures.incrementAndGet()
+            var appliedCooldownMs = 0L
+            var retryAfterRaw: String? = null
+            var incidentCount = 0
             lock.withLock {
                 val w = windows.getValue(type)
                 val now = SystemClock.elapsedRealtime()
@@ -173,11 +209,13 @@ class BetaResearchGate @Inject constructor() {
                     // Multiple replies in the same 5-second window are ONE incident.
                     if (w.rateLimitIncidents.lastOrNull()?.let { now - it < 5_000L } != true)
                         w.rateLimitIncidents.addLast(now)
+                    incidentCount = w.rateLimitIncidents.size
+                    retryAfterRaw = failure.response()?.headers()?.get("Retry-After")
                     val retryAfter = GrowwRetryAfterPolicy.retryAfterMs(
-                        failure.response()?.headers()?.get("Retry-After"), System.currentTimeMillis()
+                        retryAfterRaw, System.currentTimeMillis()
                     )
-                    val cooldown = GrowwRecoveryPolicy.cooldownMs(w.rateLimitIncidents.size, retryAfter)
-                    w.cooldownUntil = maxOf(w.cooldownUntil, now + cooldown)
+                    appliedCooldownMs = GrowwRecoveryPolicy.cooldownMs(incidentCount, retryAfter)
+                    w.cooldownUntil = maxOf(w.cooldownUntil, now + appliedCooldownMs)
                     w.probeRequired = true
                 } else if (w.probeInFlight) {
                     // A failed probe does not release a burst of queued Beta calls.
@@ -186,6 +224,21 @@ class BetaResearchGate @Inject constructor() {
                 }
                 w.probeInFlight = false
                 if (type == Type.LIVE) updateLiveStatus(now, w)
+            }
+            if (failure is HttpException && failure.code() == 429) {
+                val category = if (type == Type.LIVE) "LIVE_DATA" else "HISTORICAL"
+                val wire = GrowwHttpTraceLedger.counters("BETA", category)
+                auditLogger.logAsync("API_RATE_LIMIT", "BETA_HTTP_429", mapOf(
+                    "account" to "BETA", "category" to category,
+                    "http_status" to 429, "retry_after_raw" to retryAfterRaw,
+                    "applied_local_cooldown_ms" to appliedCooldownMs,
+                    "incident_count_last_hour" to incidentCount,
+                    "category_wire_requests_total" to wire.requests,
+                    "category_wire_429_total" to wire.rateLimits,
+                    "broker_category_limit_proven" to false,
+                    "beta_read_only" to true,
+                    "alpha_cooldown_independent" to true
+                ))
             }
             throw failure
         } finally {
@@ -227,7 +280,9 @@ class BetaResearchGate @Inject constructor() {
 
     fun snapshot() = UsageSnapshot(
         liveRequests.get(), historicalRequests.get(), liveFailures.get(), historicalFailures.get(),
-        liveRateLimits.get(), historicalRateLimits.get(), lastLatencyMs.get()
+        liveRateLimits.get(), historicalRateLimits.get(), lastLatencyMs.get(),
+        livePermitWaitRequests.get(), historicalPermitWaitRequests.get(),
+        livePermitWaitMs.get(), historicalPermitWaitMs.get()
     )
     fun configuredLiveLimitPerMinute() = liveMinute
     fun configuredHistoricalLimitPerMinute() = histMinute

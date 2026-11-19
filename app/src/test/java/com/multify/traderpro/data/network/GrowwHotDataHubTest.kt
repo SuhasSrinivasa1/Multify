@@ -1,5 +1,6 @@
 package com.multify.traderpro.data.network
 
+import com.multify.traderpro.engine.MarketDataPriorityAdmissionPolicy
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.mockwebserver.Dispatcher
@@ -48,6 +49,24 @@ class GrowwHotDataHubTest {
                 assertEquals(1, server.requestCount)
             } finally { pool.shutdownNow() }
         }
+    }
+
+    @Test fun protectionPriorityAlwaysBypassesHotCacheAndSingleFlight() {
+        val request = Request.Builder()
+            .url("https://example.test/v1/live-data/quote?trading_symbol=RELIANCE")
+            .header("Authorization", "Bearer alpha-one")
+            .header(MarketDataPriorityAdmissionPolicy.HEADER, MarketDataPriorityAdmissionPolicy.PROTECTION)
+            .build()
+        assertTrue(hub().bypassForProtection(request))
+        assertEquals(null, hub().freshResponse(request))
+    }
+
+    @Test fun ordinaryResearchQuoteCanStillUseHotCache() {
+        val request = Request.Builder()
+            .url("https://example.test/v1/live-data/quote?trading_symbol=RELIANCE")
+            .header("Authorization", "Bearer alpha-one")
+            .build()
+        assertEquals(false, hub().bypassForProtection(request))
     }
 
     @Test fun differentAlphaAuthorizationCannotReuseCachedQuote() {

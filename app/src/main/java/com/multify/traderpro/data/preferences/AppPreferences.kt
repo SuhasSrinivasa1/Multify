@@ -28,6 +28,8 @@ data class AppSettings(
     val forecastAutoBuyEnabled: Boolean = false,
     val fixedAutoBuyEnabled: Boolean = false,
     val fixedAutoBuyActivatedAtMs: Long = 0L,
+    /** Independent Working Range pilot stream; OFF by default, never enables Auto-Buy. */
+    val workingRangeEnabled: Boolean = false,
     val onboardingComplete: Boolean = false,
     val brokerAuthenticated: Boolean = false,
     val authenticatedAtMs: Long = 0L,
@@ -68,6 +70,7 @@ class AppPreferences @Inject constructor(
         val forecastAutoBuyEnabled = booleanPreferencesKey("forecast_auto_buy_enabled")
         val fixedAutoBuyEnabled = booleanPreferencesKey("fixed_auto_buy_enabled")
         val fixedAutoBuyActivatedAtMs = longPreferencesKey("fixed_auto_buy_activated_at_ms")
+        val workingRangeEnabled = booleanPreferencesKey("working_range_enabled_v9020")
         val v7931EntryToggleReset = booleanPreferencesKey("v7931_entry_toggles_off_once")
         val onboardingComplete = booleanPreferencesKey("onboarding_complete")
         val brokerAuthenticated = booleanPreferencesKey("broker_authenticated")
@@ -178,6 +181,11 @@ class AppPreferences @Inject constructor(
         }
     }
 
+    /** Working Range is an independent optional research stream; it never changes Fixed or Auto-Buy. */
+    suspend fun setWorkingRangeEnabled(value: Boolean) {
+        context.dataStore.edit { it[Keys.workingRangeEnabled] = value }
+    }
+
     /** A new ON session is a time boundary for eligible Fixed recommendation events.
      * Persist this atomically with the toggle so a restarted service cannot re-buy
      * previously published ACTIVE recommendations. Legacy ON without a timestamp
@@ -252,6 +260,7 @@ class AppPreferences @Inject constructor(
         forecastAutoBuyEnabled = this[Keys.forecastAutoBuyEnabled] ?: false,
         fixedAutoBuyEnabled = this[Keys.fixedAutoBuyEnabled] ?: false,
         fixedAutoBuyActivatedAtMs = this[Keys.fixedAutoBuyActivatedAtMs] ?: 0L,
+        workingRangeEnabled = this[Keys.workingRangeEnabled] ?: false,
         onboardingComplete = this[Keys.onboardingComplete] ?: false,
         brokerAuthenticated = this[Keys.brokerAuthenticated] ?: false,
         authenticatedAtMs = this[Keys.authenticatedAtMs] ?: 0L,
