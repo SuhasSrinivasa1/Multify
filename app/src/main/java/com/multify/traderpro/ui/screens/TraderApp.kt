@@ -1137,7 +1137,11 @@ private fun FixedScreen(
         }
         item { ForecastTable(rows, onBuy,
             state.settings.brokerAuthenticated && state.settings.staticIpMatched && state.settings.brokerDdpiEnabled && !state.settings.safetyHalt,
-            fixed = true, fixedMarketOpen = fixedMarketOpen, fixedClockMsForTable = fixedClockMs
+            fixed = true, fixedMarketOpen = fixedMarketOpen,
+            fixedEntryWindowOpen = fixedEntryWindowOpen,
+            fixedClockMsForTable = fixedClockMs,
+            openPositionSymbols = dashboard?.positions.orEmpty()
+                .map { it.symbol.uppercase(Locale.US) }.toSet()
         ) }
         item {
             Card(
@@ -1160,7 +1164,9 @@ private fun FixedScreen(
 @Composable
 private fun ForecastTable(
     rows: List<ForecastDto>, onBuy: (String) -> Unit, executionReady: Boolean,
-    fixed: Boolean = false, fixedMarketOpen: Boolean = true, fixedClockMsForTable: Long = 0L
+    fixed: Boolean = false, fixedMarketOpen: Boolean = true,
+    fixedEntryWindowOpen: Boolean = true, fixedClockMsForTable: Long = 0L,
+    openPositionSymbols: Set<String> = emptySet()
 ) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -1214,9 +1220,7 @@ private fun ForecastTable(
                         maxLines = 3,
                         overflow = TextOverflow.Ellipsis
                     )
-                    val hasOpenPosition = dashboard?.positions?.any {
-                        it.symbol.equals(f.symbol, ignoreCase = true)
-                    } == true
+                    val hasOpenPosition = f.symbol.uppercase(Locale.US) in openPositionSymbols
                     Button(
                         onClick = { onBuy(f.symbol) },
                         enabled = if (fixed) FixedExecutionPresentationPolicy.canBuy(
