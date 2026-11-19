@@ -112,6 +112,7 @@ import com.multify.traderpro.engine.ForecastPublicationPolicy
 import com.multify.traderpro.engine.FixedAdaptiveLearningMath
 import com.multify.traderpro.engine.FixedForecastPublicationPolicy
 import com.multify.traderpro.engine.FixedRepeatQualificationPolicy
+import com.multify.traderpro.engine.FixedExecutionPresentationPolicy
 import com.multify.traderpro.engine.FixedEntryActionabilityPolicy
 import com.multify.traderpro.engine.FixedEarlyWatchPolicy
 import com.multify.traderpro.engine.FixedFinalContract
@@ -251,6 +252,7 @@ class TradingRepository @Inject constructor(
     private val fixedHistoricalEvidenceArchive: FixedHistoricalEvidenceArchive,
     private val fixedImportedSameDayDedupJournal: FixedImportedSameDayDedupJournal,
     private val fixedAutoBuyOrderStore: FixedAutoBuyOrderStore,
+    private val fixedExecutionUiStateStore: FixedExecutionUiStateStore,
     private val fixedMarketDiscoveryStateStore: FixedMarketDiscoveryStateStore,
     @ApplicationContext private val appContext: Context
 ) {
@@ -2344,7 +2346,7 @@ class TradingRepository @Inject constructor(
                 engine = ENGINE_MULTIFY_HOLDING, symbol = symbol, product = "CNC", side = "LONG", quantity = filled,
                 entryPrice = entry, stopPrice = HardStopLossPolicy.stopPrice(entry),
                 targetPrice = signal.target,
-                strategy = "Multify ARM holding · hard -3% floor · common trail 0.55→0.50, 0.75→0.60, 0.85→0.70 then +0.10%",
+                strategy = "Multify ARM holding · hard -2% floor · common trail 0.55→0.50, 0.75→0.60, 0.85→0.70 then +0.10%",
                 regime = "HOLDING_LONG", confidence = 1.0, sourceEventId = eventId,
                 openOrderId = order.growwOrderId, openReferenceId = ref, openedAtMs = System.currentTimeMillis(),
                 lastPrice = entry, maxFavourablePrice = entry, maxAdversePrice = entry, lastEvaluatedAtMs = System.currentTimeMillis(),
@@ -2406,7 +2408,7 @@ class TradingRepository @Inject constructor(
 
         dao.updateForwarding(
             eventId, "ANALYZED", "MULTIFY_EXIT_TRAIL_CONTINUES",
-            "Multify Book Profit recorded for MFE learning only. $symbol remains held; the common -3% hard stop and fixed stepped profitable trail remain the mandatory sell logic.",
+            "Multify Book Profit recorded for MFE learning only. $symbol remains held; the common -2% hard stop and fixed stepped profitable trail remain the mandatory sell logic.",
             null
         )
         auditLogger.log("HOLDING", "MULTIFY_BOOK_PROFIT_IGNORED_FOR_EXECUTION", mapOf(
@@ -2542,25 +2544,11 @@ class TradingRepository @Inject constructor(
                     ).filter { it.id !in priorIds }
                     for (row in freshPublished) {
                         val ref = fixedResearchQuoteReceipts[row.symbol.uppercase(Locale.US)]
-                        val first = fixedEarlyWatchJournal.recent(row.recommendationDate, 1000)
-                            .firstOrNull { it.symbol.equals(row.symbol, true) }
-                        // v9.0.17 READ-ONLY: Early Watch can be empty even though the
-                        // official tier store recorded PRIMARY observations. Recover
-                        // those scan-start observations without inventing quote times.
-                        val persistedFirstPrimary = fixedRecommendationStore.observations(
-                            row.recommendationDate
-                        ).asSequence().filter { observation ->
-                            observation.symbol.equals(row.symbol, true) &&
-                                observation.scanAtMs <= row.generatedAtMs &&
-                                observation.qualityTier == "PRIMARY" &&
-                                observation.publishEligible && observation.executionEligible
-                        }.minByOrNull { it.scanAtMs }
-                        val firstPrimaryAtMs = first?.firstPrimaryScanAtMs
-                            ?: persistedFirstPrimary?.scanAtMs
-                        val firstPrimaryPrice = first?.firstPrimaryPrice
-                            ?: persistedFirstPrimary?.observedPrice?.takeIf {
-                                it.isFinite() && it > 0.0
-                            }
+                        // Event-local anchor: a repeat uses the first qualified PRIMARY
+                        // after its explicit reset, never the first PRIMARY from the old setup.
+                        val firstPrimary = fixedFirstPrimaryAnchor(row)
+                        val firstPrimaryAtMs = firstPrimary?.first
+                        val firstPrimaryPrice = firstPrimary?.second
                         val features = fixedShadowReferences[row.symbol.uppercase(Locale.US)]?.takeIf {
                             it.quoteCapturedAtMs in row.generatedAtMs..recommendationCompletedAtMs
                         }?.evaluation?.features
@@ -2577,9 +2565,8 @@ class TradingRepository @Inject constructor(
                             "published_target_pct" to row.targetPct,
                             "first_primary_at_ms" to firstPrimaryAtMs,
                             "first_primary_price" to firstPrimaryPrice,
-                            "first_primary_source" to (if (first != null)
-                                "PERSISTED_EARLY_WATCH" else if (persistedFirstPrimary != null)
-                                "PERSISTED_QUALIFIED_TIER_SCAN_START" else "UNAVAILABLE"),
+                            "first_primary_source" to (firstPrimary?.third ?: "UNAVAILABLE"),
+                            "first_primary_anchor_scope" to "EVENT_LOCAL_AFTER_LAST_EXPLICIT_RESET",
                             "first_primary_to_publication_ms" to study.firstPrimaryToPublicationMs,
                             "source_quote_to_publication_ms" to study.sourceQuoteToPublicationMs,
                             "runup_since_first_primary_pct" to study.firstPrimaryRunupPct,
@@ -2819,7 +2806,7 @@ class TradingRepository @Inject constructor(
         return newPulses
     }
 
-    private fun fixedFirstPrimaryPrice(row: FixedRecommendationRecord): Double? {
+    private fun fixedFirstPrimaryAnchor(row: FixedRecommendationRecord): Triple<Long, Double, String>? {
         val day = row.recommendationDate
         val allEvents = fixedRecommendationStore.recommendations(day)
         val previousAt = listOfNotNull(
@@ -2830,22 +2817,33 @@ class TradingRepository @Inject constructor(
                 ?.takeIf { it < row.generatedAtMs }
         ).maxOrNull()
         val observations = fixedRecommendationStore.observations(day)
+            .filter { it.scanAtMs <= row.generatedAtMs }
         val boundary = previousAt?.let {
             FixedRepeatQualificationPolicy.resetAt(row.symbol, it, observations)
         }
         val firstFresh = observations.asSequence().filter {
             it.symbol.equals(row.symbol, true) &&
                 it.scanAtMs <= row.generatedAtMs &&
-                (boundary == null && previousAt == null || boundary != null && it.scanAtMs > boundary) &&
+                (previousAt == null || boundary != null && it.scanAtMs > boundary) &&
                 it.qualityTier == "PRIMARY" && it.publishEligible && it.executionEligible &&
                 it.observedPrice?.isFinite() == true && (it.observedPrice ?: 0.0) > 0.0
-        }.minByOrNull { it.scanAtMs }?.observedPrice
-        // A repeat can never use the first PRIMARY price from a previous setup.
-        return firstFresh ?: if (previousAt == null)
-            fixedEarlyWatchJournal.recent(day, 1000)
-                .firstOrNull { it.symbol.equals(row.symbol, true) }?.firstPrimaryPrice
-        else null
+        }.minByOrNull { it.scanAtMs }
+        if (firstFresh != null) return Triple(
+            firstFresh.scanAtMs, firstFresh.observedPrice!!, "EVENT_LOCAL_PERSISTED_TIER_OBSERVATION")
+        // Legacy Early Watch is only a fallback for the first event of the session.
+        // A repeat must never inherit a previous setup's symbol-level anchor.
+        if (previousAt == null) {
+            val watch = fixedEarlyWatchJournal.recent(day, 1000)
+                .firstOrNull { it.symbol.equals(row.symbol, true) }
+            val price = watch?.firstPrimaryPrice?.takeIf { it.isFinite() && it > 0.0 }
+            if (watch != null && price != null)
+                return Triple(watch.firstPrimaryScanAtMs, price, "FIRST_EVENT_EARLY_WATCH_FALLBACK")
+        }
+        return null
     }
+
+    private fun fixedFirstPrimaryPrice(row: FixedRecommendationRecord): Double? =
+        fixedFirstPrimaryAnchor(row)?.second
 
     private fun fixedEntryVerdict(
         row: FixedRecommendationRecord, quote: QuotePayload?,
@@ -2883,6 +2881,10 @@ class TradingRepository @Inject constructor(
     private fun fixedPresentationDto(row: FixedRecommendationRecord,
         nowMs: Long = System.currentTimeMillis()): ForecastDto {
         val verdict = fixedEntryVerdict(row, fixedPublishedQuote(row, nowMs), nowMs)
+        val execution = fixedExecutionUiStateStore.get(row.id)
+        val executionStatus = execution?.status ?: if (row.status == "BUY_EXECUTED")
+            FixedExecutionPresentationPolicy.EXECUTED_LEGACY
+        else FixedExecutionPresentationPolicy.NOT_ATTEMPTED
         val riskPrefix = when (verdict.status) {
             "RESEARCH_ONLY" -> "FIXED RESEARCH ONLY · BUY BLOCKED: " + verdict.reasons.joinToString(",") + " · "
             "CAUTION" -> "FIXED ENTRY CAUTION: " + verdict.reasons.joinToString(",") + " · "
@@ -2890,7 +2892,11 @@ class TradingRepository @Inject constructor(
         }
         return row.toDto().copy(
             reason = riskPrefix + row.reason,
-            executionEligible = row.executionEligible && verdict.actionable
+            executionEligible = row.executionEligible && verdict.actionable,
+            executionStatus = executionStatus,
+            executionReason = execution?.reason.orEmpty(),
+            executionFilledQuantity = execution?.filledQuantity,
+            executionRequestedQuantity = execution?.requestedQuantity
         )
     }
 
@@ -6128,7 +6134,7 @@ class TradingRepository @Inject constructor(
                 engine = ENGINE_UNIVEST_HOLDING, symbol = symbol, product = "CNC",
                 side = "LONG", quantity = filled, entryPrice = actualEntry,
                 stopPrice = HardStopLossPolicy.stopPrice(actualEntry), targetPrice = null,
-                strategy = "Official Univest ENTRY via Fixed Auto Buy · Alpha CNC · hard -3% · common stepped trailing exit",
+                strategy = "Official Univest ENTRY via Fixed Auto Buy · Alpha CNC · hard -2% · common stepped trailing exit",
                 regime = "UNIVEST_LONG", confidence = 1.0, sourceEventId = null,
                 openOrderId = order.growwOrderId, openReferenceId = reference,
                 openedAtMs = openedAt, lastPrice = actualEntry,
@@ -7457,10 +7463,17 @@ class TradingRepository @Inject constructor(
             return "${row.symbol} already has a Forecast holding; duplicate Forecast BUY blocked"
         }
         val quoteRequestStartedAtMs = System.currentTimeMillis()
-        val quote = apiFactory.groww.quote(
-            bearer(token), tradingSymbol = row.symbol,
-            trafficPriority = MarketDataPriorityAdmissionPolicy.PROTECTION
-        ).requirePayload("Quote ${row.symbol}")
+        val quote = try {
+            apiFactory.groww.quote(
+                bearer(token), tradingSymbol = row.symbol,
+                trafficPriority = MarketDataPriorityAdmissionPolicy.PROTECTION
+            ).requirePayload("Quote ${row.symbol}")
+        } catch (error: Throwable) {
+            fixedExecutionUiStateStore.record(row.id, row.symbol,
+                FixedExecutionPresentationPolicy.BROKER_REJECTED,
+                "Fresh Alpha execution quote could not be obtained.")
+            throw error
+        }
         val quoteRequestElapsedMs = System.currentTimeMillis() - quoteRequestStartedAtMs
         val ltp = quote.lastPrice ?: error("Groww quote has no LTP")
         require(RecommendationPriceBandPolicy.eligible(ltp)) { "Forecast BUY requires fresh price >₹200 and <₹5,000" }
@@ -7504,7 +7517,7 @@ class TradingRepository @Inject constructor(
                 engine = ENGINE_FORECAST_HOLDING, symbol = row.symbol, product = "CNC", side = "LONG", quantity = filled,
                 entryPrice = entry, stopPrice = HardStopLossPolicy.stopPrice(entry),
                 targetPrice = entry * (1.0 + row.targetPct / 100.0),
-                strategy = "Forecast holding · ${row.strategy} · hard -3% floor · v7 fixed stepped trail 0.55→0.50 then +0.10%",
+                strategy = "Forecast holding · ${row.strategy} · hard -2% floor · v7 fixed stepped trail 0.55→0.50 then +0.10%",
                 regime = row.regime, confidence = row.confidence,
                 sourceEventId = null, openOrderId = order.growwOrderId, openReferenceId = ref,
                 openedAtMs = System.currentTimeMillis(), lastPrice = entry,
@@ -7844,7 +7857,7 @@ class TradingRepository @Inject constructor(
                     append(" · MARKET child · fixed target ₹")
                     append(fmt(state.fixedTargetPrice))
                     forecast?.strategy?.takeIf { it.isNotBlank() }?.let { append(" · "); append(it) }
-                    append(" · hard -3% floor · v7 fixed stepped trail 0.55→0.50 then +0.10%")
+                    append(" · hard -2% floor · v7 fixed stepped trail 0.55→0.50 then +0.10%")
                 },
                 regime = forecast?.regime ?: "FORECAST_AUTO_BUY",
                 confidence = forecast?.confidence ?: 1.0,
@@ -7938,7 +7951,7 @@ class TradingRepository @Inject constructor(
                 entryPrice = actualFill,
                 stopPrice = HardStopLossPolicy.stopPrice(actualFill),
                 targetPrice = state.fixedTargetPrice,
-                strategy = "Migrated legacy forecast LIMIT fill · fixed target ₹${fmt(state.fixedTargetPrice)} · hard -3% floor · v7 fixed stepped trail 0.55→0.50 then +0.10%",
+                strategy = "Migrated legacy forecast LIMIT fill · fixed target ₹${fmt(state.fixedTargetPrice)} · hard -2% floor · v7 fixed stepped trail 0.55→0.50 then +0.10%",
                 regime = "FORECAST_AUTO_BUY",
                 confidence = 1.0,
                 sourceEventId = null,
@@ -7974,6 +7987,9 @@ class TradingRepository @Inject constructor(
         // Legacy entry GTTs migrate in the maintenance worker, never on the BUY hot path.
         val pendingLegacy = fixedAutoBuyOrderStore.forSymbol(today, row.symbol)
         if (pendingLegacy != null && !ForecastAutoBuyPolicy.isTerminal(pendingLegacy.status)) {
+            fixedExecutionUiStateStore.record(row.id, row.symbol,
+                FixedExecutionPresentationPolicy.BLOCKED_PENDING_GTT,
+                "A legacy entry GTT is still being reconciled; duplicate BUY remains blocked.")
             return "Legacy Fixed entry GTT is still being reconciled for ${row.symbol}; no duplicate BUY was sent"
         }
 
@@ -7984,6 +8000,9 @@ class TradingRepository @Inject constructor(
         require(RecommendationPriceBandPolicy.eligible(row.entryPrice)) { "Fixed executes only stocks strictly between ₹200 and ₹5,000" }
         require(row.executionEligible && row.qualityTier == "PRIMARY") { "Only PRIMARY Fixed recommendations can place a real BUY" }
         if (managedDao.openPosition(ENGINE_FIXED_HOLDING, row.symbol) != null) {
+            fixedExecutionUiStateStore.record(row.id, row.symbol,
+                FixedExecutionPresentationPolicy.BLOCKED_EXISTING_HOLDING,
+                "An app-owned Fixed holding is already open for this symbol.")
             return "${row.symbol} already has a Fixed holding; duplicate Fixed BUY blocked"
         }
 
@@ -7994,13 +8013,20 @@ class TradingRepository @Inject constructor(
         ).requirePayload("Quote ${row.symbol}")
         val quoteRequestElapsedMs = System.currentTimeMillis() - quoteRequestStartedAtMs
         val ltp = quote.lastPrice ?: error("Groww quote has no LTP")
-        require(RecommendationPriceBandPolicy.eligible(ltp)) { "Fixed BUY requires fresh price >₹200 and <₹5,000" }
+        if (!RecommendationPriceBandPolicy.eligible(ltp)) {
+            fixedExecutionUiStateStore.record(row.id, row.symbol,
+                FixedExecutionPresentationPolicy.BLOCKED_PRICE_BAND,
+                "Fresh broker price is outside the approved Fixed execution price band.")
+            error("Fixed BUY requires fresh price >₹200 and <₹5,000")
+        }
         val fixedLiquidityReject = ExecutionQuoteLiquidityPolicy.rejectionReason(quote)
         if (fixedLiquidityReject != null) {
             auditLogger.logAsync("FIXED_BUY", "ENTRY_LIQUIDITY_UNVERIFIED", mapOf(
                 "symbol" to row.symbol, "reason" to fixedLiquidityReject,
                 "source" to "FRESH_EXECUTION_QUOTE", "fixed_scoring_changed" to false
             ))
+            fixedExecutionUiStateStore.record(row.id, row.symbol,
+                FixedExecutionPresentationPolicy.BLOCKED_LIQUIDITY, fixedLiquidityReject)
             error("Fixed BUY blocked: broker book not verified ($fixedLiquidityReject)")
         }
         val thinLiquidityReject = FixedExecutionThinLiquidityPolicy.rejectionReason(quote)
@@ -8010,6 +8036,8 @@ class TradingRepository @Inject constructor(
                 "reported_day_shares" to quote.volume,
                 "daily_turnover_estimate" to (ltp * (quote.volume ?: 0L)),
                 "fixed_scoring_changed" to false))
+            fixedExecutionUiStateStore.record(row.id, row.symbol,
+                FixedExecutionPresentationPolicy.BLOCKED_LIQUIDITY, thinLiquidityReject)
             error("Fixed BUY blocked: extremely thin reported turnover ($thinLiquidityReject)")
         }
         val entryActionability = fixedEntryVerdict(row, quote)
@@ -8019,6 +8047,9 @@ class TradingRepository @Inject constructor(
                 "first_primary_to_entry_pct" to entryActionability.firstPrimaryRunupPct,
                 "distance_from_day_high_pct" to entryActionability.distanceFromQuoteHighPct,
                 "fixed_model_unchanged" to true))
+            fixedExecutionUiStateStore.record(row.id, row.symbol,
+                FixedExecutionPresentationPolicy.BLOCKED_ENTRY_QUALITY,
+                entryActionability.reasons.joinToString(","))
             error("Fixed BUY held for research: " + entryActionability.reasons.joinToString(","))
         }
         val fixedExtensionReject = ExecutionEntryPriceGuardPolicy.rejectionReason(
@@ -8028,6 +8059,8 @@ class TradingRepository @Inject constructor(
                 mapOf("symbol" to row.symbol, "reason" to fixedExtensionReject,
                     "quote_network_elapsed_ms" to quoteRequestElapsedMs, "reference" to row.entryPrice,
                     "fresh_ltp" to ltp, "fixed_scoring_changed" to false))
+            fixedExecutionUiStateStore.record(row.id, row.symbol,
+                FixedExecutionPresentationPolicy.BLOCKED_PRICE_EXTENSION, fixedExtensionReject)
             error("Fixed BUY blocked: entry quote guard ($fixedExtensionReject)")
         }
         if (ltp >= row.targetPrice) {
@@ -8050,11 +8083,55 @@ class TradingRepository @Inject constructor(
             "Fixed BUY disabled: recommendation is no longer active"
         }
         val ref = stableRef("FXH", "${row.recommendationDate}-${row.id}-${row.symbol}")
-        val order = placeCncBuy(token, row.symbol, sizing.quantity, ref, entryQuote = quote, quoteReceivedAtMs = quoteRequestStartedAtMs + quoteRequestElapsedMs)
+        val order = try {
+            placeCncBuy(token, row.symbol, sizing.quantity, ref, entryQuote = quote,
+                quoteReceivedAtMs = quoteRequestStartedAtMs + quoteRequestElapsedMs,
+                recommendationId = row.id)
+        } catch (error: Throwable) {
+            val message = error.message.orEmpty()
+            val status = when {
+                message.contains("already exists in Groww/app holdings", true) ->
+                    FixedExecutionPresentationPolicy.BLOCKED_EXTERNAL_HOLDING
+                message.contains("MAX_CONCURRENT_HOLDINGS", true) ->
+                    FixedExecutionPresentationPolicy.BLOCKED_MAX_HOLDINGS
+                BrokerBuyFailureMessagePolicy.insufficientFunds(message) ->
+                    FixedExecutionPresentationPolicy.BLOCKED_INSUFFICIENT_FUNDS
+                else -> FixedExecutionPresentationPolicy.BROKER_REJECTED
+            }
+            val reason = when (status) {
+                FixedExecutionPresentationPolicy.BLOCKED_EXTERNAL_HOLDING ->
+                    "A Groww holding already exists outside this Fixed-owned position; ownership remains separate."
+                FixedExecutionPresentationPolicy.BLOCKED_MAX_HOLDINGS ->
+                    "Configured concurrent app-owned holding limit is currently full."
+                FixedExecutionPresentationPolicy.BLOCKED_INSUFFICIENT_FUNDS ->
+                    "Groww rejected this BUY for insufficient funds."
+                else -> "Groww did not accept this BUY; inspect the execution audit for the broker response."
+            }
+            fixedExecutionUiStateStore.record(row.id, row.symbol, status, reason,
+                requestedQuantity = sizing.quantity)
+            throw error
+        }
         val filled = order.filledQuantity?.takeIf { it > 0 } ?: sizing.quantity
         val actualFill = order.averageFillPrice?.takeIf { it.isFinite() && it > 0.0 } ?: ltp
         val executionTarget = actualFill * (1.0 + row.targetPct / 100.0)
         val nowMs = System.currentTimeMillis()
+        val partialFill = filled < sizing.quantity
+        fixedExecutionUiStateStore.record(
+            row.id, row.symbol,
+            if (partialFill) FixedExecutionPresentationPolicy.PARTIAL_FILL
+            else FixedExecutionPresentationPolicy.EXECUTED,
+            if (partialFill) "Groww reported a partial fill; only the confirmed filled quantity is registered."
+            else "Groww confirmed the full requested BUY quantity.",
+            requestedQuantity = sizing.quantity, filledQuantity = filled)
+        fixedRecommendationStore.update(row.copy(
+            status = "BUY_EXECUTED",
+            lastPrice = actualFill,
+            lastObservedAtMs = nowMs,
+            maxFavourablePct = maxOf(row.maxFavourablePct,
+                (actualFill / row.entryPrice - 1.0) * 100.0),
+            maxAdversePct = maxOf(row.maxAdversePct,
+                (row.entryPrice - actualFill).coerceAtLeast(0.0) / row.entryPrice * 100.0)
+        ))
         registerBoughtPositionAndProtect(
             ManagedPositionEntity(
                 engine = ENGINE_FIXED_HOLDING,
@@ -8065,7 +8142,7 @@ class TradingRepository @Inject constructor(
                 entryPrice = actualFill,
                 stopPrice = HardStopLossPolicy.stopPrice(actualFill),
                 targetPrice = executionTarget,
-                strategy = "Fixed ${FixedEngineSnapshotStore.SNAPSHOT_ID} manual direct MARKET BUY · published entry ₹${fmt(row.entryPrice)} · broker fill ₹${fmt(actualFill)} · execution target ₹${fmt(executionTarget)} · ${row.strategy} · hard -3% floor · v7 stepped trail 0.55→0.50 then +0.10%",
+                strategy = "Fixed ${FixedEngineSnapshotStore.SNAPSHOT_ID} manual direct MARKET BUY · published entry ₹${fmt(row.entryPrice)} · broker fill ₹${fmt(actualFill)} · execution target ₹${fmt(executionTarget)} · ${row.strategy} · hard -2% floor · v7 stepped trail 0.55→0.50 then +0.10%",
                 regime = row.regime,
                 confidence = row.confidence,
                 sourceEventId = null,
@@ -8158,6 +8235,11 @@ class TradingRepository @Inject constructor(
         if (rows.isEmpty()) return 0
         val preflightCooldown = buyApiCooldownOrNull(GrowwApiUsageLedger.Category.LIVE_DATA)
         if (preflightCooldown != null) {
+            rows.forEach { row ->
+                fixedExecutionUiStateStore.record(row.id, row.symbol,
+                    FixedExecutionPresentationPolicy.BROKER_COOLDOWN,
+                    "Alpha broker cooldown active; automatic retry is scheduled.")
+            }
             auditAutoBuyBlocked("FIXED_AUTO_BUY", preflightCooldown)
             scheduleFixedAutoBuyCooldownWake(rows, preflightCooldown, System.currentTimeMillis())
             return 0
@@ -8186,6 +8268,9 @@ class TradingRepository @Inject constructor(
                 auditLogger.logAsync("FIXED_AUTO_BUY", "ENTRY_QUALITY_BLOCKED_BEFORE_QUOTE",
                     mapOf("symbol" to row.symbol, "reasons" to preEntryVerdict.reasons,
                         "fixed_model_unchanged" to true))
+                fixedExecutionUiStateStore.record(row.id, row.symbol,
+                    FixedExecutionPresentationPolicy.BLOCKED_ENTRY_QUALITY,
+                    preEntryVerdict.reasons.joinToString(","))
                 continue
             }
             val freshnessAtQuote = com.multify.traderpro.engine
@@ -8203,15 +8288,25 @@ class TradingRepository @Inject constructor(
                     "max_source_and_publication_age_ms" to
                         AutoBuyEntrySafetyPolicy.FIXED_AUTO_BUY_MAX_AGE_MS
                 ))
+                fixedExecutionUiStateStore.record(row.id, row.symbol,
+                    FixedExecutionPresentationPolicy.EXPIRED, freshnessAtQuote.reason)
                 continue
             }
             val cooldown = buyApiCooldownOrNull(GrowwApiUsageLedger.Category.LIVE_DATA)
             if (cooldown != null) {
                 auditAutoBuyBlocked("FIXED_AUTO_BUY", cooldown, row.id, row.symbol)
+                fixedExecutionUiStateStore.record(row.id, row.symbol,
+                    FixedExecutionPresentationPolicy.BROKER_COOLDOWN,
+                    "Alpha broker cooldown active; automatic retry is scheduled.")
                 scheduleFixedAutoBuyCooldownWake(rows, cooldown, System.currentTimeMillis())
                 break
             }
-            if (managedDao.openPosition(ENGINE_FIXED_HOLDING, row.symbol) != null) continue
+            if (managedDao.openPosition(ENGINE_FIXED_HOLDING, row.symbol) != null) {
+                fixedExecutionUiStateStore.record(row.id, row.symbol,
+                    FixedExecutionPresentationPolicy.BLOCKED_EXISTING_HOLDING,
+                    "An app-owned Fixed holding is already open for this symbol.")
+                continue
+            }
             val fundsRejectPrefs = appContext.getSharedPreferences("fixed_broker_funds_rejections_v9011", Context.MODE_PRIVATE)
             val rejectedUntil = fundsRejectPrefs.getLong(row.id.toString(), 0L)
             if (rejectedUntil > System.currentTimeMillis()) {
@@ -8219,6 +8314,9 @@ class TradingRepository @Inject constructor(
                     "symbol" to row.symbol, "recommendation_id" to row.id,
                     "retry_after_ms" to rejectedUntil - System.currentTimeMillis(),
                     "no_duplicate_order" to true))
+                fixedExecutionUiStateStore.record(row.id, row.symbol,
+                    FixedExecutionPresentationPolicy.BLOCKED_INSUFFICIENT_FUNDS,
+                    "Groww previously rejected this recommendation for insufficient funds.")
                 continue
             }
 
@@ -8231,6 +8329,9 @@ class TradingRepository @Inject constructor(
                     "smart_order_id" to pendingLegacy.orderId,
                     "status" to pendingLegacy.status
                 ))
+                fixedExecutionUiStateStore.record(row.id, row.symbol,
+                    FixedExecutionPresentationPolicy.BLOCKED_PENDING_GTT,
+                    "A legacy entry GTT is still being reconciled; duplicate BUY remains blocked.")
                 continue
             }
 
@@ -8263,15 +8364,30 @@ class TradingRepository @Inject constructor(
                 val cooldown = buyApiCooldownOrNull(GrowwApiUsageLedger.Category.LIVE_DATA)
                 if (cooldown != null) {
                     auditAutoBuyBlocked("FIXED_AUTO_BUY", cooldown, row.id, row.symbol)
+                    fixedExecutionUiStateStore.record(row.id, row.symbol,
+                        FixedExecutionPresentationPolicy.BROKER_COOLDOWN,
+                        "Alpha broker cooldown active; automatic retry is scheduled.")
                     scheduleFixedAutoBuyCooldownWake(rows, cooldown, System.currentTimeMillis())
                     break
                 }
+                fixedExecutionUiStateStore.record(row.id, row.symbol,
+                    FixedExecutionPresentationPolicy.BROKER_REJECTED,
+                    "Fresh Alpha execution quote was unavailable.")
                 continue
             }
             val quoteElapsedMs = (System.currentTimeMillis() - quoteStartedAtMs).coerceAtLeast(0L)
-            val ltp = quote.lastPrice?.takeIf { it.isFinite() && it > 0.0 } ?: continue
+            val ltp = quote.lastPrice?.takeIf { it.isFinite() && it > 0.0 }
+            if (ltp == null) {
+                fixedExecutionUiStateStore.record(row.id, row.symbol,
+                    FixedExecutionPresentationPolicy.BROKER_REJECTED,
+                    "Fresh Alpha quote did not contain a valid last price.")
+                continue
+            }
             if (!RecommendationPriceBandPolicy.eligible(ltp)) {
                 auditLogger.logAsync("FIXED_AUTO_BUY", "PRICE_BAND_REJECTED", mapOf("symbol" to row.symbol, "fresh_ltp" to ltp))
+                fixedExecutionUiStateStore.record(row.id, row.symbol,
+                    FixedExecutionPresentationPolicy.BLOCKED_PRICE_BAND,
+                    "Fresh broker price is outside the approved Fixed execution price band.")
                 continue
             }
             val liquidityReject = ExecutionQuoteLiquidityPolicy.rejectionReason(quote)
@@ -8280,6 +8396,8 @@ class TradingRepository @Inject constructor(
                     "symbol" to row.symbol, "reason" to liquidityReject,
                     "fresh_quote" to true, "scoring_changed" to false
                 ))
+                fixedExecutionUiStateStore.record(row.id, row.symbol,
+                    FixedExecutionPresentationPolicy.BLOCKED_LIQUIDITY, liquidityReject)
                 continue
             }
             val thinLiquidityReject = FixedExecutionThinLiquidityPolicy.rejectionReason(quote)
@@ -8289,16 +8407,17 @@ class TradingRepository @Inject constructor(
                     "reported_day_shares" to quote.volume,
                     "daily_turnover_estimate" to (ltp * (quote.volume ?: 0L)),
                     "fixed_scoring_changed" to false))
+                fixedExecutionUiStateStore.record(row.id, row.symbol,
+                    FixedExecutionPresentationPolicy.BLOCKED_LIQUIDITY, thinLiquidityReject)
                 continue
             }
             val publishedEvidence = fixedAutoBuyPublicationEvidence.find(row.id)
-            val firstPrimary = fixedEarlyWatchJournal.recent(today, 1000)
-                .firstOrNull { it.symbol.equals(row.symbol, true) }
+            val firstPrimary = fixedFirstPrimaryAnchor(row)
             val shadowFeatures = fixedShadowReferences[row.symbol.uppercase(Locale.US)]?.takeIf {
                 it.quoteCapturedAtMs in row.generatedAtMs..System.currentTimeMillis()
             }?.evaluation?.features
             val timingStudy = com.multify.traderpro.engine.FixedEntryTimingStudyPolicy.assess(
-                firstPrimary?.firstPrimaryScanAtMs, firstPrimary?.firstPrimaryPrice,
+                firstPrimary?.first, firstPrimary?.second,
                 publishedEvidence?.sourceQuoteReceivedAtMs,
                 publishedEvidence?.publishedAtMs ?: System.currentTimeMillis(),
                 ltp, row.targetPct, shadowFeatures?.atr14, shadowFeatures?.vwap
@@ -8307,8 +8426,8 @@ class TradingRepository @Inject constructor(
                 "symbol" to row.symbol, "recommendation_id" to row.id,
                 "scan_started_at_ms" to row.generatedAtMs,
                 "published_at_ms" to publishedEvidence?.publishedAtMs,
-                "first_primary_at_ms" to firstPrimary?.firstPrimaryScanAtMs,
-                "first_primary_price" to firstPrimary?.firstPrimaryPrice,
+                "first_primary_at_ms" to firstPrimary?.first,
+                "first_primary_price" to firstPrimary?.second,
                 "alpha_quote_received_at_ms" to (quoteStartedAtMs + quoteElapsedMs),
                 "alpha_quote_price" to ltp,
                 "first_primary_to_publication_ms" to timingStudy.firstPrimaryToPublicationMs,
@@ -8331,6 +8450,9 @@ class TradingRepository @Inject constructor(
                     "first_primary_to_entry_pct" to entryActionability.firstPrimaryRunupPct,
                     "distance_from_day_high_pct" to entryActionability.distanceFromQuoteHighPct,
                     "fixed_model_unchanged" to true))
+                fixedExecutionUiStateStore.record(row.id, row.symbol,
+                    FixedExecutionPresentationPolicy.BLOCKED_ENTRY_QUALITY,
+                    entryActionability.reasons.joinToString(","))
                 continue
             }
             val autoExtensionReject = ExecutionEntryPriceGuardPolicy.rejectionReason(
@@ -8340,6 +8462,8 @@ class TradingRepository @Inject constructor(
                     mapOf("symbol" to row.symbol, "reason" to autoExtensionReject,
                         "reference" to row.entryPrice, "fresh_ltp" to ltp,
                         "quote_network_elapsed_ms" to quoteElapsedMs, "fixed_scoring_changed" to false))
+                fixedExecutionUiStateStore.record(row.id, row.symbol,
+                    FixedExecutionPresentationPolicy.BLOCKED_PRICE_EXTENSION, autoExtensionReject)
                 continue
             }
             if (ltp >= row.targetPrice) {
@@ -8364,6 +8488,9 @@ class TradingRepository @Inject constructor(
             )
             if (executionCooldown != null) {
                 auditAutoBuyBlocked("FIXED_AUTO_BUY", executionCooldown, row.id, row.symbol)
+                fixedExecutionUiStateStore.record(row.id, row.symbol,
+                    FixedExecutionPresentationPolicy.BROKER_COOLDOWN,
+                    "Order/inventory API cooldown active; automatic retry is scheduled.")
                 scheduleFixedAutoBuyCooldownWake(rows, executionCooldown, System.currentTimeMillis())
                 break
             }
@@ -8413,6 +8540,8 @@ class TradingRepository @Inject constructor(
                     "reason" to freshnessAtOrder.reason,
                     "expiry_ms" to freshnessAtOrder.expiresAtMs
                 ))
+                fixedExecutionUiStateStore.record(row.id, row.symbol,
+                    FixedExecutionPresentationPolicy.EXPIRED, freshnessAtOrder.reason)
                 continue
             }
             if (fixedRecommendationStore.recommendations(today).firstOrNull { it.id == row.id }?.status != "ACTIVE") continue
@@ -8432,12 +8561,33 @@ class TradingRepository @Inject constructor(
                 }.getOrNull()
                 val insufficient = BrokerBuyFailureMessagePolicy.insufficientFunds(
                     it.message.orEmpty() + " " + brokerError.orEmpty())
+                val brokerMessage = it.message.orEmpty() + " " + brokerError.orEmpty()
+                val uiStatus = when {
+                    brokerMessage.contains("already exists in Groww/app holdings", ignoreCase = true) ->
+                        FixedExecutionPresentationPolicy.BLOCKED_EXTERNAL_HOLDING
+                    brokerMessage.contains("MAX_CONCURRENT_HOLDINGS", ignoreCase = true) ->
+                        FixedExecutionPresentationPolicy.BLOCKED_MAX_HOLDINGS
+                    insufficient -> FixedExecutionPresentationPolicy.BLOCKED_INSUFFICIENT_FUNDS
+                    else -> FixedExecutionPresentationPolicy.BROKER_REJECTED
+                }
+                val uiReason = when (uiStatus) {
+                    FixedExecutionPresentationPolicy.BLOCKED_EXTERNAL_HOLDING ->
+                        "A Groww holding already exists outside this Fixed-owned position; ownership remains separate."
+                    FixedExecutionPresentationPolicy.BLOCKED_MAX_HOLDINGS ->
+                        "Configured concurrent app-owned holding limit is currently full; automatic retry remains eligible while the signal is fresh."
+                    FixedExecutionPresentationPolicy.BLOCKED_INSUFFICIENT_FUNDS ->
+                        "Groww rejected this BUY for insufficient funds."
+                    else -> "Groww did not accept this BUY; inspect the execution audit for the broker response."
+                }
+                fixedExecutionUiStateStore.record(row.id, row.symbol, uiStatus, uiReason,
+                    requestedQuantity = sizing.quantity)
                 auditLogger.log("FIXED_AUTO_BUY", "MARKET_BUY_ERROR", mapOf(
                     "symbol" to row.symbol,
                     "reference" to reference,
                     "fresh_ltp" to ltp,
                     "message" to (it.message ?: it.javaClass.simpleName),
                     "insufficient_funds" to insufficient,
+                    "ui_execution_state" to uiStatus,
                     "wallet_api_calls" to 0
                 ))
                 if (insufficient) {
@@ -8451,6 +8601,14 @@ class TradingRepository @Inject constructor(
             val filled = order.filledQuantity?.takeIf { it > 0 } ?: sizing.quantity
             val actualFill = order.averageFillPrice?.takeIf { it.isFinite() && it > 0.0 } ?: ltp
             val executionTarget = actualFill * (1.0 + row.targetPct / 100.0)
+            val partialFill = filled < sizing.quantity
+            fixedExecutionUiStateStore.record(
+                row.id, row.symbol,
+                if (partialFill) FixedExecutionPresentationPolicy.PARTIAL_FILL
+                else FixedExecutionPresentationPolicy.EXECUTED,
+                if (partialFill) "Groww reported a partial fill; only the confirmed filled quantity is registered."
+                else "Groww confirmed the full requested BUY quantity.",
+                requestedQuantity = sizing.quantity, filledQuantity = filled)
             val openedAtMs = System.currentTimeMillis()
             fixedRecommendationStore.update(row.copy(
                 status = "BUY_EXECUTED",
@@ -8481,7 +8639,7 @@ class TradingRepository @Inject constructor(
                     entryPrice = actualFill,
                     stopPrice = HardStopLossPolicy.stopPrice(actualFill),
                     targetPrice = executionTarget,
-                    strategy = "Fixed ${FixedEngineSnapshotStore.SNAPSHOT_ID} auto-buy · direct MARKET · published entry ₹${fmt(row.entryPrice)} · fill ₹${fmt(actualFill)} · execution target ₹${fmt(executionTarget)} · ${row.strategy} · hard -3% floor · v7 stepped trail 0.55→0.50 then +0.10%",
+                    strategy = "Fixed ${FixedEngineSnapshotStore.SNAPSHOT_ID} auto-buy · direct MARKET · published entry ₹${fmt(row.entryPrice)} · fill ₹${fmt(actualFill)} · execution target ₹${fmt(executionTarget)} · ${row.strategy} · hard -2% floor · v7 stepped trail 0.55→0.50 then +0.10%",
                     regime = row.regime,
                     confidence = row.confidence,
                     sourceEventId = null,
@@ -8719,7 +8877,7 @@ class TradingRepository @Inject constructor(
                 entryPrice = actualEntry,
                 stopPrice = HardStopLossPolicy.stopPrice(actualEntry),
                 targetPrice = executionTarget,
-                strategy = "Fixed ${FixedEngineSnapshotStore.SNAPSHOT_ID} legacy GTT migrated · actual entry ₹${fmt(actualEntry)} · execution target ₹${fmt(executionTarget)} · ${row?.strategy.orEmpty()} · hard -3% floor · v7 stepped trail 0.55→0.50 then +0.10%",
+                strategy = "Fixed ${FixedEngineSnapshotStore.SNAPSHOT_ID} legacy GTT migrated · actual entry ₹${fmt(actualEntry)} · execution target ₹${fmt(executionTarget)} · ${row?.strategy.orEmpty()} · hard -2% floor · v7 stepped trail 0.55→0.50 then +0.10%",
                 regime = row?.regime ?: "FIXED_ENGINE",
                 confidence = row?.confidence ?: 1.0,
                 sourceEventId = null,
@@ -9243,7 +9401,7 @@ class TradingRepository @Inject constructor(
                         outcomeMfePct = mfe,
                         outcomeMaePct = mae,
                         outcomeClosePct = closePct,
-                        // Do not label a historical Forecast success when the -3% research stop
+                        // Do not label a historical Forecast success when the -2% research stop
                         // was observed first or the one-minute sequence is ambiguous.
                         outcomeTargetHit = chronological.firstTouch == "TARGET_FIRST_1M",
                         outcomeUpdatedAtMs = System.currentTimeMillis()
@@ -10149,7 +10307,7 @@ class TradingRepository @Inject constructor(
 
         if (!marketOpen) {
             // Keep every managed LONG protected overnight. Existing profitable trailing GTTs are
-            // preserved; an unarmed holding receives the common -3% server-side hard stop. This
+            // preserved; an unarmed holding receives the common -2% server-side hard stop. This
             // also self-recovers protection after an app/service restart or a prior GTT failure.
             var hardStopReady = 0
             var hardStopFailures = 0
@@ -10482,7 +10640,7 @@ class TradingRepository @Inject constructor(
             existingTrigger != null && existingTrigger + SMART_ORDER_PRICE_EPSILON >= hardStop
         ) return position
 
-        // Upgrade existing broker GTTs to the new -3% floor without cancelling
+        // Upgrade existing broker GTTs to the approved -2% floor without cancelling
         // the protective SELL order first. On API failure retain the older
         // server GTT for continued position-monitor retries.
         if (com.multify.traderpro.engine.HardStopGttTighteningPolicy.shouldModifyExisting(
@@ -10498,7 +10656,7 @@ class TradingRepository @Inject constructor(
                 val modified = modifyPositionGtt(
                     token, position, hardStop, "DOWN", position.smartOrderMode
                 )
-                auditLogger.log("PROTECTION", "HARD_STOP_MINUS_3_EXISTING_GTT_UPGRADED", mapOf(
+                auditLogger.log("PROTECTION", "HARD_STOP_MINUS_2_EXISTING_GTT_UPGRADED", mapOf(
                     "symbol" to position.symbol, "position_id" to position.id,
                     "old_trigger" to existingTrigger, "new_trigger" to modified.smartOrderTriggerPrice,
                     "gtt_id" to position.smartOrderId,
@@ -10508,7 +10666,7 @@ class TradingRepository @Inject constructor(
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Throwable) {
-                auditLogger.log("PROTECTION", "HARD_STOP_MINUS_3_GTT_UPGRADE_DEFERRED", mapOf(
+                auditLogger.log("PROTECTION", "HARD_STOP_MINUS_2_GTT_UPGRADE_DEFERRED", mapOf(
                     "symbol" to position.symbol, "position_id" to position.id,
                     "existing_active_gtt_preserved" to true,
                     "existing_trigger" to existingTrigger, "desired_trigger" to hardStop,
@@ -10547,7 +10705,7 @@ class TradingRepository @Inject constructor(
 
     private suspend fun monitorLongHoldingLocked(position: ManagedPositionEntity, token: String, ltp: Double) {
         // Common sell protection for every managed CNC LONG, regardless of source:
-        // 1) hard -3% loss floor from the actual holding cost basis;
+        // 1) hard -2% loss floor from the actual holding cost basis;
         // 2) once +0.55% high-water is reached, the existing stepped profitable trail takes over;
         // 3) the active stop only moves upward. There is no averaging-down path.
         val decisionStartedNs = SystemClock.elapsedRealtimeNanos()
@@ -10612,7 +10770,7 @@ class TradingRepository @Inject constructor(
                 working,
                 ltp,
                 if (desiredMode == HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT)
-                    "COMMON_HARD_STOP_MINUS_3_LOCAL_FALLBACK"
+                    "COMMON_HARD_STOP_MINUS_2_LOCAL_FALLBACK"
                 else "LONG_TRAILING_PROFIT_STOP_V7_1_LOCAL_FALLBACK",
                 decisionStartedNs
             )
@@ -10637,7 +10795,7 @@ class TradingRepository @Inject constructor(
                             protected,
                             ltp,
                             if (desiredMode == HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT)
-                                "COMMON_HARD_STOP_MINUS_3_STALE_GTT_FALLBACK"
+                                "COMMON_HARD_STOP_MINUS_2_STALE_GTT_FALLBACK"
                             else "LONG_TRAILING_PROFIT_STOP_V7_1_STALE_GTT_FALLBACK",
                             decisionStartedNs
                         )
@@ -10706,7 +10864,7 @@ class TradingRepository @Inject constructor(
                             cleared,
                             ltp,
                             if (working.smartOrderMode == HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT)
-                                "COMMON_HARD_STOP_MINUS_3_GTT_FAILED_FALLBACK"
+                                "COMMON_HARD_STOP_MINUS_2_GTT_FAILED_FALLBACK"
                             else "LONG_TRAILING_PROFIT_STOP_V7_1_GTT_FAILED_FALLBACK",
                             decisionStartedNs
                         )
@@ -10727,7 +10885,7 @@ class TradingRepository @Inject constructor(
                     working,
                     ltp,
                     if (desiredMode == HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT)
-                        "COMMON_HARD_STOP_MINUS_3_LOCAL_FALLBACK"
+                        "COMMON_HARD_STOP_MINUS_2_LOCAL_FALLBACK"
                     else "LONG_TRAILING_PROFIT_STOP_V7_1_LOCAL_FALLBACK",
                     decisionStartedNs
                 )
@@ -10741,7 +10899,7 @@ class TradingRepository @Inject constructor(
             position.smartOrderMode != HoldingSmartOrderPolicy.MODE_TRAILING_GTT
         if (stopRaised || trailJustArmed) {
             val event = when {
-                desiredMode == HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT && previousProtected == null -> "HARD_STOP_MINUS_3_ARMED"
+                desiredMode == HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT && previousProtected == null -> "HARD_STOP_MINUS_2_ARMED"
                 trailJustArmed -> "V7_1_TRAIL_ARMED"
                 else -> "V7_1_STEP_RATCHET"
             }
@@ -12530,7 +12688,7 @@ class TradingRepository @Inject constructor(
                 // v9.0.17: replayable first-PRIMARY timeline independent of the
                 // optional Early Watch journal. All prices are sampled research
                 // observations; no execution or selection logic consumes this.
-                add("fixed_primary_progression_v9017.json",
+                add("fixed_primary_progression_v9018.json",
                     FixedPrimaryProgressionResearch.export(
                         fixedRecommendationStore.archivedObservations(), fixedRecommendations))
                 fixedHistoricalEvidenceArchive.capture(fixedRecommendations)
@@ -12578,6 +12736,7 @@ class TradingRepository @Inject constructor(
                     "pair_count" to fixedFiveMinuteShadowJournal.all().size
                 ))
                 add("fixed_auto_buy_orders.json", fixedAutoBuyOrders)
+                add("fixed_execution_ui_states.json", fixedExecutionUiStateStore.all())
                 fixedFactorTelemetry.appendExportEntry(zip)
                 written("fixed_factor_snapshots.jsonl")
                 fixedMarketPathTelemetry.appendExportEntry(zip)
@@ -12653,7 +12812,7 @@ class TradingRepository @Inject constructor(
                     "publication_candidate_timeline_event" to "ALL_CANDIDATE_CONFIRMATION_TIMELINE",
                     "fixed_factor_telemetry_file" to "fixed_factor_snapshots.jsonl",
                             "fixed_working_range_shadow_schema" to "fixed_working_range_shadow_v9017",
-                            "fixed_primary_progression_v9017_file" to "fixed_primary_progression_v9017.json",
+                            "fixed_primary_progression_v9018_file" to "fixed_primary_progression_v9018.json",
                             "working_range_trading_effect" to "NONE",
                             "working_range_extra_broker_calls" to 0,
                     "fixed_early_watch_file" to "fixed_early_watch.json",

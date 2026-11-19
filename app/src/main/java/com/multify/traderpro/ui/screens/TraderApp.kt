@@ -81,6 +81,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.multify.traderpro.BuildConfig
 import com.multify.traderpro.engine.FixedBuyAvailabilityPolicy
+import com.multify.traderpro.engine.FixedExecutionPresentationPolicy
 import com.multify.traderpro.data.network.DashboardDto
 import com.multify.traderpro.data.network.FixedScanTrendStore
 import com.multify.traderpro.data.logging.FixedUiRenderEvidenceStore
@@ -786,7 +787,7 @@ private fun ForecastScreen(
                 shape = RoundedCornerShape(20.dp)) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
                     Text("Univest · official alerts / same-day closes", fontWeight = FontWeight.SemiBold)
-                    Text("Official Univest ENTRY uses Groww Alpha only when Fixed Auto Buy is ON and safeguards pass. Univest EXIT never triggers a SELL; the shared -3% stop and trailing GTT manage holdings. Research prices below are not broker fills.",
+                    Text("Official Univest ENTRY uses Groww Alpha only when Fixed Auto Buy is ON and safeguards pass. Univest EXIT never triggers a SELL; the shared -2% stop and trailing GTT manage holdings. Research prices below are not broker fills.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                     if (official.isEmpty()) {
@@ -933,6 +934,7 @@ private fun FixedScreen(
         }
     }
     val fixedMarketOpen = FixedBuyAvailabilityPolicy.nseRegularSession(fixedClockMs)
+    val fixedEntryWindowOpen = FixedBuyAvailabilityPolicy.fixedNewEntryWindow(fixedClockMs)
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -1135,7 +1137,11 @@ private fun FixedScreen(
         }
         item { ForecastTable(rows, onBuy,
             state.settings.brokerAuthenticated && state.settings.staticIpMatched && state.settings.brokerDdpiEnabled && !state.settings.safetyHalt,
-            fixed = true, fixedMarketOpen = fixedMarketOpen, fixedClockMsForTable = fixedClockMs
+            fixed = true, fixedMarketOpen = fixedMarketOpen,
+            fixedEntryWindowOpen = fixedEntryWindowOpen,
+            fixedClockMsForTable = fixedClockMs,
+            openPositionSymbols = dashboard?.positions.orEmpty()
+                .map { it.symbol.uppercase(Locale.US) }.toSet()
         ) }
         item {
             Card(
@@ -1158,7 +1164,9 @@ private fun FixedScreen(
 @Composable
 private fun ForecastTable(
     rows: List<ForecastDto>, onBuy: (String) -> Unit, executionReady: Boolean,
-    fixed: Boolean = false, fixedMarketOpen: Boolean = true, fixedClockMsForTable: Long = 0L
+    fixed: Boolean = false, fixedMarketOpen: Boolean = true,
+    fixedEntryWindowOpen: Boolean = true, fixedClockMsForTable: Long = 0L,
+    openPositionSymbols: Set<String> = emptySet()
 ) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -1212,30 +1220,49 @@ private fun ForecastTable(
                         maxLines = 3,
                         overflow = TextOverflow.Ellipsis
                     )
+                    val hasOpenPosition = f.symbol.uppercase(Locale.US) in openPositionSymbols
                     Button(
                         onClick = { onBuy(f.symbol) },
-                        enabled = if (fixed) !oldFixedEvent && FixedBuyAvailabilityPolicy.canBuy(
-                            fixedClockMsForTable, executionReady, f.status, f.executionEligible
+                        enabled = if (fixed) FixedExecutionPresentationPolicy.canBuy(
+                            fixedClockMsForTable, executionReady, f.status, f.executionEligible,
+                            f.executionStatus, oldFixedEvent, hasOpenPosition
                         ) else ForecastBuyAvailabilityPolicy.canBuy(
                             fixedClockMsForTable, executionReady, f.status, f.executionEligible
                         ),
                         modifier = Modifier.fillMaxWidth().padding(top = 7.dp)
                     ) {
                         Text(
-                            when {
-                                oldFixedEvent -> "Earlier Fixed setup · BUY latest instead"
-                                fixed && f.status == "TARGET_HIT" -> "TARGET HIT · BUY disabled"
-                                fixed && f.status != "ACTIVE" -> "Session ended · BUY disabled"
-                                !fixed && f.status == "TARGET_HIT" -> "TARGET HIT · BUY disabled"
-                                !fixed && f.status == "WATCH_ONLY" -> "PROVISIONAL WATCH · BUY disabled"
-                                !fixed && f.status == "AWAITING_CONFIRMATION" -> "PRIMARY pending · BUY disabled"
-                                !fixed && f.status != "ACTIVE" -> "Finished · BUY disabled"
-                                !fixed && !com.multify.traderpro.engine.FixedBuyAvailabilityPolicy.nseRegularSession(fixedClockMsForTable) -> "Market closed · BUY disabled"
-                                fixed && !fixedMarketOpen -> "Market closed · BUY disabled"
+                            if (fixed) FixedExecutionPresentationPolicy.buttonLabel(
+                                symbol = f.symbol,
+                                recommendationStatus = f.status,
+                                executionStatus = f.executionStatus,
+                                filledQuantity = f.executionFilledQuantity,
+                                requestedQuantity = f.executionRequestedQuantity,
+                                oldFixedEvent = oldFixedEvent,
+                                marketOpen = fixedMarketOpen,
+                                entryWindowOpen = fixedEntryWindowOpen,
+                                brokerReady = executionReady,
+                                executionEligible = f.executionEligible,
+                                hasOpenPosition = hasOpenPosition
+                            ) else when {
+                                f.status == "TARGET_HIT" -> "TARGET HIT · BUY disabled"
+                                f.status == "WATCH_ONLY" -> "PROVISIONAL WATCH · BUY disabled"
+                                f.status == "AWAITING_CONFIRMATION" -> "PRIMARY pending · BUY disabled"
+                                f.status != "ACTIVE" -> "Finished · BUY disabled"
+                                !com.multify.traderpro.engine.FixedBuyAvailabilityPolicy.nseRegularSession(fixedClockMsForTable) -> "Market closed · BUY disabled"
                                 !f.executionEligible -> f.qualityTier + " · observation only"
                                 !executionReady -> "Broker readiness required · " + f.symbol
                                 else -> "BUY " + f.symbol + " · CNC"
                             }
+                        )
+                    }
+                    if (fixed && f.executionReason.isNotBlank()) {
+                        Text(
+                            "Execution: " + f.executionReason,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                     if (fixed) {
@@ -1470,7 +1497,7 @@ private fun SettingsScreen(
                         if (state.settings.fixedAutoBuyEnabled) "ON · waiting for new Fixed/Univest signals" else "OFF · no new Fixed/Univest auto BUY"
                     )
                     Text(
-                        "Fixed remains immutable. Forecast may read prior positive Fixed outcomes, but can never write into Fixed or change its v7.4.1 rules. Every app-owned Multify, Fixed, Univest and Forecast LONG uses the same sell protection: hard -3% loss floor, then the existing +0.55% arm → +0.50% protected gain → +0.10% ratchet when profitable. No averaging down.",
+                        "Fixed remains immutable. Forecast may read prior positive Fixed outcomes, but can never write into Fixed or change its v7.4.1 rules. Every app-owned Multify, Fixed, Univest and Forecast LONG uses the same sell protection: hard -2% loss floor, then the existing +0.55% arm → +0.50% protected gain → +0.10% ratchet when profitable. No averaging down.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -1535,7 +1562,7 @@ private fun SettingsScreen(
                         else "$lastParsedSymbol · $lastParsedStatus")
                     KeyValueRow("Univest Alpha entry", lastUnivestOrderStatus)
                     Text(
-                        "Univest buys require a fresh official notification and Fixed Auto Buy ON. SELL remains managed only by the common -3% hard stop and trailing GTT. A running engine does not prove Android notification access is connected.",
+                        "Univest buys require a fresh official notification and Fixed Auto Buy ON. SELL remains managed only by the common -2% hard stop and trailing GTT. A running engine does not prove Android notification access is connected.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
