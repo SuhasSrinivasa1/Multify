@@ -109,7 +109,7 @@ class WorkingRangeRecommendationStore(context: Context) {
             val existing = rows.getOrNull(index)
             if (existing != null && existing.dto.confirmedAtMs > 0L) {
                 updateConfirmed(existing, decision.matches, decision.reasons, price,
-                    observedAtMs, marketabilityState, evaluation)
+                    observedAtMs, marketabilityState, marketability, evaluation)
                 persistLocked()
                 return
             }
@@ -146,6 +146,9 @@ class WorkingRangeRecommendationStore(context: Context) {
                     spreadBps = f.spreadBps,
                     orderBookImbalance = f.orderBookImbalance,
                     marketabilityState = marketabilityState,
+                    upperCircuitPrice = marketability.brokerUpperCircuit,
+                    bestSellOffer = marketability.bestObservedOffer,
+                    quoteClientReceiptAgeMs = marketability.clientReceiptAgeMs,
                     reason = "Working Range v0.1 · first matching scan · confirmation 1/2 · manual review only"
                 )
                 val row = StoredRow(date, symbol, first, price, 1, observedAtMs)
@@ -204,6 +207,9 @@ class WorkingRangeRecommendationStore(context: Context) {
                 spreadBps = f.spreadBps,
                 orderBookImbalance = f.orderBookImbalance,
                 marketabilityState = marketabilityState,
+                upperCircuitPrice = marketability.brokerUpperCircuit,
+                bestSellOffer = marketability.bestObservedOffer,
+                quoteClientReceiptAgeMs = marketability.clientReceiptAgeMs,
                 reason = if (confirmed)
                     "WORKING RANGE v0.1 · two consecutive 15m-evaluation sweeps · manual review only · no Auto-Buy"
                 else "Working Range v0.1 · confirmation 2/2 pending"
@@ -219,6 +225,7 @@ class WorkingRangeRecommendationStore(context: Context) {
         price: Double,
         observedAtMs: Long,
         marketabilityState: String,
+        marketability: FixedQuoteMarketabilityPresentationPolicy.Result,
         evaluation: FixedStrategyEvaluation
     ) {
         val f = evaluation.features
@@ -258,6 +265,9 @@ class WorkingRangeRecommendationStore(context: Context) {
             spreadBps = f.spreadBps,
             orderBookImbalance = f.orderBookImbalance,
             marketabilityState = marketabilityState,
+            upperCircuitPrice = marketability.brokerUpperCircuit,
+            bestSellOffer = marketability.bestObservedOffer,
+            quoteClientReceiptAgeMs = marketability.clientReceiptAgeMs,
             maxFavourablePct = mfe,
             maxAdversePct = mae,
             targetFirstTouchAtMs = targetAt,
