@@ -65,6 +65,10 @@ Working Range cards retain entry and target references, sampled MFE/MAE, and sam
 
 The v9.0.19 TEST APK was signed with SHA-256 certificate `6e0fc9f69890c8a47eaeb3612e7fb71ea1bf567d3bd1bdae5ce19ed74afe982b`, which differed from the prior v9.0.18 stable APK signer `9021b05e9a18113b689a4df2e6f242c9a70ad0cd10f8f2a8daa0b631e3b68e9c`. v9.0.20 CI restores the stable signing key from GitHub Actions secret `MULTIFY_KEYSTORE_BASE64` when configured and reports compatibility against both fingerprints. Never uninstall the installed trading app to work around a signer mismatch while holdings, GTTs, credentials or unexported state exist.
 
+### Final CI result and TEST signer
+Final pull-request CI run `44511576393` passed frozen-source checks, historical/replay tests, Android unit tests, APK assembly and Android v2 signature verification.
+The stable signing-key secret `MULTIFY_KEYSTORE_BASE64` was **not configured**. This TEST APK therefore uses a runner-generated Android Debug certificate with SHA-256 `829c96c7369aaf849cb4cf5f770da77ebfe569d0b640bf6f1981aaf0d024fae6`. It is **not compatible for in-place update** over either the v9.0.18 stable signer or the previously supplied v9.0.19 TEST signer. Do not uninstall the current trading app to install this package. The original application signing keystore must be configured securely in GitHub Actions before a compatible update can be built; if the installed app is already the prior ephemeral v9.0.19 TEST package, that signing key was not retained and cannot be recreated from the APK.
+
 ## Required validation
 
 - Android unit tests and source-level Frozen Fixed regression checks pass.
