@@ -3,7 +3,7 @@ on:
   push:
     branches: [v9018-operator-clarity-20261119]
   pull_request:
-    branches: [v9018-working-range-evidence-20261118]
+    branches: [v9017-working-range-evidence-20261118]
   workflow_dispatch:
 permissions:
   contents: read
