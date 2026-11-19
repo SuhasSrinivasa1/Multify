@@ -39,7 +39,10 @@ internal object FixedPrimaryProgressionResearch {
             // symbol's first PRIMARY from an earlier setup.
             val resetAt = previousAt?.let {
                 com.multify.traderpro.engine.FixedRepeatQualificationPolicy.resetAt(
-                    recommendation.symbol, it, symbolObservations)
+                    recommendation.symbol, it,
+                    symbolObservations.filter { observation ->
+                        observation.scanAtMs <= recommendation.generatedAtMs
+                    })
             }
             val eventSeries = when {
                 previousAt == null -> series
