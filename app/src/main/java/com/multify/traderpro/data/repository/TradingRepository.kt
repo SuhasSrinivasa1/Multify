@@ -112,6 +112,7 @@ import com.multify.traderpro.engine.ForecastPublicationPolicy
 import com.multify.traderpro.engine.FixedAdaptiveLearningMath
 import com.multify.traderpro.engine.FixedForecastPublicationPolicy
 import com.multify.traderpro.engine.FixedRepeatQualificationPolicy
+import com.multify.traderpro.engine.FixedExecutionPresentationPolicy
 import com.multify.traderpro.engine.FixedEntryActionabilityPolicy
 import com.multify.traderpro.engine.FixedEarlyWatchPolicy
 import com.multify.traderpro.engine.FixedFinalContract
@@ -251,6 +252,7 @@ class TradingRepository @Inject constructor(
     private val fixedHistoricalEvidenceArchive: FixedHistoricalEvidenceArchive,
     private val fixedImportedSameDayDedupJournal: FixedImportedSameDayDedupJournal,
     private val fixedAutoBuyOrderStore: FixedAutoBuyOrderStore,
+    private val fixedExecutionUiStateStore: FixedExecutionUiStateStore,
     private val fixedMarketDiscoveryStateStore: FixedMarketDiscoveryStateStore,
     @ApplicationContext private val appContext: Context
 ) {
@@ -2542,25 +2544,11 @@ class TradingRepository @Inject constructor(
                     ).filter { it.id !in priorIds }
                     for (row in freshPublished) {
                         val ref = fixedResearchQuoteReceipts[row.symbol.uppercase(Locale.US)]
-                        val first = fixedEarlyWatchJournal.recent(row.recommendationDate, 1000)
-                            .firstOrNull { it.symbol.equals(row.symbol, true) }
-                        // v9.0.17 READ-ONLY: Early Watch can be empty even though the
-                        // official tier store recorded PRIMARY observations. Recover
-                        // those scan-start observations without inventing quote times.
-                        val persistedFirstPrimary = fixedRecommendationStore.observations(
-                            row.recommendationDate
-                        ).asSequence().filter { observation ->
-                            observation.symbol.equals(row.symbol, true) &&
-                                observation.scanAtMs <= row.generatedAtMs &&
-                                observation.qualityTier == "PRIMARY" &&
-                                observation.publishEligible && observation.executionEligible
-                        }.minByOrNull { it.scanAtMs }
-                        val firstPrimaryAtMs = first?.firstPrimaryScanAtMs
-                            ?: persistedFirstPrimary?.scanAtMs
-                        val firstPrimaryPrice = first?.firstPrimaryPrice
-                            ?: persistedFirstPrimary?.observedPrice?.takeIf {
-                                it.isFinite() && it > 0.0
-                            }
+                        // Event-local anchor: a repeat uses the first qualified PRIMARY
+                        // after its explicit reset, never the first PRIMARY from the old setup.
+                        val firstPrimary = fixedFirstPrimaryAnchor(row)
+                        val firstPrimaryAtMs = firstPrimary?.first
+                        val firstPrimaryPrice = firstPrimary?.second
                         val features = fixedShadowReferences[row.symbol.uppercase(Locale.US)]?.takeIf {
                             it.quoteCapturedAtMs in row.generatedAtMs..recommendationCompletedAtMs
                         }?.evaluation?.features
@@ -2577,9 +2565,8 @@ class TradingRepository @Inject constructor(
                             "published_target_pct" to row.targetPct,
                             "first_primary_at_ms" to firstPrimaryAtMs,
                             "first_primary_price" to firstPrimaryPrice,
-                            "first_primary_source" to (if (first != null)
-                                "PERSISTED_EARLY_WATCH" else if (persistedFirstPrimary != null)
-                                "PERSISTED_QUALIFIED_TIER_SCAN_START" else "UNAVAILABLE"),
+                            "first_primary_source" to (firstPrimary?.third ?: "UNAVAILABLE"),
+                            "first_primary_anchor_scope" to "EVENT_LOCAL_AFTER_LAST_EXPLICIT_RESET",
                             "first_primary_to_publication_ms" to study.firstPrimaryToPublicationMs,
                             "source_quote_to_publication_ms" to study.sourceQuoteToPublicationMs,
                             "runup_since_first_primary_pct" to study.firstPrimaryRunupPct,
@@ -2819,7 +2806,7 @@ class TradingRepository @Inject constructor(
         return newPulses
     }
 
-    private fun fixedFirstPrimaryPrice(row: FixedRecommendationRecord): Double? {
+    private fun fixedFirstPrimaryAnchor(row: FixedRecommendationRecord): Triple<Long, Double, String>? {
         val day = row.recommendationDate
         val allEvents = fixedRecommendationStore.recommendations(day)
         val previousAt = listOfNotNull(
@@ -2836,16 +2823,26 @@ class TradingRepository @Inject constructor(
         val firstFresh = observations.asSequence().filter {
             it.symbol.equals(row.symbol, true) &&
                 it.scanAtMs <= row.generatedAtMs &&
-                (boundary == null && previousAt == null || boundary != null && it.scanAtMs > boundary) &&
+                (previousAt == null || boundary != null && it.scanAtMs > boundary) &&
                 it.qualityTier == "PRIMARY" && it.publishEligible && it.executionEligible &&
                 it.observedPrice?.isFinite() == true && (it.observedPrice ?: 0.0) > 0.0
-        }.minByOrNull { it.scanAtMs }?.observedPrice
-        // A repeat can never use the first PRIMARY price from a previous setup.
-        return firstFresh ?: if (previousAt == null)
-            fixedEarlyWatchJournal.recent(day, 1000)
-                .firstOrNull { it.symbol.equals(row.symbol, true) }?.firstPrimaryPrice
-        else null
+        }.minByOrNull { it.scanAtMs }
+        if (firstFresh != null) return Triple(
+            firstFresh.scanAtMs, firstFresh.observedPrice!!, "EVENT_LOCAL_PERSISTED_TIER_OBSERVATION")
+        // Legacy Early Watch is only a fallback for the first event of the session.
+        // A repeat must never inherit a previous setup's symbol-level anchor.
+        if (previousAt == null) {
+            val watch = fixedEarlyWatchJournal.recent(day, 1000)
+                .firstOrNull { it.symbol.equals(row.symbol, true) }
+            val price = watch?.firstPrimaryPrice?.takeIf { it.isFinite() && it > 0.0 }
+            if (watch != null && price != null)
+                return Triple(watch.firstPrimaryScanAtMs, price, "FIRST_EVENT_EARLY_WATCH_FALLBACK")
+        }
+        return null
     }
+
+    private fun fixedFirstPrimaryPrice(row: FixedRecommendationRecord): Double? =
+        fixedFirstPrimaryAnchor(row)?.second
 
     private fun fixedEntryVerdict(
         row: FixedRecommendationRecord, quote: QuotePayload?,
@@ -8292,13 +8289,12 @@ class TradingRepository @Inject constructor(
                 continue
             }
             val publishedEvidence = fixedAutoBuyPublicationEvidence.find(row.id)
-            val firstPrimary = fixedEarlyWatchJournal.recent(today, 1000)
-                .firstOrNull { it.symbol.equals(row.symbol, true) }
+            val firstPrimary = fixedFirstPrimaryAnchor(row)
             val shadowFeatures = fixedShadowReferences[row.symbol.uppercase(Locale.US)]?.takeIf {
                 it.quoteCapturedAtMs in row.generatedAtMs..System.currentTimeMillis()
             }?.evaluation?.features
             val timingStudy = com.multify.traderpro.engine.FixedEntryTimingStudyPolicy.assess(
-                firstPrimary?.firstPrimaryScanAtMs, firstPrimary?.firstPrimaryPrice,
+                firstPrimary?.first, firstPrimary?.second,
                 publishedEvidence?.sourceQuoteReceivedAtMs,
                 publishedEvidence?.publishedAtMs ?: System.currentTimeMillis(),
                 ltp, row.targetPct, shadowFeatures?.atr14, shadowFeatures?.vwap
