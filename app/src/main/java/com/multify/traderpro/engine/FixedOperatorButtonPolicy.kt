@@ -19,7 +19,8 @@ object FixedOperatorButtonPolicy {
         brokerReadiness: Boolean,
         appOwnedPositionQuantity: Int? = null,
         appOwnedOpenSymbolCount: Int? = null,
-        maxConcurrentHoldings: Int? = null
+        maxConcurrentHoldings: Int? = null,
+        quoteMarketabilityState: String = "NO_RECENT_QUOTE"
     ): Decision {
         if (olderRecommendationEvent)
             return Decision(false, "Earlier Fixed setup · BUY latest instead")
@@ -45,6 +46,20 @@ object FixedOperatorButtonPolicy {
             return Decision(false, "Entry not executable · BUY disabled")
         if (!brokerReadiness)
             return Decision(false, "Broker readiness required · ${symbol}")
-        return Decision(true, "BUY ${symbol} · CNC")
+        // Presentation mirror only: a contemporaneous quote with no seller cannot
+        // execute. Existing broker quote/order checks remain authoritative.
+        when (quoteMarketabilityState) {
+            "UPPER_BAND_NO_SELL_OFFER" ->
+                return Decision(false, "No seller at upper band · BUY unavailable")
+            "NO_SELL_OFFER_OBSERVED" ->
+                return Decision(false, "No sell offer · BUY unavailable")
+            "OFFER_OUTSIDE_CIRCUIT" ->
+                return Decision(false, "Offer outside price band · BUY blocked")
+        }
+        return Decision(true,
+            if (quoteMarketabilityState == "NO_RECENT_QUOTE" ||
+                quoteMarketabilityState == "STALE_CLIENT_QUOTE")
+                "BUY ${symbol} · Verify offer"
+            else "BUY ${symbol} · CNC")
     }
 }
