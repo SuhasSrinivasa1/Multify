@@ -257,7 +257,11 @@ data class ForecastDto(
     val generatedAtMs: Long = 0L,
     val observedAfterPublication: Boolean = false,
     val qualityTier: String = "LEGACY",
-    val executionEligible: Boolean = false
+    val executionEligible: Boolean = false,
+    val executionStatus: String = "NOT_ATTEMPTED",
+    val executionReason: String = "",
+    val executionFilledQuantity: Int? = null,
+    val executionRequestedQuantity: Int? = null
 )
 
 data class ForecastChampionDto(
