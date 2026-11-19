@@ -12,6 +12,7 @@ import com.multify.traderpro.data.network.FixedQuoteTimingRegistry
 import com.multify.traderpro.engine.FixedMarketQualityShadowPolicy
 import com.multify.traderpro.engine.FixedIntradayPatternResearchPolicy
 import com.multify.traderpro.engine.FixedWorkingRangeShadowPolicy
+import com.multify.traderpro.engine.FixedMomentumContinuationShadowPolicy
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
 import java.time.Instant
@@ -157,6 +158,18 @@ class FixedFactorTelemetry @Inject constructor(@ApplicationContext context: Cont
                 e, model, quoteCapturedAtMs ?: completedAtMs),
             "working_range_shadow_v9017" to FixedWorkingRangeShadowPolicy.observe(
                 e, quoteCapturedAtMs ?: completedAtMs),
+            "momentum_continuation_shadow_v9019" to FixedMomentumContinuationShadowPolicy.observe(e),
+            // Quote quality is independent of 40 frozen feature inputs. Preserve
+            // UNKNOWN rather than interpreting placeholder ask/spread=0 as liquidity.
+            "validated_raw_book_shadow_v9019" to mapOf(
+                "source" to "EXISTING_BROKER_QUOTE_NO_NEW_REQUEST",
+                "ask" to quality.ask, "bid" to quality.bid,
+                "spread_bps" to quality.observedSpreadBps,
+                "book_status" to quality.bookStatus,
+                "features_ask_placeholder_zero" to (f.ask == 0.0 && quality.ask == null),
+                "features_spread_placeholder_zero" to (f.spreadBps == 0.0 && quality.observedSpreadBps == null),
+                "shadow_only_no_scoring_changes" to true
+            ),
             "diagnostic_metrics" to mapOf(
                 "vwap_distance_atr" to if (atr != null) f.vwap?.let { clean((f.ltp - it) / atr) } else null,
                 "ema9_ema20_separation_atr" to if (atr != null && f.ema9 != null && f.ema20 != null)
