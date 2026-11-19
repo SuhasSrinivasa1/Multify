@@ -25,6 +25,9 @@ class FixedExecutionPresentationPolicyTest {
         assertFalse(FixedExecutionPresentationPolicy.canBuy(
             1L, true, "ACTIVE", true,
             FixedExecutionPresentationPolicy.BLOCKED_MAX_HOLDINGS, false, false))
+        assertEquals("BROKER COOLDOWN · RETRY PENDING", FixedExecutionPresentationPolicy.buttonLabel(
+            "ABC", "ACTIVE", FixedExecutionPresentationPolicy.BROKER_COOLDOWN,
+            null, null, false, true, true, true, true, false))
     }
 
     @Test fun targetMarketAndEntryCutoffLabelsAreDistinct() {
