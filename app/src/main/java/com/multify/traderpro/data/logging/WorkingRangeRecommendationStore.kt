@@ -52,10 +52,23 @@ class WorkingRangeRecommendationStore(context: Context) {
         { _, _ -> droppedQueueItems.incrementAndGet() }
     )
     private val rowType = object : TypeToken<MutableList<StoredRow>>() {}.type
+    @Volatile private var enabled: Boolean = false
+    @Volatile private var generation: Long = 0L
     private val rows: MutableList<StoredRow> = runCatching {
         gson.fromJson<MutableList<StoredRow>>(prefs.getString(KEY_ROWS, "[]"), rowType)
             ?: mutableListOf()
     }.getOrDefault(mutableListOf())
+
+    fun setEnabled(value: Boolean, reason: String = "Working Range toggle changed") = synchronized(lock) {
+        if (enabled != value) {
+            enabled = value
+            generation += 1L
+            rows.filter { it.dto.state == "PENDING_CONFIRMATION" }.forEach { row ->
+                row.dto = row.dto.copy(state = "PENDING_DROPPED", reason = reason)
+            }
+            persistLocked()
+        }
+    }
 
     fun offer(
         symbol: String,
@@ -65,11 +78,14 @@ class WorkingRangeRecommendationStore(context: Context) {
         scanStartedAtMs: Long
     ) {
         val normalized = symbol.trim().uppercase(java.util.Locale.US)
-        if (normalized.isBlank() || quoteCapturedAtMs <= 0L) return
+        if (!enabled || normalized.isBlank() || quoteCapturedAtMs <= 0L) return
+        val queuedGeneration = generation
         runCatching {
             queue.execute {
+                if (!enabled || generation != queuedGeneration) return@execute
                 runCatching {
-                    observeOnWorker(normalized, evaluation, quote, quoteCapturedAtMs, scanStartedAtMs)
+                    observeOnWorker(normalized, evaluation, quote, quoteCapturedAtMs,
+                        scanStartedAtMs, queuedGeneration)
                 }
             }
         }.onFailure { droppedQueueItems.incrementAndGet() }
@@ -80,8 +96,10 @@ class WorkingRangeRecommendationStore(context: Context) {
         evaluation: FixedStrategyEvaluation,
         quote: QuotePayload?,
         observedAtMs: Long,
-        scanStartedAtMs: Long
+        scanStartedAtMs: Long,
+        queuedGeneration: Long
     ) {
+        if (!enabled || generation != queuedGeneration) return
         val zone = ZoneId.of("Asia/Kolkata")
         val at = Instant.ofEpochMilli(observedAtMs).atZone(zone)
         val date = at.toLocalDate().toString()
@@ -105,6 +123,7 @@ class WorkingRangeRecommendationStore(context: Context) {
         }
         val key = "$date|$symbol"
         synchronized(lock) {
+            if (!enabled || generation != queuedGeneration) return
             val index = rows.indexOfFirst { it.dateIst == date && it.symbol == symbol }
             val existing = rows.getOrNull(index)
             if (existing != null && existing.dto.confirmedAtMs > 0L) {
@@ -287,16 +306,12 @@ class WorkingRangeRecommendationStore(context: Context) {
             .map { it.dto }
     }
 
-    fun resetPending(reason: String = "Working Range toggle changed") = synchronized(lock) {
-        rows.filter { it.dto.state == "PENDING_CONFIRMATION" }.forEach { row ->
-            row.dto = row.dto.copy(state = "PENDING_DROPPED", reason = reason)
-        }
-        persistLocked()
-    }
-
-    fun export(): Map<String, Any?> = synchronized(lock) {
+    fun export(): Map<String, Any?> {
+        runCatching { queue.submit {}.get(5, TimeUnit.SECONDS) }
+        return synchronized(lock) {
         mapOf(
             "schema" to "working_range_pilot_v9020",
+            "toggle_enabled" to enabled,
             "enabled_setting_is_separate_from_fixed" to true,
             "source" to "existing_fixed_15m_evaluations_and_existing_quotes",
             "extra_broker_requests" to 0,
@@ -331,6 +346,7 @@ class WorkingRangeRecommendationStore(context: Context) {
                 "consecutive_passes" to it.consecutivePasses, "last_pass_at_ms" to it.lastPassAtMs,
                 "recommendation" to it.dto) }
         )
+        }
     }
 
     private fun trimLocked() {
