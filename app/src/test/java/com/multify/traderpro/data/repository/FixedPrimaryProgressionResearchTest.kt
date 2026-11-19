@@ -34,6 +34,28 @@ class FixedPrimaryProgressionResearchTest {
         assertEquals(false, first["earliest_first_primary_missing"])
     }
 
+
+    @Test fun repeatEventUsesFirstPrimaryAfterItsOwnReset() {
+        val first = rec(11, 2000, 100.0)
+        val repeat = rec(22, 5000, 104.0)
+        val observations = listOf(
+            obs(1000, "SECONDARY", 98.0),
+            obs(2000, "PRIMARY", 100.0),
+            obs(3000, "PRIMARY", 101.0),
+            obs(3500, "RESEARCH", 99.0),
+            obs(4000, "PRIMARY", 102.0),
+            obs(5000, "PRIMARY", 104.0)
+        )
+        val report = FixedPrimaryProgressionResearch.export(observations, listOf(first, repeat))
+        val events = report["events"] as List<*>
+        val second = events[1] as Map<*, *>
+        assertEquals(3500L, second["reset_observation_scan_at_ms"])
+        assertEquals(4000L, second["first_qualified_primary_scan_at_ms"])
+        assertEquals(102.0, second["first_qualified_primary_observed_price"])
+        assertEquals(2, second["independent_primary_scan_count_through_generation"])
+        assertEquals("AFTER_EXPLICIT_NON_PRIMARY_RESET", second["event_anchor_scope"])
+    }
+
     @Test fun noFirstPrimaryIsNotInvented() {
         val report = FixedPrimaryProgressionResearch.export(
             listOf(obs(1000, "SECONDARY", 97.0)), listOf(rec(11, 3000, 102.0))
