@@ -274,7 +274,9 @@ internal class GrowwRateLimitInterceptor(
             if (waitMs <= 0L) {
                 if (totalWaitMs > 0L) {
                     GrowwApiUsageLedger.recordPermitWait(category, totalWaitMs)
-                    if (totalWaitMs >= AUDIT_WAIT_THRESHOLD_MS) {
+                    // Audit every request that actually waited, not only >=500ms.
+                    // This makes event counts reconcilable with permitWaitCount.
+                    if (totalWaitMs > 0L) {
                         val row = GrowwApiUsageLedger.snapshot().categories.first { it.category == category }
                         auditLogger.logAsync("API_RATE_LIMIT", "CLIENT_GOVERNOR_WAIT", mapOf(
                             "method" to request.method, "path" to path,
@@ -289,7 +291,9 @@ internal class GrowwRateLimitInterceptor(
                                 .minuteId(System.currentTimeMillis()),
                             "calendar_minute_count_at_admission" to
                                 synchronized(lock) { states.getValue(category).calendar.used },
-                            "broker_wire_budget_not_inferred" to true
+                            "broker_wire_budget_not_inferred" to true,
+                            "wait_event_scope" to "ONE_COMPLETED_REQUEST_WITH_ANY_POSITIVE_LOCAL_WAIT",
+                            "counter_recorded_once_for_request" to true
                         ))
                     }
                 }
@@ -332,7 +336,6 @@ internal class GrowwRateLimitInterceptor(
 
 
     companion object {
-        private const val AUDIT_WAIT_THRESHOLD_MS = 500L
         @Volatile private var bootstrappedGate: GrowwRecoveryGate? = null
         @Volatile private var bootstrappedPreferences: AppPreferences? = null
 
