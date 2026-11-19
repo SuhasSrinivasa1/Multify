@@ -273,6 +273,7 @@ data class ForecastDto(
  */
 data class WorkingRangeRecommendationDto(
     val symbol: String = "",
+    val scanStartedAtMs: Long = 0L,
     val state: String = "PENDING_CONFIRMATION",
     val entryPrice: Double = 0.0,
     val targetPrice: Double = 0.0,
