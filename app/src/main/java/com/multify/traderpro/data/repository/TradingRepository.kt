@@ -2882,7 +2882,14 @@ class TradingRepository @Inject constructor(
 
     private fun fixedPresentationDto(row: FixedRecommendationRecord,
         nowMs: Long = System.currentTimeMillis()): ForecastDto {
-        val verdict = fixedEntryVerdict(row, fixedPublishedQuote(row, nowMs), nowMs)
+        val presentedQuote = fixedPublishedQuote(row, nowMs)
+        val verdict = fixedEntryVerdict(row, presentedQuote, nowMs)
+        val quoteAtMs = if (presentedQuote != null)
+            fixedShadowReferences[row.symbol.uppercase(Locale.US)]?.quoteCapturedAtMs
+        else null
+        val marketability = com.multify.traderpro.engine
+            .FixedQuoteMarketabilityPresentationPolicy.assess(
+                presentedQuote, quoteAtMs, nowMs)
         val riskPrefix = when (verdict.status) {
             "RESEARCH_ONLY" -> "FIXED RESEARCH ONLY · BUY BLOCKED: " + verdict.reasons.joinToString(",") + " · "
             "CAUTION" -> "FIXED ENTRY CAUTION: " + verdict.reasons.joinToString(",") + " · "
@@ -2890,7 +2897,11 @@ class TradingRepository @Inject constructor(
         }
         return row.toDto().copy(
             reason = riskPrefix + row.reason,
-            executionEligible = row.executionEligible && verdict.actionable
+            executionEligible = row.executionEligible && verdict.actionable,
+            quoteMarketabilityState = marketability.state,
+            quoteUpperCircuitPrice = marketability.brokerUpperCircuit,
+            quoteBestSellOffer = marketability.bestObservedOffer,
+            quoteClientReceivedAtMs = marketability.quoteClientReceivedAtMs
         )
     }
 
@@ -12587,6 +12598,9 @@ class TradingRepository @Inject constructor(
                         fixedRecommendations, fixedRecommendationStore.archivedObservations()))
                 add("fixed_screen_compose_observation.json",
                     com.multify.traderpro.data.logging.FixedUiRenderEvidenceStore.export(appContext))
+                add("fixed_operator_ui_transitions_v9019.json",
+                    com.multify.traderpro.data.logging.FixedUiRenderEvidenceStore
+                        .exportOperatorTransitions(appContext))
                 add("fixed_shadow_hypotheses_manifest.json", mapOf(
                     "schema" to "fixed_hypotheses_v8322",
                     "purpose" to "OBSERVATIONAL_ONLY",
@@ -12632,6 +12646,9 @@ class TradingRepository @Inject constructor(
                     "sampled_maturity_research_file" to "fixed_sampled_maturity_and_repeat_research.json",
                     "fixed_first_primary_progression_file" to "fixed_first_primary_to_publication_study.json",
                     "fixed_screen_observation_file" to "fixed_screen_compose_observation.json",
+                    "fixed_operator_ui_transitions_file" to "fixed_operator_ui_transitions_v9019.json",
+                    "momentum_continuation_shadow_schema" to "fixed_momentum_continuation_shadow_v9019",
+                    "marketability_from_existing_quote_only" to true,
                     "fixed_pattern_research_schema" to "fixed_pattern_hypotheses_v8322",
                     "fixed_unclamped_score_event" to "UNCAPPED_RANKING_COMPONENTS",
                     "fixed_persisted_timestamp_event" to "RECOMMENDATION_PERSISTED_TIMING",

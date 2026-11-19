@@ -25,6 +25,60 @@ internal object FixedUiRenderEvidenceStore {
         if (changed) edit.apply()
     }
 
+    /**
+     * Optional Compose state observation, NOT proof a pixel was painted or that
+     * a broker order was sent. Stores only meaningful label/state transitions.
+     * Never invoked from scanner or broker execution, and no network requests.
+     */
+    private const val OPERATOR_PREF = "fixed_operator_transitions_v9019"
+    fun recordOperatorStateObserved(
+        context: Context, symbol: String, eventScanAtMs: Long,
+        recommendationStatus: String, buttonLabel: String, enabled: Boolean,
+        marketabilityState: String, atMs: Long
+    ) {
+        if (eventScanAtMs <= 0L || symbol.isBlank()) return
+        val prefs = context.getSharedPreferences(OPERATOR_PREF, Context.MODE_PRIVATE)
+        val identity = eventScanAtMs.toString() + "|" + symbol.uppercase()
+        val current = listOf(recommendationStatus, buttonLabel, enabled,
+            marketabilityState).joinToString("|")
+        val lastKey = "last|" + identity
+        if (prefs.getString(lastKey, null) == current) return
+        val edit = prefs.edit().putString(lastKey, current)
+        // A durable finite ring of transition observations; keep 400 newest.
+        val historical = prefs.all.keys.filter { it.startsWith("t|") }.sorted()
+        for (old in historical.take((historical.size - 399).coerceAtLeast(0))) edit.remove(old)
+        val key = "t|" + atMs.toString().padStart(13, '0') + "|" + identity
+        edit.putString(key, current).apply()
+    }
+
+    fun exportOperatorTransitions(context: Context): Map<String, Any?> {
+        val prefs = context.getSharedPreferences(OPERATOR_PREF, Context.MODE_PRIVATE)
+        val rows = prefs.all.entries.filter { it.key.startsWith("t|") }
+            .sortedBy { it.key }
+            .takeLast(400)
+            .mapNotNull { entry ->
+                val parts = entry.key.split('|')
+                val state = (entry.value as? String)?.split('|') ?: return@mapNotNull null
+                if (parts.size != 4 || state.size < 4) return@mapNotNull null
+                mapOf(
+                    "observed_at_ms" to (parts[1].toLongOrNull()),
+                    "recommendation_scan_start_at_ms" to (parts[2].toLongOrNull()),
+                    "symbol" to parts[3],
+                    "recommendation_status" to state[0],
+                    "button_label" to state[1],
+                    "ui_button_enabled" to state[2].toBoolean(),
+                    "marketability_snapshot_status" to state[3]
+                )
+            }
+        return mapOf(
+            "source" to "CLIENT_COMPOSE_OPERATOR_STATE_OBSERVATION",
+            "not_physical_pixel_render_or_broker_fill" to true,
+            "not_authoritative_entry_gate" to true,
+            "no_extra_broker_calls" to true,
+            "rows" to rows
+        )
+    }
+
     fun export(context: Context): Map<String, Any?> {
         val prefs = context.getSharedPreferences(PREF, Context.MODE_PRIVATE)
         val cases = prefs.all.entries.asSequence()
