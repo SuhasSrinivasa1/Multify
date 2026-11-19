@@ -961,6 +961,22 @@ private fun FixedScreen(
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.Medium
                     )
+                    if (dashboard != null) {
+                        val appOwnedOpenSymbols = dashboard.positions
+                            .filter { it.quantity > 0 }
+                            .map { it.symbol.uppercase(Locale.US) }
+                            .distinct().size
+                        Text(
+                            "Operator app-owned positions: ${appOwnedOpenSymbols}/${state.settings.maxConcurrentHoldings} · Groww inventory and available cash checked again at execution",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Text(
+                        "Current hard-stop policy: -${com.multify.traderpro.engine.HardStopLossPolicy.MAX_LOSS_PCT}% · verify against prior -2% specification before enabling new automatic BUYs. Existing protection remains monitored.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
         }
