@@ -51,7 +51,7 @@ class FixedPrimaryProgressionResearchTest {
         val second = events[1] as Map<*, *>
         assertEquals(3500L, second["reset_observation_scan_at_ms"])
         assertEquals(4000L, second["first_qualified_primary_scan_at_ms"])
-        assertEquals(102.0, second["first_qualified_primary_observed_price"])
+        assertEquals(102.0, second["first_qualified_primary_observed_price"] as Double, 0.0)
         assertEquals(2, second["independent_primary_scan_count_through_generation"])
         assertEquals("AFTER_EXPLICIT_NON_PRIMARY_RESET", second["event_anchor_scope"])
     }
