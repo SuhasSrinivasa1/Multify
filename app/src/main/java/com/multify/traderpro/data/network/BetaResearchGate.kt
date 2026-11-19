@@ -172,7 +172,7 @@ class BetaResearchGate @Inject constructor(
                 "local_per_second_limit" to if (type == Type.LIVE) liveSec else histSec,
                 "local_per_minute_limit" to if (type == Type.LIVE) liveMinute else histMinute,
                 "wait_is_local_not_broker_429" to true,
-                "one_event_per_completed_request" to true
+                "one_event_per_admitted_request_with_positive_wait" to true
             ))
         }
         val started = SystemClock.elapsedRealtime()
