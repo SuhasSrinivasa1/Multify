@@ -23,7 +23,7 @@ class FixedOperatorButtonPolicyTest {
     @Test fun activeAndReadyRemainsActionable() {
         val x = decision()
         assertTrue(x.enabled)
-        assertEquals("BUY EXIDEIND · CNC", x.label)
+        assertEquals("BUY EXIDEIND · Verify offer", x.label)
     }
     @Test fun boughtRecommendationIsNotCalledSessionEnded() {
         val x = decision(status = "BUY_EXECUTED")
@@ -57,6 +57,27 @@ class FixedOperatorButtonPolicyTest {
         assertFalse(decision(entry = false).enabled)
         assertFalse(decision(ready = false).enabled)
         assertFalse(decision(eligible = false).enabled)
+    }
+    @Test fun noSellSideAtUpperBandMustBeExplainedNotCalledSessionEnded() {
+        val x = FixedOperatorButtonPolicy.decide("RUNWALENTR", "ACTIVE",
+            true, false, true, true, true,
+            quoteMarketabilityState = "UPPER_BAND_NO_SELL_OFFER")
+        assertFalse(x.enabled)
+        assertEquals("No seller at upper band · BUY unavailable", x.label)
+    }
+    @Test fun validSellOfferAllowsNormalBuyButtonButStillUsesBrokerPreflight() {
+        val x = FixedOperatorButtonPolicy.decide("LIBERTSHOE", "ACTIVE",
+            true, false, true, true, true,
+            quoteMarketabilityState = "SELL_OFFER_OBSERVED_NOT_FILL_GUARANTEE")
+        assertTrue(x.enabled)
+        assertEquals("BUY LIBERTSHOE · CNC", x.label)
+    }
+    @Test fun staleQuoteDoesNotBlockManualFreshBrokerCheck() {
+        val x = FixedOperatorButtonPolicy.decide("GLOBUSSPR", "ACTIVE",
+            true, false, true, true, true,
+            quoteMarketabilityState = "STALE_CLIENT_QUOTE")
+        assertTrue(x.enabled)
+        assertEquals("BUY GLOBUSSPR · Verify offer", x.label)
     }
     @Test fun unknownNonactiveStatusMustNeverClaimSessionEnded() {
         val x = decision(status = "PENDING_RECONCILIATION")
