@@ -40,7 +40,7 @@ internal class GrowwHotDataCacheInterceptor(
 
     override fun intercept(chain: Interceptor.Chain): Response {
         val request = chain.request()
-        if (request.method != "GET") return chain.proceed(request)
+        if (request.method != "GET" || bypassForProtection(request)) return chain.proceed(request)
         val path = request.url.encodedPath
         val ttlMs = ttlFor(path, request.url.queryParameter("candle_interval"))
         if (ttlMs <= 0L) return chain.proceed(request)
@@ -107,7 +107,7 @@ internal class GrowwHotDataCacheInterceptor(
     /** Fast-path used before Alpha's coroutine governor: preserve cache-hit latency and
      * never reserve broker permits for snapshots already held in this account's RAM. */
     internal fun freshResponse(request: okhttp3.Request): Response? {
-        if (request.method != "GET") return null
+        if (request.method != "GET" || bypassForProtection(request)) return null
         val ttl = ttlFor(request.url.encodedPath, request.url.queryParameter("candle_interval"))
         if (ttl <= 0L) return null
         val key = keyFor(request)
@@ -117,6 +117,12 @@ internal class GrowwHotDataCacheInterceptor(
         if (recordAlphaStats) GrowwApiUsageLedger.recordCacheHit()
         return replay(request, entry, "HIT")
     }
+
+    /** Protection/BUY quotes must always reach Groww; never serve a cached quote to execution. */
+    internal fun bypassForProtection(request: okhttp3.Request): Boolean =
+        com.multify.traderpro.engine.MarketDataPriorityAdmissionPolicy.isProtectionHeader(
+            request.header(com.multify.traderpro.engine.MarketDataPriorityAdmissionPolicy.HEADER)
+        )
 
     private fun keyFor(request: okhttp3.Request): String {
         val auth = request.header("Authorization").orEmpty()
