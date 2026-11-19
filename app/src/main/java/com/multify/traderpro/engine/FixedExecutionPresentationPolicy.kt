@@ -19,6 +19,7 @@ object FixedExecutionPresentationPolicy {
     const val BLOCKED_PRICE_BAND = "BLOCKED_PRICE_BAND"
     const val BLOCKED_INSUFFICIENT_FUNDS = "BLOCKED_INSUFFICIENT_FUNDS"
     const val BROKER_REJECTED = "BROKER_REJECTED"
+    const val BROKER_COOLDOWN = "BROKER_COOLDOWN"
     const val EXPIRED = "EXPIRED"
 
     fun blocksManualBuy(status: String): Boolean = status in setOf(
@@ -27,7 +28,7 @@ object FixedExecutionPresentationPolicy {
         BLOCKED_MAX_HOLDINGS, BLOCKED_PENDING_GTT,
         BLOCKED_LIQUIDITY, BLOCKED_ENTRY_QUALITY,
         BLOCKED_PRICE_EXTENSION, BLOCKED_PRICE_BAND,
-        BLOCKED_INSUFFICIENT_FUNDS, BROKER_REJECTED, EXPIRED
+        BLOCKED_INSUFFICIENT_FUNDS, BROKER_REJECTED, BROKER_COOLDOWN, EXPIRED
     )
 
     fun canBuy(
@@ -73,6 +74,7 @@ object FixedExecutionPresentationPolicy {
             BLOCKED_PRICE_BAND -> return "PRICE BAND · BUY BLOCKED"
             BLOCKED_INSUFFICIENT_FUNDS -> return "INSUFFICIENT FUNDS · BUY BLOCKED"
             BROKER_REJECTED -> return "BROKER REJECTED · REVIEW"
+            BROKER_COOLDOWN -> return "BROKER COOLDOWN · RETRY PENDING"
             EXPIRED -> return "SIGNAL EXPIRED · BUY disabled"
         }
         if (recommendationStatus == "BUY_EXECUTED") return "BUY EXECUTED · FILL DETAILS PENDING"
