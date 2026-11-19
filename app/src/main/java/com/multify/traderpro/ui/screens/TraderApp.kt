@@ -1196,6 +1196,11 @@ private fun WorkingRangeTable(
                             style = MaterialTheme.typography.labelSmall,
                             color = if (row.marketabilityState.contains("NO_SELL") || row.marketabilityState.contains("STALE") || row.marketabilityState == "WIDE_SPREAD")
                                 MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(
+                            "Upper circuit ${row.upperCircuitPrice?.let { "₹${String.format(Locale.US, "%.2f", it)}" } ?: "unknown"} · Best sell offer ${row.bestSellOffer?.let { "₹${String.format(Locale.US, "%.2f", it)}" } ?: "not observed"} · Client quote receipt age ${row.quoteClientReceiptAgeMs?.let { "${it}ms" } ?: "unknown"}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                         Text(row.reason, style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Text("MANUAL REVIEW ONLY · NO WORKING RANGE AUTO-BUY · sparse client LTP samples are not intrabar paths",
