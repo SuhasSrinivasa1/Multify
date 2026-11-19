@@ -7,7 +7,7 @@ import javax.inject.Inject
 import javax.inject.Singleton
 import java.util.Locale
 
-internal data class FixedExecutionUiState(
+data class FixedExecutionUiState(
     val recommendationId: Long,
     val symbol: String,
     val status: String,
