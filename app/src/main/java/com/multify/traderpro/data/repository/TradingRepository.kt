@@ -12654,7 +12654,7 @@ class TradingRepository @Inject constructor(
                 // v9.0.17: replayable first-PRIMARY timeline independent of the
                 // optional Early Watch journal. All prices are sampled research
                 // observations; no execution or selection logic consumes this.
-                add("fixed_primary_progression_v9017.json",
+                add("fixed_primary_progression_v9018.json",
                     FixedPrimaryProgressionResearch.export(
                         fixedRecommendationStore.archivedObservations(), fixedRecommendations))
                 fixedHistoricalEvidenceArchive.capture(fixedRecommendations)
@@ -12702,6 +12702,7 @@ class TradingRepository @Inject constructor(
                     "pair_count" to fixedFiveMinuteShadowJournal.all().size
                 ))
                 add("fixed_auto_buy_orders.json", fixedAutoBuyOrders)
+                add("fixed_execution_ui_states.json", fixedExecutionUiStateStore.all())
                 fixedFactorTelemetry.appendExportEntry(zip)
                 written("fixed_factor_snapshots.jsonl")
                 fixedMarketPathTelemetry.appendExportEntry(zip)
@@ -12777,7 +12778,7 @@ class TradingRepository @Inject constructor(
                     "publication_candidate_timeline_event" to "ALL_CANDIDATE_CONFIRMATION_TIMELINE",
                     "fixed_factor_telemetry_file" to "fixed_factor_snapshots.jsonl",
                             "fixed_working_range_shadow_schema" to "fixed_working_range_shadow_v9017",
-                            "fixed_primary_progression_v9017_file" to "fixed_primary_progression_v9017.json",
+                            "fixed_primary_progression_v9018_file" to "fixed_primary_progression_v9018.json",
                             "working_range_trading_effect" to "NONE",
                             "working_range_extra_broker_calls" to 0,
                     "fixed_early_watch_file" to "fixed_early_watch.json",
