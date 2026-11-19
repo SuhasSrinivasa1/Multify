@@ -5,6 +5,7 @@ import com.google.gson.Gson
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
+import java.util.Locale
 
 internal data class FixedExecutionUiState(
     val recommendationId: Long,
@@ -47,7 +48,7 @@ class FixedExecutionUiStateStore @Inject constructor(
     ) {
         val row = FixedExecutionUiState(
             recommendationId = recommendationId,
-            symbol = symbol.uppercase(),
+            symbol = symbol.uppercase(Locale.US),
             status = status,
             reason = reason.take(240),
             requestedQuantity = requestedQuantity,
