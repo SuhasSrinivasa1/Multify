@@ -7243,12 +7243,7 @@ class TradingRepository @Inject constructor(
                 }.onFailure { auditLogger.logAsync("FORECAST_NEWS", "BETA_NEWS_QUOTE_RETRY", mapOf(
                     "id" to item.id, "symbol" to item.symbol, "exception" to it.javaClass.simpleName))
                 }.getOrNull() ?: continue
-                val ltp = quote.lastPrice?.takeIf { it.isFinite() && it > 0.0 } ?: run {
-                fixedExecutionUiStateStore.record(row.id, row.symbol,
-                    FixedExecutionPresentationPolicy.BROKER_REJECTED,
-                    "Fresh Alpha quote did not contain a valid last price.")
-                continue
-            }
+                val ltp = quote.lastPrice?.takeIf { it.isFinite() && it > 0.0 } ?: continue
                 val bid = quote.bidPrice?.takeIf { it.isFinite() && it > 0.0 }
                     ?: quote.depth?.buy?.mapNotNull { it.price?.takeIf { p -> p.isFinite() && p > 0.0 } }?.maxOrNull()
                 val ask = quote.offerPrice?.takeIf { it.isFinite() && it > 0.0 }
@@ -8381,7 +8376,8 @@ class TradingRepository @Inject constructor(
                 continue
             }
             val quoteElapsedMs = (System.currentTimeMillis() - quoteStartedAtMs).coerceAtLeast(0L)
-            val ltp = quote.lastPrice?.takeIf { it.isFinite() && it > 0.0 } ?: run {
+            val ltp = quote.lastPrice?.takeIf { it.isFinite() && it > 0.0 }
+            if (ltp == null) {
                 fixedExecutionUiStateStore.record(row.id, row.symbol,
                     FixedExecutionPresentationPolicy.BROKER_REJECTED,
                     "Fresh Alpha quote did not contain a valid last price.")
@@ -8430,8 +8426,8 @@ class TradingRepository @Inject constructor(
                 "symbol" to row.symbol, "recommendation_id" to row.id,
                 "scan_started_at_ms" to row.generatedAtMs,
                 "published_at_ms" to publishedEvidence?.publishedAtMs,
-                "first_primary_at_ms" to firstPrimary?.firstPrimaryScanAtMs,
-                "first_primary_price" to firstPrimary?.firstPrimaryPrice,
+                "first_primary_at_ms" to firstPrimary?.first,
+                "first_primary_price" to firstPrimary?.second,
                 "alpha_quote_received_at_ms" to (quoteStartedAtMs + quoteElapsedMs),
                 "alpha_quote_price" to ltp,
                 "first_primary_to_publication_ms" to timingStudy.firstPrimaryToPublicationMs,
