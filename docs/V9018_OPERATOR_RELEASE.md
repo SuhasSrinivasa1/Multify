@@ -53,6 +53,10 @@ Scan duration median was 118.4 seconds overall, with the 9:45-10:15 bucket at 14
 
 The latest export showed two active app-owned GTTs at approximately -3%. The operator update changes the desired stop to -2% and uses the existing safe GTT-tightening monitor to upgrade those orders after install. Confirm broker-side trigger/status after updating.
 
+The shadow challenger has one interesting preliminary fingerprint: the three-factor combination (positive MACD histogram slope, positive RSI slope and positive order-book imbalance) passed on 3 of 10 recommendation events; all three passed events later showed sampled full-target hits. DCI also reached its target without passing that combination. This is a one-session, very small sample, not a validated 100% working range. It remains research-only. The RSI-exhaustion flag did not fire on these 10 events, and only two 5m/15m shadow pairs had no mature forward outcomes. No VWAP-extension cutoff is justified: several sampled winners were over 3 ATR from session VWAP, including TINNARUBR at about 5.68 ATR.
+
+The repeat VEEFIN event's correct event-local first PRIMARY was 10:27:17 IST after its 10:25:06 non-PRIMARY reset, not the original setup's first PRIMARY. v9.0.18 exports this event-local lineage.
+
 ## Explicitly not changed
 
 - No Fixed selection, confirmation, scoring, target or trailing threshold was relaxed.
