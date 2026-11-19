@@ -50,6 +50,24 @@ class GrowwHotDataHubTest {
         }
     }
 
+    @Test fun protectionPriorityAlwaysBypassesHotCacheAndSingleFlight() {
+        val request = Request.Builder()
+            .url("https://example.test/v1/live-data/quote?trading_symbol=RELIANCE")
+            .header("Authorization", "Bearer alpha-one")
+            .header(MarketDataPriorityAdmissionPolicy.HEADER, MarketDataPriorityAdmissionPolicy.PROTECTION)
+            .build()
+        assertTrue(hub().bypassForProtection(request))
+        assertEquals(null, hub().freshResponse(request))
+    }
+
+    @Test fun ordinaryResearchQuoteCanStillUseHotCache() {
+        val request = Request.Builder()
+            .url("https://example.test/v1/live-data/quote?trading_symbol=RELIANCE")
+            .header("Authorization", "Bearer alpha-one")
+            .build()
+        assertEquals(false, hub().bypassForProtection(request))
+    }
+
     @Test fun differentAlphaAuthorizationCannotReuseCachedQuote() {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setBody("token1"))
