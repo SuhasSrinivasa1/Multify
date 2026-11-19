@@ -8219,6 +8219,11 @@ class TradingRepository @Inject constructor(
         if (rows.isEmpty()) return 0
         val preflightCooldown = buyApiCooldownOrNull(GrowwApiUsageLedger.Category.LIVE_DATA)
         if (preflightCooldown != null) {
+            rows.forEach { row ->
+                fixedExecutionUiStateStore.record(row.id, row.symbol,
+                    FixedExecutionPresentationPolicy.BROKER_COOLDOWN,
+                    "Alpha broker cooldown active; automatic retry is scheduled.")
+            }
             auditAutoBuyBlocked("FIXED_AUTO_BUY", preflightCooldown)
             scheduleFixedAutoBuyCooldownWake(rows, preflightCooldown, System.currentTimeMillis())
             return 0
@@ -8274,6 +8279,9 @@ class TradingRepository @Inject constructor(
             val cooldown = buyApiCooldownOrNull(GrowwApiUsageLedger.Category.LIVE_DATA)
             if (cooldown != null) {
                 auditAutoBuyBlocked("FIXED_AUTO_BUY", cooldown, row.id, row.symbol)
+                fixedExecutionUiStateStore.record(row.id, row.symbol,
+                    FixedExecutionPresentationPolicy.BROKER_COOLDOWN,
+                    "Alpha broker cooldown active; automatic retry is scheduled.")
                 scheduleFixedAutoBuyCooldownWake(rows, cooldown, System.currentTimeMillis())
                 break
             }
@@ -8341,8 +8349,8 @@ class TradingRepository @Inject constructor(
                 if (cooldown != null) {
                     auditAutoBuyBlocked("FIXED_AUTO_BUY", cooldown, row.id, row.symbol)
                     fixedExecutionUiStateStore.record(row.id, row.symbol,
-                        FixedExecutionPresentationPolicy.BROKER_REJECTED,
-                        "Fresh Alpha quote deferred by the broker cooldown.")
+                        FixedExecutionPresentationPolicy.BROKER_COOLDOWN,
+                        "Alpha broker cooldown active; automatic retry is scheduled.")
                     scheduleFixedAutoBuyCooldownWake(rows, cooldown, System.currentTimeMillis())
                     break
                 }
@@ -8352,7 +8360,12 @@ class TradingRepository @Inject constructor(
                 continue
             }
             val quoteElapsedMs = (System.currentTimeMillis() - quoteStartedAtMs).coerceAtLeast(0L)
-            val ltp = quote.lastPrice?.takeIf { it.isFinite() && it > 0.0 } ?: continue
+            val ltp = quote.lastPrice?.takeIf { it.isFinite() && it > 0.0 } ?: run {
+                fixedExecutionUiStateStore.record(row.id, row.symbol,
+                    FixedExecutionPresentationPolicy.BROKER_REJECTED,
+                    "Fresh Alpha quote did not contain a valid last price.")
+                continue
+            }
             if (!RecommendationPriceBandPolicy.eligible(ltp)) {
                 auditLogger.logAsync("FIXED_AUTO_BUY", "PRICE_BAND_REJECTED", mapOf("symbol" to row.symbol, "fresh_ltp" to ltp))
                 fixedExecutionUiStateStore.record(row.id, row.symbol,
