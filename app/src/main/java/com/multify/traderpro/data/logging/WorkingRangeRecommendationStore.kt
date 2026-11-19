@@ -129,6 +129,7 @@ class WorkingRangeRecommendationStore(context: Context) {
             if (existing == null || existing.dto.state != "PENDING_CONFIRMATION") {
                 val first = WorkingRangeRecommendationDto(
                     symbol = symbol,
+                    scanStartedAtMs = scanStartedAtMs,
                     state = "PENDING_CONFIRMATION",
                     targetPct = targetPct,
                     firstQualifiedAtMs = observedAtMs,
