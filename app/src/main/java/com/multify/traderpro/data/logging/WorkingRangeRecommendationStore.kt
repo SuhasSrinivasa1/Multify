@@ -96,12 +96,16 @@ class WorkingRangeRecommendationStore(context: Context) {
             if (!enabled || row.dto.state != "IN_RANGE" ||
                 row.dto.autoBuyState != "NOT_ATTEMPTED" || reference.isBlank() || quantity <= 0)
                 return@synchronized false
+            val previous = row.dto
             row.dto = row.dto.copy(
                 autoBuyEnabled = true, autoBuyState = "ORDER_INTENT_RESERVED",
                 autoBuyReference = reference, autoBuyQuantity = quantity,
-                reason = "Working Range confirmed · Alpha order intent reserved · awaiting broker result"
+                reason = "Working Range confirmed · durable Alpha order intent reserved · awaiting broker result"
             )
-            persistLocked()
+            if (!persistLocked(commit = true)) {
+                row.dto = previous
+                return@synchronized false
+            }
             true
         }
 
@@ -435,8 +439,12 @@ class WorkingRangeRecommendationStore(context: Context) {
         if (rows.size > 400) rows.subList(0, rows.size - 400).clear()
     }
 
-    private fun persistLocked() {
-        prefs.edit().putString(KEY_ROWS, gson.toJson(rows)).apply()
+    private fun persistLocked(commit: Boolean = false): Boolean {
+        val editor = prefs.edit().putString(KEY_ROWS, gson.toJson(rows))
+        return if (commit) editor.commit() else {
+            editor.apply()
+            true
+        }
     }
 
     private fun persistRejectionsLocked() {
