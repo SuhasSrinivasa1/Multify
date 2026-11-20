@@ -61,6 +61,8 @@ internal object WorkingRangeCandidatePolicy {
         val emaAlignmentMode: String
     )
 
+    fun priceEligible(price: Double): Boolean = price.isFinite() && price > MIN_PRICE && price < MAX_PRICE
+
     fun assess(i: Inputs): Decision {
         val reasons = mutableListOf<String>()
         fun valid(v: Double?): Double? = v?.takeIf { it.isFinite() }
