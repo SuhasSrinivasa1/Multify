@@ -69,6 +69,10 @@ jobs:
           assert "fixedScannerEnabled: Boolean = true" in prefs
           assert "fixedAutoBuyEnabled: Boolean = false" in prefs
           assert "workingRangeEnabled: Boolean = false" in prefs
+          assert "legacyPortfolioReconciled: Boolean = false" in prefs
+          repository=(root/"data/repository/TradingRepository.kt").read_text()
+          assert "BUY blocked: reconcile previous-app holdings" in repository
+          assert "Reconcile previous-app holdings in Groww before enabling Fixed Auto-Buy" in repository
           assert not (root/"ui/screens/TraderApp.kt").exists()
           assert not (root/"service/MultifyNotificationListenerService.kt").exists()
           print("PASS: frozen strategy, Working Range policy, separate package and independent position protection")
