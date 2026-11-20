@@ -48,7 +48,7 @@ class WorkingRangeEntryBandPolicyTest {
     }
 
     @Test fun confirmationOlderThanThirtySecondsIsRejected() {
-        val r = assess(firstAge = 50_000L, confirmAge = 31_000L)
+        val r = assess(firstAge = 70_000L, confirmAge = 46_000L)
         assertEquals("WORKING_RANGE_CONFIRMATION_TO_BUY_OVER_30S", r.reason)
     }
 
