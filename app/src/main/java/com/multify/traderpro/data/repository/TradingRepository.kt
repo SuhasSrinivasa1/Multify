@@ -1711,6 +1711,12 @@ class TradingRepository @Inject constructor(
                 if (pending.isNotEmpty()) {
                     val token = ensureToken()
                     if (token != null) reconcileWorkingRangeAutoBuyIntents(token)
+                    else {
+                        preferences.setSafetyHalt(true)
+                        auditLogger.log("SAFETY", "WORKING_RANGE_DISABLE_PENDING_ORDER_UNRECONCILED",
+                            mapOf("pending_intents" to pending.size, "new_buys_halted" to true,
+                                "manual_broker_reconciliation_required" to true))
+                    }
                 }
             }.onFailure {
                 auditLogger.log("WORKING_RANGE_AUTO_BUY", "DISABLE_ORDER_RECONCILIATION_FAILED",
@@ -8094,8 +8100,10 @@ class TradingRepository @Inject constructor(
 
         if (pendingIntents.isEmpty() && potential.isEmpty()) return 0
         val token = ensureToken() ?: run {
-            auditLogger.logAsync("WORKING_RANGE_AUTO_BUY", "ALPHA_AUTH_REQUIRED",
-                mapOf("new_buys_submitted" to false, "pending_intents" to pendingIntents.size))
+            if (pendingIntents.isNotEmpty()) preferences.setSafetyHalt(true)
+            auditLogger.log("WORKING_RANGE_AUTO_BUY", "ALPHA_AUTH_REQUIRED",
+                mapOf("new_buys_submitted" to false, "pending_intents" to pendingIntents.size,
+                    "safety_halt_set_for_unresolved_intent" to pendingIntents.isNotEmpty()))
             return 0
         }
 
@@ -8282,18 +8290,22 @@ class TradingRepository @Inject constructor(
                 ).requirePayload("Reconcile Working Range BUY $reference")
             }.getOrNull()
             if (broker == null) {
-                auditLogger.logAsync("WORKING_RANGE_AUTO_BUY", "REFERENCE_STATUS_UNAVAILABLE",
+                preferences.setSafetyHalt(true)
+                auditLogger.log("SAFETY", "WORKING_RANGE_REFERENCE_STATUS_UNAVAILABLE",
                     mapOf("symbol" to row.symbol, "reference" to reference,
-                        "blind_resubmission" to false, "manual_reconciliation_if_persistent" to true))
+                        "blind_resubmission" to false, "new_buys_halted" to true,
+                        "manual_broker_reconciliation_required" to true))
                 continue
             }
             val orderId = com.multify.traderpro.engine.BrokerOrderAcknowledgementPolicy
                 .usableId(broker.growwOrderId)
             val status = broker.orderStatus.orEmpty().uppercase(Locale.US)
             if (orderId == null) {
-                auditLogger.logAsync("WORKING_RANGE_AUTO_BUY", "BROKER_ORDER_ID_UNRESOLVED",
+                preferences.setSafetyHalt(true)
+                auditLogger.log("SAFETY", "WORKING_RANGE_BROKER_ORDER_ID_UNRESOLVED",
                     mapOf("symbol" to row.symbol, "reference" to reference,
-                        "status" to status, "blind_resubmission" to false))
+                        "status" to status, "blind_resubmission" to false,
+                        "new_buys_halted" to true, "manual_broker_reconciliation_required" to true))
                 continue
             }
             var settled = broker
