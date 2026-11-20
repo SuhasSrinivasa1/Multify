@@ -13045,6 +13045,15 @@ class TradingRepository @Inject constructor(
                     .isFixedNewEntryWindow(ZonedDateTime.now(INDIA))) {
                 "BUY blocked: Fixed/Univest auto-buy disabled or session entry window ended during broker preflight"
             }
+        } else if (reference.startsWith("WRM")) {
+            val switchAtDispatch = preferences.settings.first()
+            require(switchAtDispatch.workingRangeEnabled &&
+                switchAtDispatch.workingRangeActivatedAtMs > 0L &&
+                !switchAtDispatch.safetyHalt &&
+                com.multify.traderpro.engine.NseEquitySessionCalendar
+                    .isFixedNewEntryWindow(ZonedDateTime.now(INDIA))) {
+                "BUY blocked: Working Range Auto-Buy disabled or session entry window ended during broker preflight"
+            }
         }
         require(System.currentTimeMillis() - freshAt in
             0L..CircuitAwareBuyPolicy.MAX_QUOTE_AGE_MS) {
