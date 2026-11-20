@@ -229,7 +229,7 @@ class TraderViewModel @Inject constructor(
 
     fun setLegacyPortfolioReconciled(reconciled: Boolean) {
         viewModelScope.launch {
-            runCatching { preferences.setLegacyPortfolioReconciled(reconciled) }
+            runCatching { repository.setLegacyPortfolioReconciled(reconciled) }
                 .onSuccess {
                     remote.value = remote.value.copy(
                         message = if (reconciled)
