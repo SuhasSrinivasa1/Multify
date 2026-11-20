@@ -913,7 +913,7 @@ private fun SwitchRow(
 ) {
     Row(
         Modifier.fillMaxWidth().heightIn(min = 64.dp)
-            .semantics { this.contentDescription = listOf(contentDescription) },
+            .semantics { this.contentDescription = contentDescription },
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
