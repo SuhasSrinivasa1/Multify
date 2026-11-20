@@ -173,6 +173,8 @@ private enum class Destination(val label: String, val subtitle: String, val icon
 @Composable
 fun TraderApp(viewModel: TraderViewModel = hiltViewModel()) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    // External signal-adapter screens are intentionally excluded from the standalone app.
+    val destinations = listOf(Destination.Execution, Destination.Fixed, Destination.Settings)
     var selected by rememberSaveable { mutableIntStateOf(0) }
     val snackbar = remember { SnackbarHostState() }
     var showArmConfirm by remember { mutableStateOf(false) }
@@ -202,9 +204,9 @@ fun TraderApp(viewModel: TraderViewModel = hiltViewModel()) {
                 CenterAlignedTopAppBar(
                     title = {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text(Destination.entries[selected].label, fontWeight = FontWeight.SemiBold)
+                            Text(destinations[selected].label, fontWeight = FontWeight.SemiBold)
                             Text(
-                                Destination.entries[selected].subtitle,
+                                destinations[selected].subtitle,
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -249,7 +251,7 @@ fun TraderApp(viewModel: TraderViewModel = hiltViewModel()) {
         },
         bottomBar = {
             NavigationBar(windowInsets = WindowInsets.navigationBars) {
-                Destination.entries.forEachIndexed { index, destination ->
+                destinations.forEachIndexed { index, destination ->
                     NavigationBarItem(
                         selected = selected == index,
                         onClick = { selected = index },
@@ -262,7 +264,7 @@ fun TraderApp(viewModel: TraderViewModel = hiltViewModel()) {
         }
     ) { padding ->
         Box(Modifier.fillMaxSize().padding(padding)) {
-            when (Destination.entries[selected]) {
+            when (destinations[selected]) {
                 Destination.Execution -> ExecutionScreen(
                     state = state,
                     onRefresh = viewModel::refresh,
@@ -380,9 +382,9 @@ private fun ExecutionScreen(
         }
         item {
             MetricCard(
-                label = "Multify 30-day Avg",
-                value = String.format(Locale.US, "%.2f%%", learning.longAveragePct),
-                supporting = "${learning.rollingCalls} MFE-observed calls across ${learning.rollingTradingDays} trading days",
+                label = "Fixed · frozen target calibration",
+                value = String.format(Locale.US, "%.2f%%", FixedFinalContract.CANONICAL_MULTIFY_MFE_AVG_PCT),
+                supporting = "Frozen historical reference only; no external alert or notification dependency",
                 modifier = Modifier.fillMaxWidth(),
                 accent = MaterialTheme.colorScheme.primary
             )
@@ -685,6 +687,26 @@ private fun ForecastScreen(
             )
         }
         item {
+            SectionTitle("Opening NSE momentum watch · research only",
+                "Starts from 09:15 IST using successive existing full-market price scans. First observation is a baseline; an independent next scan is needed for momentum. No additional API calls, no BUY approval, and no change to Fixed's completed 15m candle requirement.")
+        }
+        if (dashboard?.fixedPulseResearch.isNullOrEmpty()) {
+            item {
+                Text("Waiting for two completed, valid NSE discovery scans; official Fixed may need the first completed current-session 15m candle (around 09:30 IST).",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        } else {
+            dashboard!!.fixedPulseResearch.take(8).forEach { pulse ->
+                item {
+                    Text(pulse.symbol + "  ·  sampled +" +
+                        String.format(Locale.US, "%.2f%%", pulse.pulsePct) +
+                        "  ·  research observation only; not an executable recommendation",
+                        style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+        }
+        item {
             Card(
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha=.18f)),
                 shape = RoundedCornerShape(20.dp)
@@ -955,11 +977,11 @@ private fun FixedScreen(
             ) {
                 Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
                     Text("Fixed engine · FROZEN", fontWeight = FontWeight.SemiBold)
-                    Text("v7.4.1 · 40 factors · 15-minute candles · original selection and SELL rules preserved.",
+                    Text("v7.4.1 · 40 factors · 15-minute candles · original selection preserved · new entries have a -1% hard stop.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Text(
-                        if (state.settings.fixedAutoBuyEnabled) "Fixed + Univest Auto Buy · ON" else "Fixed + Univest Auto Buy · OFF",
+                        if (state.settings.fixedAutoBuyEnabled) "Fixed Auto Buy · ON" else "Fixed Auto Buy · OFF",
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.Medium
                     )
@@ -1512,7 +1534,7 @@ private fun SettingsScreen(
         contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp, 14.dp, 16.dp, 32.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        item { SectionTitle("Alpha — trading account", "Fixed, Multify, all BUY/SELL/GTT, portfolio and static IP remain on Alpha.") }
+        item { SectionTitle("Alpha — trading account", "Fixed and Working Range BUY/SELL/GTT and broker-side protection use Alpha exclusively.") }
         item {
             Card(
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -1523,10 +1545,9 @@ private fun SettingsScreen(
                     OutlinedTextField(apiKey, { apiKey = it }, Modifier.fillMaxWidth(), label = { Text("Groww TOTP token") }, visualTransformation = PasswordVisualTransformation(), singleLine = true)
                     OutlinedTextField(totpSecret, { totpSecret = it }, Modifier.fillMaxWidth(), label = { Text("Groww TOTP secret") }, visualTransformation = PasswordVisualTransformation(), singleLine = true)
                     OutlinedTextField(staticIp, { staticIp = it.trim() }, Modifier.fillMaxWidth(), label = { Text("Groww-whitelisted static IP") }, singleLine = true)
-                    OutlinedTextField(packageFilter, { packageFilter = it }, Modifier.fillMaxWidth(), label = { Text("Multify package filter (blank = official app only)") }, singleLine = true)
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         OutlinedButton(
-                            onClick = { onSave(apiKey, totpSecret, staticIp, packageFilter, budget.toLong().toString()) },
+                            onClick = { onSave(apiKey, totpSecret, staticIp, "", budget.toLong().toString()) },
                             modifier = Modifier.weight(1f)
                         ) { Text("Save") }
                         Button(onClick = onAuthenticate, enabled = state.credentialsConfigured, modifier = Modifier.weight(1f)) { Text("Authenticate") }
@@ -1543,7 +1564,7 @@ private fun SettingsScreen(
             }
         }
 
-        item { SectionTitle("Beta — Forecast research only", "Separate Groww account. No static IP field, no orders, no holdings access.") }
+        item { SectionTitle("Beta — Fixed research only", "Separate Groww account. No static IP field, no orders, no holdings access.") }
         item {
             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha=.24f)),
@@ -1564,10 +1585,10 @@ private fun SettingsScreen(
                     KeyValueRow("Beta research", when {
                         state.betaAuthenticated -> "Authenticated — read-only market data"
                         state.betaConfigured -> "Configured — authenticate for research"
-                        else -> "Not configured — Forecast uses Alpha's spare capacity"
+                        else -> "Not configured — Fixed may use Alpha's spare research capacity"
                     })
                     Text("Beta is strictly market-data only. All trading and protective orders remain on Alpha. " +
-                        "When Beta is configured but unauthenticated, Forecast pauses instead of consuming Alpha quota. " +
+                        "When Beta is configured but unauthenticated, Beta reads pause instead of consuming Alpha quota. " +
                         "Separate API keys do not guarantee separate broker rate limits.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1575,24 +1596,15 @@ private fun SettingsScreen(
             }
         }
 
-        item { SectionTitle("ARM", "There is one trading mode only: LONG CNC holdings.") }
+        item { SectionTitle("Automatic entry & capital", "Independent Fixed and Working Range LONG CNC only; 1% initial hard stop, verified Alpha protection.") }
         item {
             Card(
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha=.22f)),
                 shape = RoundedCornerShape(20.dp)
             ) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) {
-                            Text("ARM Multify calls", fontWeight = FontWeight.SemiBold)
-                            Text(
-                                "When armed, the next eligible Multify call places a CNC BUY. Holdings can remain overnight.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        Switch(checked = armed, onCheckedChange = { onArmRequested() }, enabled = true) // Allow tap to display the ARM rejection reason.
-                    }
+                    Text("Standalone mode: no external app notifications, alerts or manual signal imports can authorize BUYs.",
+                        style = MaterialTheme.typography.bodySmall)
                     Text("Per-call holding budget · " + money(budget.toDouble()))
                     Slider(
                         value = budget,
@@ -1611,34 +1623,8 @@ private fun SettingsScreen(
                         valueRange = 1f..10f, steps = 8)
                     Text("Auto BUY uses fresh Alpha CNC available cash and pending-order safety; if broker funds cannot be verified, BUY is blocked.", style = MaterialTheme.typography.bodySmall)
                     HorizontalDivider()
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) {
-                            Text("Fixed-only performance mode", fontWeight = FontWeight.SemiBold)
-                            Text(
-                                "ON pauses background Forecast discovery/research, preserving Fixed and all existing holdings. Turning this ON also disables Forecast auto-buy; Forecast code and history are retained.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        Checkbox(checked = true, onCheckedChange = {}, enabled = false)
-                    }
-                    KeyValueRow("Forecast background discovery", "FROZEN · Beta dedicated to Fixed")
-                    HorizontalDivider()
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) {
-                            Text("Auto-buy forecast recommendations", fontWeight = FontWeight.SemiBold)
-                            Text(
-                                "When enabled, confirmed PRIMARY Forecast calls may use direct Groww CNC MARKET BUY; all broker readiness, entry freshness, safety halt and common SELL protections still apply. Research-only rows cannot BUY.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        Switch(checked = false, onCheckedChange = {}, enabled = false)
-                    }
-                    KeyValueRow(
-                        "Forecast auto-buy",
-                        "FROZEN · no Forecast BUY orders permitted"
-                    )
+                    Text("Forecast and external signal-app integrations are disabled; Alpha/Beta capacity is dedicated to Fixed and Working Range.",
+                        style = MaterialTheme.typography.bodySmall)
                     Text(
                         "Entry control: no Fixed entry GTT. Auto-buy uses a fresh quote for sizing and sends a direct CNC MARKET BUY immediately. The actual broker fill becomes the holding average and trailing anchor; the live execution target keeps the frozen recommendation target percentage but is anchored to that actual fill.",
                         style = MaterialTheme.typography.bodySmall,
@@ -1647,9 +1633,9 @@ private fun SettingsScreen(
                     HorizontalDivider()
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
-                            Text("Auto-buy Fixed + Univest", fontWeight = FontWeight.SemiBold)
+                            Text("Auto-buy Fixed", fontWeight = FontWeight.SemiBold)
                             Text(
-                                "Fixed: only new PRIMARY recommendations published after you enable this switch can buy. Univest: only fresh official NSE equity ENTRY alerts received after enabling it can buy through Groww Alpha. No separate Univest switch or Multify ARM is needed. Both use the existing broker safety and SELL/GTT rules.",
+                                "Only new Fixed PRIMARY recommendations published after you enable this switch may attempt a fresh Alpha CNC BUY. No external signal-app notifications are used. All broker cash, holding and GTT safeguards remain mandatory.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -1660,8 +1646,8 @@ private fun SettingsScreen(
                         )
                     }
                     KeyValueRow(
-                        "Fixed + Univest auto-buy",
-                        if (state.settings.fixedAutoBuyEnabled) "ON · waiting for new Fixed/Univest signals" else "OFF · no new Fixed/Univest auto BUY"
+                        "Fixed auto-buy",
+                        if (state.settings.fixedAutoBuyEnabled) "ON · waiting for new Fixed confirmations" else "OFF · no new Fixed auto BUY"
                     )
                     HorizontalDivider()
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -1683,7 +1669,7 @@ private fun SettingsScreen(
                         "ON · only new post-activation confirmations may attempt Alpha BUY"
                         else "OFF · research continues; no new Working Range BUY")
                     Text(
-                        "Fixed remains immutable. Forecast may read prior positive Fixed outcomes, but can never write into Fixed or change its v7.4.1 rules. Every app-owned Multify, Fixed, Working Range, Univest and Forecast LONG uses the same sell protection: hard -3% loss floor, then the existing +0.55% arm → +0.50% protected gain → +0.10% ratchet when profitable. No averaging down.",
+                        "Fixed's 40-factor selection and 15-minute inputs remain frozen. New Fixed LONGs use a -1% broker-side hard stop, then the original +0.55% arm → +0.50% protected gain → +0.10% ratchet. Working Range uses -1% hard stop and its independent full-target exit without trailing. Broker fills and GTT verification are required. No averaging down.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -1698,62 +1684,11 @@ private fun SettingsScreen(
             }
         }
 
-        item { SectionTitle("Manual Multify fallback", "Use only if a Multify notification was missed by Android.") }
-        item {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha=.24f)),
-                shape = RoundedCornerShape(20.dp)
-            ) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    OutlinedTextField(
-                        manualSymbol,
-                        { manualSymbol = it.uppercase(Locale.US).filter { ch -> ch.isLetterOrDigit() || ch in "&._-" } },
-                        Modifier.fillMaxWidth(),
-                        label = { Text("NSE symbol") },
-                        singleLine = true
-                    )
-                    OutlinedTextField(manualPrice, { manualPrice = it }, Modifier.fillMaxWidth(), label = { Text("Observed price (optional)") }, singleLine = true)
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Button(
-                            onClick = { onSubmitManualSignal(manualSymbol, "BUY", manualPrice) },
-                            enabled = manualSymbol.isNotBlank(),
-                            modifier = Modifier.weight(1f)
-                        ) { Text("BUY CALL") }
-                        OutlinedButton(
-                            onClick = { onSubmitManualSignal(manualSymbol, "BOOK_PROFIT", manualPrice) },
-                            enabled = manualSymbol.isNotBlank(),
-                            modifier = Modifier.weight(1f)
-                        ) { Text("BOOK PROFIT") }
-                    }
-                }
-            }
-        }
-
-        item { SectionTitle("Device & diagnostics", "Background access keeps Multify capture and holding monitoring alive.") }
+        item { SectionTitle("Device & diagnostics", "Background access keeps Fixed scanning and broker-side holding protection alive.") }
         item {
             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface), shape = RoundedCornerShape(20.dp)) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    KeyValueRow("Notification access", if (notificationAccess) "Enabled" else "Required")
-                    KeyValueRow("Notification listener", when {
-                        !notificationAccess -> "PERMISSION DISABLED"
-                        listenerConnected -> "Connected"
-                        else -> "Disconnected / awaiting Android"
-                    })
-                    KeyValueRow("Listener last connected", captureTime(lastListenerAt))
-                    KeyValueRow("Latest official Univest alert", captureTime(lastOfficialUnivestAt))
-                    KeyValueRow("Latest Univest parse", captureTime(lastParsedAt))
-                    KeyValueRow("Univest parse result",
-                        if (lastParsedSymbol.isBlank()) lastParsedStatus
-                        else "$lastParsedSymbol · $lastParsedStatus")
-                    KeyValueRow("Univest Alpha entry", lastUnivestOrderStatus)
-                    Text(
-                        "Univest buys require a fresh official notification and Fixed Auto Buy ON. SELL remains managed only by the common -3% hard stop and trailing GTT. A running engine does not prove Android notification access is connected.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
                     KeyValueRow("Background battery", if (batteryUnrestricted) "Unrestricted" else "Optimized")
-                    OutlinedButton(onClick = { openNotificationAccessSettings(context) }, modifier = Modifier.fillMaxWidth()) { Text("Notification access") }
                     Button(onClick = { requestUnrestrictedBattery(context) }, modifier = Modifier.fillMaxWidth()) { Text("Allow unrestricted background") }
                     HorizontalDivider()
                     KeyValueRow("Version", BuildConfig.VERSION_NAME)
@@ -1849,7 +1784,7 @@ private fun money(value: Double): String = NumberFormat.getCurrencyInstance(Loca
 private fun defaultLogFileName(): String {
     val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
     val safeVersion = BuildConfig.VERSION_NAME.replace(Regex("[^A-Za-z0-9._-]"), "_")
-    return "MultifyTraderPro-logs-v$safeVersion-$stamp.zip"
+    return "FixedMomentumTrader-logs-v$safeVersion-$stamp.zip"
 }
 
 private fun notificationAccessEnabled(context: Context): Boolean {
