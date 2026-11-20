@@ -12,7 +12,7 @@ class HardStopGttTighteningPolicyTest {
         smartOrderStatus = status, brokerTrigger = trigger
     )
 
-    @Test fun existingFivePercentHardStopIsUpgradeCandidate() {
+    @Test fun existingLooserHardStopIsUpgradeCandidate() {
         assertTrue(modify(95.0))
         assertTrue(modify(96.5))
         assertTrue(modify(95.0, mode = HoldingSmartOrderPolicy.MODE_TRAILING_GTT))
@@ -20,8 +20,8 @@ class HardStopGttTighteningPolicyTest {
     }
 
     @Test fun alreadyTightOrProfitTrailingStopsNeverLoosen() {
-        assertFalse(modify(98.0))
-        assertFalse(modify(98.001))
+        assertFalse(modify(99.0))
+        assertFalse(modify(99.001))
         assertFalse(modify(100.50, mode = HoldingSmartOrderPolicy.MODE_TRAILING_GTT))
         assertFalse(modify(101.0))
     }
