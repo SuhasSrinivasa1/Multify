@@ -51,7 +51,8 @@ internal object WorkingRangeCandidatePolicy {
         val reasons: List<String>,
         val targetRequirementAtr: Double?,
         val vwapExtensionAtr: Double?,
-        val emaAligned: Boolean?
+        val emaAligned: Boolean?,
+        val emaAlignmentMode: String
     )
 
     fun assess(i: Inputs): Decision {
@@ -73,6 +74,11 @@ internal object WorkingRangeCandidatePolicy {
             (price - vwap) / atr else null
         val emaAligned = if (e9 != null && e20 != null && e50 != null)
             e9 > e20 && e20 > e50 else null
+        val emaAlignmentMode = when {
+            emaAligned == null -> "MISSING"
+            emaAligned -> "STRICT"
+            else -> "NOT_ALIGNED"
+        }
 
         if (price == null || !RecommendationPriceBandPolicy.eligible(price))
             reasons += "PRICE_OUTSIDE_FIXED_EQUITY_BAND"
@@ -99,7 +105,8 @@ internal object WorkingRangeCandidatePolicy {
             reasons = reasons,
             targetRequirementAtr = targetAtr,
             vwapExtensionAtr = vwapExtension,
-            emaAligned = emaAligned
+            emaAligned = emaAligned,
+            emaAlignmentMode = emaAlignmentMode
         )
     }
 
