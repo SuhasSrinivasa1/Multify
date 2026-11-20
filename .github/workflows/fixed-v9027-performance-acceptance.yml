@@ -1,0 +1,174 @@
+name: Fixed Momentum Pro v9.0.27 — frozen parity, API budget and APK acceptance
+on:
+  push:
+    branches: [v9027-fixed-performance-safety-candidate]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  regression-and-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Android SDK 35
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
+      - name: Frozen Fixed selection, Working Range and API budget parity
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+          baseline="v9026-independent-fixed-working-range-minus1-opening-watch"
+          root=Path("app/src/main/java/com/multify/traderpro")
+          def old(p):return subprocess.check_output(["git","show",f"{baseline}:{p}"])
+          locked=[
+            "engine/FixedFinalContract.kt",
+            "engine/FixedLocalStrategyEngine.kt",
+            "engine/FixedMarketDiscoveryPolicy.kt",
+            "engine/FixedForecastPublicationPolicy.kt",
+            "engine/FixedForecastQualityPolicy.kt",
+            "engine/FixedEntryActionabilityPolicy.kt",
+            "engine/FixedMultifyFactorFamilies.kt",
+            "engine/SteppedTrailingPolicy.kt",
+            "engine/HardStopLossPolicy.kt",
+            "engine/WorkingRangeCandidatePolicy.kt",
+            "engine/WorkingRangeEntryMomentumPolicy.kt",
+            "engine/WorkingRangeAutoBuyPolicy.kt",
+            "engine/WorkingRangeExitPolicy.kt",
+            "data/network/BetaReadOnlyInterceptor.kt",
+            "data/network/GrowwApiFactory.kt",
+            "data/network/GrowwRateLimitInterceptor.kt",
+            "data/network/GrowwHistoricalThrottlePolicy.kt",
+            "data/network/BetaResearchGate.kt",
+            "engine/FixedResearchCapacityPolicy.kt",
+            "engine/FixedResearchLtpPacingPolicy.kt",
+            "engine/FixedDualAccountPolicy.kt",
+            "engine/FixedSingleWorkerStartGate.kt",
+            "engine/MarketDataPriorityAdmissionPolicy.kt",
+          ]
+          for rel in locked:
+            p=root/rel
+            assert p.read_bytes()==old(p.as_posix()),("REGRESSION_OR_RULE_CHANGE",rel)
+          # Only addition inside repository is new read-only local diagnostic export.
+          repo=root/"data/repository/TradingRepository.kt"
+          after=repo.read_text()
+          extra='''\n                add("fixed_singleflight_dedup_v9027.json", mapOf(
+                    "alpha_research_cache_hits" to GrowwApiUsageLedger.cacheHitCount(),
+                    "alpha_research_cache_misses" to GrowwApiUsageLedger.cacheMissCount(),
+                    "duplicate_followers_prevented_from_new_wire_requests" to
+                        GrowwApiUsageLedger.duplicateReadsPreventedCount(),
+                    "fresh_alpha_execution_quotes_must_bypass_cache" to true,
+                    "broker_wire_calls_are_in_wire_api_usage_snapshot" to true,
+                    "no_pretense_of_realized_speedup_without_matched_market_runs" to true
+                ))'''
+          assert after.count(extra)==1
+          assert after.replace(extra,"").encode()==old(repo.as_posix()), "TRADING_REPOSITORY_MODIFIED"
+          app=Path("app/src/main/AndroidManifest.xml").read_text()
+          assert "MultifyNotificationListenerService" not in app
+          assert 'android:label="Fixed Momentum Pro"' in app
+          assert not (root/"service/MultifyNotificationListenerService.kt").exists()
+          assert not (root/"ui/screens/TraderApp.kt").exists()
+          main=(root/"MainActivity.kt").read_text()
+          assert "FixedLiteApp()" in main
+          view=(root/"ui/screens/FixedLiteApp.kt").read_text()
+          assert "LitePage.FIXED" in view and "LitePage.WORKING_RANGE" in view
+          assert "LitePage.AVERAGES" in view and "LitePage.SETTINGS" in view
+          assert "Opening momentum watch" in view
+          assert "GttProtectionReadinessPolicy.verified" in view
+          assert "Manual BUY" in view
+          svc=(root/"service/TradingEngineService.kt").read_text()
+          assert "startPositionMonitorWorker()" in svc
+          assert "monitorManagedPositions()" in svc
+          assert "fixedScannerEnabled" in svc
+          assert "sampleFixedFiveMinuteShadow" not in svc
+          assert "maintainArmHotPath()" not in svc
+          assert "requestRebind(" not in svc
+          prefs=(root/"data/preferences/AppPreferences.kt").read_text()
+          assert 'fixedScannerEnabled: Boolean = true' in prefs
+          assert 'fixedAutoBuyEnabled: Boolean = false' in prefs
+          assert 'workingRangeEnabled: Boolean = false' in prefs
+          assert "resetLiveEntryPermissionsOnceForV9027()" in prefs
+          assert "it[Keys.workingRangeEnabled] = false" in prefs
+          cache=(root/"data/network/GrowwHotDataCacheInterceptor.kt").read_text()
+          assert 'FIXED_INFLIGHT_READ_TIMEOUT_NO_DUPLICATE' in cache
+          assert 'throw IOException(if (completed)' in cache
+          assert 'bypassForProtection(request)' in cache
+          store=(root/"engine/FixedHistoricalWindowStore.kt").read_text()
+          assert "var overlap = 0" in store
+          assert "if (overlap < 2" in store
+          assert "return IncrementalRequest(ts.format(format))" in store
+          assert "MAX_REUSE_AGE_MS = 12L * 60_000L" in store
+          build=Path("app/build.gradle.kts").read_text()
+          assert "versionCode = 9027" in build
+          assert 'applicationId = "com.multify.traderpro.vivoy73final"' in build
+          assert "9.0.27-fixed-performance-architecture-TEST" in build
+          print(f"PASS: {len(locked)} exact baseline policy and gateway files; no Fixed scoring, stop, target, routing, limiter or Beta order changes")
+          PY
+      - name: Replay all available backend regression fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check -r backend/requirements.txt
+          python -m pytest -q backend/tests | tee backend-replay-results.txt
+      - name: Full Android unit suite, UI test compilation and APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest
+          python - <<'PY'
+          import glob,xml.etree.ElementTree as ET,pathlib
+          total=failed=errors=skipped=0
+          for p in glob.glob("app/build/test-results/testDebugUnitTest/TEST-*.xml"):
+              root=ET.parse(p).getroot()
+              total+=int(root.attrib.get("tests",0))
+              failed+=int(root.attrib.get("failures",0))
+              errors+=int(root.attrib.get("errors",0))
+              skipped+=int(root.attrib.get("skipped",0))
+          out=f"total={total}\nfailures={failed}\nerrors={errors}\nskipped={skipped}\n"
+          pathlib.Path("android-test-summary.txt").write_text(out)
+          print(out)
+          assert total>=100 and failed==0 and errors==0
+          PY
+      - name: Verify package, signature and hash
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=app/build/outputs/apk/debug
+          apk=$out/app-debug.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$apk" | tee "$out/fixed-performance-signer.txt"
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$apk" | head -n 4 | tee "$out/fixed-performance-package.txt"
+          sha256sum "$apk" | tee "$out/fixed-performance-SHA256SUMS.txt"
+          stat -c "%s" "$apk" | tee "$out/fixed-performance-size.txt"
+          echo "Runner debug signer may differ from user's installed APK; NEVER uninstall to bypass mismatch when live holdings/GTTs exist."
+      - name: Upload APK and full offline evidence
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Fixed-Momentum-Pro-v9.0.27-TEST-APK-and-validation
+          path: |
+            app/build/outputs/apk/debug/app-debug.apk
+            app/build/outputs/apk/debug/fixed-performance-signer.txt
+            app/build/outputs/apk/debug/fixed-performance-package.txt
+            app/build/outputs/apk/debug/fixed-performance-SHA256SUMS.txt
+            app/build/outputs/apk/debug/fixed-performance-size.txt
+            app/build/test-results/testDebugUnitTest/
+            backend-replay-results.txt
+            android-test-summary.txt
+          if-no-files-found: warn
+          retention-days: 30
