@@ -110,8 +110,8 @@ class BetaResearchGate @Inject constructor(
                 BetaLiveEndpointPacingPolicy.gapMs(livePacing, BetaLiveEndpointPacingPolicy.Endpoint.LTP),
                 BetaLiveEndpointPacingPolicy.gapMs(livePacing, BetaLiveEndpointPacingPolicy.Endpoint.QUOTE)
             ),
-            ltpGapMs = BetaLiveEndpointPacingPolicy.gapMs(livePacing, LiveEndpoint.LTP),
-            quoteGapMs = BetaLiveEndpointPacingPolicy.gapMs(livePacing, LiveEndpoint.QUOTE),
+            ltpGapMs = BetaLiveEndpointPacingPolicy.gapMs(livePacing, BetaLiveEndpointPacingPolicy.Endpoint.LTP),
+            quoteGapMs = BetaLiveEndpointPacingPolicy.gapMs(livePacing, BetaLiveEndpointPacingPolicy.Endpoint.QUOTE),
             fixedMinuteBucket = DualMinuteAdmissionPolicy.minuteId(System.currentTimeMillis()),
             fixedMinuteUsed = DualMinuteAdmissionPolicy.normalize(
                 w.calendar, System.currentTimeMillis()).used,
@@ -122,7 +122,7 @@ class BetaResearchGate @Inject constructor(
     }
 
     private suspend fun <T> readRateLimited(
-        type: Type, endpoint: LiveEndpoint, block: suspend () -> T
+        type: Type, endpoint: BetaLiveEndpointPacingPolicy.Endpoint, block: suspend () -> T
     ): T {
         var totalWaitMs = 0L
         var waitIterations = 0
@@ -259,9 +259,9 @@ class BetaResearchGate @Inject constructor(
                     "incident_count_last_hour" to incidentCount,
                     "endpoint_lane" to endpoint.name,
                     "active_ltp_gap_ms" to BetaLiveEndpointPacingPolicy.gapMs(
-                        livePacing, LiveEndpoint.LTP),
+                        livePacing, BetaLiveEndpointPacingPolicy.Endpoint.LTP),
                     "active_quote_gap_ms" to BetaLiveEndpointPacingPolicy.gapMs(
-                        livePacing, LiveEndpoint.QUOTE),
+                        livePacing, BetaLiveEndpointPacingPolicy.Endpoint.QUOTE),
                     "category_wire_requests_total" to wire.requests,
                     "category_wire_429_total" to wire.rateLimits,
                     "broker_category_limit_proven" to false,
