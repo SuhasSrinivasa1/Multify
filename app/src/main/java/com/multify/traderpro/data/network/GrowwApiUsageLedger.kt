@@ -60,6 +60,7 @@ object GrowwApiUsageLedger {
     }
     private val cacheHits = AtomicLong(0)
     private val cacheMisses = AtomicLong(0)
+    private val duplicateReadsPrevented = AtomicLong(0)
 
     fun recordRequest(category: Category, nowMs: Long = SystemClock.elapsedRealtime()) = synchronized(lock) {
         val state = states.getValue(category)
@@ -90,6 +91,8 @@ object GrowwApiUsageLedger {
     fun recordCacheMiss() { cacheMisses.incrementAndGet() }
     fun cacheHitCount(): Long = cacheHits.get()
     fun cacheMissCount(): Long = cacheMisses.get()
+    fun recordDuplicatePrevented() { duplicateReadsPrevented.incrementAndGet() }
+    fun duplicateReadsPreventedCount(): Long = duplicateReadsPrevented.get()
 
     fun snapshot(nowMs: Long = SystemClock.elapsedRealtime()): Snapshot = synchronized(lock) {
         Snapshot(nowMs, Category.values().map { category ->

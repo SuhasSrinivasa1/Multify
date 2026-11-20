@@ -4,17 +4,14 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
-import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.IBinder
 import android.os.PowerManager
-import android.service.notification.NotificationListenerService
 import androidx.core.content.ContextCompat
 import androidx.core.app.NotificationCompat
-import androidx.core.app.NotificationManagerCompat
 import com.multify.traderpro.R
 import com.multify.traderpro.data.logging.AuditLogger
 import com.multify.traderpro.data.network.ForecastDto
@@ -53,6 +50,7 @@ class TradingEngineService : Service() {
     @Inject lateinit var auditLogger: AuditLogger
     @Inject lateinit var recoveryGate: GrowwRecoveryGate
     @Inject lateinit var betaResearchGate: BetaResearchGate
+    @Inject lateinit var preferences: com.multify.traderpro.data.preferences.AppPreferences
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var engineJob: Job? = null
@@ -94,7 +92,6 @@ class TradingEngineService : Service() {
     @Volatile private var lastFixedCycleCompletedAtMs = 0L
     @Volatile private var lastPositionPassSucceededAtMs = 0L
     @Volatile private var mobileHealthStatus = "INITIALIZING"
-    private var lastListenerRebindAtMs = 0L
 
     override fun onCreate() {
         super.onCreate()
@@ -120,6 +117,7 @@ class TradingEngineService : Service() {
         fixedEarlyPrefetchObserverJob = scope.launch(Dispatchers.IO) {
             repository.fixedEarlyPrefetchReady.collect { scanStartedAtMs ->
                 if (scanStartedAtMs <= 0L) return@collect
+                if (!preferences.settings.first().fixedScannerEnabled) return@collect
                 try {
                     val prepared = repository.prepareNextFixedDiscoverySweep()
                     auditLogger.logAsync("FIXED_PERFORMANCE", "EARLY_PREFETCH_SERVICE_RESULT", mapOf(
@@ -332,9 +330,6 @@ class TradingEngineService : Service() {
                         repository.recordServiceHeartbeat()
                         lastHeartbeatAtMs = nowMs
                     }
-
-                    runCatching { repository.maintainArmHotPath() }
-                        .onFailure { auditLogger.log("RUNTIME", "ARM_HOT_PATH_MAINTAIN_ERROR", mapOf("message" to (it.message ?: it.javaClass.simpleName))) }
 
                     val profileNowMs = System.currentTimeMillis()
                     if (profileNowMs - positionProfileWindowStartedAtMs >= POSITION_PROFILE_INTERVAL_MS) {
@@ -637,6 +632,12 @@ class TradingEngineService : Service() {
             ))
             while (isActive) {
                 try {
+                    if (!preferences.settings.first().fixedScannerEnabled) {
+                        // Discovery and optional research OFF, never the separate
+                        // app-owned holding/SELL/GTT protection worker.
+                        delay(4_000L)
+                        continue
+                    }
                     val now = ZonedDateTime.now(INDIA)
                     if (com.multify.traderpro.engine.NseEquitySessionCalendar.isWarmupWindow(now)) {
                         runCatching { repository.prepareFixedPreMarketWarmup() }
@@ -958,45 +959,14 @@ class TradingEngineService : Service() {
                                         )
                                     }
                             }
-                            // One optional real 5m candle comparison per eight completed
-                            // Fixed scans, only with spare category quota and no recent
-                            // broker 429. Shadow analysis never changes BUY decisions.
-                            val shadowOrdinal = nextFixedShadowScanOrdinal()
-                            if (shadowOrdinal % 8 == 0) {
-                                scope.launch(Dispatchers.IO) {
-                                    runCatching { repository.sampleFixedFiveMinuteShadow(shadowOrdinal) }
-                                        .onFailure { auditLogger.logAsync("FIXED_5M_SHADOW",
-                                            "COLLECTION_ERROR", mapOf(
-                                                "error_type" to it.javaClass.simpleName,
-                                                "trading_decision_changed" to false)) }
-                                }
-                            }
+                            // No optional five-minute broker research in the
+                            // standalone Fixed runtime. Preserves quota for
+                            // fresh Alpha execution and 15-minute discovery.
                             // Discretionary Forecast research is not launched immediately
                             // after Fixed: broker capacity is reserved for the next sweep.
                         }
                     }
-                    // V8.3.26: real 5m historical research only after 15:35 IST.
-                    // The scheduler makes no broker requests; the repository
-                    // retains Alpha 429, market-prefetch and budget guards.
-                    val researchNow = ZonedDateTime.now(INDIA)
-                    val researchAtMs = System.currentTimeMillis()
-                    if (researchNow.dayOfWeek.value < 6 &&
-                        researchNow.toLocalTime() in LocalTime.of(15, 35)..LocalTime.of(18, 0) &&
-                        researchAtMs - lastAfterCloseFiveMinuteShadowAttemptAtMs >= 180_000L
-                    ) {
-                        lastAfterCloseFiveMinuteShadowAttemptAtMs = researchAtMs
-                        scope.launch(Dispatchers.IO) {
-                            runCatching {
-                                repository.sampleFixedFiveMinuteShadow(0, afterClose = true)
-                            }.onFailure {
-                                if (it !is CancellationException) auditLogger.logAsync(
-                                    "FIXED_5M_SHADOW", "AFTER_CLOSE_WORKER_ERROR",
-                                    mapOf("error_type" to it.javaClass.simpleName,
-                                        "trading_decision_changed" to false)
-                                )
-                            }
-                        }
-                    }
+                    // No automatic after-hours historical shadow requests.
                     delay(SCAN_WORKER_POLL_MS)
                 } catch (cancelled: CancellationException) {
                     throw cancelled
@@ -1318,7 +1288,7 @@ class TradingEngineService : Service() {
     private fun engineNotification(text: String): Notification =
         NotificationCompat.Builder(this, ENGINE_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_trader)
-            .setContentTitle("Multify Trader Pro")
+            .setContentTitle("Fixed Momentum Pro")
             .setContentText(text)
             .setOngoing(true)
             .setOnlyAlertOnce(true)

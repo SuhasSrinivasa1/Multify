@@ -1,0 +1,50 @@
+name: v9.0.27 Android Compose emulator acceptance
+on:
+  push:
+    branches: [v9027-fixed-performance-safety-candidate]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  instrumented-ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Enable KVM if supported by runner
+        run: |
+          if [ -e /dev/kvm ]; then sudo chmod 666 /dev/kvm; fi
+      - name: Android emulator Compose regression tests
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
+          script: |
+            set -euo pipefail
+            gradle --no-daemon :app:connectedDebugAndroidTest
+            mkdir -p app/build/outputs/fixed-performance-ui
+            adb shell am start -n com.multify.traderpro.vivoy73final/com.multify.traderpro.MainActivity
+            sleep 4
+            adb exec-out screencap -p > app/build/outputs/fixed-performance-ui/fixed-home.png
+      - name: Preserve UI test reports and screenshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Fixed-Momentum-Pro-v9.0.27-Emulator-UI-Evidence
+          path: |
+            app/build/reports/androidTests/
+            app/build/outputs/androidTest-results/
+            app/build/outputs/fixed-performance-ui/
+          if-no-files-found: warn
+          retention-days: 30
