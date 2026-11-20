@@ -807,8 +807,8 @@ internal fun LiteSettingsScreen(
                 ) { Text("Authenticate") }
             }
             Text(
-                "Authentication: " + if (state.settings.brokerAuthenticated) "verified" else "not verified" +
-                    " · Static IP: " + if (state.settings.staticIpMatched) "matched" else "not matched",
+                "Authentication: " + (if (state.settings.brokerAuthenticated) "verified" else "not verified") +
+                    " · Static IP: " + (if (state.settings.staticIpMatched) "matched" else "not matched"),
                 style = MaterialTheme.typography.labelMedium,
                 color = if (alphaReady) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
             )
@@ -913,7 +913,7 @@ private fun SwitchRow(
 ) {
     Row(
         Modifier.fillMaxWidth().heightIn(min = 64.dp)
-            .semantics { this.contentDescription = contentDescription },
+            .semantics { this.contentDescription = listOf(contentDescription) },
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
