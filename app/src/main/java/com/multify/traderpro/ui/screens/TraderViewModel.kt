@@ -60,6 +60,9 @@ class TraderViewModel @Inject constructor(
     )
 
     init {
+        // Migrate the previous research-only ON state to OFF before the new switch
+        // can authorize real Alpha CNC orders.
+        viewModelScope.launch { repository.initializeWorkingRangeAutoBuyOptIn() }
         viewModelScope.launch {
             repository.settings.collect { settings ->
                 if (settings.brokerAuthenticated) refresh(silent = true)
@@ -198,9 +201,9 @@ class TraderViewModel @Inject constructor(
                     remote.value = remote.value.copy(
                         loading = false,
                         message = if (enabled)
-                            "Working Range pilot enabled · separate manual-review stream · Fixed remains unchanged · no Working Range Auto-Buy"
+                            "Working Range Auto-Buy enabled · only new two-scan confirmations are eligible · Alpha execution and broker protection checks apply"
                         else
-                            "Working Range pilot disabled · Fixed continues unchanged"
+                            "Working Range Auto-Buy disabled · no new Working Range entries; existing holdings remain protected"
                     )
                     refresh(silent = true)
                 }
