@@ -29,7 +29,7 @@ object WorkingRangeAutoBuyPolicy {
             return Decision(false, "FIRST_QUALIFIED_SIGNAL_EXPIRED")
         if (nowMs < confirmedAtMs) return Decision(false, "CLOCK_ORDER_INVALID")
         if (nowMs - confirmedAtMs > MAX_CONFIRMATION_AGE_MS)
-            return Decision(false, "CONFIRMATION_TO_BUY_EXPIRED_30S")
+            return Decision(false, "CONFIRMATION_TO_BUY_EXPIRED_45S")
         return Decision(true, "NEW_CONFIRMED_WORKING_RANGE_EVENT")
     }
 }
