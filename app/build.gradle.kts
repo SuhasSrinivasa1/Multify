@@ -30,8 +30,8 @@ android {
         applicationId = "com.multify.fixedpro.lite"
         minSdk = 26
         targetSdk = 35
-        versionCode = 10001
-        versionName = "1.0.0-fixed-lite-test"
+        versionCode = 10002
+        versionName = "1.0.1-fixed-lite-material3-replay-test"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
     }
