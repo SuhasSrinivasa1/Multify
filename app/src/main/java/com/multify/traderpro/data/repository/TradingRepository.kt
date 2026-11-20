@@ -8257,12 +8257,25 @@ class TradingRepository @Inject constructor(
                 submitted++
                 _fixedDeliveryEvents.tryEmit(System.currentTimeMillis())
             } catch (failure: Throwable) {
-                // Intent remains RESERVED. Recovery checks the exact broker reference;
-                // no second POST is allowed when the first outcome is ambiguous.
-                auditLogger.log("WORKING_RANGE_AUTO_BUY", "ORDER_OUTCOME_REQUIRES_REFERENCE_RECONCILIATION",
-                    mapOf("symbol" to row.symbol, "reference" to reference,
-                        "message" to (failure.message ?: failure.javaClass.simpleName),
-                        "blind_resubmission" to false, "new_buys_blocked_for_event" to true))
+                val message = failure.message ?: failure.javaClass.simpleName
+                if (message.startsWith("BUY blocked:")) {
+                    // Known local/broker preflight rejection occurs before the order POST.
+                    workingRangeRecommendationStore.markAutoBuyOutcome(
+                        row.symbol, row.confirmedAtMs, "BLOCKED_PREORDER",
+                        reason = message
+                    )
+                    auditLogger.log("WORKING_RANGE_AUTO_BUY", "PREORDER_GUARD_BLOCKED",
+                        mapOf("symbol" to row.symbol, "reference" to reference,
+                            "message" to message, "broker_order_posted" to false,
+                            "blind_resubmission" to false))
+                } else {
+                    // Intent remains RESERVED. Recovery checks the exact broker reference;
+                    // no second POST is allowed when the first outcome is ambiguous.
+                    auditLogger.log("WORKING_RANGE_AUTO_BUY", "ORDER_OUTCOME_REQUIRES_REFERENCE_RECONCILIATION",
+                        mapOf("symbol" to row.symbol, "reference" to reference,
+                            "message" to message, "blind_resubmission" to false,
+                            "new_buys_blocked_for_event" to true))
+                }
             }
         }
         return submitted
