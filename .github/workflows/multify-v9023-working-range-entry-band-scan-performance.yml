@@ -176,8 +176,8 @@ jobs:
           assert 'MAX_VWAP_EXTENSION_ATR = WorkingRangeEntryBandPolicy.MAX_VWAP_EXTENSION_ATR' in wr
           assert 'MAX_SPREAD_BPS = WorkingRangeEntryBandPolicy.MAX_SPREAD_BPS' in wr
           band=Path(root+"engine/WorkingRangeEntryBandPolicy.kt").read_text()
-          assert 'MAX_FIRST_QUALIFIED_TO_BUY_MS = 120_000L' in band
-          assert 'MAX_CONFIRMATION_TO_BUY_MS = 30_000L' in band
+          assert 'MAX_FIRST_QUALIFIED_TO_BUY_MS = 180_000L' in band
+          assert 'MAX_CONFIRMATION_TO_BUY_MS = 45_000L' in band
           assert 'MAX_UPWARD_DRIFT_FROM_FIRST_QUALIFIED_PCT = 0.50' in band
           assert 'MAX_DRAWDOWN_FROM_FIRST_QUALIFIED_PCT = 0.75' in band
           assert 'MAX_VWAP_EXTENSION_ATR = 3.50' in band
@@ -235,7 +235,7 @@ jobs:
           assert "CONFIRMED_BEFORE_ACTIVATION" in wrbuy
           assert "EVENT_ALREADY_RESERVED_OR_CONSUMED" in wrbuy
           assert "MAX_CONFIRMATION_AGE_MS = WorkingRangeEntryBandPolicy.MAX_CONFIRMATION_TO_BUY_MS" in wrbuy
-          assert "MAX_CONFIRMATION_AGE_MS = 30_000L" in Path(root+"engine/WorkingRangeEntryMomentumPolicy.kt").read_text()
+          assert "MAX_CONFIRMATION_AGE_MS = 45_000L" in Path(root+"engine/WorkingRangeEntryMomentumPolicy.kt").read_text()
           assert 'working_range_recommendations_v9021' in wrstore
           assert 'persistOrderIntentDurablyLocked()' in wrstore
           assert 'WorkingRangeDistinctScanPolicy.isIndependentSecondScan(' in wrstore
@@ -280,8 +280,8 @@ jobs:
           cache=(root/"data/network/GrowwHotDataCacheInterceptor.kt").read_text()
           beta=(root/"data/network/BetaResearchGate.kt").read_text()
           pacing=(root/"engine/BetaLiveEndpointPacingPolicy.kt").read_text()
-          assert "MAX_CONFIRMATION_AGE_MS = 30_000L" in entry
-          assert "MAX_FIRST_QUALIFIED_TO_BUY_MS = 120_000L" in band
+          assert "MAX_CONFIRMATION_AGE_MS = 45_000L" in entry
+          assert "MAX_FIRST_QUALIFIED_TO_BUY_MS = 180_000L" in band
           assert "MAX_VWAP_EXTENSION_ATR = 3.50" in band
           assert "MAX_SPREAD_BPS = 35.0" in band
           assert "HISTORICAL_15M_TTL_MS = 10 * 60_000L" in cache
