@@ -223,7 +223,7 @@ jobs:
           assert "migrateWorkingRangeToExplicitAutoBuyOptInOnce()" in wrprefs
           assert "CONFIRMED_BEFORE_ACTIVATION" in wrbuy
           assert "EVENT_ALREADY_RESERVED_OR_CONSUMED" in wrbuy
-          assert "MAX_CONFIRMATION_AGE_MS = 300_000L" in wrbuy
+          assert "MAX_CONFIRMATION_AGE_MS = WorkingRangeEntryMomentumPolicy.MAX_CONFIRMATION_AGE_MS" in wrbuy
           assert 'working_range_recommendations_v9021' in wrstore
           assert 'persistOrderIntentDurablyLocked()' in wrstore
           assert 'WorkingRangeDistinctScanPolicy.isIndependentSecondScan(' in wrstore
