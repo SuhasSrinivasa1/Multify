@@ -8,6 +8,7 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToNode
 import com.multify.traderpro.data.network.DashboardDto
+import com.multify.traderpro.data.network.EngineHealthDto
 import com.multify.traderpro.data.network.ForecastDto
 import com.multify.traderpro.data.network.WorkingRangeRecommendationDto
 import com.multify.traderpro.ui.theme.MultifyTraderTheme
@@ -21,7 +22,7 @@ class FixedLiteUiTest {
     @Test fun fixedHomeExplainsWaitingWithoutInventingMarketCoverage() {
         compose.setContent {
             MultifyTraderTheme(darkTheme = false) {
-                LiteFixedScreen(TraderUiState(), onScan = {}, onBuy = {})
+                LiteFixedScreen(TraderUiState(dashboard = DashboardDto(fixedHealth = EngineHealthDto(discovery = "WAITING"))), onScan = {}, onBuy = {})
             }
         }
         compose.onNodeWithText("Frozen 15m strategy").assertIsDisplayed()
@@ -92,7 +93,7 @@ class FixedLiteUiTest {
                 LiteRangeScreen(TraderUiState(dashboard = DashboardDto(workingRangeRecommendations = listOf(row))))
             }
         }
-        compose.onNodeWithText("Two distinct scans required").assertIsDisplayed()
+        compose.onNodeWithText("TWO DISTINCT SCANS REQUIRED").assertIsDisplayed()
         compose.onNodeWithTag("working-range-screen").performScrollToNode(hasText("RANGECO"))
         compose.onNodeWithText("RANGECO").assertIsDisplayed()
         compose.onNodeWithText("IN_RANGE").assertIsDisplayed()
