@@ -408,7 +408,12 @@ class WorkingRangeRecommendationStore(context: Context) {
             "enabled_setting_is_separate_from_fixed" to true,
             "working_range_on_authorizes_new_alpha_auto_buys" to true,
             "source" to "existing_fixed_15m_evaluations_and_existing_quotes",
-            "extra_broker_requests" to 0,
+            // Selection/confirmation reuses Fixed's existing data. Actual live
+            // Alpha BUY, quote, cash, order-read and GTT calls ARE incremental
+            // network requests and appear in the actual wire-request ledger.
+            "extra_discovery_broker_requests" to 0,
+            "working_range_live_autobuy_adds_alpha_execution_and_protection_calls" to true,
+            "authoritative_wire_usage_file" to "wire_api_usage_snapshot.json",
             "consecutive_confirmations_required" to WorkingRangeCandidatePolicy.REQUIRED_CONSECUTIVE_OBSERVATIONS,
             "candidate_age_max_minutes" to WorkingRangeCandidatePolicy.MAX_CANDIDATE_AGE_MINUTES,
             "drift_max_pct_from_first_qualified_observation" to WorkingRangeCandidatePolicy.MAX_DRIFT_FROM_FIRST_QUALIFIED_PCT,
