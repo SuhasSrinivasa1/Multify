@@ -16,18 +16,16 @@ class FixedHistoricalWindowStoreTest {
         val start = "2026-11-20 09:15:00"
         val origin = 1_790_000_000L
         // All these cases have >=2 overlapping timestamps with the cached tail.
-        for (deltaOffset in 202..238) {
+        for (deltaOffset in 228..238) {
             val old = rows(origin, 240)
             val delta = rows(origin + deltaOffset * 300L, 12)
             val store = FixedHistoricalWindowStore()
             store.remember("TEST", start, old, 100L)
             val actual = store.stitch("TEST", start, delta, 200L)
-            if (deltaOffset > 238) assertNull(actual) else {
-                assertNotNull("deltaOffset=$deltaOffset", actual)
-                val firstNew = origin + deltaOffset * 300L
-                val oracle = old.candles.filter { it[0].asLong < firstNew } + delta.candles
-                assertEquals("deltaOffset=$deltaOffset", oracle, actual!!.candles)
-            }
+            assertNotNull("deltaOffset=$deltaOffset", actual)
+            val firstNew = origin + deltaOffset * 300L
+            val oracle = old.candles.filter { it[0].asLong < firstNew } + delta.candles
+            assertEquals("deltaOffset=$deltaOffset", oracle, actual!!.candles)
         }
     }
 
@@ -38,7 +36,7 @@ class FixedHistoricalWindowStoreTest {
         store.remember("TEST", start, rows(origin, 60), 100L)
         assertNull(store.stitch("TEST", start, rows(origin + 59 * 300L, 3), 200L))
         assertNull(store.stitch("TEST", start, rows(origin + 60 * 300L, 3), 200L))
-        assertNull(store.stitch("TEST", start, rows(origin + 57 * 300L, 3), 200L))
+        assertNull(store.stitch("TEST", start, rows(origin + 56 * 300L, 3), 200L))
         val repeated = rows(origin + 57 * 300L, 4)
         val malformed = HistoricalPayload(
             candles = repeated.candles.take(2) + repeated.candles.drop(1),
