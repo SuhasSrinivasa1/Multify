@@ -4857,13 +4857,49 @@ class TradingRepository @Inject constructor(
         // quote + completed 15m evaluation whether Auto-Buy is ON or OFF.
         // No extra Groww calls, no Fixed mutation and no execution permission is implied.
         workingRangeRecommendationStore.offer(
-            symbol, evaluation, quote, fixedQuoteReceivedAtMs, lastFixedScanAtMs
+            symbol, toWorkingRangeMarketSnapshot(evaluation.features, 15),
+            quote, fixedQuoteReceivedAtMs, lastFixedScanAtMs
         )
         v9MasterShadowCollector.offer(
             symbol, quote, verifiedHistory, evaluation, lastFixedScanAtMs, referenceAt
         )
         return evaluation
     }
+
+    /**
+     * Convert already-fetched candles/quote-derived indicators into the independent
+     * Working Range data contract. Fixed scores and recommendation tiers are not passed.
+     */
+    private fun toWorkingRangeMarketSnapshot(
+        features: com.multify.traderpro.engine.FixedFeatureSnapshot,
+        intervalMinutes: Int
+    ): com.multify.traderpro.engine.WorkingRangeMarketSnapshot =
+        com.multify.traderpro.engine.WorkingRangeMarketSnapshot(
+            intervalMinutes = intervalMinutes,
+            price = features.ltp,
+            atr = features.atr14,
+            rsi = features.rsi14,
+            rsiSlope = features.rsiSlope,
+            rvol = features.rvol,
+            volumeAcceleration = features.volumeAcceleration,
+            greenVolumeShare = features.greenVolumeShare,
+            ema9 = features.ema9,
+            ema20 = features.ema20,
+            ema50 = features.ema50,
+            ema9Slope = features.ema9Slope,
+            ema20Slope = features.ema20Slope,
+            macdHistogramSlope = features.macdHistogramSlope,
+            vwap = features.vwap,
+            range52Position = features.range52Position,
+            spreadBps = features.spreadBps,
+            orderBookImbalance = features.orderBookImbalance,
+            candles = features.candles.map {
+                com.multify.traderpro.engine.WorkingRangeCandle(
+                    atMs = it.ts, open = it.open, high = it.high, low = it.low,
+                    close = it.close, volume = it.volume
+                )
+            }
+        )
 
     /**
      * Schedule the NEXT original full-universe LTP sweep while the Fixed worker
@@ -5644,6 +5680,43 @@ class TradingRepository @Inject constructor(
                 includeEventPrior = false
             )
             val fifteen = reference.evaluation
+            // Reuse the existing 5m shadow request to compare Working Range's own
+            // candidate rule against the same symbol/quote on 5m and 15m. This is
+            // telemetry only and adds no broker request or production decision.
+            val workingRangeFiveInputs =
+                com.multify.traderpro.engine.WorkingRangeOpeningMomentumPolicy.buildInputs(
+                    toWorkingRangeMarketSnapshot(five.features, 5),
+                    reference.quote,
+                    reference.quoteCapturedAtMs,
+                    emptyList(),
+                    openingModeOverride = false
+                )
+            val workingRangeFiveDecision =
+                com.multify.traderpro.engine.WorkingRangeCandidatePolicy.assess(workingRangeFiveInputs)
+            val workingRangeFifteenRow = workingRangeRecommendationStore.recent(today)
+                .firstOrNull { it.symbol.equals(symbol, true) }
+            auditLogger.logAsync("WORKING_RANGE_5M_SHADOW", "FIVE_VS_FIFTEEN_MINUTE", mapOf(
+                "symbol" to symbol,
+                "reference_quote_at_ms" to reference.quoteCapturedAtMs,
+                "same_symbol_same_quote" to true,
+                "five_minute_candidate_matches" to workingRangeFiveDecision.matches,
+                "five_minute_reasons" to workingRangeFiveDecision.reasons,
+                "five_minute_rsi" to workingRangeFiveInputs.rsi,
+                "five_minute_rsi_slope" to workingRangeFiveInputs.rsiSlope,
+                "five_minute_rvol" to workingRangeFiveInputs.rvol,
+                "five_minute_green_volume_share" to workingRangeFiveInputs.greenVolumeShare,
+                "five_minute_volume_acceleration" to workingRangeFiveInputs.volumeAcceleration,
+                "fifteen_minute_state" to workingRangeFifteenRow?.state,
+                "fifteen_minute_rsi" to workingRangeFifteenRow?.rsi,
+                "fifteen_minute_rsi_slope" to workingRangeFifteenRow?.rsiSlope,
+                "fifteen_minute_rvol" to workingRangeFifteenRow?.rvol,
+                "fifteen_minute_opening_momentum_pct" to workingRangeFifteenRow?.openingMomentumPct,
+                "reused_existing_fixed_5m_shadow_history_request" to true,
+                "additional_broker_requests" to 0,
+                "research_only" to true,
+                "production_decision_changed" to false,
+                "fixed_scoring_changed" to false
+            ))
             val targetPct = FixedForecastQualityPolicy.adaptiveTargetPct(
                 fixedSnapshotMultifyMfeAverage(ensureFixedEngineSnapshot()), emptyList()
             )
