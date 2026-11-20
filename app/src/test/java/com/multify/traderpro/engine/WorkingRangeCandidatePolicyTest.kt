@@ -65,7 +65,7 @@ class WorkingRangeCandidatePolicyTest {
             rsi = 79.05, rvol = 20.35, accel = 2.66, green = 0.8145,
             ema9 = 441.18, ema20 = 434.54, ema50 = 434.75,
             ema9Slope = 0.42, ema20Slope = 0.31, macd = 0.04,
-            price = 462.95, atr = 8.8393, vwap = 455.894,
+            price = 462.95, atr = 8.8393, vwap = 454.995,
             minutes = 300.0
         ))
         assertFalse(result.matches)
