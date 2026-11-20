@@ -1157,7 +1157,7 @@ class TradingRepository @Inject constructor(
                 exchangeSymbols = chunk.joinToString(",") { "NSE_$it" })
                 .requirePayload("Fixed Beta NSE LTP")
         },
-        liveEndpoint = BetaResearchGate.LiveEndpoint.LTP
+        liveEndpoint = com.multify.traderpro.engine.BetaLiveEndpointPacingPolicy.Endpoint.LTP
     )
 
     private suspend fun forecastMarketToken(): String? {
@@ -1176,7 +1176,7 @@ class TradingRepository @Inject constructor(
         type: BetaResearchGate.Type,
         alphaCall: suspend () -> T,
         betaCall: suspend () -> T,
-        liveEndpoint: BetaResearchGate.LiveEndpoint = BetaResearchGate.LiveEndpoint.QUOTE
+        liveEndpoint: com.multify.traderpro.engine.BetaLiveEndpointPacingPolicy.Endpoint = com.multify.traderpro.engine.BetaLiveEndpointPacingPolicy.Endpoint.QUOTE
     ): T {
         val tokenIsBeta = cachedBetaResearchToken == token || secretStore.getBetaAccessToken() == token
         if (tokenIsBeta || secretStore.hasBetaCredentials()) {
