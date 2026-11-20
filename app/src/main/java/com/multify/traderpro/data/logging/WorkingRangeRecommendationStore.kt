@@ -8,6 +8,7 @@ import com.multify.traderpro.data.network.WorkingRangeRecommendationDto
 import com.multify.traderpro.engine.FixedQuoteMarketabilityPresentationPolicy
 import com.multify.traderpro.engine.FixedStrategyEvaluation
 import com.multify.traderpro.engine.WorkingRangeCandidatePolicy
+import com.multify.traderpro.engine.WorkingRangeEntryBandPolicy
 import java.time.Duration
 import java.time.Instant
 import java.time.LocalDate
