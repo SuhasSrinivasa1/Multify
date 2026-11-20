@@ -13275,6 +13275,15 @@ class TradingRepository @Inject constructor(
                         "early_watch_no_trade_allowed")
                 ))
                 add("api_usage_snapshot.json", GrowwApiUsageLedger.snapshot())
+                add("fixed_singleflight_dedup_v9027.json", mapOf(
+                    "alpha_research_cache_hits" to GrowwApiUsageLedger.cacheHitCount(),
+                    "alpha_research_cache_misses" to GrowwApiUsageLedger.cacheMissCount(),
+                    "duplicate_followers_prevented_from_new_wire_requests" to
+                        GrowwApiUsageLedger.duplicateReadsPreventedCount(),
+                    "fresh_alpha_execution_quotes_must_bypass_cache" to true,
+                    "broker_wire_calls_are_in_wire_api_usage_snapshot" to true,
+                    "no_pretense_of_realized_speedup_without_matched_market_runs" to true
+                ))
                 add("wire_api_usage_snapshot.json",
                     com.multify.traderpro.data.network.BrokerWireAttemptLedger.summary())
                 add("beta_api_gate_snapshot.json", betaResearchGate.snapshot())
