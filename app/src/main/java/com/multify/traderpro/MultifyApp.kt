@@ -40,6 +40,8 @@ class MultifyApp : Application(), Configuration.Provider {
         // Does not disable monitoring/sells for existing app-owned positions.
         runBlocking(Dispatchers.IO) {
             preferences.disableAutomaticEntriesOnceForV7931()
+            // No external Multify notification entry is permitted in Fixed Lite.
+            preferences.setArm(false)
             // Always freeze legacy toggles on startup; never alter Fixed Auto Buy or Multify ARM.
             preferences.setForecastScannerEnabled(false)
             preferences.setForecastAutoBuy(false)
