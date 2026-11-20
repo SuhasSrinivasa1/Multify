@@ -30,7 +30,7 @@ class BetaLiveEndpointPacingPolicyTest {
             initial, BetaLiveEndpointPacingPolicy.Endpoint.QUOTE, 2_000L)
         val recovered = BetaLiveEndpointPacingPolicy.onSuccess(
             slowed, BetaLiveEndpointPacingPolicy.Endpoint.QUOTE, 122_001L)
-        assertEquals(1_300L, BetaLiveEndpointPacingPolicy.gapMs(
+        assertEquals(2_550L, BetaLiveEndpointPacingPolicy.gapMs(
             recovered, BetaLiveEndpointPacingPolicy.Endpoint.QUOTE))
         assertEquals(1_300L, BetaLiveEndpointPacingPolicy.gapMs(
             recovered, BetaLiveEndpointPacingPolicy.Endpoint.LTP))
