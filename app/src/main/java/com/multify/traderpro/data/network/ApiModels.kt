@@ -309,6 +309,7 @@ data class WorkingRangeRecommendationDto(
     val autoBuyReference: String = "",
     val autoBuyOrderId: String? = null,
     val autoBuyQuantity: Int = 0,
+    val autoBuyReferencePrice: Double? = null,
     val autoBuyFillPrice: Double? = null,
     val emaAlignmentMode: String = "UNKNOWN"
 )
