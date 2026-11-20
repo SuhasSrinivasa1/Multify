@@ -168,7 +168,7 @@ jobs:
           assert 'Working Range' in ui and 'FIXED · FROZEN v7.4.1' in ui and 'WORKING RANGE · ALPHA AUTO-BUY' in ui
           assert 'workingRangeRecommendationStore.offer(' in source_text
           assert 'workingRangeRecommendations = if (settings.workingRangeEnabled)' in source_text
-          assert 'working_range_recommendations_v9020.json' in source_text
+          assert 'working_range_recommendations_v9021.json' in source_text
           assert 'REQUIRED_CONSECUTIVE_OBSERVATIONS = 2' in wr
           assert 'MAX_CANDIDATE_AGE_MINUTES = 36.0' in wr
           assert 'MAX_DRIFT_FROM_FIRST_QUALIFIED_PCT = 1.60' in wr
@@ -225,6 +225,7 @@ jobs:
           assert "MAX_CONFIRMATION_AGE_MS = 300_000L" in wrbuy
           assert 'working_range_recommendations_v9021' in wrstore
           assert 'persistOrderIntentDurablyLocked()' in wrstore
+          assert 'WorkingRangeDistinctScanPolicy.isIndependentSecondScan(' in wrstore
           assert '.commit()' in wrstore and 'fun pendingAutoBuyIntents(dateIst: String? = null)' in wrstore
           assert 'legacy_v9020_rows_json_research_only' in wrstore
           assert 'unresolvedRangeOrders' in source_text and 'workingRangeRecommendationStore.pendingAutoBuyIntents()' in source_text
