@@ -1,7 +1,7 @@
 package com.multify.traderpro.engine
 
 /**
- * Working Range v0.1 is a separate pilot filter, not the Fixed model.
+ * Working Range v0.4 is a separate bounded entry-range filter, not the Fixed model.
  *
  * Boundaries are retrospective candidate ranges from 19-Nov logs. The original
  * 9/9 success claim was not a valid independent result: replaying the same
@@ -22,10 +22,16 @@ internal object WorkingRangeCandidatePolicy {
     const val MAX_VOLUME_ACCELERATION = 30.0
     const val MAX_TARGET_ATR = 1.60
     const val MIN_MINUTES_TO_CLOSE = 38.0
-    const val MAX_CANDIDATE_AGE_MINUTES = 36.0
-    const val MAX_DRIFT_FROM_FIRST_QUALIFIED_PCT = 1.60
+    const val MAX_CANDIDATE_AGE_MINUTES =
+        WorkingRangeEntryBandPolicy.MAX_FIRST_QUALIFIED_TO_BUY_MS / 60_000.0
+    const val MAX_DRIFT_FROM_FIRST_QUALIFIED_PCT =
+        WorkingRangeEntryBandPolicy.MAX_UPWARD_DRIFT_FROM_FIRST_QUALIFIED_PCT
+    const val MIN_DRIFT_FROM_FIRST_QUALIFIED_PCT =
+        -WorkingRangeEntryBandPolicy.MAX_DRAWDOWN_FROM_FIRST_QUALIFIED_PCT
+    const val MAX_VWAP_EXTENSION_ATR = WorkingRangeEntryBandPolicy.MAX_VWAP_EXTENSION_ATR
+    const val MAX_SPREAD_BPS = WorkingRangeEntryBandPolicy.MAX_SPREAD_BPS
     const val REQUIRED_CONSECUTIVE_OBSERVATIONS = 2
-    const val MAX_CONFIRMATION_GAP_MS = 5 * 60_000L
+    const val MAX_CONFIRMATION_GAP_MS = 120_000L
 
     data class Inputs(
         val price: Double,
@@ -98,6 +104,12 @@ internal object WorkingRangeCandidatePolicy {
         else if (macd <= 0.0) reasons += "MACD_SLOPE_NOT_POSITIVE"
         if (targetAtr == null) reasons += "TARGET_ATR_UNAVAILABLE"
         else if (targetAtr > MAX_TARGET_ATR) reasons += "TARGET_REQUIREMENT_ABOVE_1_6_ATR"
+        if (vwapExtension == null) reasons += "VWAP_EXTENSION_UNAVAILABLE"
+        else if (vwapExtension > MAX_VWAP_EXTENSION_ATR)
+            reasons += "VWAP_EXTENSION_ABOVE_3_50_ATR"
+        val spread = valid(i.spreadBps)
+        if (spread != null && spread > MAX_SPREAD_BPS)
+            reasons += "SPREAD_ABOVE_35_BPS"
         if (!i.minutesToClose.isFinite() || i.minutesToClose < MIN_MINUTES_TO_CLOSE)
             reasons += "LESS_THAN_38_MINUTES_TO_CLOSE"
 
