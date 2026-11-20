@@ -188,6 +188,10 @@ jobs:
           owner=Path(root+"engine/AppPositionOwnershipPolicy.kt").read_text()
           assert '"FIXED_HOLDING" to setOf("FXH", "FXM", "WRM")' in owner
           assert 'pendingAutoBuyIntents' in wrstore and 'ORDER_INTENT_RESERVED' in wrstore
+          assert 'persistLocked(commit = true)' in wrstore
+          assert 'pendingAutoBuyIntents()' in source_text
+          assert 'workingRangeActivationAtMs = live.workingRangeActivatedAtMs' in source_text
+          assert 'new_buys_halted_until_protection_verified' in source_text
           assert 'rejected_candidate_observations' in wrstore
           assert 'Working Range v0.2' in wrstore
           assert 'BETA_CLIENT_GOVERNOR_WAIT' in beta and 'BETA_HTTP_429' in beta
