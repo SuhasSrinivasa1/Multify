@@ -8344,13 +8344,27 @@ class TradingRepository @Inject constructor(
             it.symbol.equals(row.symbol, true)
         }
         if (existingAny != null) {
-            require(existingAny.openReferenceId == reference) {
-                "Working Range fill conflicts with an existing app-owned holding for ${row.symbol}"
+            if (existingAny.openReferenceId != reference) {
+                preferences.setSafetyHalt(true)
+                auditLogger.log("SAFETY", "WORKING_RANGE_FILL_OWNERSHIP_CONFLICT",
+                    mapOf("symbol" to row.symbol, "reference" to reference,
+                        "existing_reference" to existingAny.openReferenceId,
+                        "new_buys_halted" to true, "manual_reconciliation_required" to true))
+                error("Working Range fill conflicts with an existing holding for ${row.symbol}")
+            }
+            val alreadyProtected = com.multify.traderpro.engine.GttProtectionReadinessPolicy.verified(
+                existingAny.smartOrderMode, existingAny.smartOrderId, existingAny.smartOrderStatus)
+            if (!alreadyProtected) {
+                preferences.setSafetyHalt(true)
+                auditLogger.log("SAFETY", "WORKING_RANGE_EXISTING_FILL_UNPROTECTED",
+                    mapOf("symbol" to row.symbol, "reference" to reference,
+                        "new_buys_halted" to true, "explicit_unprotected_holding_alert" to true))
             }
             return
         }
         val openedAtMs = System.currentTimeMillis()
-        registerBoughtPositionAndProtect(
+        try {
+            registerBoughtPositionAndProtect(
             ManagedPositionEntity(
                 engine = ENGINE_FIXED_HOLDING,
                 symbol = row.symbol,
@@ -8377,17 +8391,26 @@ class TradingRepository @Inject constructor(
             ),
             allowFreshPostFillProof = true,
             deferProtectionRetryToMonitor = true
-        )
+            )
+        } catch (failure: Throwable) {
+            preferences.setSafetyHalt(true)
+            auditLogger.log("SAFETY", "WORKING_RANGE_POST_FILL_REGISTRATION_FAILED",
+                mapOf("symbol" to row.symbol, "order_id" to orderId, "reference" to reference,
+                    "message" to (failure.message ?: failure.javaClass.simpleName),
+                    "new_buys_halted" to true, "manual_reconciliation_required" to true))
+            throw failure
+        }
         val protected = managedDao.openPosition(ENGINE_FIXED_HOLDING, row.symbol)?.let {
             com.multify.traderpro.engine.GttProtectionReadinessPolicy.verified(
                 it.smartOrderMode, it.smartOrderId, it.smartOrderStatus
             )
         } == true
         if (!protected) {
+            preferences.setSafetyHalt(true)
             auditLogger.log("SAFETY", "WORKING_RANGE_BUY_UNPROTECTED_CRITICAL",
                 mapOf("symbol" to row.symbol, "order_id" to orderId,
                     "reference" to reference, "explicit_unprotected_holding_alert" to true,
-                    "new_buys_blocked_until_protection_verified" to true))
+                    "new_buys_halted_until_protection_verified" to true))
         }
         brokerInventorySnapshot = null
     }
