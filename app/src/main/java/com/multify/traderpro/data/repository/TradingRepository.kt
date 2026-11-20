@@ -13015,7 +13015,7 @@ class TradingRepository @Inject constructor(
                 add("fixed_operator_ui_transitions_v9019.json",
                     com.multify.traderpro.data.logging.FixedUiRenderEvidenceStore
                         .exportOperatorTransitions(appContext))
-                add("working_range_recommendations_v9020.json",
+                add("working_range_recommendations_v9021.json",
                     workingRangeRecommendationStore.export())
                 add("fixed_shadow_hypotheses_manifest.json", mapOf(
                     "schema" to "fixed_hypotheses_v8322",
@@ -13064,7 +13064,7 @@ class TradingRepository @Inject constructor(
                     "fixed_screen_observation_file" to "fixed_screen_compose_observation.json",
                     "fixed_operator_ui_transitions_file" to "fixed_operator_ui_transitions_v9019.json",
                     "working_range_enabled" to settings.workingRangeEnabled,
-                    "working_range_file" to "working_range_recommendations_v9020.json",
+                    "working_range_file" to "working_range_recommendations_v9021.json",
                     "working_range_auto_buy_enabled" to false,
                     "momentum_continuation_shadow_schema" to "fixed_momentum_continuation_shadow_v9019",
                     "marketability_from_existing_quote_only" to true,
