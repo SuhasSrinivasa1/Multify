@@ -335,6 +335,41 @@ private fun MetricPair(left: @Composable () -> Unit, right: @Composable () -> Un
 }
 
 @Composable
+private fun InlineMetricPair(
+    leftLabel: String,
+    leftValue: String,
+    leftSupporting: String,
+    rightLabel: String,
+    rightValue: String,
+    rightSupporting: String,
+    rightTone: LiteTone = LiteTone.NEUTRAL
+) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        Column(
+            Modifier.weight(1f).background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(12.dp)).padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(3.dp)
+        ) {
+            Text(leftLabel, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(leftValue, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Text(leftSupporting, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Column(
+            Modifier.weight(1f).background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(12.dp)).padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(3.dp)
+        ) {
+            Text(rightLabel, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(
+                rightValue,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                color = if (rightTone == LiteTone.POSITIVE) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+            )
+            Text(rightSupporting, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+@Composable
 internal fun LiteFixedScreen(state: TraderUiState, onScan: () -> Unit, onBuy: (String) -> Unit) {
     val dashboard = state.dashboard
     val health = dashboard?.fixedHealth ?: EngineHealthDto()
@@ -503,9 +538,10 @@ private fun FixedRecommendationCard(row: ForecastDto, manualEntryReady: Boolean,
             }
         }
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-        MetricPair(
-            { MetricTile("Reference", rupees(row.entryPrice), "Original Fixed entry") },
-            { MetricTile("Fixed target", rupees(row.targetPrice), "+" + pct(row.targetPct), tone = LiteTone.POSITIVE) }
+        InlineMetricPair(
+            "REFERENCE", rupees(row.entryPrice), "Original Fixed entry",
+            "FIXED TARGET", rupees(row.targetPrice), "+" + pct(row.targetPct),
+            LiteTone.POSITIVE
         )
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Text("Score " + fmt(row.score) + " · confidence " + fmt(row.confidence * 100.0) + "%", style = MaterialTheme.typography.labelSmall)
@@ -603,9 +639,10 @@ private fun WorkingRangeCard(row: WorkingRangeRecommendationDto) {
             }
             StatusPill(row.state, tone)
         }
-        MetricPair(
-            { MetricTile("First qualified", rupees(row.firstQualifiedPrice), "Immutable reference") },
-            { MetricTile("Confirmed entry", rupees(row.entryPrice), "Target " + rupees(row.targetPrice), tone = LiteTone.INFO) }
+        InlineMetricPair(
+            "FIRST QUALIFIED", rupees(row.firstQualifiedPrice), "Immutable reference",
+            "CONFIRMED ENTRY", rupees(row.entryPrice), "Target " + rupees(row.targetPrice),
+            LiteTone.INFO
         )
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Text("Target +" + pct(row.targetPct), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
