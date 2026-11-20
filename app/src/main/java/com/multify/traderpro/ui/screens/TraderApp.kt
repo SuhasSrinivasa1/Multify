@@ -1156,7 +1156,7 @@ private fun WorkingRangeTable(
             else "OFF · Fixed recommendations continue unchanged"
         )
         if (!enabled) {
-            EmptyState("Working Range is OFF", "Enable Working Range in Settings to start the separate pilot shortlist.")
+            EmptyState("Working Range is OFF", "Enable Working Range in Settings to start the separate stream and authorize new confirmed Alpha CNC entries.")
         } else if (rows.isEmpty()) {
             EmptyState("No Working Range candidate yet",
                 "The pilot requires two consecutive matching evaluations, sufficient time to close and limited drift. Fixed continues to show its own recommendations.")
@@ -1214,7 +1214,7 @@ private fun WorkingRangeTable(
                         )
                         Text(row.reason, style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Text("MANUAL REVIEW ONLY · NO WORKING RANGE AUTO-BUY · sparse client LTP samples are not intrabar paths",
+                        Text("ALPHA AUTO-BUY ON CONFIRMATION · broker preflight and GTT protection required · sparse LTP samples are not intrabar paths",
                             style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold,
                             color = MaterialTheme.colorScheme.tertiary)
                     }
