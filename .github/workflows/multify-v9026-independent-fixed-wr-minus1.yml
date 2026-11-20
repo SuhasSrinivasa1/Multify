@@ -154,7 +154,7 @@ jobs:
           assert "endpoints[t.account + \"/\" + t.endpoint]" in wire
           assert "fixed_working_range_shadow_v9017" in Path(root+"engine/FixedWorkingRangeShadowPolicy.kt").read_text()
           # User explicitly authorized the new -1% initial stop; trailing and Fixed selection stay frozen.
-          assert "const val MAX_LOSS_PCT = 3.0" in Path(root+"engine/HardStopLossPolicy.kt").read_text()
+          assert "const val MAX_LOSS_PCT = 1.0" in Path(root+"engine/HardStopLossPolicy.kt").read_text()
           # v9.0.20: independent Working Range pilot, no changes to Fixed selection/execution.
           pref=Path(root+"data/preferences/AppPreferences.kt").read_text()
           vm=Path(root+"ui/screens/TraderViewModel.kt").read_text()
