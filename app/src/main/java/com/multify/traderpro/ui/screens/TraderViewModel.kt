@@ -201,9 +201,9 @@ class TraderViewModel @Inject constructor(
                     remote.value = remote.value.copy(
                         loading = false,
                         message = if (enabled)
-                            "Working Range Auto-Buy enabled · only new two-scan confirmations are eligible · Alpha execution and broker protection checks apply"
+                            "Working Range Auto-Buy enabled · scanner and recommendations were already running · only new post-activation confirmations can attempt Alpha BUY"
                         else
-                            "Working Range Auto-Buy disabled · no new Working Range entries; existing holdings remain protected"
+                            "Working Range Auto-Buy disabled · Working Range scanning and recommendations continue · no new Working Range BUYs; existing holdings remain protected"
                     )
                     refresh(silent = true)
                 }

@@ -27,7 +27,9 @@ import kotlin.math.min
  * - Adds ZERO Groww calls and never blocks the scan thread.
  * - Two consecutive matching scan evaluations are required.
  * - One confirmed Working Range event per symbol per IST day.
- * - Live BUY is authorized only by the new explicit Working Range ON activation timestamp.
+ * - Research observation is always on during the Indian Fixed scan, independent of the Auto-Buy toggle.
+ * - Live BUY is authorized only by the separate explicit Working Range Auto-Buy ON activation timestamp.
+ * - Turning Auto-Buy OFF never stops observations or discards an unconfirmed research candidate.
  * - Order intent is persisted before Alpha submission; ambiguous outcomes are never resubmitted.
  */
 class WorkingRangeRecommendationStore(context: Context) {
@@ -70,22 +72,21 @@ class WorkingRangeRecommendationStore(context: Context) {
         gson.fromJson<MutableList<StoredRejection>>(prefs.getString(KEY_REJECTIONS, "[]"), rejectionType)
             ?: mutableListOf()
     }.getOrDefault(mutableListOf())
-    @Volatile private var enabled: Boolean = false
-    @Volatile private var generation: Long = 0L
+    // This switch gates broker execution ONLY. The research observer is always enabled.
+    @Volatile private var autoBuyEnabled: Boolean = false
     private val rows: MutableList<StoredRow> = runCatching {
         gson.fromJson<MutableList<StoredRow>>(prefs.getString(KEY_ROWS, "[]"), rowType)
             ?: mutableListOf()
     }.getOrDefault(mutableListOf())
 
-    fun setEnabled(value: Boolean, reason: String = "Working Range toggle changed") = synchronized(lock) {
-        if (enabled != value) {
-            enabled = value
-            generation += 1L
-            rows.filter { it.dto.state == "PENDING_CONFIRMATION" }.forEach { row ->
-                row.dto = row.dto.copy(state = "PENDING_DROPPED", reason = reason)
-            }
-            persistLocked()
-        }
+    /**
+     * Auto-Buy permission only. Do not change research observation, invalidate
+     * queued samples, or drop pending confirmations when the operator toggles it.
+     * The immutable activation timestamp separately excludes confirmations that
+     * predate the most recent ON action.
+     */
+    fun setAutoBuyEnabled(value: Boolean) = synchronized(lock) {
+        autoBuyEnabled = value
     }
 
     /** Wait until every already-enqueued Working Range observation has been persisted. */
@@ -98,7 +99,7 @@ class WorkingRangeRecommendationStore(context: Context) {
             val row = rows.firstOrNull {
                 it.symbol.equals(symbol, true) && it.dto.confirmedAtMs == confirmedAtMs
             } ?: return@synchronized false
-            if (!enabled || row.dto.state != "IN_RANGE" ||
+            if (!autoBuyEnabled || row.dto.state != "IN_RANGE" ||
                 row.dto.autoBuyState != "NOT_ATTEMPTED" || reference.isBlank() || quantity <= 0)
                 return@synchronized false
             row.dto = row.dto.copy(
@@ -148,14 +149,13 @@ class WorkingRangeRecommendationStore(context: Context) {
         scanStartedAtMs: Long
     ) {
         val normalized = symbol.trim().uppercase(java.util.Locale.US)
-        if (!enabled || normalized.isBlank() || quoteCapturedAtMs <= 0L) return
-        val queuedGeneration = generation
+        if (normalized.isBlank() || quoteCapturedAtMs <= 0L) return
+        // Research is unconditional: no Auto-Buy toggle check at enqueue or execution.
         runCatching {
             queue.execute {
-                if (!enabled || generation != queuedGeneration) return@execute
                 runCatching {
                     observeOnWorker(normalized, evaluation, quote, quoteCapturedAtMs,
-                        scanStartedAtMs, queuedGeneration)
+                        scanStartedAtMs)
                 }
             }
         }.onFailure { droppedQueueItems.incrementAndGet() }
@@ -166,10 +166,8 @@ class WorkingRangeRecommendationStore(context: Context) {
         evaluation: FixedStrategyEvaluation,
         quote: QuotePayload?,
         observedAtMs: Long,
-        scanStartedAtMs: Long,
-        queuedGeneration: Long
+        scanStartedAtMs: Long
     ) {
-        if (!enabled || generation != queuedGeneration) return
         val zone = ZoneId.of("Asia/Kolkata")
         val at = Instant.ofEpochMilli(observedAtMs).atZone(zone)
         val date = at.toLocalDate().toString()
@@ -193,7 +191,6 @@ class WorkingRangeRecommendationStore(context: Context) {
         }
         val key = "$date|$symbol"
         synchronized(lock) {
-            if (!enabled || generation != queuedGeneration) return
             val index = rows.indexOfFirst { it.dateIst == date && it.symbol == symbol }
             val existing = rows.getOrNull(index)
             if (existing != null && existing.dto.confirmedAtMs > 0L) {
@@ -249,9 +246,9 @@ class WorkingRangeRecommendationStore(context: Context) {
                     upperCircuitPrice = marketability.brokerUpperCircuit,
                     bestSellOffer = marketability.bestObservedOffer,
                     quoteClientReceiptAgeMs = marketability.clientReceiptAgeMs,
-                    autoBuyEnabled = true,
+                    autoBuyEnabled = this@WorkingRangeRecommendationStore.autoBuyEnabled,
                     emaAlignmentMode = decision.emaAlignmentMode,
-                    reason = "Working Range v0.2 · first matching scan · confirmation 1/2 · Alpha Auto-Buy permission ON"
+                    reason = "Working Range v0.3 · first matching scan · confirmation 1/2 · research observation"
                 )
                 val row = StoredRow(date, symbol, first, price, 1, observedAtMs)
                 if (index >= 0) rows[index] = row else rows.add(row)
@@ -320,11 +317,13 @@ class WorkingRangeRecommendationStore(context: Context) {
                 upperCircuitPrice = marketability.brokerUpperCircuit,
                 bestSellOffer = marketability.bestObservedOffer,
                 quoteClientReceiptAgeMs = marketability.clientReceiptAgeMs,
-                autoBuyEnabled = true,
+                autoBuyEnabled = if (confirmed)
+                    this@WorkingRangeRecommendationStore.autoBuyEnabled
+                else existing.dto.autoBuyEnabled,
                 emaAlignmentMode = decision.emaAlignmentMode,
                 reason = if (confirmed)
-                    "WORKING RANGE v0.2 · two consecutive evaluations · Alpha Auto-Buy preflight"
-                else "Working Range v0.2 · confirmation 2/2 pending"
+                    "WORKING RANGE v0.3 · two independent scan evaluations · Auto-Buy eligibility checked separately"
+                else "Working Range v0.3 · confirmation 2/2 pending"
             )
             persistLocked()
         }
@@ -408,10 +407,10 @@ class WorkingRangeRecommendationStore(context: Context) {
         runCatching { queue.submit {}.get(5, TimeUnit.SECONDS) }
         return synchronized(lock) {
         mapOf(
-            "schema" to "working_range_auto_buy_v9021",
-            "toggle_enabled" to enabled,
+            "schema" to "working_range_research_v9025",
+            "research_observation_always_on" to true,
             "enabled_setting_is_separate_from_fixed" to true,
-            "working_range_on_authorizes_new_alpha_auto_buys" to true,
+            "auto_buy_toggle_only_authorizes_new_alpha_auto_buys" to true,
             "source" to "existing_fixed_15m_evaluations_and_existing_quotes",
             // Selection/confirmation reuses Fixed's existing data. Actual live
             // Alpha BUY, quote, cash, order-read and GTT calls ARE incremental
@@ -442,7 +441,7 @@ class WorkingRangeRecommendationStore(context: Context) {
             "target_pct_unchanged_from_fixed_reference" to WorkingRangeCandidatePolicy.TARGET_PCT,
             "marketability_is_separate_from_technical_range" to true,
             "upper_circuit_or_no_offer_does_not_erase_candidate" to true,
-            "auto_buy_enabled" to enabled,
+            "auto_buy_enabled" to autoBuyEnabled,
             "auto_buy_requires_new_confirmation_after_activation" to true,
             "ambiguous_order_intent_never_resubmitted" to true,
             "validated_working_range_claim" to false,

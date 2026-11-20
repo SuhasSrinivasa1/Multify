@@ -28,7 +28,7 @@ data class AppSettings(
     val forecastAutoBuyEnabled: Boolean = false,
     val fixedAutoBuyEnabled: Boolean = false,
     val fixedAutoBuyActivatedAtMs: Long = 0L,
-    /** Independent Working Range pilot stream; OFF by default, never enables Auto-Buy. */
+    /** Independent Working Range Auto-Buy permission; the research scanner is always on. */
     val workingRangeEnabled: Boolean = false,
     val workingRangeActivatedAtMs: Long = 0L,
     val onboardingComplete: Boolean = false,
@@ -199,7 +199,7 @@ class AppPreferences @Inject constructor(
         }
     }
 
-    /** ON enables the separate Working Range stream AND permits its new confirmed events to Auto-Buy. */
+    /** ON permits only newly confirmed Working Range events to attempt Alpha Auto-Buy; research always runs. */
     suspend fun setWorkingRangeEnabled(value: Boolean) {
         context.dataStore.edit {
             if (value) {

@@ -1124,7 +1124,7 @@ private fun FixedScreen(
         item {
             WorkingRangeTable(
                 rows = dashboard?.workingRangeRecommendations.orEmpty(),
-                enabled = state.settings.workingRangeEnabled
+                autoBuyEnabled = state.settings.workingRangeEnabled
             )
         }
         item {
@@ -1148,19 +1148,19 @@ private fun FixedScreen(
 @Composable
 private fun WorkingRangeTable(
     rows: List<com.multify.traderpro.data.network.WorkingRangeRecommendationDto>,
-    enabled: Boolean
+    autoBuyEnabled: Boolean
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
         SectionTitle(
             "Working Range recommendations",
-            if (enabled) "Separate pilot stream · Alpha Auto-Buy on confirmation · Fixed remains unchanged"
-            else "OFF · Fixed recommendations continue unchanged"
+            if (autoBuyEnabled)
+                "Always-on research scanner · Auto-Buy ON for new post-activation confirmations · Fixed remains unchanged"
+            else
+                "Always-on research scanner · Auto-Buy OFF · recommendations remain visible · Fixed remains unchanged"
         )
-        if (!enabled) {
-            EmptyState("Working Range is OFF", "Enable Working Range in Settings to start the separate pilot shortlist.")
-        } else if (rows.isEmpty()) {
+        if (rows.isEmpty()) {
             EmptyState("No Working Range candidate yet",
-                "The pilot requires two consecutive matching evaluations, sufficient time to close and limited drift. Fixed continues to show its own recommendations.")
+                "The research scanner runs during Indian market hours regardless of the Auto-Buy switch. It requires two consecutive matching evaluations, sufficient time to close and limited drift.")
         } else {
             rows.forEach { row ->
                 Card(
@@ -1178,13 +1178,17 @@ private fun WorkingRangeTable(
                                         row.autoBuyState == "TARGET_ALREADY_REACHED" ||
                                         row.autoBuyState == "BROKER_REJECTED" ->
                                         "WORKING RANGE · ENTRY BLOCKED"
-                                    else -> "WORKING RANGE · ALPHA AUTO-BUY"
+                                    else -> if (autoBuyEnabled && row.autoBuyEnabled)
+                                        "WORKING RANGE · AUTO-BUY PERMISSION ON"
+                                    else "WORKING RANGE · RESEARCH ONLY · NO BUY PERMISSION"
                                 }, style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.tertiary, fontWeight = FontWeight.Bold)
                         }
-                        if (row.autoBuyState != "NOT_ATTEMPTED") {
+                        if (row.autoBuyState != "NOT_ATTEMPTED" || !autoBuyEnabled) {
                             Text(
-                                "Auto-Buy: " + row.autoBuyState.replace('_', ' ') +
+                                if (row.autoBuyState == "NOT_ATTEMPTED")
+                                    "Auto-Buy: OFF · research observation only"
+                                else "Auto-Buy: " + row.autoBuyState.replace('_', ' ') +
                                     (row.autoBuyOrderId?.let { " · Order $it" } ?: "") +
                                     (row.autoBuyFillPrice?.let { " · Fill ₹" + String.format(Locale.US, "%.2f", it) } ?: ""),
                                 style = MaterialTheme.typography.labelSmall,
@@ -1236,9 +1240,14 @@ private fun WorkingRangeTable(
                         )
                         Text(row.reason, style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Text("MANUAL REVIEW ONLY · NO WORKING RANGE AUTO-BUY · sparse client LTP samples are not intrabar paths",
+                        Text(
+                            if (autoBuyEnabled && row.autoBuyEnabled)
+                                "AUTO-BUY PERMISSION ON FOR THIS EVENT · fresh Alpha quote, cash, order and verified GTT checks still required · sparse LTP samples are not intrabar paths"
+                            else
+                                "RESEARCH ONLY · no BUY permission for this event · sparse client LTP samples are not intrabar paths",
                             style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold,
-                            color = MaterialTheme.colorScheme.tertiary)
+                            color = MaterialTheme.colorScheme.tertiary
+                        )
                     }
                 }
             }
@@ -1657,9 +1666,9 @@ private fun SettingsScreen(
                     HorizontalDivider()
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
-                            Text("Working Range", fontWeight = FontWeight.SemiBold)
+                            Text("Working Range Auto-Buy", fontWeight = FontWeight.SemiBold)
                             Text(
-                                "ON starts the separate Working Range stream and authorizes an Alpha CNC BUY when a new candidate passes two consecutive matching evaluations. Fixed and Fixed Auto-Buy remain independent. Each order still requires a fresh Alpha quote, valid sell offer/circuit checks, price-drift guard, broker cash, capital/holding/pending-order checks and verified GTT protection. OFF stops new Working Range BUYs; existing holdings remain protected.",
+                                "The Working Range research scanner always runs during Indian market hours and its recommendations remain visible whether this switch is ON or OFF. ON only authorizes newly confirmed events occurring after activation to attempt an Alpha CNC BUY. OFF blocks new Working Range BUYs but never stops scanning, hides recommendations or removes pending research candidates. Every permitted order still requires fresh Alpha quotes, marketability, cash, capital/holding/pending-order checks and verified broker GTT protection. Existing holdings remain protected.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -1669,8 +1678,10 @@ private fun SettingsScreen(
                             onCheckedChange = onWorkingRangeChanged
                         )
                     }
+                    KeyValueRow("Working Range research", "ALWAYS ON · recommendations visible in both toggle states")
                     KeyValueRow("Working Range Auto-Buy", if (state.settings.workingRangeEnabled)
-                        "ON · Alpha BUY after two-scan confirmation" else "OFF · no new Working Range BUY")
+                        "ON · only new post-activation confirmations may attempt Alpha BUY"
+                        else "OFF · research continues; no new Working Range BUY")
                     Text(
                         "Fixed remains immutable. Forecast may read prior positive Fixed outcomes, but can never write into Fixed or change its v7.4.1 rules. Every app-owned Multify, Fixed, Working Range, Univest and Forecast LONG uses the same sell protection: hard -3% loss floor, then the existing +0.55% arm → +0.50% protected gain → +0.10% ratchet when profitable. No averaging down.",
                         style = MaterialTheme.typography.bodySmall,
