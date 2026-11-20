@@ -8062,7 +8062,7 @@ class TradingRepository @Inject constructor(
         val today = LocalDate.now(INDIA).toString()
         workingRangeRecommendationStore.flush()
         val initialSettings = preferences.settings.first()
-        val pendingIntents = workingRangeRecommendationStore.pendingAutoBuyIntents(today)
+        val pendingIntents = workingRangeRecommendationStore.pendingAutoBuyIntents()
         val potential = if (initialSettings.workingRangeEnabled &&
             initialSettings.workingRangeActivatedAtMs > 0L) {
             workingRangeRecommendationStore.recent(today).filter { row ->
@@ -8198,7 +8198,14 @@ class TradingRepository @Inject constructor(
             val reference = stableRef("WRM",
                 "${today}|${row.symbol.uppercase(Locale.US)}|${row.confirmedAtMs}")
             if (!workingRangeRecommendationStore.reserveAutoBuy(
-                    row.symbol, row.confirmedAtMs, reference, sizing.quantity)) continue
+                    row.symbol, row.confirmedAtMs, reference, sizing.quantity)) {
+                auditLogger.log("WORKING_RANGE_AUTO_BUY",
+                    "ORDER_INTENT_RESERVATION_NOT_DURABLY_ACCEPTED",
+                    mapOf("symbol" to row.symbol, "reference" to reference,
+                        "new_broker_order_submitted" to false,
+                        "no_retry_without_reconciliation" to true))
+                continue
+            }
             auditLogger.logAsync("WORKING_RANGE_AUTO_BUY", "ORDER_INTENT_RESERVED",
                 mapOf("symbol" to row.symbol, "reference" to reference,
                     "confirmed_at_ms" to row.confirmedAtMs, "requested_quantity" to sizing.quantity,
@@ -8242,7 +8249,7 @@ class TradingRepository @Inject constructor(
     }
 
     private suspend fun reconcileWorkingRangeAutoBuyIntents(token: String, today: String) {
-        for (row in workingRangeRecommendationStore.pendingAutoBuyIntents(today)) {
+        for (row in workingRangeRecommendationStore.pendingAutoBuyIntents()) {
             val reference = row.autoBuyReference
             if (reference.isBlank()) continue
             val existing = managedDao.openPositions().firstOrNull {
@@ -13334,6 +13341,15 @@ class TradingRepository @Inject constructor(
         }
         // Serialize all application CNC entries so two independent engines cannot both buy
         // the same symbol while the first order is still awaiting broker acknowledgement.
+        // A WRM reference with an ambiguous broker result must block ALL new
+        // CNC entries (including Fixed/Univest), not just another WRM order.
+        // Exclude this order's own *durably committed* reference, which is
+        // deliberately RESERVED before it reaches this shared gateway.
+        val unresolvedRangeOrders = workingRangeRecommendationStore.pendingAutoBuyIntents()
+            .filter { it.autoBuyReference != reference }
+        require(unresolvedRangeOrders.isEmpty()) {
+            "New BUY blocked: ${unresolvedRangeOrders.size} unresolved Working Range broker order intent(s)"
+        }
         val key = symbol.uppercase(Locale.US)
         val broker = brokerInventory(token, force = true)
         val demat = broker.holdings[key]?.quantity ?: 0
