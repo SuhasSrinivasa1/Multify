@@ -39,7 +39,8 @@ jobs:
           /usr/bin/time -f "%e" -o gradle-wall-seconds.txt gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug
           apk=app/build/outputs/apk/debug/app-debug.apk
           stat -c "%s" "$apk" > apk-bytes.txt
-          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$apk" | head -n 1 > package-id.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$apk" > package-full.txt
+          head -n 1 package-full.txt > package-id.txt
           python - <<'PY'
           import glob,xml.etree.ElementTree as ET,pathlib
           total=failed=skipped=0
