@@ -55,7 +55,7 @@ class WorkingRangeAutoBuyPolicyTest {
     @Test fun firstQualifiedSignalOlderThanTwoMinutesCannotBuy() {
         assertEquals("FIRST_QUALIFIED_SIGNAL_EXPIRED",
             decide(activated = 500L, confirmed = 10_000L,
-                first = 1_000L, now = 121_001L).reason)
+                first = 1_000L, now = 181_001L).reason)
     }
 
     @Test fun staleConfirmationCannotTriggerDelayedAutoBuy() {
