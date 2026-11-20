@@ -1,0 +1,67 @@
+name: Fixed Lite vs v9.0.25 Baseline Replay
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  compare:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: v9.0.25-baseline
+            ref: v9025-working-range-always-visible-us-readonly-research
+          - label: fixed-pro-lite
+            ref: fixed-pro-lite-independent-app-v1
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.ref }}
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Android SDK 35
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
+      - name: Run same JVM regression suite and APK build
+        shell: bash
+        run: |
+          set -euo pipefail
+          /usr/bin/time -f "%e" -o gradle-wall-seconds.txt gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug
+          apk=app/build/outputs/apk/debug/app-debug.apk
+          stat -c "%s" "$apk" > apk-bytes.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$apk" | head -n 1 > package-id.txt
+          python - <<'PY'
+          import glob,xml.etree.ElementTree as ET,pathlib
+          total=failed=skipped=0
+          for p in glob.glob("app/build/test-results/testDebugUnitTest/TEST-*.xml"):
+            r=ET.parse(p).getroot()
+            total+=int(r.attrib.get("tests",0))
+            failed+=int(r.attrib.get("failures",0))+int(r.attrib.get("errors",0))
+            skipped+=int(r.attrib.get("skipped",0))
+          pathlib.Path("junit-counts.txt").write_text(f"tests={total}\nfailed={failed}\nskipped={skipped}\n")
+          PY
+          {
+            echo "label=${{ matrix.label }}"
+            echo "ref=${{ matrix.ref }}"
+            echo "apk_bytes=$(cat apk-bytes.txt)"
+            echo "gradle_wall_seconds=$(cat gradle-wall-seconds.txt)"
+            cat junit-counts.txt
+            cat package-id.txt
+          } > comparison-metrics.txt
+          cat comparison-metrics.txt
+      - name: Upload comparison metrics and APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Fixed-Lite-comparison-${{ matrix.label }}
+          path: |
+            comparison-metrics.txt
+            app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 30
