@@ -135,7 +135,11 @@ internal object WorkingRangeOpeningMomentumPolicy {
             openingSampleCount = metrics.sampleCount,
             openingMomentumPct = metrics.momentumPct,
             openingVolumePaceRvol = metrics.volumePaceRvol,
-            openingSignalBasis = metrics.signalBasis
+            openingSignalBasis = when {
+                openingMode -> metrics.signalBasis
+                intervalMinutes == 5 -> "COMPLETED_5M_SESSION_CANDLES"
+                else -> "COMPLETED_15M_SESSION_CANDLES"
+            }
         )
     }
 
