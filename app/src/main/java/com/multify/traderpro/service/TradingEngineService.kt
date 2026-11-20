@@ -53,6 +53,7 @@ class TradingEngineService : Service() {
     @Inject lateinit var auditLogger: AuditLogger
     @Inject lateinit var recoveryGate: GrowwRecoveryGate
     @Inject lateinit var betaResearchGate: BetaResearchGate
+    @Inject lateinit var preferences: com.multify.traderpro.data.preferences.AppPreferences
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var engineJob: Job? = null
@@ -120,6 +121,7 @@ class TradingEngineService : Service() {
         fixedEarlyPrefetchObserverJob = scope.launch(Dispatchers.IO) {
             repository.fixedEarlyPrefetchReady.collect { scanStartedAtMs ->
                 if (scanStartedAtMs <= 0L) return@collect
+                if (!preferences.settings.first().fixedScannerEnabled) return@collect
                 try {
                     val prepared = repository.prepareNextFixedDiscoverySweep()
                     auditLogger.logAsync("FIXED_PERFORMANCE", "EARLY_PREFETCH_SERVICE_RESULT", mapOf(
@@ -637,6 +639,12 @@ class TradingEngineService : Service() {
             ))
             while (isActive) {
                 try {
+                    if (!preferences.settings.first().fixedScannerEnabled) {
+                        // Discovery and optional research OFF, never the separate
+                        // app-owned holding/SELL/GTT protection worker.
+                        delay(4_000L)
+                        continue
+                    }
                     val now = ZonedDateTime.now(INDIA)
                     if (com.multify.traderpro.engine.NseEquitySessionCalendar.isWarmupWindow(now)) {
                         runCatching { repository.prepareFixedPreMarketWarmup() }
