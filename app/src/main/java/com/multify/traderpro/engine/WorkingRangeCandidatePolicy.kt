@@ -4,8 +4,8 @@ package com.multify.traderpro.engine
  * Standalone Working Range momentum filter.
  *
  * It consumes a strategy-owned snapshot made from market data already fetched by the
- * shared scan transport. It does not read Fixed scores, FixedFinalContract, Univest
- * notifications, Multify learning priors or another strategy's recommendation state.
+ * shared scan transport. It does not read other strategy scores, external alert
+ * notifications, learning priors or another strategy's recommendation state.
  * The target constant is owned here and is intentionally frozen for comparable replay.
  */
 internal object WorkingRangeCandidatePolicy {
