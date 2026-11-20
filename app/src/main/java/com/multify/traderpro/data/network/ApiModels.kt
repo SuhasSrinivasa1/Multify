@@ -336,6 +336,9 @@ data class WorkingRangeRecommendationDto(
     val autoBuyOrderId: String? = null,
     val autoBuyQuantity: Int = 0,
     val autoBuyFillPrice: Double? = null,
+    val autoBuyFillAtMs: Long = 0L,
+    val firstQualifiedToFillRunupPct: Double? = null,
+    val confirmationToFillDriftPct: Double? = null,
     val emaAlignmentMode: String = "UNKNOWN"
 )
 
