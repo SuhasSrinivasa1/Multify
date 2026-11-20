@@ -206,8 +206,8 @@ class WorkingRangeRecommendationStore(context: Context) {
     ) = synchronized(lock) {
         val row = rows.firstOrNull {
             it.symbol.equals(symbol, true) &&
-                (it.dto.autoBuyReference == reference || it.dto.confirmedAtMs > 0L &&
-                    reference.isBlank() && it.dto.autoBuyState == "BUY_EXECUTED")
+                (it.dto.autoBuyReference == reference || it.dto.autoBuyReference.isBlank() && it.dto.confirmedAtMs > 0L &&
+                    it.dto.autoBuyState == "BUY_EXECUTED")
         } ?: return@synchronized
         row.dto = row.dto.copy(
             state = "POSITION_CLOSED",
@@ -544,7 +544,7 @@ class WorkingRangeRecommendationStore(context: Context) {
         quoteClientReceiptAgeMs = marketability.clientReceiptAgeMs,
         autoBuyEnabled = autoBuyEnabled,
         emaAlignmentMode = decision.emaAlignmentMode,
-        researchStopLossPct = WorkingRangeExitPolicy.HARD_STOP_LOSS_PCT,
+        researchStopLossPct = -WorkingRangeExitPolicy.HARD_STOP_LOSS_PCT,
         reason = reason
     )
 
