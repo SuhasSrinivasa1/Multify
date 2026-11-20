@@ -172,7 +172,7 @@ jobs:
           assert 'REQUIRED_CONSECUTIVE_OBSERVATIONS = 2' in wr
           assert 'MAX_CANDIDATE_AGE_MINUTES = 36.0' in wr
           assert 'MAX_DRIFT_FROM_FIRST_QUALIFIED_PCT = 1.60' in wr
-          assert '"auto_buy_enabled" to false' in wrstore
+          assert '"auto_buy_enabled" to enabled' in wrstore
           assert 'extra_broker_requests' in wrstore and '0' in wrstore
           assert 'Working Range Auto-Buy enabled' in vm
           assert 'Alpha CNC BUY when a new candidate passes two consecutive matching evaluations' in ui
@@ -185,6 +185,7 @@ jobs:
           assert 'workingRangeRecommendationStore.reserveAutoBuy(' in source_text
           assert 'reconcileWorkingRangeAutoBuyIntents(' in source_text
           assert 'reference.startsWith("WRM")' in source_text
+          owner=Path(root+"engine/AppPositionOwnershipPolicy.kt").read_text()
           assert '"FIXED_HOLDING" to setOf("FXH", "FXM", "WRM")' in owner
           assert 'pendingAutoBuyIntents' in wrstore and 'ORDER_INTENT_RESERVED' in wrstore
           assert 'rejected_candidate_observations' in wrstore
