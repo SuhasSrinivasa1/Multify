@@ -8278,8 +8278,7 @@ class TradingRepository @Inject constructor(
                 continue
             }
             var settled = broker
-            if (status in setOf("PARTIALLY_FILLED", "PARTIAL", "OPEN", "PENDING") &&
-                (broker.filledQuantity ?: 0) > 0) {
+            if (status in setOf("PARTIALLY_FILLED", "PARTIAL", "OPEN", "PENDING")) {
                 runCatching {
                     apiFactory.groww.cancelOrder(
                         bearer(token), OrderCancelRequest(growwOrderId = orderId)
@@ -8291,6 +8290,14 @@ class TradingRepository @Inject constructor(
                 }.getOrDefault(broker)
             }
             val settledStatus = settled.orderStatus.orEmpty().uppercase(Locale.US)
+            if (settledStatus in setOf("PARTIALLY_FILLED", "PARTIAL", "OPEN", "PENDING")) {
+                preferences.setSafetyHalt(true)
+                auditLogger.log("SAFETY", "WORKING_RANGE_PENDING_ORDER_CANCEL_UNCONFIRMED",
+                    mapOf("symbol" to row.symbol, "reference" to reference, "order_id" to orderId,
+                        "status" to settledStatus, "filled_quantity" to settled.filledQuantity,
+                        "new_buys_halted" to true, "manual_broker_reconciliation_required" to true))
+                continue
+            }
             val terminalFilled = settledStatus in setOf("EXECUTED", "COMPLETED") ||
                 (settled.filledQuantity ?: 0) >= row.autoBuyQuantity
             if (terminalFilled || ((settled.filledQuantity ?: 0) > 0 &&
