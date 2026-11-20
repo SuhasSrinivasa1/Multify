@@ -97,16 +97,14 @@ class WorkingRangeRecommendationStore(context: Context) {
                 row.dto.autoBuyState !in setOf("NOT_ATTEMPTED", "RETRYABLE_BLOCKED") ||
                 reference.isBlank() || quantity <= 0)
                 return@synchronized false
-            val previous = row.dto
             row.dto = row.dto.copy(
                 autoBuyEnabled = true, autoBuyState = "ORDER_INTENT_RESERVED",
                 autoBuyReference = reference, autoBuyQuantity = quantity,
                 reason = "Working Range confirmed · durable Alpha order intent reserved · awaiting broker result"
             )
-            if (!persistLocked(commit = true)) {
-                row.dto = previous
-                return@synchronized false
-            }
+            // Keep the in-memory reservation even if disk commit reports failure:
+            // fail closed and never permit a second POST for this event in-process.
+            if (!persistLocked(commit = true)) return@synchronized false
             true
         }
 
