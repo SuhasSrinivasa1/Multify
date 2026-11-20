@@ -173,7 +173,8 @@ jobs:
           assert 'MAX_CANDIDATE_AGE_MINUTES = 36.0' in wr
           assert 'MAX_DRIFT_FROM_FIRST_QUALIFIED_PCT = 1.60' in wr
           assert '"auto_buy_enabled" to enabled' in wrstore
-          assert 'extra_broker_requests' in wrstore and '0' in wrstore
+          assert '"extra_discovery_broker_requests" to 0' in wrstore
+          assert 'working_range_live_autobuy_adds_alpha_execution_and_protection_calls' in wrstore
           assert 'Working Range Auto-Buy enabled' in vm
           assert 'Alpha CNC BUY when a new candidate passes two consecutive matching evaluations' in ui
           assert 'autoBuyState' in Path(root+"data/network/ApiModels.kt").read_text()
