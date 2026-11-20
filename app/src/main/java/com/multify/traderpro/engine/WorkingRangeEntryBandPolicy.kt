@@ -84,7 +84,7 @@ object WorkingRangeEntryBandPolicy {
         if (nowMs - firstQualifiedAtMs > MAX_FIRST_QUALIFIED_TO_BUY_MS)
             return reject("WORKING_RANGE_FIRST_QUALIFIED_SIGNAL_STALE")
         if (nowMs - confirmedAtMs > MAX_CONFIRMATION_TO_BUY_MS)
-            return reject("WORKING_RANGE_CONFIRMATION_TO_BUY_OVER_30S")
+            return reject("WORKING_RANGE_CONFIRMATION_TO_BUY_OVER_45S")
         if (drift == null) return reject("WORKING_RANGE_FIRST_PRICE_DRIFT_UNAVAILABLE")
         if (drift > MAX_UPWARD_DRIFT_FROM_FIRST_QUALIFIED_PCT)
             return reject("WORKING_RANGE_PRICE_ABOVE_ENTRY_BAND")
