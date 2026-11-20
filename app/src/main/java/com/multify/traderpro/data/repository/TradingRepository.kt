@@ -8249,7 +8249,7 @@ class TradingRepository @Inject constructor(
             val reference = stableRef("WRM",
                 "${today}|${row.symbol.uppercase(Locale.US)}|${row.confirmedAtMs}")
             if (!workingRangeRecommendationStore.reserveAutoBuy(
-                    row.symbol, row.confirmedAtMs, reference, sizing.quantity)) continue
+                    row.symbol, row.confirmedAtMs, reference, sizing.quantity, ltp)) continue
             auditLogger.logAsync("WORKING_RANGE_AUTO_BUY", "ORDER_INTENT_RESERVED",
                 mapOf("symbol" to row.symbol, "reference" to reference,
                     "confirmed_at_ms" to row.confirmedAtMs, "requested_quantity" to sizing.quantity,
@@ -8379,9 +8379,23 @@ class TradingRepository @Inject constructor(
                     settledStatus in setOf("CANCELLED", "REJECTED", "FAILED"))) {
                 val filled = com.multify.traderpro.engine.ExecutionFillQuantityPolicy
                     .confirmedFilledQuantity(row.autoBuyQuantity, settled.filledQuantity, settledStatus)
-                    ?: continue
+                if (filled == null || filled <= 0) {
+                    preferences.setSafetyHalt(true)
+                    auditLogger.log("SAFETY", "WORKING_RANGE_FILLED_QUANTITY_UNVERIFIED",
+                        mapOf("symbol" to row.symbol, "reference" to reference, "order_id" to orderId,
+                            "status" to settledStatus, "reported_filled_quantity" to settled.filledQuantity,
+                            "new_buys_halted" to true, "manual_broker_reconciliation_required" to true))
+                    continue
+                }
                 val fillPrice = settled.averageFillPrice?.takeIf { it.isFinite() && it > 0.0 }
-                    ?: row.entryPrice.takeIf { it > 0.0 } ?: continue
+                    ?: row.autoBuyReferencePrice?.takeIf { it.isFinite() && it > 0.0 }
+                if (fillPrice == null) {
+                    preferences.setSafetyHalt(true)
+                    auditLogger.log("SAFETY", "WORKING_RANGE_FILL_PRICE_UNVERIFIED",
+                        mapOf("symbol" to row.symbol, "reference" to reference, "order_id" to orderId,
+                            "new_buys_halted" to true, "manual_broker_reconciliation_required" to true))
+                    continue
+                }
                 registerWorkingRangeBoughtPosition(row, orderId, reference, filled, fillPrice)
                 workingRangeRecommendationStore.markAutoBuyOutcome(
                     row.symbol, row.confirmedAtMs, "BUY_EXECUTED",
