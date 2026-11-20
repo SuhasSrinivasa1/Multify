@@ -43,6 +43,11 @@ class WorkingRangeRecommendationStore(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences(
         "working_range_recommendations_v9021", Context.MODE_PRIVATE
     )
+    // Historical v9.0.20 pilot evidence is kept for diagnostics, never migrated
+    // into a newly live, actionable v9.0.21 order queue.
+    private val legacyPilotPrefs = context.applicationContext.getSharedPreferences(
+        "working_range_recommendations_v9020", Context.MODE_PRIVATE
+    )
     private val gson = Gson()
     private val lock = Any()
     private val droppedQueueItems = AtomicLong(0L)
@@ -101,8 +106,11 @@ class WorkingRangeRecommendationStore(context: Context) {
                 autoBuyReference = reference, autoBuyQuantity = quantity,
                 reason = "Working Range confirmed · Alpha order intent reserved · awaiting broker result"
             )
-            persistLocked()
-            true
+            // A successful synchronous disk commit is mandatory before a POST.
+            // If it fails, keep the in-memory intent RESERVED, refuse the BUY,
+            // and reconcile manually. SharedPreferences.apply() is NOT durable
+            // enough for crash-safe order-intent reservation.
+            persistOrderIntentDurablyLocked()
         }
 
     fun markAutoBuyOutcome(
@@ -124,9 +132,11 @@ class WorkingRangeRecommendationStore(context: Context) {
         persistLocked()
     }
 
-    fun pendingAutoBuyIntents(dateIst: String): List<WorkingRangeRecommendationDto> =
+    /** Include older-day unresolved orders: midnight must not erase a broker liability. */
+    fun pendingAutoBuyIntents(dateIst: String? = null): List<WorkingRangeRecommendationDto> =
         synchronized(lock) {
-            rows.filter { it.dateIst == dateIst && it.dto.autoBuyState == "ORDER_INTENT_RESERVED" }
+            rows.filter { (dateIst == null || it.dateIst == dateIst) &&
+                it.dto.autoBuyState == "ORDER_INTENT_RESERVED" }
                 .map { it.dto }
         }
 
@@ -420,6 +430,10 @@ class WorkingRangeRecommendationStore(context: Context) {
             "ambiguous_order_intent_never_resubmitted" to true,
             "validated_working_range_claim" to false,
             "retrospective_sample_has_known_false_positive_gpil" to true,
+            "legacy_v9020_rows_json_research_only" to
+                (legacyPilotPrefs.getString(KEY_ROWS, "[]") ?: "[]"),
+            "legacy_pilot_rows_never_order_eligible" to true,
+            "auto_buy_intent_write_is_synchronous_disk_commit" to true,
             "deferred_queue_observations" to droppedQueueItems.get(),
             "rows" to rows.map { mapOf("date_ist" to it.dateIst, "symbol" to it.symbol,
                 "first_qualified_price" to it.firstQualifiedPrice,
@@ -436,6 +450,11 @@ class WorkingRangeRecommendationStore(context: Context) {
 
     private fun persistLocked() {
         prefs.edit().putString(KEY_ROWS, gson.toJson(rows)).apply()
+    }
+
+    private fun persistOrderIntentDurablyLocked(): Boolean {
+        // Commit under the same ledger lock. Failure must fail closed.
+        return prefs.edit().putString(KEY_ROWS, gson.toJson(rows)).commit()
     }
 
     private fun persistRejectionsLocked() {
