@@ -23,11 +23,12 @@ import kotlin.math.min
 /**
  * Separate Working Range pilot journal.
  *
- * - Consumes only a Fixed evaluation/quote that has already been fetched.
- * - Adds ZERO Groww calls and never blocks the scan thread.
+ * - Candidate discovery consumes only a Fixed evaluation/quote already fetched and adds ZERO Groww calls.
+ * - The separate execution consumer requests a fresh Alpha quote and broker preflight only after explicit opt-in.
  * - Two consecutive matching scan evaluations are required.
  * - One confirmed Working Range event per symbol per IST day.
- * - No automatic BUY, no GTT, no SELL, and no changes to Fixed rows.
+ * - Live BUY is authorized only by the new explicit Working Range ON activation timestamp.
+ * - Order intent is persisted before Alpha submission; ambiguous outcomes are never resubmitted.
  */
 class WorkingRangeRecommendationStore(context: Context) {
     private data class StoredRow(
@@ -51,7 +52,19 @@ class WorkingRangeRecommendationStore(context: Context) {
         { r -> Thread(r, "WorkingRangeEvidence").apply { isDaemon = true; priority = Thread.MIN_PRIORITY } },
         { _, _ -> droppedQueueItems.incrementAndGet() }
     )
+    private data class StoredRejection(
+        val dateIst: String, val symbol: String, val observedAtMs: Long, val price: Double,
+        val reasons: List<String>, val rsi: Double?, val rvol: Double?,
+        val greenVolumeShare: Double?, val volumeAcceleration: Double?,
+        val ema9: Double?, val ema20: Double?, val ema50: Double?,
+        val targetRequirementAtr: Double?, val vwapExtensionAtr: Double?
+    )
     private val rowType = object : TypeToken<MutableList<StoredRow>>() {}.type
+    private val rejectionType = object : TypeToken<MutableList<StoredRejection>>() {}.type
+    private val rejections: MutableList<StoredRejection> = runCatching {
+        gson.fromJson<MutableList<StoredRejection>>(prefs.getString(KEY_REJECTIONS, "[]"), rejectionType)
+            ?: mutableListOf()
+    }.getOrDefault(mutableListOf())
     @Volatile private var enabled: Boolean = false
     @Volatile private var generation: Long = 0L
     private val rows: MutableList<StoredRow> = runCatching {
@@ -69,6 +82,59 @@ class WorkingRangeRecommendationStore(context: Context) {
             persistLocked()
         }
     }
+
+    /** Wait until every already-enqueued Working Range observation has been persisted. */
+    fun flush(timeoutMs: Long = 5_000L): Boolean =
+        runCatching { queue.submit {}.get(timeoutMs, TimeUnit.MILLISECONDS); true }.getOrDefault(false)
+
+    /** Durable one-shot order intent, keyed by the confirmed symbol/event timestamp. */
+    fun reserveAutoBuy(symbol: String, confirmedAtMs: Long, reference: String, quantity: Int,
+        referencePrice: Double): Boolean =
+        synchronized(lock) {
+            val row = rows.firstOrNull {
+                it.symbol.equals(symbol, true) && it.dto.confirmedAtMs == confirmedAtMs
+            } ?: return@synchronized false
+            if (!enabled || row.dto.state != "IN_RANGE" ||
+                row.dto.autoBuyState !in setOf("NOT_ATTEMPTED", "RETRYABLE_BLOCKED") ||
+                reference.isBlank() || quantity <= 0 || !referencePrice.isFinite() || referencePrice <= 0.0)
+                return@synchronized false
+            row.dto = row.dto.copy(
+                autoBuyEnabled = true, autoBuyState = "ORDER_INTENT_RESERVED",
+                autoBuyReference = reference, autoBuyQuantity = quantity,
+                autoBuyReferencePrice = referencePrice,
+                reason = "Working Range confirmed · durable Alpha order intent reserved · awaiting broker result"
+            )
+            // Keep the in-memory reservation even if disk commit reports failure:
+            // fail closed and never permit a second POST for this event in-process.
+            if (!persistLocked(commit = true)) return@synchronized false
+            true
+        }
+
+    fun markAutoBuyOutcome(
+        symbol: String, confirmedAtMs: Long, state: String,
+        orderId: String? = null, quantity: Int? = null, fillPrice: Double? = null,
+        reason: String? = null
+    ) = synchronized(lock) {
+        val row = rows.firstOrNull {
+            it.symbol.equals(symbol, true) && it.dto.confirmedAtMs == confirmedAtMs
+        } ?: return@synchronized
+        row.dto = row.dto.copy(
+            autoBuyState = state,
+            autoBuyOrderId = orderId ?: row.dto.autoBuyOrderId,
+            autoBuyQuantity = quantity ?: row.dto.autoBuyQuantity,
+            autoBuyFillPrice = fillPrice ?: row.dto.autoBuyFillPrice,
+            autoBuyEnabled = true,
+            reason = reason ?: row.dto.reason
+        )
+        persistLocked()
+    }
+
+    /** Pending order intents survive midnight and are always reconciled before new entries. */
+    fun pendingAutoBuyIntents(): List<WorkingRangeRecommendationDto> =
+        synchronized(lock) {
+            rows.filter { it.dto.autoBuyState == "ORDER_INTENT_RESERVED" }
+                .map { it.dto }
+        }
 
     fun offer(
         symbol: String,
@@ -127,12 +193,22 @@ class WorkingRangeRecommendationStore(context: Context) {
             val index = rows.indexOfFirst { it.dateIst == date && it.symbol == symbol }
             val existing = rows.getOrNull(index)
             if (existing != null && existing.dto.confirmedAtMs > 0L) {
-                updateConfirmed(existing, decision.matches, decision.reasons, price,
+                updateConfirmed(existing, decision.matches, decision.reasons, decision.emaAlignmentMode, price,
                     observedAtMs, marketabilityState, marketability, evaluation)
                 persistLocked()
                 return
             }
             if (!decision.matches) {
+                rejections.add(StoredRejection(
+                    dateIst = date, symbol = symbol, observedAtMs = observedAtMs, price = price,
+                    reasons = decision.reasons, rsi = f.rsi14, rvol = f.rvol,
+                    greenVolumeShare = f.greenVolumeShare, volumeAcceleration = f.volumeAcceleration,
+                    ema9 = f.ema9, ema20 = f.ema20, ema50 = f.ema50,
+                    targetRequirementAtr = decision.targetRequirementAtr,
+                    vwapExtensionAtr = decision.vwapExtensionAtr
+                ))
+                while (rejections.size > 600) rejections.removeAt(0)
+                persistRejectionsLocked()
                 if (existing != null && existing.dto.state == "PENDING_CONFIRMATION") {
                     existing.dto = existing.dto.copy(
                         state = "PENDING_DROPPED",
@@ -168,7 +244,9 @@ class WorkingRangeRecommendationStore(context: Context) {
                     upperCircuitPrice = marketability.brokerUpperCircuit,
                     bestSellOffer = marketability.bestObservedOffer,
                     quoteClientReceiptAgeMs = marketability.clientReceiptAgeMs,
-                    reason = "Working Range v0.1 · first matching scan · confirmation 1/2 · manual review only"
+                    autoBuyEnabled = true,
+                    emaAlignmentMode = decision.emaAlignmentMode,
+                    reason = "Working Range v0.2 · first matching scan · confirmation 1/2 · Alpha Auto-Buy permission ON"
                 )
                 val row = StoredRow(date, symbol, first, price, 1, observedAtMs)
                 if (index >= 0) rows[index] = row else rows.add(row)
@@ -229,9 +307,11 @@ class WorkingRangeRecommendationStore(context: Context) {
                 upperCircuitPrice = marketability.brokerUpperCircuit,
                 bestSellOffer = marketability.bestObservedOffer,
                 quoteClientReceiptAgeMs = marketability.clientReceiptAgeMs,
+                autoBuyEnabled = true,
+                emaAlignmentMode = decision.emaAlignmentMode,
                 reason = if (confirmed)
-                    "WORKING RANGE v0.1 · two consecutive 15m-evaluation sweeps · manual review only · no Auto-Buy"
-                else "Working Range v0.1 · confirmation 2/2 pending"
+                    "WORKING RANGE v0.2 · two consecutive evaluations · Alpha Auto-Buy preflight"
+                else "Working Range v0.2 · confirmation 2/2 pending"
             )
             persistLocked()
         }
@@ -241,6 +321,7 @@ class WorkingRangeRecommendationStore(context: Context) {
         row: StoredRow,
         stillMatches: Boolean,
         reasons: List<String>,
+        emaAlignmentMode: String,
         price: Double,
         observedAtMs: Long,
         marketabilityState: String,
@@ -287,6 +368,7 @@ class WorkingRangeRecommendationStore(context: Context) {
             upperCircuitPrice = marketability.brokerUpperCircuit,
             bestSellOffer = marketability.bestObservedOffer,
             quoteClientReceiptAgeMs = marketability.clientReceiptAgeMs,
+            emaAlignmentMode = emaAlignmentMode,
             maxFavourablePct = mfe,
             maxAdversePct = mae,
             targetFirstTouchAtMs = targetAt,
@@ -310,11 +392,13 @@ class WorkingRangeRecommendationStore(context: Context) {
         runCatching { queue.submit {}.get(5, TimeUnit.SECONDS) }
         return synchronized(lock) {
         mapOf(
-            "schema" to "working_range_pilot_v9020",
+            "schema" to "working_range_auto_buy_v9021",
             "toggle_enabled" to enabled,
             "enabled_setting_is_separate_from_fixed" to true,
+            "working_range_on_authorizes_new_alpha_auto_buys" to true,
             "source" to "existing_fixed_15m_evaluations_and_existing_quotes",
-            "extra_broker_requests" to 0,
+            "extra_broker_requests_for_candidate_discovery" to 0,
+            "execution_network_calls" to "Only after new confirmation: fresh Alpha quote, broker inventory/cash/pending-order preflight, order acknowledgement and GTT protection",
             "consecutive_confirmations_required" to WorkingRangeCandidatePolicy.REQUIRED_CONSECUTIVE_OBSERVATIONS,
             "candidate_age_max_minutes" to WorkingRangeCandidatePolicy.MAX_CANDIDATE_AGE_MINUTES,
             "drift_max_pct_from_first_qualified_observation" to WorkingRangeCandidatePolicy.MAX_DRIFT_FROM_FIRST_QUALIFIED_PCT,
@@ -325,6 +409,7 @@ class WorkingRangeRecommendationStore(context: Context) {
                 "volume_acceleration_min" to WorkingRangeCandidatePolicy.MIN_VOLUME_ACCELERATION,
                 "volume_acceleration_max" to WorkingRangeCandidatePolicy.MAX_VOLUME_ACCELERATION,
                 "ema9_gt_ema20_gt_ema50" to true,
+                "ema20_ema50_near_alignment_tolerance_atr" to 0.0,
                 "ema9_ema20_slopes_positive" to true,
                 "macd_histogram_slope_positive" to true,
                 "target_requirement_max_atr" to WorkingRangeCandidatePolicy.MAX_TARGET_ATR,
@@ -337,25 +422,45 @@ class WorkingRangeRecommendationStore(context: Context) {
             "target_pct_unchanged_from_fixed_reference" to WorkingRangeCandidatePolicy.TARGET_PCT,
             "marketability_is_separate_from_technical_range" to true,
             "upper_circuit_or_no_offer_does_not_erase_candidate" to true,
-            "auto_buy_enabled" to false,
+            "auto_buy_enabled" to enabled,
+            "auto_buy_requires_new_confirmation_after_activation" to true,
+            "ambiguous_order_intent_never_resubmitted" to true,
             "validated_working_range_claim" to false,
             "retrospective_sample_has_known_false_positive_gpil" to true,
             "deferred_queue_observations" to droppedQueueItems.get(),
             "rows" to rows.map { mapOf("date_ist" to it.dateIst, "symbol" to it.symbol,
                 "first_qualified_price" to it.firstQualifiedPrice,
                 "consecutive_passes" to it.consecutivePasses, "last_pass_at_ms" to it.lastPassAtMs,
-                "recommendation" to it.dto) }
+                "recommendation" to it.dto) },
+            "rejected_candidate_observations" to rejections
         )
         }
     }
 
     private fun trimLocked() {
-        if (rows.size > 400) rows.subList(0, rows.size - 400).clear()
+        if (rows.size <= 400) return
+        val excess = rows.size - 400
+        val removable = rows.indices.filter {
+            rows[it].dto.autoBuyState != "ORDER_INTENT_RESERVED"
+        }.take(excess).toSet()
+        for (index in removable.sortedDescending()) rows.removeAt(index)
+        // If every excess row has an unresolved broker order intent, retain it.
     }
 
-    private fun persistLocked() {
-        prefs.edit().putString(KEY_ROWS, gson.toJson(rows)).apply()
+    private fun persistLocked(commit: Boolean = false): Boolean {
+        val editor = prefs.edit().putString(KEY_ROWS, gson.toJson(rows))
+        return if (commit) editor.commit() else {
+            editor.apply()
+            true
+        }
     }
 
-    companion object { private const val KEY_ROWS = "rows_json" }
+    private fun persistRejectionsLocked() {
+        prefs.edit().putString(KEY_REJECTIONS, gson.toJson(rejections)).apply()
+    }
+
+    companion object {
+        private const val KEY_ROWS = "rows_json"
+        private const val KEY_REJECTIONS = "rejections_json"
+    }
 }

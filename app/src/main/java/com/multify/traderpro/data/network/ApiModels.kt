@@ -304,7 +304,14 @@ data class WorkingRangeRecommendationDto(
     val sampledOutcomeNote: String = "UNRESOLVED · SPARSE CLIENT LTP SAMPLES",
     val reason: String = "",
     val researchOnly: Boolean = true,
-    val autoBuyEnabled: Boolean = false
+    val autoBuyEnabled: Boolean = false,
+    val autoBuyState: String = "NOT_ATTEMPTED",
+    val autoBuyReference: String = "",
+    val autoBuyOrderId: String? = null,
+    val autoBuyQuantity: Int = 0,
+    val autoBuyReferencePrice: Double? = null,
+    val autoBuyFillPrice: Double? = null,
+    val emaAlignmentMode: String = "UNKNOWN"
 )
 
 data class ForecastChampionDto(

@@ -1,16 +1,17 @@
 package com.multify.traderpro.engine
 
 /**
- * Working Range v0.1 is a separate pilot filter, not the Fixed model.
+ * Working Range v0.2 is a separate pilot filter, not the Fixed model.
  *
  * Boundaries are retrospective candidate ranges from 19-Nov logs. The original
  * 9/9 success claim was not a valid independent result: replaying the same
  * envelope also admits GPIL, which was a clear adverse/unsuccessful example.
- * Therefore this remains manual-review-only and must be validated prospectively.
+ * Therefore it remains a pilot rule. Live Auto-Buy requires an explicit fresh
+ * Working Range toggle activation and passes the independent broker execution guard.
  *
  * This policy consumes an evaluation and quote already fetched by Fixed. It
  * makes no API calls and never changes Fixed scoring, rank, publication, orders,
- * target, stop, GTT or trailing.
+ * target, stop, GTT or trailing. The separate Auto-Buy consumer is outside Fixed.
  */
 internal object WorkingRangeCandidatePolicy {
     const val TARGET_PCT = FixedFinalContract.CANONICAL_MULTIFY_MFE_AVG_PCT
@@ -51,7 +52,8 @@ internal object WorkingRangeCandidatePolicy {
         val reasons: List<String>,
         val targetRequirementAtr: Double?,
         val vwapExtensionAtr: Double?,
-        val emaAligned: Boolean?
+        val emaAligned: Boolean?,
+        val emaAlignmentMode: String
     )
 
     fun assess(i: Inputs): Decision {
@@ -73,6 +75,11 @@ internal object WorkingRangeCandidatePolicy {
             (price - vwap) / atr else null
         val emaAligned = if (e9 != null && e20 != null && e50 != null)
             e9 > e20 && e20 > e50 else null
+        val emaAlignmentMode = when {
+            emaAligned == null -> "MISSING"
+            emaAligned -> "STRICT"
+            else -> "NOT_ALIGNED"
+        }
 
         if (price == null || !RecommendationPriceBandPolicy.eligible(price))
             reasons += "PRICE_OUTSIDE_FIXED_EQUITY_BAND"
@@ -99,7 +106,8 @@ internal object WorkingRangeCandidatePolicy {
             reasons = reasons,
             targetRequirementAtr = targetAtr,
             vwapExtensionAtr = vwapExtension,
-            emaAligned = emaAligned
+            emaAligned = emaAligned,
+            emaAlignmentMode = emaAlignmentMode
         )
     }
 

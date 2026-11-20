@@ -265,14 +265,25 @@ class TradingRepository @Inject constructor(
         com.multify.traderpro.data.logging.WorkingRangeRecommendationStore(appContext)
     }
     @Volatile private var workingRangeEnabledCache: Boolean? = null
+    @Volatile private var workingRangeMigrationReady = false
+    private val workingRangeMigrationMutex = Mutex()
+
+    /** Called from UI startup and the scanner; the legacy research-only ON state is reset once. */
+    suspend fun initializeWorkingRangeAutoBuyOptIn() {
+        workingRangeMigrationMutex.withLock {
+            if (workingRangeMigrationReady) return
+            preferences.migrateWorkingRangeToExplicitAutoBuyOptInOnce()
+            val enabled = preferences.settings.first().workingRangeEnabled
+            workingRangeEnabledCache = enabled
+            workingRangeRecommendationStore.setEnabled(enabled,
+                "Working Range initialized after v9.0.21 explicit Auto-Buy opt-in migration")
+            workingRangeMigrationReady = true
+        }
+    }
 
     private suspend fun workingRangeEnabledNow(): Boolean {
-        workingRangeEnabledCache?.let { return it }
-        val enabled = preferences.settings.first().workingRangeEnabled
-        workingRangeEnabledCache = enabled
-        workingRangeRecommendationStore.setEnabled(enabled,
-            "Working Range initialized from persisted operator setting")
-        return enabled
+        initializeWorkingRangeAutoBuyOptIn()
+        return workingRangeEnabledCache ?: preferences.settings.first().workingRangeEnabled
     }
 
     private val fixedRecommendationExecutionPrefs by lazy {
@@ -1667,23 +1678,52 @@ class TradingRepository @Inject constructor(
     @Volatile private var fixedAutoBuyActivationForQueue = 0L
 
     suspend fun setWorkingRangeEnabled(enabled: Boolean) {
+        initializeWorkingRangeAutoBuyOptIn()
         val previous = workingRangeEnabledNow()
         preferences.setWorkingRangeEnabled(enabled)
+        val live = preferences.settings.first()
         workingRangeEnabledCache = enabled
         if (previous != enabled) {
             workingRangeRecommendationStore.setEnabled(enabled,
-                if (enabled) "Working Range re-enabled; new candidate baseline required"
-                else "Working Range disabled by operator")
+                if (enabled) "Working Range Auto-Buy enabled; new candidate baseline and activation timestamp required"
+                else "Working Range Auto-Buy disabled by operator")
         }
         auditLogger.log("SETTINGS",
-            if (enabled) "WORKING_RANGE_ENABLED" else "WORKING_RANGE_DISABLED",
+            if (enabled) "WORKING_RANGE_AUTO_BUY_ENABLED" else "WORKING_RANGE_AUTO_BUY_DISABLED",
             mapOf(
                 "fixed_scoring_changed" to false,
                 "fixed_recommendations_suppressed" to false,
-                "working_range_auto_buy_enabled" to false,
+                "working_range_auto_buy_enabled" to enabled,
+                "activation_at_ms" to live.workingRangeActivatedAtMs,
+                "only_new_confirmations_after_activation_eligible" to true,
+                "alpha_only_execution" to true,
+                "beta_read_only" to true,
                 "source" to "existing_fixed_15m_evaluation_and_quote",
-                "extra_broker_requests" to 0
+                "extra_broker_requests_for_discovery" to 0
             ))
+        if (enabled && !live.safetyHalt && marketSession() == "OPEN") {
+            runCatching { prepareArmHotPath(force = false) }
+        } else if (!enabled) {
+            // OFF stops new entries and immediately reconciles/cancels any still-open
+            // Working Range entry intent. Filled shares are registered and protected.
+            runCatching {
+                val pending = workingRangeRecommendationStore.pendingAutoBuyIntents()
+                if (pending.isNotEmpty()) {
+                    val token = ensureToken()
+                    if (token != null) reconcileWorkingRangeAutoBuyIntents(token)
+                    else {
+                        preferences.setSafetyHalt(true)
+                        auditLogger.log("SAFETY", "WORKING_RANGE_DISABLE_PENDING_ORDER_UNRECONCILED",
+                            mapOf("pending_intents" to pending.size, "new_buys_halted" to true,
+                                "manual_broker_reconciliation_required" to true))
+                    }
+                }
+            }.onFailure {
+                auditLogger.log("WORKING_RANGE_AUTO_BUY", "DISABLE_ORDER_RECONCILIATION_FAILED",
+                    mapOf("message" to (it.message ?: it.javaClass.simpleName),
+                        "no_new_entries" to true, "manual_order_check_required" to true))
+            }
+        }
     }
 
     suspend fun setFixedAutoBuy(enabled: Boolean) {
@@ -2761,7 +2801,9 @@ class TradingRepository @Inject constructor(
                     ))
                 }
                 var autoBuySubmitted = 0
+                var workingRangeAutoBuySubmitted = 0
                 var autoBuyElapsedMs = 0L
+                var workingRangeAutoBuyElapsedMs = 0L
                 if (scanned) {
                     val autoBuyStartedAtMs = System.currentTimeMillis()
                     // Execution readiness is independent of the already completed frozen
@@ -2781,6 +2823,18 @@ class TradingRepository @Inject constructor(
                         }
                     )
                     autoBuyElapsedMs = (System.currentTimeMillis() - autoBuyStartedAtMs).coerceAtLeast(0L)
+                    val workingRangeStartedAtMs = System.currentTimeMillis()
+                    workingRangeAutoBuySubmitted = FixedScanBuyIsolationPolicy.execute(
+                        buy = { autoBuyWorkingRangeRecommendations() },
+                        onFailure = { cause ->
+                            auditLogger.log("WORKING_RANGE_AUTO_BUY", "EXECUTION_DEFERRED_SCAN_PRESERVED",
+                                mapOf("reason" to (cause.message ?: cause.javaClass.simpleName),
+                                    "fixed_scan_completed" to true, "fixed_model_changed" to false,
+                                    "blind_resubmission" to false))
+                        }
+                    )
+                    workingRangeAutoBuyElapsedMs =
+                        (System.currentTimeMillis() - workingRangeStartedAtMs).coerceAtLeast(0L)
                 }
                 if (scanned) {
                     auditLogger.logAsync("RUNTIME", "FIXED_PRIORITY_PHASE_PROFILE", mapOf(
@@ -2788,6 +2842,8 @@ class TradingRepository @Inject constructor(
                         "recommendation_stage_ms" to (recommendationCompletedAtMs - recommendationStartedAtMs).coerceAtLeast(0L),
                         "auto_buy_stage_ms" to autoBuyElapsedMs,
                         "auto_buy_submitted" to autoBuySubmitted,
+                        "working_range_auto_buy_stage_ms" to workingRangeAutoBuyElapsedMs,
+                        "working_range_auto_buy_submitted" to workingRangeAutoBuySubmitted,
                         "cycle_total_ms" to (System.currentTimeMillis() - cycleStartedAtMs).coerceAtLeast(0L),
                         "order_before_notification" to true,
                         "fixed_formula_changed" to false
@@ -8013,6 +8069,442 @@ class TradingRepository @Inject constructor(
         brokerInventorySnapshot = null
     }
 
+    /**
+     * Separate Working Range execution path. Fixed recommendation rows, scoring,
+     * rank and Fixed Auto-Buy activation are never read or mutated here.
+     * All broker actions use Alpha and the shared app-owned BUY/protection path.
+     */
+    suspend fun autoBuyWorkingRangeRecommendations(): Int =
+        fixedAutoBuySubmissionMutex.withLock { autoBuyWorkingRangeRecommendationsLocked() }
+
+    private suspend fun autoBuyWorkingRangeRecommendationsLocked(): Int {
+        initializeWorkingRangeAutoBuyOptIn()
+        val today = LocalDate.now(INDIA).toString()
+        if (!workingRangeRecommendationStore.flush()) {
+            auditLogger.logAsync("WORKING_RANGE_AUTO_BUY", "EVIDENCE_QUEUE_NOT_DRAINED",
+                mapOf("new_buys_submitted" to false, "reason" to "Current confirmation state could not be flushed"))
+            return 0
+        }
+        val initialSettings = preferences.settings.first()
+        val pendingIntents = workingRangeRecommendationStore.pendingAutoBuyIntents()
+        val potential = if (initialSettings.workingRangeEnabled &&
+            initialSettings.workingRangeActivatedAtMs > 0L) {
+            workingRangeRecommendationStore.recent(today).filter { row ->
+                com.multify.traderpro.engine.WorkingRangeAutoBuyPolicy.decide(
+                    initialSettings.workingRangeEnabled, initialSettings.safetyHalt,
+                    initialSettings.workingRangeActivatedAtMs, row.confirmedAtMs,
+                    row.state, row.autoBuyState, System.currentTimeMillis()
+                ).eligible
+            }
+        } else emptyList()
+
+        if (pendingIntents.isEmpty() && potential.isEmpty()) return 0
+        val token = ensureToken() ?: run {
+            if (pendingIntents.isNotEmpty()) preferences.setSafetyHalt(true)
+            auditLogger.log("WORKING_RANGE_AUTO_BUY", "ALPHA_AUTH_REQUIRED",
+                mapOf("new_buys_submitted" to false, "pending_intents" to pendingIntents.size,
+                    "safety_halt_set_for_unresolved_intent" to pendingIntents.isNotEmpty()))
+            return 0
+        }
+
+        // A crash after broker acknowledgement must reconcile by the deterministic
+        // WRM reference. Never blindly resubmit an ambiguous Working Range intent.
+        reconcileWorkingRangeAutoBuyIntents(token)
+
+        val settings = preferences.settings.first()
+        if (!settings.workingRangeEnabled || settings.workingRangeActivatedAtMs <= 0L ||
+            settings.safetyHalt || potential.isEmpty()) return 0
+        val now = ZonedDateTime.now(INDIA)
+        if (!com.multify.traderpro.engine.NseEquitySessionCalendar.isFixedNewEntryWindow(now) ||
+            marketSession() != "OPEN") return 0
+
+        val cooldown = buyApiCooldownOrNull(
+            GrowwApiUsageLedger.Category.LIVE_DATA,
+            GrowwApiUsageLedger.Category.NON_TRADING,
+            GrowwApiUsageLedger.Category.ORDERS
+        )
+        if (cooldown != null) {
+            auditAutoBuyBlocked("WORKING_RANGE_AUTO_BUY", cooldown)
+            return 0
+        }
+        preFixedAutoBuyExecutionGuard(settings)
+
+        var submitted = 0
+        for (row in potential) {
+            val live = preferences.settings.first()
+            val decision = com.multify.traderpro.engine.WorkingRangeAutoBuyPolicy.decide(
+                live.workingRangeEnabled, live.safetyHalt, live.workingRangeActivatedAtMs,
+                row.confirmedAtMs, row.state, row.autoBuyState, System.currentTimeMillis()
+            )
+            if (!decision.eligible) {
+                auditLogger.logAsync("WORKING_RANGE_AUTO_BUY", "CANDIDATE_NOT_EXECUTABLE",
+                    mapOf("symbol" to row.symbol, "reason" to decision.reason,
+                        "confirmed_at_ms" to row.confirmedAtMs))
+                continue
+            }
+            if (!com.multify.traderpro.engine.NseEquitySessionCalendar.isFixedNewEntryWindow(
+                    ZonedDateTime.now(INDIA)) || marketSession() != "OPEN") break
+            if (row.entryPrice <= 0.0 || row.targetPrice <= 0.0 ||
+                row.targetFirstTouchAtMs > 0L) {
+                workingRangeRecommendationStore.markAutoBuyOutcome(
+                    row.symbol, row.confirmedAtMs, "BLOCKED_INVALID_OR_TARGET_REACHED",
+                    reason = "Working Range entry/target invalid or target already sampled"
+                )
+                continue
+            }
+            if (managedDao.openPositions().any { it.symbol.equals(row.symbol, true) }) {
+                workingRangeRecommendationStore.markAutoBuyOutcome(
+                    row.symbol, row.confirmedAtMs, "BLOCKED_EXISTING_APP_OR_BROKER_HOLDING",
+                    reason = "Existing broker/app holding prevents duplicate symbol entry"
+                )
+                continue
+            }
+
+            val quoteStartedAtMs = System.currentTimeMillis()
+            val quote = runCatching {
+                apiFactory.groww.quote(
+                    bearer(token), tradingSymbol = row.symbol,
+                    trafficPriority = MarketDataPriorityAdmissionPolicy.PROTECTION
+                ).requirePayload("Working Range fresh Alpha quote ${row.symbol}")
+            }.onFailure {
+                val message = it.message ?: it.javaClass.simpleName
+                workingRangeRecommendationStore.markAutoBuyOutcome(
+                    row.symbol, row.confirmedAtMs, "RETRYABLE_BLOCKED",
+                    reason = "Fresh Alpha quote unavailable · $message"
+                )
+                auditLogger.logAsync("WORKING_RANGE_AUTO_BUY", "ALPHA_QUOTE_FAILED",
+                    mapOf("symbol" to row.symbol, "message" to message,
+                        "retry_on_next_fresh_scan" to true))
+            }.getOrNull() ?: continue
+            val quoteReceivedAtMs = System.currentTimeMillis()
+            preferences.recordMarketData()
+            val quoteElapsedMs = (quoteReceivedAtMs - quoteStartedAtMs).coerceAtLeast(0L)
+            val ltp = quote.lastPrice?.takeIf { it.isFinite() && it > 0.0 } ?: continue
+            if (!RecommendationPriceBandPolicy.eligible(ltp)) {
+                workingRangeRecommendationStore.markAutoBuyOutcome(
+                    row.symbol, row.confirmedAtMs, "BLOCKED_PRICE_BAND",
+                    reason = "Fresh Alpha price is outside the supported entry band"
+                )
+                auditLogger.logAsync("WORKING_RANGE_AUTO_BUY", "PRICE_BAND_REJECTED",
+                    mapOf("symbol" to row.symbol, "fresh_alpha_ltp" to ltp))
+                continue
+            }
+            val liquidityReject = ExecutionQuoteLiquidityPolicy.rejectionReason(quote)
+            if (liquidityReject != null) {
+                workingRangeRecommendationStore.markAutoBuyOutcome(
+                    row.symbol, row.confirmedAtMs, "RETRYABLE_BLOCKED",
+                    reason = "Fresh Alpha liquidity preflight · $liquidityReject"
+                )
+                auditLogger.logAsync("WORKING_RANGE_AUTO_BUY", "ENTRY_LIQUIDITY_UNVERIFIED",
+                    mapOf("symbol" to row.symbol, "reason" to liquidityReject,
+                        "fresh_alpha_quote" to true, "retry_on_next_fresh_scan" to true))
+                continue
+            }
+            val thinLiquidityReject = FixedExecutionThinLiquidityPolicy.rejectionReason(quote)
+            if (thinLiquidityReject != null) {
+                workingRangeRecommendationStore.markAutoBuyOutcome(
+                    row.symbol, row.confirmedAtMs, "RETRYABLE_BLOCKED",
+                    reason = "Fresh Alpha micro-liquidity preflight · $thinLiquidityReject"
+                )
+                auditLogger.logAsync("WORKING_RANGE_AUTO_BUY", "ENTRY_MICRO_LIQUIDITY_REJECTED",
+                    mapOf("symbol" to row.symbol, "reason" to thinLiquidityReject,
+                        "reported_day_shares" to quote.volume, "retry_on_next_fresh_scan" to true))
+                continue
+            }
+            val extensionReject = ExecutionEntryPriceGuardPolicy.rejectionReason(
+                row.entryPrice, ltp, quoteElapsedMs
+            )
+            if (extensionReject != null) {
+                workingRangeRecommendationStore.markAutoBuyOutcome(
+                    row.symbol, row.confirmedAtMs, "RETRYABLE_BLOCKED",
+                    reason = "Fresh Alpha price drift preflight · $extensionReject"
+                )
+                auditLogger.logAsync("WORKING_RANGE_AUTO_BUY", "ENTRY_PRICE_GUARD_REJECTED",
+                    mapOf("symbol" to row.symbol, "reason" to extensionReject,
+                        "confirmed_entry" to row.entryPrice, "fresh_alpha_ltp" to ltp,
+                        "quote_elapsed_ms" to quoteElapsedMs, "retry_on_next_fresh_scan" to true))
+                continue
+            }
+            if (ltp >= row.targetPrice) {
+                workingRangeRecommendationStore.markAutoBuyOutcome(
+                    row.symbol, row.confirmedAtMs, "TARGET_ALREADY_REACHED",
+                    reason = "Fresh Alpha quote is already at/above the Working Range target; no chase BUY"
+                )
+                continue
+            }
+            val sizing = com.multify.traderpro.engine.BudgetOnlyCncSizing.size(
+                live.holdingBudgetRupees.toDouble(), ltp
+            )
+            if (sizing.quantity <= 0) {
+                workingRangeRecommendationStore.markAutoBuyOutcome(
+                    row.symbol, row.confirmedAtMs, "BLOCKED_INVALID_BUDGET_OR_PRICE",
+                    reason = "Per-order CNC budget cannot fund one share at fresh Alpha LTP"
+                )
+                auditLogger.logAsync("WORKING_RANGE_AUTO_BUY", "SKIPPED_INVALID_BUDGET_OR_PRICE",
+                    mapOf("symbol" to row.symbol, "fresh_ltp" to ltp,
+                        "per_order_budget" to live.holdingBudgetRupees))
+                continue
+            }
+
+            val reference = stableRef("WRM",
+                "${today}|${row.symbol.uppercase(Locale.US)}|${row.confirmedAtMs}")
+            if (!workingRangeRecommendationStore.reserveAutoBuy(
+                    row.symbol, row.confirmedAtMs, reference, sizing.quantity, ltp)) continue
+            auditLogger.logAsync("WORKING_RANGE_AUTO_BUY", "ORDER_INTENT_RESERVED",
+                mapOf("symbol" to row.symbol, "reference" to reference,
+                    "confirmed_at_ms" to row.confirmedAtMs, "requested_quantity" to sizing.quantity,
+                    "fresh_alpha_ltp" to ltp, "target_pct" to row.targetPct,
+                    "fixed_model_changed" to false, "beta_order_route" to false,
+                    "blind_resubmission" to false))
+            try {
+                val order = placeCncBuy(
+                    token, row.symbol, sizing.quantity, reference,
+                    entryQuote = quote, quoteReceivedAtMs = quoteReceivedAtMs,
+                    workingRangeActivationAtMs = live.workingRangeActivatedAtMs
+                )
+                val filled = order.filledQuantity?.takeIf { it > 0 }
+                    ?: error("Working Range broker fill quantity was not verified")
+                val actualFill = order.averageFillPrice?.takeIf { it.isFinite() && it > 0.0 }
+                    ?: run {
+                        preferences.setSafetyHalt(true)
+                        auditLogger.log("SAFETY", "WORKING_RANGE_FILL_PRICE_UNVERIFIED",
+                            mapOf("symbol" to row.symbol, "order_id" to order.growwOrderId,
+                                "reference" to reference, "new_buys_halted" to true,
+                                "manual_broker_reconciliation_required" to true))
+                        error("Working Range broker fill price unverified; reconcile $reference before any new entry")
+                    }
+                registerWorkingRangeBoughtPosition(
+                    row, order.growwOrderId, reference, filled, actualFill
+                )
+                workingRangeRecommendationStore.markAutoBuyOutcome(
+                    row.symbol, row.confirmedAtMs, "BUY_EXECUTED",
+                    orderId = order.growwOrderId, quantity = filled, fillPrice = actualFill,
+                    reason = "Working Range Alpha CNC BUY filled · broker GTT protection workflow started"
+                )
+                auditLogger.logAsync("WORKING_RANGE_AUTO_BUY", "ENTRY_MARKETABLE_LIMIT_FILLED",
+                    mapOf("symbol" to row.symbol, "order_id" to order.growwOrderId,
+                        "reference" to reference, "quantity" to filled, "fill_price" to actualFill,
+                        "confirmed_entry" to row.entryPrice, "fresh_alpha_quote" to ltp,
+                        "target_pct" to row.targetPct, "alpha_only" to true, "beta_read_only" to true))
+                submitted++
+                _fixedDeliveryEvents.tryEmit(System.currentTimeMillis())
+            } catch (failure: Throwable) {
+                val message = failure.message ?: failure.javaClass.simpleName
+                if (message.startsWith("BUY blocked:")) {
+                    // Known local/broker preflight rejection occurs before the order POST.
+                    val retryableMarketability = message.contains("seller", true) ||
+                        message.contains("offer", true) || message.contains("circuit", true)
+                    workingRangeRecommendationStore.markAutoBuyOutcome(
+                        row.symbol, row.confirmedAtMs,
+                        if (retryableMarketability) "RETRYABLE_BLOCKED" else "BLOCKED_PREORDER",
+                        reason = message
+                    )
+                    auditLogger.log("WORKING_RANGE_AUTO_BUY",
+                        if (retryableMarketability) "PREORDER_MARKETABILITY_RETRYABLE"
+                        else "PREORDER_GUARD_BLOCKED",
+                        mapOf("symbol" to row.symbol, "reference" to reference,
+                            "message" to message, "broker_order_posted" to false,
+                            "retry_on_next_fresh_scan" to retryableMarketability,
+                            "blind_resubmission" to false))
+                } else {
+                    // Intent remains RESERVED. Recovery checks the exact broker reference;
+                    // no second POST is allowed when the first outcome is ambiguous.
+                    auditLogger.log("WORKING_RANGE_AUTO_BUY", "ORDER_OUTCOME_REQUIRES_REFERENCE_RECONCILIATION",
+                        mapOf("symbol" to row.symbol, "reference" to reference,
+                            "message" to message, "blind_resubmission" to false,
+                            "new_buys_blocked_for_event" to true))
+                }
+            }
+        }
+        return submitted
+    }
+
+    private suspend fun reconcileWorkingRangeAutoBuyIntents(token: String) {
+        for (row in workingRangeRecommendationStore.pendingAutoBuyIntents()) {
+            val reference = row.autoBuyReference
+            if (reference.isBlank()) continue
+            val existing = managedDao.openPositions().firstOrNull {
+                it.symbol.equals(row.symbol, true) && it.openReferenceId == reference
+            }
+            if (existing != null) {
+                workingRangeRecommendationStore.markAutoBuyOutcome(
+                    row.symbol, row.confirmedAtMs, "BUY_EXECUTED",
+                    orderId = existing.openOrderId, quantity = existing.quantity,
+                    fillPrice = existing.entryPrice,
+                    reason = "Recovered app-owned Working Range holding by deterministic reference"
+                )
+                continue
+            }
+            val broker = runCatching {
+                apiFactory.groww.orderStatusByReference(
+                    bearer(token), referenceId = reference
+                ).requirePayload("Reconcile Working Range BUY $reference")
+            }.getOrNull()
+            if (broker == null) {
+                preferences.setSafetyHalt(true)
+                auditLogger.log("SAFETY", "WORKING_RANGE_REFERENCE_STATUS_UNAVAILABLE",
+                    mapOf("symbol" to row.symbol, "reference" to reference,
+                        "blind_resubmission" to false, "new_buys_halted" to true,
+                        "manual_broker_reconciliation_required" to true))
+                continue
+            }
+            val orderId = com.multify.traderpro.engine.BrokerOrderAcknowledgementPolicy
+                .usableId(broker.growwOrderId)
+            val status = broker.orderStatus.orEmpty().uppercase(Locale.US)
+            if (orderId == null) {
+                preferences.setSafetyHalt(true)
+                auditLogger.log("SAFETY", "WORKING_RANGE_BROKER_ORDER_ID_UNRESOLVED",
+                    mapOf("symbol" to row.symbol, "reference" to reference,
+                        "status" to status, "blind_resubmission" to false,
+                        "new_buys_halted" to true, "manual_broker_reconciliation_required" to true))
+                continue
+            }
+            var settled = broker
+            if (status in setOf("PARTIALLY_FILLED", "PARTIAL", "OPEN", "PENDING")) {
+                runCatching {
+                    apiFactory.groww.cancelOrder(
+                        bearer(token), OrderCancelRequest(growwOrderId = orderId)
+                    ).requirePayload("Cancel remaining Working Range BUY $orderId")
+                }
+                settled = runCatching {
+                    apiFactory.groww.orderStatus(bearer(token), orderId)
+                        .requirePayload("Reconcile Working Range BUY after cancel $orderId")
+                }.getOrDefault(broker)
+            }
+            val settledStatus = settled.orderStatus.orEmpty().uppercase(Locale.US)
+            if (settledStatus in setOf("PARTIALLY_FILLED", "PARTIAL", "OPEN", "PENDING")) {
+                preferences.setSafetyHalt(true)
+                auditLogger.log("SAFETY", "WORKING_RANGE_PENDING_ORDER_CANCEL_UNCONFIRMED",
+                    mapOf("symbol" to row.symbol, "reference" to reference, "order_id" to orderId,
+                        "status" to settledStatus, "filled_quantity" to settled.filledQuantity,
+                        "new_buys_halted" to true, "manual_broker_reconciliation_required" to true))
+                continue
+            }
+            val terminalFilled = settledStatus in setOf("EXECUTED", "COMPLETED") ||
+                (settled.filledQuantity ?: 0) >= row.autoBuyQuantity
+            if (terminalFilled || ((settled.filledQuantity ?: 0) > 0 &&
+                    settledStatus in setOf("CANCELLED", "REJECTED", "FAILED"))) {
+                val filled = com.multify.traderpro.engine.ExecutionFillQuantityPolicy
+                    .confirmedFilledQuantity(row.autoBuyQuantity, settled.filledQuantity, settledStatus)
+                if (filled == null || filled <= 0) {
+                    preferences.setSafetyHalt(true)
+                    auditLogger.log("SAFETY", "WORKING_RANGE_FILLED_QUANTITY_UNVERIFIED",
+                        mapOf("symbol" to row.symbol, "reference" to reference, "order_id" to orderId,
+                            "status" to settledStatus, "reported_filled_quantity" to settled.filledQuantity,
+                            "new_buys_halted" to true, "manual_broker_reconciliation_required" to true))
+                    continue
+                }
+                val fillPrice = settled.averageFillPrice?.takeIf { it.isFinite() && it > 0.0 }
+                if (fillPrice == null) {
+                    preferences.setSafetyHalt(true)
+                    auditLogger.log("SAFETY", "WORKING_RANGE_FILL_PRICE_UNVERIFIED",
+                        mapOf("symbol" to row.symbol, "reference" to reference, "order_id" to orderId,
+                            "new_buys_halted" to true, "manual_broker_reconciliation_required" to true))
+                    continue
+                }
+                registerWorkingRangeBoughtPosition(row, orderId, reference, filled, fillPrice)
+                workingRangeRecommendationStore.markAutoBuyOutcome(
+                    row.symbol, row.confirmedAtMs, "BUY_EXECUTED",
+                    orderId = orderId, quantity = filled, fillPrice = fillPrice,
+                    reason = "Working Range broker reference reconciled; filled shares registered for GTT protection"
+                )
+            } else if (settledStatus in setOf("REJECTED", "FAILED", "CANCELLED") &&
+                (settled.filledQuantity ?: 0) == 0) {
+                workingRangeRecommendationStore.markAutoBuyOutcome(
+                    row.symbol, row.confirmedAtMs, "BROKER_REJECTED",
+                    orderId = orderId, reason = "Groww confirmed terminal non-fill; event will not be resubmitted"
+                )
+            } else {
+                auditLogger.logAsync("WORKING_RANGE_AUTO_BUY", "BROKER_ORDER_STILL_UNRESOLVED",
+                    mapOf("symbol" to row.symbol, "reference" to reference, "order_id" to orderId,
+                        "status" to settledStatus, "filled_quantity" to settled.filledQuantity,
+                        "blind_resubmission" to false))
+            }
+        }
+    }
+
+    private suspend fun registerWorkingRangeBoughtPosition(
+        row: com.multify.traderpro.data.network.WorkingRangeRecommendationDto,
+        orderId: String,
+        reference: String,
+        filled: Int,
+        actualFill: Double
+    ) {
+        val existingAny = managedDao.openPositions().firstOrNull {
+            it.symbol.equals(row.symbol, true)
+        }
+        if (existingAny != null) {
+            if (existingAny.openReferenceId != reference) {
+                preferences.setSafetyHalt(true)
+                auditLogger.log("SAFETY", "WORKING_RANGE_FILL_OWNERSHIP_CONFLICT",
+                    mapOf("symbol" to row.symbol, "reference" to reference,
+                        "existing_reference" to existingAny.openReferenceId,
+                        "new_buys_halted" to true, "manual_reconciliation_required" to true))
+                error("Working Range fill conflicts with an existing holding for ${row.symbol}")
+            }
+            val alreadyProtected = com.multify.traderpro.engine.GttProtectionReadinessPolicy.verified(
+                existingAny.smartOrderMode, existingAny.smartOrderId, existingAny.smartOrderStatus)
+            if (!alreadyProtected) {
+                preferences.setSafetyHalt(true)
+                auditLogger.log("SAFETY", "WORKING_RANGE_EXISTING_FILL_UNPROTECTED",
+                    mapOf("symbol" to row.symbol, "reference" to reference,
+                        "new_buys_halted" to true, "explicit_unprotected_holding_alert" to true))
+            }
+            return
+        }
+        val openedAtMs = System.currentTimeMillis()
+        try {
+            registerBoughtPositionAndProtect(
+            ManagedPositionEntity(
+                engine = ENGINE_FIXED_HOLDING,
+                symbol = row.symbol,
+                product = "CNC",
+                side = "LONG",
+                quantity = filled,
+                entryPrice = actualFill,
+                stopPrice = HardStopLossPolicy.stopPrice(actualFill),
+                targetPrice = actualFill * (1.0 + row.targetPct / 100.0),
+                strategy = "Working Range v0.2 Alpha Auto-Buy · direct marketable LIMIT · hard -3% floor · v7 stepped trail 0.55→0.50 then +0.10%",
+                regime = "WORKING_RANGE_LONG",
+                confidence = 1.0,
+                sourceEventId = null,
+                openOrderId = orderId,
+                openReferenceId = reference,
+                openedAtMs = openedAtMs,
+                lastPrice = actualFill,
+                maxFavourablePrice = actualFill,
+                maxAdversePrice = actualFill,
+                lastEvaluatedAtMs = openedAtMs,
+                trailingArmPct = SteppedTrailingPolicy.ARM_TRIGGER_PCT,
+                trailingLastRatchetPrice = 0.0,
+                smartOrderMode = HoldingSmartOrderPolicy.MODE_NONE
+            ),
+            allowFreshPostFillProof = true,
+            deferProtectionRetryToMonitor = true
+            )
+        } catch (failure: Throwable) {
+            preferences.setSafetyHalt(true)
+            auditLogger.log("SAFETY", "WORKING_RANGE_POST_FILL_REGISTRATION_FAILED",
+                mapOf("symbol" to row.symbol, "order_id" to orderId, "reference" to reference,
+                    "message" to (failure.message ?: failure.javaClass.simpleName),
+                    "new_buys_halted" to true, "manual_reconciliation_required" to true))
+            throw failure
+        }
+        val protected = managedDao.openPosition(ENGINE_FIXED_HOLDING, row.symbol)?.let {
+            com.multify.traderpro.engine.GttProtectionReadinessPolicy.verified(
+                it.smartOrderMode, it.smartOrderId, it.smartOrderStatus
+            )
+        } == true
+        if (!protected) {
+            preferences.setSafetyHalt(true)
+            auditLogger.log("SAFETY", "WORKING_RANGE_BUY_UNPROTECTED_CRITICAL",
+                mapOf("symbol" to row.symbol, "order_id" to orderId,
+                    "reference" to reference, "explicit_unprotected_holding_alert" to true,
+                    "new_buys_halted_until_protection_verified" to true))
+        }
+        brokerInventorySnapshot = null
+    }
+
     suspend fun executeFixed(symbol: String): String {
         val now = ZonedDateTime.now(INDIA)
         require(com.multify.traderpro.engine.NseEquitySessionCalendar.isFixedNewEntryWindow(now) && marketSession() == "OPEN") { "Fixed BUY is unavailable outside the NSE entry window" }
@@ -12648,7 +13140,7 @@ class TradingRepository @Inject constructor(
                 add("fixed_operator_ui_transitions_v9019.json",
                     com.multify.traderpro.data.logging.FixedUiRenderEvidenceStore
                         .exportOperatorTransitions(appContext))
-                add("working_range_recommendations_v9020.json",
+                add("working_range_recommendations_v9021.json",
                     workingRangeRecommendationStore.export())
                 add("fixed_shadow_hypotheses_manifest.json", mapOf(
                     "schema" to "fixed_hypotheses_v8322",
@@ -12697,7 +13189,7 @@ class TradingRepository @Inject constructor(
                     "fixed_screen_observation_file" to "fixed_screen_compose_observation.json",
                     "fixed_operator_ui_transitions_file" to "fixed_operator_ui_transitions_v9019.json",
                     "working_range_enabled" to settings.workingRangeEnabled,
-                    "working_range_file" to "working_range_recommendations_v9020.json",
+                    "working_range_file" to "working_range_recommendations_v9021.json",
                     "working_range_auto_buy_enabled" to false,
                     "momentum_continuation_shadow_schema" to "fixed_momentum_continuation_shadow_v9019",
                     "marketability_from_existing_quote_only" to true,
@@ -12946,7 +13438,8 @@ class TradingRepository @Inject constructor(
         entryQuote: QuotePayload,
         quoteReceivedAtMs: Long,
         allowOtherSymbolProtectionRecovery: Boolean = false,
-        recommendationId: Long? = null
+        recommendationId: Long? = null,
+        workingRangeActivationAtMs: Long? = null
     ): OrderPayload = appOwnedBuyMutex.withLock {
         if (recommendationId != null && isFixedRecommendationExecutionConsumed(recommendationId)) {
             auditLogger.log("FIXED_AUTO_BUY", "RECOMMENDATION_EVENT_ALREADY_CONSUMED", mapOf(
@@ -13044,6 +13537,17 @@ class TradingRepository @Inject constructor(
                 com.multify.traderpro.engine.NseEquitySessionCalendar
                     .isFixedNewEntryWindow(ZonedDateTime.now(INDIA))) {
                 "BUY blocked: Fixed/Univest auto-buy disabled or session entry window ended during broker preflight"
+            }
+        } else if (reference.startsWith("WRM")) {
+            val switchAtDispatch = preferences.settings.first()
+            require(switchAtDispatch.workingRangeEnabled &&
+                switchAtDispatch.workingRangeActivatedAtMs > 0L &&
+                (workingRangeActivationAtMs == null ||
+                    switchAtDispatch.workingRangeActivatedAtMs == workingRangeActivationAtMs) &&
+                !switchAtDispatch.safetyHalt &&
+                com.multify.traderpro.engine.NseEquitySessionCalendar
+                    .isFixedNewEntryWindow(ZonedDateTime.now(INDIA))) {
+                "BUY blocked: Working Range Auto-Buy disabled or session entry window ended during broker preflight"
             }
         }
         require(System.currentTimeMillis() - freshAt in

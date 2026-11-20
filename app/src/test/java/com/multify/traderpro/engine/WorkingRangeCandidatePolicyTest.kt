@@ -58,6 +58,21 @@ class WorkingRangeCandidatePolicyTest {
         assertTrue(result.reasons.contains("EMA9_20_50_NOT_ALIGNED"))
     }
 
+    @Test fun oalNearEma20Ema50CrossIsRecordedButNotPromotedBeforeEndOfDayReview() {
+        // 20-Nov OAL: strong participation/book/momentum and a 0.21 INR EMA20/EMA50 gap.
+        // Keep strict selection unchanged today; telemetry records this near-cross for replay.
+        val result = WorkingRangeCandidatePolicy.assess(input(
+            rsi = 79.05, rvol = 20.35, accel = 2.66, green = 0.8145,
+            ema9 = 441.18, ema20 = 434.54, ema50 = 434.75,
+            ema9Slope = 0.42, ema20Slope = 0.31, macd = 0.04,
+            price = 462.95, atr = 8.8393, vwap = 454.995,
+            minutes = 300.0
+        ))
+        assertFalse(result.matches)
+        assertEquals("NOT_ALIGNED", result.emaAlignmentMode)
+        assertTrue(result.reasons.contains("EMA9_20_50_NOT_ALIGNED"))
+    }
+
     @Test fun lateEntryBelowThirtyEightMinutesIsNotPublished() {
         val result = WorkingRangeCandidatePolicy.assess(input(minutes = 37.9))
         assertFalse(result.matches)

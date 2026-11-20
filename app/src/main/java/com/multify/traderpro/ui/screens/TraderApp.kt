@@ -1152,11 +1152,11 @@ private fun WorkingRangeTable(
     Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
         SectionTitle(
             "Working Range recommendations",
-            if (enabled) "Separate pilot stream · manual review only · does not alter Fixed or Auto-Buy"
+            if (enabled) "Separate pilot stream · Alpha Auto-Buy on confirmation · Fixed remains unchanged"
             else "OFF · Fixed recommendations continue unchanged"
         )
         if (!enabled) {
-            EmptyState("Working Range is OFF", "Enable Working Range in Settings to start the separate pilot shortlist.")
+            EmptyState("Working Range is OFF", "Enable Working Range in Settings to start the separate stream and authorize new confirmed Alpha CNC entries.")
         } else if (rows.isEmpty()) {
             EmptyState("No Working Range candidate yet",
                 "The pilot requires two consecutive matching evaluations, sufficient time to close and limited drift. Fixed continues to show its own recommendations.")
@@ -1171,8 +1171,24 @@ private fun WorkingRangeTable(
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically) {
                             Text(row.symbol, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                            Text("WORKING RANGE · PILOT", style = MaterialTheme.typography.labelSmall,
+                            Text(
+                                when {
+                                    row.autoBuyState == "BUY_EXECUTED" -> "WORKING RANGE · BUY EXECUTED"
+                                    row.confirmedAtMs <= 0L && row.autoBuyEnabled -> "WORKING RANGE · CONFIRMATION 1/2"
+                                    row.autoBuyEnabled -> "WORKING RANGE · ALPHA AUTO-BUY ARMED"
+                                    else -> "WORKING RANGE · PRIOR RESEARCH"
+                                }, style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.tertiary, fontWeight = FontWeight.Bold)
+                        }
+                        if (row.autoBuyState != "NOT_ATTEMPTED") {
+                            Text(
+                                "Auto-Buy: " + row.autoBuyState.replace('_', ' ') +
+                                    (row.autoBuyOrderId?.let { " · Order $it" } ?: "") +
+                                    (row.autoBuyFillPrice?.let { " · Fill ₹" + String.format(Locale.US, "%.2f", it) } ?: ""),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (row.autoBuyState == "BUY_EXECUTED")
+                                    MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
                         }
                         Text(row.state.replace('_', ' '), style = MaterialTheme.typography.labelMedium,
                             color = if (row.state.startsWith("TARGET")) MaterialTheme.colorScheme.primary
@@ -1203,7 +1219,7 @@ private fun WorkingRangeTable(
                         )
                         Text(row.reason, style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Text("MANUAL REVIEW ONLY · NO WORKING RANGE AUTO-BUY · sparse client LTP samples are not intrabar paths",
+                        Text("ALPHA AUTO-BUY ON CONFIRMATION · broker preflight and GTT protection required · sparse LTP samples are not intrabar paths",
                             style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold,
                             color = MaterialTheme.colorScheme.tertiary)
                     }
@@ -1593,7 +1609,7 @@ private fun SettingsScreen(
                         Column(Modifier.weight(1f)) {
                             Text("Working Range", fontWeight = FontWeight.SemiBold)
                             Text(
-                                "Independent pilot shortlist using the same already-fetched 15m evaluation and quote. Fixed keeps running unchanged. Two consecutive matching scans are required. Working Range cards are manual-review only; this switch never enables Auto-Buy.",
+                                "ON starts the separate Working Range stream and authorizes an Alpha CNC BUY when a new candidate passes two consecutive matching evaluations. Fixed and Fixed Auto-Buy remain independent. Each order still requires a fresh Alpha quote, valid sell offer/circuit checks, price-drift guard, broker cash, capital/holding/pending-order checks and verified GTT protection. OFF stops new Working Range BUYs; existing holdings remain protected.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -1603,10 +1619,18 @@ private fun SettingsScreen(
                             onCheckedChange = onWorkingRangeChanged
                         )
                     }
-                    KeyValueRow("Working Range", if (state.settings.workingRangeEnabled)
-                        "ON · separate pilot stream · no Auto-Buy" else "OFF · Fixed only")
+                    if (state.settings.workingRangeEnabled) {
+                        Text(
+                            "LIVE AUTO-BUY ARMED · New confirmed Working Range events may submit real CNC orders through Groww Alpha. Switch OFF to stop new entries; it does not close or disable protection for existing holdings.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.error,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                    KeyValueRow("Working Range Auto-Buy", if (state.settings.workingRangeEnabled)
+                        "ON · Alpha BUY after two-scan confirmation" else "OFF · no new Working Range BUY")
                     Text(
-                        "Fixed remains immutable. Forecast may read prior positive Fixed outcomes, but can never write into Fixed or change its v7.4.1 rules. Every app-owned Multify, Fixed, Univest and Forecast LONG uses the same sell protection: hard -3% loss floor, then the existing +0.55% arm → +0.50% protected gain → +0.10% ratchet when profitable. No averaging down.",
+                        "Fixed remains immutable. Forecast may read prior positive Fixed outcomes, but can never write into Fixed or change its v7.4.1 rules. Every app-owned Multify, Fixed, Working Range, Univest and Forecast LONG uses the same sell protection: hard -3% loss floor, then the existing +0.55% arm → +0.50% protected gain → +0.10% ratchet when profitable. No averaging down.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
