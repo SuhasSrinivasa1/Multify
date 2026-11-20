@@ -7,9 +7,11 @@ class WorkingRangeAutoBuyPolicyTest {
     private fun decide(
         enabled: Boolean = true, halt: Boolean = false, activated: Long = 1_000L,
         confirmed: Long = 2_000L, state: String = "IN_RANGE",
-        execution: String = "NOT_ATTEMPTED", now: Long = 2_100L
+        execution: String = "NOT_ATTEMPTED", now: Long = 2_100L,
+        first: Long = confirmed
     ) = WorkingRangeAutoBuyPolicy.decide(
-        enabled, halt, activated, confirmed, state, execution, now
+        enabled, halt, activated, confirmed, state, execution, now,
+        firstQualifiedAtMs = first
     )
 
     @Test fun onlyNewConfirmationAfterExplicitActivationCanBuy() {
@@ -48,6 +50,12 @@ class WorkingRangeAutoBuyPolicyTest {
             1_000L, 2_000L, 1_200L, 1_150L))
         assertTrue(WorkingRangeDistinctScanPolicy.isIndependentSecondScan(
             1_000L, 2_000L, 1_100L, 2_100L))
+    }
+
+    @Test fun firstQualifiedSignalOlderThanTwoMinutesCannotBuy() {
+        assertEquals("FIRST_QUALIFIED_SIGNAL_EXPIRED",
+            decide(activated = 500L, confirmed = 10_000L,
+                first = 1_000L, now = 121_001L).reason)
     }
 
     @Test fun staleConfirmationCannotTriggerDelayedAutoBuy() {
