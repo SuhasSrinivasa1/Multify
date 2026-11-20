@@ -8089,7 +8089,7 @@ class TradingRepository @Inject constructor(
                             "confirmed_at_ms" to row.confirmedAtMs, "no_order_sent" to true))
                     if (eligibility.reason in setOf(
                             "FIRST_QUALIFIED_SIGNAL_EXPIRED",
-                            "CONFIRMATION_TO_BUY_EXPIRED_30S"
+                            "CONFIRMATION_TO_BUY_EXPIRED_45S"
                         )
                     ) workingRangeRecommendationStore.markAutoBuyOutcome(
                         row.symbol, row.confirmedAtMs, "BLOCKED_STALE_SIGNAL",
