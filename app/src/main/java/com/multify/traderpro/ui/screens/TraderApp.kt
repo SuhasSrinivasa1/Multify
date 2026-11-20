@@ -102,6 +102,7 @@ import java.text.NumberFormat
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.TimeZone
 
 
 @Composable
@@ -1339,6 +1340,15 @@ private fun ForecastTable(
                     if (fixed) {
                         Text("FIXED · FROZEN v7.4.1", style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                        if (f.reason.startsWith("FIXED PRIMARY PRESERVED · ENTRY PAUSED")) {
+                            Text(
+                                "ENTRY PAUSED · Source is extended, late or missing verified publication. " +
+                                    "PRIMARY ranking is preserved; a new BUY is not authorized.",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.error,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
                     }
                     if (fixed && f.qualityTier == "PRIMARY") {
                         Text(
@@ -1389,9 +1399,33 @@ private fun ForecastTable(
                         )
                     }
                     if (fixed) {
+                        val istClock = SimpleDateFormat("HH:mm:ss", Locale.US).apply {
+                            timeZone = TimeZone.getTimeZone("Asia/Kolkata")
+                        }
+                        val actualPublished = f.fixedActualPublishedAtMs?.let {
+                            istClock.format(Date(it)) + " IST"
+                        } ?: "not verified"
+                        val quoteReceipt = f.fixedSourceQuoteReceivedAtMs?.let {
+                            istClock.format(Date(it)) + " IST (client receipt)"
+                        } ?: "not verified"
                         Text(
-                            "Event scan " + SimpleDateFormat("HH:mm:ss", Locale.US)
-                                .format(Date(f.generatedAtMs)) + " IST · Fixed status: ${f.status.replace('_', ' ')} · observed high " +
+                            "SCAN START " + istClock.format(Date(f.generatedAtMs)) +
+                                " IST · ACTUAL PUBLICATION " + actualPublished,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            "Original Fixed quote " + quoteReceipt +
+                                (f.fixedFirstPrimaryPrice?.let {
+                                    " · First PRIMARY ₹" + String.format(Locale.US, "%.2f", it)
+                                } ?: "") +
+                                " · Broker exchange tick age NOT verified",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            "Fixed status: ${f.status.replace('_', ' ')} · sampled high " +
                                 (if (f.observedAfterPublication) "+${String.format(Locale.US, "%.2f", f.maxFavourablePct)}%" else "—"),
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant

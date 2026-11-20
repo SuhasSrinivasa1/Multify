@@ -82,7 +82,8 @@ class FixedHistoricalWindowStoreTest {
     @Test fun `LRU evictions are diagnosed without changing broker reuse decisions`() {
         val store = FixedHistoricalWindowStore()
         val start = "2026-11-16 09:15:00"
-        for (n in 0 until 130) {
+        // Cache capacity is 256; verify true LRU eviction, not a fixed 128-row assumption.
+        for (n in 0 until 258) {
             store.remember("LTP$n", start, rows(1_790_000_000L, 8), 1_000L)
         }
         assertNull(store.request("LTP0", start, 2_000L))
