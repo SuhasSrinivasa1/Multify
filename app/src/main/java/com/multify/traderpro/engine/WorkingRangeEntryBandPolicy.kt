@@ -10,8 +10,8 @@ package com.multify.traderpro.engine
  * historically optimal; every rejection is logged for equal-horizon replay.
  */
 object WorkingRangeEntryBandPolicy {
-    const val MAX_FIRST_QUALIFIED_TO_BUY_MS = 120_000L
-    const val MAX_CONFIRMATION_TO_BUY_MS = 30_000L
+    const val MAX_FIRST_QUALIFIED_TO_BUY_MS = 180_000L
+    const val MAX_CONFIRMATION_TO_BUY_MS = 45_000L
     const val MAX_UPWARD_DRIFT_FROM_FIRST_QUALIFIED_PCT = 0.50
     const val MAX_DRAWDOWN_FROM_FIRST_QUALIFIED_PCT = 0.75
     const val MAX_VWAP_EXTENSION_ATR = 3.50
