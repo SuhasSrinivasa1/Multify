@@ -90,13 +90,25 @@ class FixedHistoricalWindowStore {
         val rows = incremental.candles
         if (rows.size < 3 || !strictlyIncreasing(rows) || !strictlyIncreasing(oldRows)) return null
         val firstNew = epochSeconds(rows.first()) ?: return null
-        // Fresh data must overlap the old window by at least two candle timestamps.
+        // Both timestamp sequences are already verified strictly increasing.
+        // Merge-join is O(old + delta), not the previous O(old * delta)
+        // membership scan. No extra candles or API requests are introduced.
         val oldTimes = oldRows.map { epochSeconds(it) ?: return null }
         val newTimes = rows.map { epochSeconds(it) ?: return null }
-        if (oldTimes.count { it in newTimes } < 2) return null
-        if (newTimes.last() < oldTimes.last()) return null
-        val prefix = oldRows.filterIndexed { index, _ -> oldTimes[index] < firstNew }
-        val merged = prefix + rows
+        var i = 0
+        var j = 0
+        var overlap = 0
+        while (i < oldTimes.size && j < newTimes.size) {
+            when {
+                oldTimes[i] < newTimes[j] -> i++
+                oldTimes[i] > newTimes[j] -> j++
+                else -> { overlap++; i++; j++ }
+            }
+        }
+        if (overlap < 2 || newTimes.last() < oldTimes.last()) return null
+        val prefixEnd = oldTimes.indexOfFirst { it >= firstNew }
+            .let { if (it < 0) oldTimes.size else it }
+        val merged = oldRows.subList(0, prefixEnd) + rows
         if (!strictlyIncreasing(merged) || merged.size < MIN_BASE_ROWS) return null
         return incremental.copy(candles = merged, startTime = prior.history.startTime)
     }
