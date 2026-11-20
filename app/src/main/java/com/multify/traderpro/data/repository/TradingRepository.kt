@@ -1707,9 +1707,7 @@ class TradingRepository @Inject constructor(
             // OFF stops new entries and immediately reconciles/cancels any still-open
             // Working Range entry intent. Filled shares are registered and protected.
             runCatching {
-                val pending = workingRangeRecommendationStore.pendingAutoBuyIntents(
-                    LocalDate.now(INDIA).toString()
-                )
+                val pending = workingRangeRecommendationStore.pendingAutoBuyIntents()
                 if (pending.isNotEmpty()) {
                     val token = ensureToken()
                     if (token != null) reconcileWorkingRangeAutoBuyIntents(token)
@@ -8263,7 +8261,7 @@ class TradingRepository @Inject constructor(
     }
 
     private suspend fun reconcileWorkingRangeAutoBuyIntents(token: String) {
-        for (row in workingRangeRecommendationStore.pendingAutoBuyIntents(today)) {
+        for (row in workingRangeRecommendationStore.pendingAutoBuyIntents()) {
             val reference = row.autoBuyReference
             if (reference.isBlank()) continue
             val existing = managedDao.openPositions().firstOrNull {
