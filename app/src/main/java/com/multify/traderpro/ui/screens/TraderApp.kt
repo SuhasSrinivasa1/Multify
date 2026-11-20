@@ -1154,13 +1154,13 @@ private fun WorkingRangeTable(
         SectionTitle(
             "Working Range recommendations",
             if (autoBuyEnabled)
-                "Always-on research scanner · Auto-Buy ON for new post-activation confirmations · Fixed remains unchanged"
+                "Independent momentum rules · Auto-Buy ON for new confirmations · opening quote samples from 9:15 · no extra discovery calls"
             else
-                "Always-on research scanner · Auto-Buy OFF · recommendations remain visible · Fixed remains unchanged"
+                "Independent momentum rules · Auto-Buy OFF · opening watch visible from 9:15 · no extra discovery calls"
         )
         if (rows.isEmpty()) {
             EmptyState("No Working Range candidate yet",
-                "The research scanner runs during Indian market hours regardless of the Auto-Buy switch. It requires two consecutive matching evaluations, sufficient time to close and limited drift.")
+                "The opening monitor starts with the first existing live quote scan. Before 09:45 IST it uses client-received price/volume samples plus prior completed 15m trend; it does not wait for the first same-day 15m candle. A provisional watch can appear after two samples; a confirmed candidate still needs three opening samples and two independent qualifying scans. No extra 5m/history requests are made.")
         } else {
             rows.forEach { row ->
                 Card(
@@ -1173,6 +1173,8 @@ private fun WorkingRangeTable(
                             verticalAlignment = Alignment.CenterVertically) {
                             Text(row.symbol, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                             Text(when {
+                                    row.state == "OPENING_WATCH" -> "WORKING RANGE · OPENING WATCH · PROVISIONAL"
+                                    row.state == "POSITION_CLOSED" -> "WORKING RANGE · BROKER CLOSE · RE-ENTRY RESEARCH ONLY"
                                     row.autoBuyState == "BUY_EXECUTED" -> "WORKING RANGE · BUY EXECUTED"
                                     row.autoBuyState.startsWith("BLOCKED_") ||
                                         row.autoBuyState == "TARGET_ALREADY_REACHED" ||
@@ -1196,7 +1198,7 @@ private fun WorkingRangeTable(
                                     MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
-                        Text(if (row.state == "IN_RANGE") "TECHNICAL RANGE MATCH · BUY eligibility checked separately"
+                        Text(if (row.state == "IN_RANGE") "MOMENTUM RANGE CONFIRMED · BUY eligibility checked separately"
                             else row.state.replace('_', ' '), style = MaterialTheme.typography.labelMedium,
                             color = if (row.state.startsWith("TARGET")) MaterialTheme.colorScheme.primary
                                 else if (row.state.startsWith("STOP")) MaterialTheme.colorScheme.error
@@ -1221,11 +1223,26 @@ private fun WorkingRangeTable(
                                 style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
                             Text("Latest ₹${String.format(Locale.US, "%.2f", row.lastPrice)}  ·  Sampled MFE +${String.format(Locale.US, "%.2f", row.maxFavourablePct)}%  ·  MAE ${String.format(Locale.US, "%.2f", row.maxAdversePct)}%",
                                 style = MaterialTheme.typography.bodySmall)
+                        } else if (row.state == "OPENING_WATCH") {
+                            Text(
+                                "Opening momentum " + (row.openingMomentumPct?.let { String.format(Locale.US, "%+.2f%%", it) } ?: "—") +
+                                    " · " + row.openingSampleCount + " client quote samples · provisional only",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.tertiary
+                            )
                         } else {
                             Text("Confirming candidate · ${String.format(Locale.US, "%.1f", row.candidateAgeMinutes)} min · price drift ${String.format(Locale.US, "%.2f", row.driftFromFirstQualifiedPct)}%",
                                 style = MaterialTheme.typography.bodySmall)
                         }
-                        Text("RSI ${row.rsi?.let { String.format(Locale.US, "%.1f", it) } ?: "—"} · RVOL ${row.rvol?.let { String.format(Locale.US, "%.2f", it) } ?: "—"} · Vol accel ${row.volumeAcceleration?.let { String.format(Locale.US, "%.2f", it) } ?: "—"} · Green volume ${row.greenVolumeShare?.let { String.format(Locale.US, "%.0f%%", it * 100.0) } ?: "—"}",
+                        Text("RSI ${row.rsi?.let { String.format(Locale.US, "%.1f", it) } ?: "—"} (slope ${row.rsiSlope?.let { String.format(Locale.US, "%+.2f", it) } ?: "—"}) · RVOL ${row.rvol?.let { String.format(Locale.US, "%.2f", it) } ?: "—"} · Vol accel ${row.volumeAcceleration?.let { String.format(Locale.US, "%.2f", it) } ?: "—"} · Green volume ${row.greenVolumeShare?.let { String.format(Locale.US, "%.0f%%", it * 100.0) } ?: "—"}",
+                            style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("EMA slopes ${row.ema9Slope?.let { String.format(Locale.US, "%+.3f", it) } ?: "—"}/${row.ema20Slope?.let { String.format(Locale.US, "%+.3f", it) } ?: "—"} · MACD hist slope ${row.macdHistogramSlope?.let { String.format(Locale.US, "%+.3f", it) } ?: "—"}",
+                            style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        if (row.openingSampleCount > 0) {
+                            Text("Opening basis: ${row.openingSignalBasis.replace('_', ' ')} · volume pace RVOL ${row.openingVolumePaceRvol?.let { String.format(Locale.US, "%.2f", it) } ?: "—"}",
+                                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Text("Research stop -1.00% · exit shadows: fixed ${row.exitComparisonFixedState.replace('_', ' ')} (${row.exitComparisonFixedReturnPct?.let { String.format(Locale.US, "%+.2f%%", it) } ?: "—"}) · trail ${row.exitComparisonTrailState.replace('_', ' ')} · partial ${row.exitComparisonPartialState.replace('_', ' '}",
                             style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Text("Target requirement ${row.targetRequirementAtr?.let { String.format(Locale.US, "%.2f ATR", it) } ?: "—"} · VWAP extension ${row.vwapExtensionAtr?.let { String.format(Locale.US, "%.2f ATR", it) } ?: "—"} · Spread ${row.spreadBps?.let { String.format(Locale.US, "%.1f bps", it) } ?: "unknown"}",
                             style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1242,9 +1259,9 @@ private fun WorkingRangeTable(
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Text(
                             if (autoBuyEnabled && row.autoBuyEnabled)
-                                "AUTO-BUY PERMISSION ON FOR THIS EVENT · fresh Alpha quote, cash, order and verified GTT checks still required · sparse LTP samples are not intrabar paths"
+                                "AUTO-BUY PERMISSION ON FOR THIS EVENT · fresh Alpha quote, cash, order and verified -1% GTT protection still required · sparse LTP samples are not intrabar paths"
                             else
-                                "RESEARCH ONLY · no BUY permission for this event · sparse client LTP samples are not intrabar paths",
+                                "RESEARCH ONLY · no BUY permission for this event · Working Range hard stop is -1.00% · sparse client LTP samples are not intrabar paths",
                             style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold,
                             color = MaterialTheme.colorScheme.tertiary
                         )
@@ -1668,7 +1685,7 @@ private fun SettingsScreen(
                         Column(Modifier.weight(1f)) {
                             Text("Working Range Auto-Buy", fontWeight = FontWeight.SemiBold)
                             Text(
-                                "The Working Range research scanner always runs during Indian market hours and its recommendations remain visible whether this switch is ON or OFF. ON only authorizes newly confirmed events occurring after activation to attempt an Alpha CNC BUY. OFF blocks new Working Range BUYs but never stops scanning, hides recommendations or removes pending research candidates. Every permitted order still requires fresh Alpha quotes, marketability, cash, capital/holding/pending-order checks and verified broker GTT protection. Existing holdings remain protected.",
+                                "Working Range is an independent momentum strategy: it does not consume Univest alerts or Fixed scores/recommendations. It reuses the existing shared market-data quote/history snapshots to avoid extra discovery calls. Its opening monitor uses live quote/volume samples before 09:45 IST, so it does not wait for a completed same-day 15m candle. ON only authorizes newly confirmed post-activation events to attempt an Alpha CNC BUY. Every permitted order requires a fresh Alpha quote, marketability, cash/capital/holding/pending-order checks and a broker-verified fixed -1.00% GTT stop. Beta remains read-only.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -1683,7 +1700,7 @@ private fun SettingsScreen(
                         "ON · only new post-activation confirmations may attempt Alpha BUY"
                         else "OFF · research continues; no new Working Range BUY")
                     Text(
-                        "Fixed remains immutable. Forecast may read prior positive Fixed outcomes, but can never write into Fixed or change its v7.4.1 rules. Every app-owned Multify, Fixed, Working Range, Univest and Forecast LONG uses the same sell protection: hard -3% loss floor, then the existing +0.55% arm → +0.50% protected gain → +0.10% ratchet when profitable. No averaging down.",
+                        "Fixed remains frozen, including its existing stop and stepped-trailing rules. Working Range has its own fixed -1.00% hard stop and full-target-or-stop exit; it does not use the Fixed/Univest sell thresholds or the stepped trail. Working Range re-entry after a broker-confirmed close is research-only. No averaging down.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
