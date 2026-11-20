@@ -11,6 +11,7 @@ import java.util.LinkedHashMap
 import java.security.MessageDigest
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.io.IOException
 
 /**
  * Small RAM-only hot-response cache for repeated Groww market-data reads.
@@ -19,7 +20,8 @@ import java.util.concurrent.TimeUnit
 internal class GrowwHotDataCacheInterceptor(
     private val account: String = "ALPHA",
     private val recordAlphaStats: Boolean = true,
-    private val elapsedMs: () -> Long = { SystemClock.elapsedRealtime() }
+    private val elapsedMs: () -> Long = { SystemClock.elapsedRealtime() },
+    private val singleFlightWaitMs: Long = SINGLE_FLIGHT_WAIT_MS
 ) : Interceptor {
     private data class Entry(
         val storedAtMs: Long,
@@ -70,16 +72,24 @@ internal class GrowwHotDataCacheInterceptor(
         if (!leader) {
             // Identical in-flight reads share one immutable body. Do not coalesce trading,
             // account, authentication, or non-GET endpoints; only paths with explicit TTL.
-            if (pendingRequest.completed.await(SINGLE_FLIGHT_WAIT_MS, TimeUnit.MILLISECONDS)) {
-                val result = pendingRequest.outcome
-                if (result != null && elapsedMs() - result.storedAtMs <= ttlMs) {
-                    if (recordAlphaStats) GrowwApiUsageLedger.recordCacheHit()
-                    return replay(request, result, "SINGLE_FLIGHT")
-                }
+            val completed = try {
+                pendingRequest.completed.await(singleFlightWaitMs.coerceAtLeast(1L), TimeUnit.MILLISECONDS)
+            } catch (interrupted: InterruptedException) {
+                Thread.currentThread().interrupt()
+                throw IOException("FIXED_INFLIGHT_READ_INTERRUPTED_NO_RETRY", interrupted)
             }
-            // Timed-out or failed leader: use normal broker/recovery rules for fallback.
-            if (recordAlphaStats) GrowwApiUsageLedger.recordCacheMiss()
-            return chain.proceed(request)
+            val result = if (completed) pendingRequest.outcome else null
+            if (result != null && elapsedMs() - result.storedAtMs <= ttlMs) {
+                if (recordAlphaStats) GrowwApiUsageLedger.recordCacheHit()
+                return replay(request, result, "SINGLE_FLIGHT")
+            }
+            // Previous behaviour sent a SECOND request when an identical leader was
+            // slow, rate-limited or failed. That amplified 429s and wasted permits.
+            // Fail closed instead: never silently replay stale data or create duplicate
+            // full-market/historical wire traffic. The next scheduled scan may retry.
+            if (recordAlphaStats) GrowwApiUsageLedger.recordDuplicatePrevented()
+            throw IOException(if (completed) "FIXED_INFLIGHT_READ_FAILED_NO_DUPLICATE"
+                else "FIXED_INFLIGHT_READ_TIMEOUT_NO_DUPLICATE")
         }
 
         if (recordAlphaStats) GrowwApiUsageLedger.recordCacheMiss()
