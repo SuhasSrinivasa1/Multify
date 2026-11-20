@@ -225,6 +225,9 @@ private fun AccountStatusStrip(state: TraderUiState) {
     ) {
         AccountPill("ALPHA", alphaStatus, if (alphaReady) LiteTone.POSITIVE else LiteTone.WARNING)
         AccountPill("BETA", betaStatus, if (state.betaAuthenticated) LiteTone.INFO else LiteTone.NEUTRAL)
+        if (state.settings.brokerAuthenticated && !state.settings.brokerDdpiEnabled) {
+            AccountPill("DDPI", "NOT ENABLED", LiteTone.WARNING)
+        }
         if (state.settings.safetyHalt || state.dashboard?.halted == true) {
             AccountPill("TRADING", "SAFETY HALT", LiteTone.NEGATIVE)
         }
@@ -377,7 +380,7 @@ internal fun LiteFixedScreen(state: TraderUiState, onScan: () -> Unit, onBuy: (S
         .sortedWith(compareBy<ForecastDto> { it.rank }.thenByDescending { it.generatedAtMs })
     val positions = dashboard?.positions.orEmpty().filter { it.quantity > 0 }
     val manualEntryReady = dashboard != null && state.settings.legacyPortfolioReconciled &&
-        state.settings.brokerAuthenticated && state.settings.staticIpMatched &&
+        state.settings.brokerAuthenticated && state.settings.staticIpMatched && state.settings.brokerDdpiEnabled &&
         !state.settings.safetyHalt && dashboard.halted.not()
     val discoveryTone = when (health.discovery.uppercase(Locale.US)) {
         "READY", "HEALTHY", "COMPLETE" -> LiteTone.POSITIVE
@@ -759,7 +762,9 @@ internal fun LiteSettingsScreen(
         GttProtectionReadinessPolicy.verified(it.smartOrderMode, it.smartOrderId, it.smartOrderStatus)
     }
     val alphaReady = state.settings.brokerAuthenticated && state.settings.staticIpMatched
-    val canEnableAutoBuy = alphaReady && state.dashboard != null && state.settings.legacyPortfolioReconciled && !state.settings.safetyHalt && state.dashboard?.halted != true && allProtected
+    val canEnableAutoBuy = alphaReady && state.settings.brokerDdpiEnabled && state.dashboard != null &&
+        state.settings.legacyPortfolioReconciled && !state.settings.safetyHalt &&
+        state.dashboard?.halted != true && allProtected
 
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).testTag("settings-screen")
@@ -812,7 +817,7 @@ internal fun LiteSettingsScreen(
             }
             if (!canEnableAutoBuy) {
                 Text(
-                    "Auto-Buy remains locked until Alpha authentication, static-IP match, portfolio reconciliation, a loaded position snapshot, no safety halt and verified GTT protection are all present.",
+                    "Auto-Buy remains locked until Alpha authentication, static-IP match, DDPI, portfolio reconciliation, a loaded position snapshot, no safety halt and verified GTT protection are all present.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error
                 )
