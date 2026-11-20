@@ -14,6 +14,7 @@ class AppPositionOwnershipPolicyTest {
         assertTrue(allowed("FORECAST_HOLDING", "FLH1234567890abcd"))
         assertTrue(allowed("FIXED_HOLDING", "FXH1234567890abcd"))
         assertTrue(allowed("FIXED_HOLDING", "FXM1234567890abcd"))
+        assertTrue(allowed("FIXED_HOLDING", "WRM1234567890abcd"))
         assertFalse(allowed("PORTFOLIO_HOLDING", "PFH1234567890abcd"))
         assertFalse(allowed("FIXED_HOLDING", "PFH1234567890abcd"))
         assertFalse(allowed("FORECAST_HOLDING", "unknown"))
