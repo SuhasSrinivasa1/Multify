@@ -8456,7 +8456,7 @@ class TradingRepository @Inject constructor(
                 entryPrice = actualFill,
                 stopPrice = com.multify.traderpro.engine.WorkingRangeExitPolicy.stopPrice(actualFill),
                 targetPrice = actualFill * (1.0 + row.targetPct / 100.0),
-                strategy = "Working Range v0.3 Alpha Auto-Buy · full target or hard -1% stop only · no stepped trailing",
+                strategy = "Working Range v0.4 Alpha Auto-Buy · bounded entry band · full target or hard -1% stop only · no stepped trailing",
                 regime = "WORKING_RANGE_LONG",
                 confidence = 1.0,
                 sourceEventId = null,
