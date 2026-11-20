@@ -1,6 +1,8 @@
 package com.multify.traderpro.ui.screens
 
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
@@ -12,6 +14,9 @@ import com.multify.traderpro.data.network.EngineHealthDto
 import com.multify.traderpro.data.network.ForecastDto
 import com.multify.traderpro.data.network.WorkingRangeRecommendationDto
 import com.multify.traderpro.ui.theme.MultifyTraderTheme
+import com.multify.traderpro.data.preferences.AppSettings
+import java.time.LocalDateTime
+import java.time.ZoneId
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
@@ -19,15 +24,21 @@ import org.junit.Test
 class FixedLiteUiTest {
     @get:Rule val compose = createComposeRule()
 
-    @Test fun fixedHomeExplainsWaitingWithoutInventingMarketCoverage() {
+    private fun ist(hour: Int, minute: Int): Long =
+        LocalDateTime.of(2026, 11, 20, hour, minute)
+            .atZone(ZoneId.of("Asia/Kolkata")).toInstant().toEpochMilli()
+
+    @Test fun fixedHomeExplainsClosedSessionInsteadOfFakeZeroCoverage() {
         compose.setContent {
             MultifyTraderTheme(darkTheme = false) {
-                LiteFixedScreen(TraderUiState(dashboard = DashboardDto(fixedHealth = EngineHealthDto(discovery = "WAITING"))), onScan = {}, onBuy = {})
+                LiteFixedScreen(TraderUiState(dashboard = DashboardDto(fixedHealth = EngineHealthDto(discovery = "WAITING"))), onScan = {}, nowMs = ist(20, 18), onBuy = {})
             }
         }
         compose.onNodeWithText("Frozen 15m strategy").assertIsDisplayed()
         compose.onNodeWithText("Run Fixed scan").assertIsDisplayed()
-        compose.onNodeWithText("WAITING").assertIsDisplayed()
+        compose.onNodeWithText("MARKET CLOSED").assertIsDisplayed()
+        compose.onNodeWithText("Run Fixed scan").assertIsNotEnabled()
+        compose.onNodeWithText("Live discovery starts during the NSE session. Coverage is not measured while closed.").assertIsDisplayed()
         compose.onNodeWithTag("fixed-screen").performScrollToNode(hasText("No published recommendations"))
         compose.onNodeWithText("No published recommendations").assertIsDisplayed()
     }
@@ -53,8 +64,15 @@ class FixedLiteUiTest {
         compose.setContent {
             MultifyTraderTheme(darkTheme = false) {
                 LiteFixedScreen(
-                    TraderUiState(dashboard = DashboardDto(fixedForecasts = listOf(row))),
+                    TraderUiState(
+                        settings = AppSettings(
+                            brokerAuthenticated = true,
+                            staticIpMatched = true
+                        ),
+                        dashboard = DashboardDto(fixedForecasts = listOf(row))
+                    ),
                     onScan = {},
+                    nowMs = ist(10, 0),
                     onBuy = {}
                 )
             }
@@ -63,7 +81,7 @@ class FixedLiteUiTest {
         compose.onNodeWithText("TESTCO").assertIsDisplayed()
         compose.onNodeWithText("PRIMARY").assertIsDisplayed()
         compose.onNodeWithText("ACTIONABLE").assertIsDisplayed()
-        compose.onNodeWithText("Manual BUY · Alpha").assertIsDisplayed()
+        compose.onNodeWithText("Manual BUY · Alpha").assertIsEnabled()
     }
 
     @Test fun workingRangeCardShowsTwoScanPilotAndKeepsOutcomeSamplingExplicit() {
@@ -93,7 +111,7 @@ class FixedLiteUiTest {
                 LiteRangeScreen(TraderUiState(dashboard = DashboardDto(workingRangeRecommendations = listOf(row))))
             }
         }
-        compose.onNodeWithText("TWO DISTINCT SCANS REQUIRED").assertIsDisplayed()
+        compose.onNodeWithText("TWO DISTINCT SCANS").assertIsDisplayed()
         compose.onNodeWithTag("working-range-screen").performScrollToNode(hasText("RANGECO"))
         compose.onNodeWithText("RANGECO").assertIsDisplayed()
         compose.onNodeWithText("IN_RANGE").assertIsDisplayed()
