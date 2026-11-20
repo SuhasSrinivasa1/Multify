@@ -8167,41 +8167,62 @@ class TradingRepository @Inject constructor(
                     trafficPriority = MarketDataPriorityAdmissionPolicy.PROTECTION
                 ).requirePayload("Working Range fresh Alpha quote ${row.symbol}")
             }.onFailure {
+                val message = it.message ?: it.javaClass.simpleName
+                workingRangeRecommendationStore.markAutoBuyOutcome(
+                    row.symbol, row.confirmedAtMs, "RETRYABLE_BLOCKED",
+                    reason = "Fresh Alpha quote unavailable · $message"
+                )
                 auditLogger.logAsync("WORKING_RANGE_AUTO_BUY", "ALPHA_QUOTE_FAILED",
-                    mapOf("symbol" to row.symbol,
-                        "message" to (it.message ?: it.javaClass.simpleName)))
+                    mapOf("symbol" to row.symbol, "message" to message,
+                        "retry_on_next_fresh_scan" to true))
             }.getOrNull() ?: continue
             val quoteReceivedAtMs = System.currentTimeMillis()
             preferences.recordMarketData()
             val quoteElapsedMs = (quoteReceivedAtMs - quoteStartedAtMs).coerceAtLeast(0L)
             val ltp = quote.lastPrice?.takeIf { it.isFinite() && it > 0.0 } ?: continue
             if (!RecommendationPriceBandPolicy.eligible(ltp)) {
+                workingRangeRecommendationStore.markAutoBuyOutcome(
+                    row.symbol, row.confirmedAtMs, "BLOCKED_PRICE_BAND",
+                    reason = "Fresh Alpha price is outside the supported entry band"
+                )
                 auditLogger.logAsync("WORKING_RANGE_AUTO_BUY", "PRICE_BAND_REJECTED",
                     mapOf("symbol" to row.symbol, "fresh_alpha_ltp" to ltp))
                 continue
             }
             val liquidityReject = ExecutionQuoteLiquidityPolicy.rejectionReason(quote)
             if (liquidityReject != null) {
+                workingRangeRecommendationStore.markAutoBuyOutcome(
+                    row.symbol, row.confirmedAtMs, "RETRYABLE_BLOCKED",
+                    reason = "Fresh Alpha liquidity preflight · $liquidityReject"
+                )
                 auditLogger.logAsync("WORKING_RANGE_AUTO_BUY", "ENTRY_LIQUIDITY_UNVERIFIED",
                     mapOf("symbol" to row.symbol, "reason" to liquidityReject,
-                        "fresh_alpha_quote" to true))
+                        "fresh_alpha_quote" to true, "retry_on_next_fresh_scan" to true))
                 continue
             }
             val thinLiquidityReject = FixedExecutionThinLiquidityPolicy.rejectionReason(quote)
             if (thinLiquidityReject != null) {
+                workingRangeRecommendationStore.markAutoBuyOutcome(
+                    row.symbol, row.confirmedAtMs, "RETRYABLE_BLOCKED",
+                    reason = "Fresh Alpha micro-liquidity preflight · $thinLiquidityReject"
+                )
                 auditLogger.logAsync("WORKING_RANGE_AUTO_BUY", "ENTRY_MICRO_LIQUIDITY_REJECTED",
                     mapOf("symbol" to row.symbol, "reason" to thinLiquidityReject,
-                        "reported_day_shares" to quote.volume))
+                        "reported_day_shares" to quote.volume, "retry_on_next_fresh_scan" to true))
                 continue
             }
             val extensionReject = ExecutionEntryPriceGuardPolicy.rejectionReason(
                 row.entryPrice, ltp, quoteElapsedMs
             )
             if (extensionReject != null) {
+                workingRangeRecommendationStore.markAutoBuyOutcome(
+                    row.symbol, row.confirmedAtMs, "RETRYABLE_BLOCKED",
+                    reason = "Fresh Alpha price drift preflight · $extensionReject"
+                )
                 auditLogger.logAsync("WORKING_RANGE_AUTO_BUY", "ENTRY_PRICE_GUARD_REJECTED",
                     mapOf("symbol" to row.symbol, "reason" to extensionReject,
                         "confirmed_entry" to row.entryPrice, "fresh_alpha_ltp" to ltp,
-                        "quote_elapsed_ms" to quoteElapsedMs))
+                        "quote_elapsed_ms" to quoteElapsedMs, "retry_on_next_fresh_scan" to true))
                 continue
             }
             if (ltp >= row.targetPrice) {
@@ -8215,6 +8236,10 @@ class TradingRepository @Inject constructor(
                 live.holdingBudgetRupees.toDouble(), ltp
             )
             if (sizing.quantity <= 0) {
+                workingRangeRecommendationStore.markAutoBuyOutcome(
+                    row.symbol, row.confirmedAtMs, "BLOCKED_INVALID_BUDGET_OR_PRICE",
+                    reason = "Per-order CNC budget cannot fund one share at fresh Alpha LTP"
+                )
                 auditLogger.logAsync("WORKING_RANGE_AUTO_BUY", "SKIPPED_INVALID_BUDGET_OR_PRICE",
                     mapOf("symbol" to row.symbol, "fresh_ltp" to ltp,
                         "per_order_budget" to live.holdingBudgetRupees))
@@ -8260,13 +8285,19 @@ class TradingRepository @Inject constructor(
                 val message = failure.message ?: failure.javaClass.simpleName
                 if (message.startsWith("BUY blocked:")) {
                     // Known local/broker preflight rejection occurs before the order POST.
+                    val retryableMarketability = message.contains("seller", true) ||
+                        message.contains("offer", true) || message.contains("circuit", true)
                     workingRangeRecommendationStore.markAutoBuyOutcome(
-                        row.symbol, row.confirmedAtMs, "BLOCKED_PREORDER",
+                        row.symbol, row.confirmedAtMs,
+                        if (retryableMarketability) "RETRYABLE_BLOCKED" else "BLOCKED_PREORDER",
                         reason = message
                     )
-                    auditLogger.log("WORKING_RANGE_AUTO_BUY", "PREORDER_GUARD_BLOCKED",
+                    auditLogger.log("WORKING_RANGE_AUTO_BUY",
+                        if (retryableMarketability) "PREORDER_MARKETABILITY_RETRYABLE"
+                        else "PREORDER_GUARD_BLOCKED",
                         mapOf("symbol" to row.symbol, "reference" to reference,
                             "message" to message, "broker_order_posted" to false,
+                            "retry_on_next_fresh_scan" to retryableMarketability,
                             "blind_resubmission" to false))
                 } else {
                     // Intent remains RESERVED. Recovery checks the exact broker reference;
