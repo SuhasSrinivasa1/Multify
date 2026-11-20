@@ -12909,7 +12909,8 @@ class TradingRepository @Inject constructor(
             "forecast_auto_buy_enabled" to settings.forecastAutoBuyEnabled,
             "fixed_auto_buy_enabled" to settings.fixedAutoBuyEnabled,
             "working_range_enabled" to settings.workingRangeEnabled,
-            "working_range_auto_buy_enabled" to false,
+            "working_range_auto_buy_enabled" to
+                (settings.workingRangeEnabled && settings.workingRangeActivatedAtMs > 0L),
             "package_filter" to settings.packageFilter,
             "broker_authenticated" to settings.brokerAuthenticated,
             "ddpi_enabled" to settings.brokerDdpiEnabled,
@@ -13079,7 +13080,8 @@ class TradingRepository @Inject constructor(
                     "fixed_operator_ui_transitions_file" to "fixed_operator_ui_transitions_v9019.json",
                     "working_range_enabled" to settings.workingRangeEnabled,
                     "working_range_file" to "working_range_recommendations_v9021.json",
-                    "working_range_auto_buy_enabled" to false,
+                    "working_range_auto_buy_enabled" to
+                (settings.workingRangeEnabled && settings.workingRangeActivatedAtMs > 0L),
                     "momentum_continuation_shadow_schema" to "fixed_momentum_continuation_shadow_v9019",
                     "marketability_from_existing_quote_only" to true,
                     "fixed_pattern_research_schema" to "fixed_pattern_hypotheses_v8322",
