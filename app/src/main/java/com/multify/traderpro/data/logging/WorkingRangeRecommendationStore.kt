@@ -108,6 +108,7 @@ class WorkingRangeRecommendationStore(context: Context) {
     private val gson = Gson()
     private val lock = Any()
     private val droppedQueueItems = AtomicLong(0L)
+    @Volatile private var lastFlushedDroppedCount = 0L
     private val queue = ThreadPoolExecutor(
         1, 1, 0L, TimeUnit.MILLISECONDS,
         ArrayBlockingQueue(256),
@@ -143,8 +144,16 @@ class WorkingRangeRecommendationStore(context: Context) {
     }
 
     /** Wait until all already-enqueued evidence writes have completed. */
-    fun flush(timeoutMs: Long = 5_000L): Boolean =
-        runCatching { queue.submit {}.get(timeoutMs, TimeUnit.MILLISECONDS); true }.getOrDefault(false)
+    fun flush(timeoutMs: Long = 5_000L): Boolean {
+        val completed = runCatching {
+            queue.submit {}.get(timeoutMs, TimeUnit.MILLISECONDS)
+            true
+        }.getOrDefault(false)
+        val droppedNow = droppedQueueItems.get()
+        val noNewDropsSincePreviousFlush = droppedNow == lastFlushedDroppedCount
+        lastFlushedDroppedCount = droppedNow
+        return completed && noNewDropsSincePreviousFlush
+    }
 
     /** Durable one-shot intent, keyed by the confirmed symbol/event timestamp. */
     fun reserveAutoBuy(symbol: String, confirmedAtMs: Long, reference: String, quantity: Int): Boolean =
@@ -206,7 +215,8 @@ class WorkingRangeRecommendationStore(context: Context) {
     ) = synchronized(lock) {
         val row = rows.firstOrNull {
             it.symbol.equals(symbol, true) &&
-                (it.dto.autoBuyReference == reference || it.dto.autoBuyReference.isBlank() && it.dto.confirmedAtMs > 0L &&
+                (it.dto.autoBuyReference == reference || reference.isBlank() &&
+                    it.dto.autoBuyReference.isBlank() && it.dto.confirmedAtMs > 0L &&
                     it.dto.autoBuyState == "BUY_EXECUTED")
         } ?: return@synchronized
         row.dto = row.dto.copy(
