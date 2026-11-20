@@ -23,8 +23,8 @@ import kotlin.math.min
 /**
  * Separate Working Range pilot journal.
  *
- * - Consumes only a Fixed evaluation/quote that has already been fetched.
- * - Adds ZERO Groww calls and never blocks the scan thread.
+ * - Candidate discovery consumes only a Fixed evaluation/quote already fetched and adds ZERO Groww calls.
+ * - The separate execution consumer requests a fresh Alpha quote and broker preflight only after explicit opt-in.
  * - Two consecutive matching scan evaluations are required.
  * - One confirmed Working Range event per symbol per IST day.
  * - Live BUY is authorized only by the new explicit Working Range ON activation timestamp.
