@@ -27,6 +27,7 @@ data class AppSettings(
     val forecastScannerEnabled: Boolean = false,
     val forecastAutoBuyEnabled: Boolean = false,
     val fixedScannerEnabled: Boolean = true,
+    val legacyPortfolioReconciled: Boolean = false,
     val fixedAutoBuyEnabled: Boolean = false,
     val fixedAutoBuyActivatedAtMs: Long = 0L,
     /** Independent Working Range Auto-Buy permission; the research scanner is always on. */
@@ -71,6 +72,7 @@ class AppPreferences @Inject constructor(
         val forecastEarlyEntryMigration = booleanPreferencesKey("forecast_early_entry_v788_enabled")
         val forecastAutoBuyEnabled = booleanPreferencesKey("forecast_auto_buy_enabled")
         val fixedScannerEnabled = booleanPreferencesKey("fixed_lite_scanner_enabled_v1")
+        val legacyPortfolioReconciled = booleanPreferencesKey("fixed_lite_legacy_portfolio_reconciled_v1")
         val fixedAutoBuyEnabled = booleanPreferencesKey("fixed_auto_buy_enabled")
         val fixedAutoBuyActivatedAtMs = longPreferencesKey("fixed_auto_buy_activated_at_ms")
         val workingRangeEnabled = booleanPreferencesKey("working_range_enabled_v9020")
@@ -226,6 +228,11 @@ class AppPreferences @Inject constructor(
         context.dataStore.edit { it[Keys.fixedScannerEnabled] = value }
     }
 
+    /** Separate package has a separate DB; never enable Auto-Buy until the operator reconciles old-app holdings in Groww. */
+    suspend fun setLegacyPortfolioReconciled(value: Boolean) {
+        context.dataStore.edit { it[Keys.legacyPortfolioReconciled] = value }
+    }
+
     suspend fun setFixedAutoBuy(value: Boolean) {
         context.dataStore.edit {
             if (value) {
@@ -294,6 +301,7 @@ class AppPreferences @Inject constructor(
         forecastScannerEnabled = this[Keys.forecastScannerEnabled] ?: false,
         forecastAutoBuyEnabled = this[Keys.forecastAutoBuyEnabled] ?: false,
         fixedScannerEnabled = this[Keys.fixedScannerEnabled] ?: true,
+        legacyPortfolioReconciled = this[Keys.legacyPortfolioReconciled] ?: false,
         fixedAutoBuyEnabled = this[Keys.fixedAutoBuyEnabled] ?: false,
         fixedAutoBuyActivatedAtMs = this[Keys.fixedAutoBuyActivatedAtMs] ?: 0L,
         workingRangeEnabled = this[Keys.workingRangeEnabled] ?: false,
