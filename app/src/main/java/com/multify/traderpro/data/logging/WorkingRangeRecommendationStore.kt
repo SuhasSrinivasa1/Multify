@@ -183,6 +183,13 @@ class WorkingRangeRecommendationStore(context: Context) {
             autoBuyOrderId = orderId ?: row.dto.autoBuyOrderId,
             autoBuyQuantity = quantity ?: row.dto.autoBuyQuantity,
             autoBuyFillPrice = fillPrice ?: row.dto.autoBuyFillPrice,
+            autoBuyFillAtMs = if (fillPrice != null) System.currentTimeMillis() else row.dto.autoBuyFillAtMs,
+            firstQualifiedToFillRunupPct = fillPrice?.takeIf { row.firstQualifiedPrice > 0.0 }?.let {
+                (it / row.firstQualifiedPrice - 1.0) * 100.0
+            } ?: row.dto.firstQualifiedToFillRunupPct,
+            confirmationToFillDriftPct = fillPrice?.takeIf { row.dto.entryPrice > 0.0 }?.let {
+                (it / row.dto.entryPrice - 1.0) * 100.0
+            } ?: row.dto.confirmationToFillDriftPct,
             // Do not infer that the operator's toggle is ON from an execution outcome.
             reason = reason ?: row.dto.reason
         )
