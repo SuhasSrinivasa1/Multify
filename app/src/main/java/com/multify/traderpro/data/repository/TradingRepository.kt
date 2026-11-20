@@ -8060,7 +8060,11 @@ class TradingRepository @Inject constructor(
     private suspend fun autoBuyWorkingRangeRecommendationsLocked(): Int {
         initializeWorkingRangeAutoBuyOptIn()
         val today = LocalDate.now(INDIA).toString()
-        workingRangeRecommendationStore.flush()
+        if (!workingRangeRecommendationStore.flush()) {
+            auditLogger.logAsync("WORKING_RANGE_AUTO_BUY", "EVIDENCE_QUEUE_NOT_DRAINED",
+                mapOf("new_buys_submitted" to false, "reason" to "Current confirmation state could not be flushed"))
+            return 0
+        }
         val initialSettings = preferences.settings.first()
         val pendingIntents = workingRangeRecommendationStore.pendingAutoBuyIntents(today)
         val potential = if (initialSettings.workingRangeEnabled &&
@@ -8208,7 +8212,8 @@ class TradingRepository @Inject constructor(
             try {
                 val order = placeCncBuy(
                     token, row.symbol, sizing.quantity, reference,
-                    entryQuote = quote, quoteReceivedAtMs = quoteReceivedAtMs
+                    entryQuote = quote, quoteReceivedAtMs = quoteReceivedAtMs,
+                    workingRangeActivationAtMs = live.workingRangeActivatedAtMs
                 )
                 val filled = order.filledQuantity?.takeIf { it > 0 }
                     ?: error("Working Range broker fill quantity was not verified")
@@ -13320,7 +13325,8 @@ class TradingRepository @Inject constructor(
         entryQuote: QuotePayload,
         quoteReceivedAtMs: Long,
         allowOtherSymbolProtectionRecovery: Boolean = false,
-        recommendationId: Long? = null
+        recommendationId: Long? = null,
+        workingRangeActivationAtMs: Long? = null
     ): OrderPayload = appOwnedBuyMutex.withLock {
         if (recommendationId != null && isFixedRecommendationExecutionConsumed(recommendationId)) {
             auditLogger.log("FIXED_AUTO_BUY", "RECOMMENDATION_EVENT_ALREADY_CONSUMED", mapOf(
@@ -13423,6 +13429,8 @@ class TradingRepository @Inject constructor(
             val switchAtDispatch = preferences.settings.first()
             require(switchAtDispatch.workingRangeEnabled &&
                 switchAtDispatch.workingRangeActivatedAtMs > 0L &&
+                (workingRangeActivationAtMs == null ||
+                    switchAtDispatch.workingRangeActivatedAtMs == workingRangeActivationAtMs) &&
                 !switchAtDispatch.safetyHalt &&
                 com.multify.traderpro.engine.NseEquitySessionCalendar
                     .isFixedNewEntryWindow(ZonedDateTime.now(INDIA))) {
