@@ -1242,7 +1242,7 @@ private fun WorkingRangeTable(
                             Text("Opening basis: ${row.openingSignalBasis.replace('_', ' ')} · volume pace RVOL ${row.openingVolumePaceRvol?.let { String.format(Locale.US, "%.2f", it) } ?: "—"}",
                                 style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
-                        Text("Research stop -1.00% · exit shadows: fixed ${row.exitComparisonFixedState.replace('_', ' ')} (${row.exitComparisonFixedReturnPct?.let { String.format(Locale.US, "%+.2f%%", it) } ?: "—"}) · trail ${row.exitComparisonTrailState.replace('_', ' ')} · partial ${row.exitComparisonPartialState.replace('_', ' '}",
+                        Text("Research stop -1.00% · exit shadows: fixed ${row.exitComparisonFixedState.replace('_', ' ')} (${row.exitComparisonFixedReturnPct?.let { String.format(Locale.US, "%+.2f%%", it) } ?: "—"}) · trail ${row.exitComparisonTrailState.replace('_', ' ')} · partial ${row.exitComparisonPartialState.replace('_', ' ')}",
                             style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Text("Target requirement ${row.targetRequirementAtr?.let { String.format(Locale.US, "%.2f ATR", it) } ?: "—"} · VWAP extension ${row.vwapExtensionAtr?.let { String.format(Locale.US, "%.2f ATR", it) } ?: "—"} · Spread ${row.spreadBps?.let { String.format(Locale.US, "%.1f bps", it) } ?: "unknown"}",
                             style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
