@@ -6,6 +6,9 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -44,6 +47,10 @@ import com.multify.traderpro.data.network.ForecastDto
 import com.multify.traderpro.data.network.PositionDto
 import com.multify.traderpro.data.network.WorkingRangeRecommendationDto
 import com.multify.traderpro.engine.GttProtectionReadinessPolicy
+import com.multify.traderpro.engine.FixedBuyAvailabilityPolicy
+import com.multify.traderpro.engine.NseEquitySessionCalendar
+import java.time.Instant
+import java.time.ZoneId
 import com.multify.traderpro.engine.HardStopLossPolicy
 import com.multify.traderpro.engine.SteppedTrailingPolicy
 import java.text.SimpleDateFormat
@@ -255,7 +262,7 @@ private fun AccountPill(label: String, status: String, tone: LiteTone) {
 @Composable
 private fun toneColors(tone: LiteTone): Pair<Color, Color> = when (tone) {
     LiteTone.POSITIVE -> MaterialTheme.colorScheme.primaryContainer to MaterialTheme.colorScheme.onPrimaryContainer
-    LiteTone.WARNING -> Color(0xFFFFF1D6) to Color(0xFF754900)
+    LiteTone.WARNING -> MaterialTheme.colorScheme.tertiaryContainer to MaterialTheme.colorScheme.onTertiaryContainer
     LiteTone.NEGATIVE -> MaterialTheme.colorScheme.errorContainer to MaterialTheme.colorScheme.onErrorContainer
     LiteTone.INFO -> MaterialTheme.colorScheme.secondaryContainer to MaterialTheme.colorScheme.onSecondaryContainer
     LiteTone.NEUTRAL -> MaterialTheme.colorScheme.surfaceVariant to MaterialTheme.colorScheme.onSurfaceVariant
@@ -326,13 +333,35 @@ private fun MetricTile(
     }
 }
 
+/** Respect Android font scaling and compact devices rather than compressing prices. */
 @Composable
 private fun MetricPair(left: @Composable () -> Unit, right: @Composable () -> Unit) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        Box(Modifier.weight(1f)) { left() }
-        Box(Modifier.weight(1f)) { right() }
+    val fontScale = LocalDensity.current.fontScale
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        if (maxWidth < 336.dp || fontScale >= 1.3f) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                left()
+                right()
+            }
+        } else {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Box(Modifier.weight(1f)) { left() }
+                Box(Modifier.weight(1f)) { right() }
+            }
+        }
     }
 }
+
+/** Status chips wrap naturally under accessibility font and display-size settings. */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ChipGroup(content: @Composable RowScope.() -> Unit) {
+    // A horizontally scrollable chip group keeps individual pill text unbroken.
+    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        content = content)
+}
+
 
 @Composable
 internal fun LiteFixedScreen(state: TraderUiState, onScan: () -> Unit, onBuy: (String) -> Unit) {
@@ -347,8 +376,17 @@ internal fun LiteFixedScreen(state: TraderUiState, onScan: () -> Unit, onBuy: (S
         "WARMING", "WAITING" -> LiteTone.WARNING
         else -> LiteTone.NEUTRAL
     }
-    val discoveryLabel = if (health.discoveryBaselineReady) health.discovery.ifBlank { "READY" }
-        else health.discovery.ifBlank { "WAITING" }
+    // Device time zones are not NSE time zones. Match the existing IST session calendar.
+    val marketOpen = NseEquitySessionCalendar.isFixedScanWindow(
+        Instant.ofEpochMilli(System.currentTimeMillis()).atZone(ZoneId.of("Asia/Kolkata"))
+    )
+    val discoveryLabel = when {
+        !state.settings.fixedScannerEnabled -> "PAUSED"
+        !marketOpen -> "MARKET CLOSED"
+        !state.settings.brokerAuthenticated -> "AUTH REQUIRED"
+        health.discoveryBaselineReady -> health.discovery.ifBlank { "READY" }
+        else -> health.discovery.ifBlank { "WAITING" }
+    }
 
     LazyColumn(
         Modifier.fillMaxSize().testTag("fixed-screen"),
@@ -365,18 +403,19 @@ internal fun LiteFixedScreen(state: TraderUiState, onScan: () -> Unit, onBuy: (S
                     StatusPill("v7.4.1", LiteTone.INFO)
                 }
                 Text("40-factor model · completed 15-minute candles", style = MaterialTheme.typography.bodyMedium)
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                ChipGroup {
                     StatusPill(if (state.settings.fixedScannerEnabled) "Scanner ON" else "Scanner PAUSED", if (state.settings.fixedScannerEnabled) LiteTone.POSITIVE else LiteTone.WARNING)
                     StatusPill(if (state.settings.fixedAutoBuyEnabled) "Auto-Buy ON" else "Auto-Buy OFF", if (state.settings.fixedAutoBuyEnabled) LiteTone.WARNING else LiteTone.NEUTRAL)
                 }
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     Text("Market", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text(prettyState(dashboard?.marketSession ?: "WAITING"), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+                    Text(if (marketOpen) prettyState(dashboard?.marketSession ?: "OPEN") else "Outside NSE trading hours", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
                 }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                     Text("Discovery", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    StatusPill(discoveryLabel, discoveryTone)
+                    StatusPill(discoveryLabel,
+                        if (!marketOpen || !state.settings.fixedScannerEnabled) LiteTone.NEUTRAL else discoveryTone)
                 }
                 if (health.discoveryBaselineReady) {
                     LinearProgressIndicator(
@@ -389,7 +428,16 @@ internal fun LiteFixedScreen(state: TraderUiState, onScan: () -> Unit, onBuy: (S
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 } else {
-                    Text("Discovery baseline is not ready. Coverage is not inferred.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        when {
+                            !marketOpen -> "Live discovery starts during the NSE session. Coverage is not measured while closed."
+                            !state.settings.fixedScannerEnabled -> "Scanning paused. Broker-side SELL/GTT monitoring remains separate."
+                            !state.settings.brokerAuthenticated -> "Authenticate Alpha before checking market coverage."
+                            else -> "Waiting for a complete market sweep. No coverage percentage is inferred."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     Text("Market data", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -397,7 +445,7 @@ internal fun LiteFixedScreen(state: TraderUiState, onScan: () -> Unit, onBuy: (S
                 }
                 Button(
                     onClick = onScan,
-                    enabled = state.settings.fixedScannerEnabled && !state.loading,
+                    enabled = state.settings.fixedScannerEnabled && marketOpen && !state.loading,
                     modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
                 ) {
                     if (state.loading) {
@@ -406,7 +454,12 @@ internal fun LiteFixedScreen(state: TraderUiState, onScan: () -> Unit, onBuy: (S
                     }
                     Text(if (state.loading) "Refreshing…" else "Run Fixed scan")
                 }
-                Text("Manual scan requests respect anti-overlap and broker cooldown gates.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(
+                    if (marketOpen) "Full-market scan respects the broker pacing and single-worker gates."
+                    else "Available in NSE market hours. Outside-session scans are not queued.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
 
@@ -448,7 +501,9 @@ internal fun LiteFixedScreen(state: TraderUiState, onScan: () -> Unit, onBuy: (S
             }
         } else {
             items(recommendations, key = { "fixed-" + it.symbol + "-" + it.generatedAtMs }) { row ->
-                FixedRecommendationCard(row, onBuy)
+                FixedRecommendationCard(row, onBuy,
+                    state.settings.brokerAuthenticated && state.settings.staticIpMatched &&
+                        !state.settings.safetyHalt && dashboard?.halted != true)
             }
         }
     }
@@ -474,7 +529,7 @@ private fun PositionRow(position: PositionDto) {
 }
 
 @Composable
-private fun FixedRecommendationCard(row: ForecastDto, onBuy: (String) -> Unit) {
+private fun FixedRecommendationCard(row: ForecastDto, onBuy: (String) -> Unit, brokerReady: Boolean) {
     val tierTone = when (row.qualityTier.uppercase(Locale.US)) {
         "PRIMARY" -> LiteTone.POSITIVE
         "SECONDARY" -> LiteTone.INFO
@@ -511,9 +566,14 @@ private fun FixedRecommendationCard(row: ForecastDto, onBuy: (String) -> Unit) {
         Text("Scan " + timeLabel(row.generatedAtMs) + " · published " + timeLabel(row.fixedActualPublishedAtMs ?: 0L), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Text(row.reason, style = MaterialTheme.typography.bodySmall, maxLines = 3, overflow = TextOverflow.Ellipsis)
         if (row.executionEligible) {
-            OutlinedButton(onClick = { onBuy(row.symbol) }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-                Text("Manual BUY · Alpha")
-            }
+            val allowedNow = FixedBuyAvailabilityPolicy.canBuy(
+                System.currentTimeMillis(), brokerReady, row.status, row.executionEligible
+            )
+            OutlinedButton(
+                onClick = { onBuy(row.symbol) },
+                enabled = allowedNow,
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
+            ) { Text(if (allowedNow) "Manual BUY · Alpha" else "BUY unavailable · verify market / Alpha") }
         } else {
             Text("No manual order permission for this observation.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
@@ -540,8 +600,8 @@ internal fun LiteRangeScreen(state: TraderUiState) {
                     StatusPill("RESEARCH", LiteTone.INFO)
                 }
                 Text("Reuses completed Fixed 15-minute evaluations and quotes.", style = MaterialTheme.typography.bodyMedium)
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    StatusPill("Two distinct scans required", LiteTone.INFO)
+                ChipGroup {
+                    StatusPill("Two distinct scans", LiteTone.INFO)
                     StatusPill(if (state.settings.workingRangeEnabled) "Auto-Buy ON" else "Research only", if (state.settings.workingRangeEnabled) LiteTone.WARNING else LiteTone.NEUTRAL)
                 }
                 Text("Pilot results are not a validated win rate. Missing inputs remain missing.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -691,10 +751,10 @@ internal fun LiteSettingsScreen(
     onResetRequested: () -> Unit,
     onExport: () -> Unit
 ) {
-    var alphaKey by rememberSaveable { mutableStateOf("") }
-    var alphaTotp by rememberSaveable { mutableStateOf("") }
-    var betaKey by rememberSaveable { mutableStateOf("") }
-    var betaSecret by rememberSaveable { mutableStateOf("") }
+    var alphaKey by remember { mutableStateOf("") }
+    var alphaTotp by remember { mutableStateOf("") }
+    var betaKey by remember { mutableStateOf("") }
+    var betaSecret by remember { mutableStateOf("") }
     var staticIp by remember(state.settings.expectedStaticIp) { mutableStateOf(state.settings.expectedStaticIp) }
     var budget by remember(state.settings.holdingBudgetRupees) { mutableStateOf(state.settings.holdingBudgetRupees.toString()) }
     var capital by remember(state.settings.maxTotalCapitalRupees) { mutableStateOf(state.settings.maxTotalCapitalRupees.toString()) }
