@@ -1,0 +1,183 @@
+name: Fixed Pro Lite v1.0.1 Material 3 + Replay Acceptance
+on:
+  push:
+    branches: [fixed-lite-v1-material3-replay-verification]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  replay-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Android SDK 35
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
+      - name: Verify byte-locked trading policies and isolated execution boundaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+          root=Path("app/src/main/java/com/multify/traderpro")
+          original="origin/v9025-working-range-always-visible-us-readonly-research"
+          relpaths=[
+              "engine/FixedFinalContract.kt",
+              "engine/FixedLocalStrategyEngine.kt",
+              "engine/FixedForecastQualityPolicy.kt",
+              "engine/FixedForecastPublicationPolicy.kt",
+              "engine/FixedMarketDiscoveryPolicy.kt",
+              "engine/FixedEntryActionabilityPolicy.kt",
+              "engine/SteppedTrailingPolicy.kt",
+              "engine/HardStopLossPolicy.kt",
+              "engine/FixedLateEntrySafetyPolicy.kt",
+              "engine/WorkingRangeCandidatePolicy.kt",
+              "engine/WorkingRangeEntryMomentumPolicy.kt",
+              "engine/WorkingRangeAutoBuyPolicy.kt",
+              "engine/WorkingRangeExitPolicy.kt",
+              "engine/GttProtectionReadinessPolicy.kt",
+              "engine/BrokerOrderAcknowledgementPolicy.kt",
+              "data/network/BetaReadOnlyInterceptor.kt",
+          ]
+          for rel in relpaths:
+              path=root/rel
+              remote="app/src/main/java/com/multify/traderpro/"+rel
+              prior=subprocess.check_output(["git","show",f"{original}:{remote}"])
+              assert path.read_bytes()==prior,("POLICY_CHANGED",rel)
+          service=(root/"service/TradingEngineService.kt").read_text()
+          assert "startPositionMonitorWorker()" in service
+          assert "monitorManagedPositions()" in service
+          assert "fixedScannerEnabled" in service
+          assert "maintainArmHotPath()" not in service
+          assert "sampleFixedFiveMinuteShadow" not in service
+          assert "requestRebind(" not in service
+          assert not (root/"service/MultifyNotificationListenerService.kt").exists()
+          assert not (root/"ui/screens/TraderApp.kt").exists()
+          manifest=Path("app/src/main/AndroidManifest.xml").read_text()
+          assert "MultifyNotificationListenerService" not in manifest
+          assert 'android:label="Fixed Pro Lite"' in manifest
+          ui=(root/"ui/screens/FixedLiteApp.kt").read_text()
+          assert "marketOpen" in ui
+          assert "canBuy(" in ui
+          assert "LocalDensity.current.fontScale" in ui
+          assert "var alphaTotp by remember {" in ui
+          assert "var alphaTotp by rememberSaveable" not in ui
+          assert "LitePage.FIXED" in ui and "LitePage.WORKING_RANGE" in ui
+          assert "LitePage.AVERAGES" in ui and "LitePage.SETTINGS" in ui
+          version=Path("app/build.gradle.kts").read_text()
+          assert "versionCode = 10002" in version
+          assert 'applicationId = "com.multify.fixedpro.lite"' in version
+          print(f"PASS: {len(relpaths)} unchanged baseline policy files + isolated Fixed Lite safety/UX invariants")
+          PY
+      - name: Full available Python strategy/fixture replay
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check pytest
+          python -m pytest -q             backend/tests/test_v9_master_log_replay.py             backend/tests/test_adaptive_timeframe_replay.py             backend/tests/test_fixed_peak_report.py             backend/tests/test_fixed_stream_research.py             | tee python-replay.txt
+      - name: Run complete JVM unit and offline policy replay suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug
+          python - <<'PY'
+          import glob,xml.etree.ElementTree as ET,pathlib
+          total=failures=errors=skipped=0
+          for path in glob.glob("app/build/test-results/testDebugUnitTest/TEST-*.xml"):
+              t=ET.parse(path).getroot()
+              total+=int(t.attrib.get("tests",0))
+              failures+=int(t.attrib.get("failures",0))
+              errors+=int(t.attrib.get("errors",0))
+              skipped+=int(t.attrib.get("skipped",0))
+          result=f"total={total}\nfailures={failures}\nerrors={errors}\nskipped={skipped}\n"
+          pathlib.Path("unit-test-counts.txt").write_text(result)
+          print(result)
+          assert total>0 and failures==0 and errors==0
+          PY
+      - name: Verify APK manifest, signing and bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=app/build/outputs/apk/debug
+          apk=$out/app-debug.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$apk" | tee "$out/apk-signing.txt"
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$apk" | head -n 3 | tee "$out/apk-package.txt"
+          sha256sum "$apk" | tee "$out/APK-SHA256SUMS.txt"
+          stat -c "%s" "$apk" | tee "$out/apk-size-bytes.txt"
+      - name: Upload tested APK and replay evidence
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Fixed-Pro-Lite-v1.0.1-TEST-APK-and-replay
+          path: |
+            app/build/outputs/apk/debug/app-debug.apk
+            app/build/outputs/apk/debug/apk-signing.txt
+            app/build/outputs/apk/debug/apk-package.txt
+            app/build/outputs/apk/debug/APK-SHA256SUMS.txt
+            app/build/outputs/apk/debug/apk-size-bytes.txt
+            app/build/test-results/testDebugUnitTest/
+            python-replay.txt
+            unit-test-counts.txt
+          if-no-files-found: warn
+          retention-days: 30
+
+  instrumented-ui:
+    needs: replay-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Install Android SDK/emulator
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0" "system-images;android-35;google_apis;x86_64"
+      - name: Compose UI tests + first-launch screenshot
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          disable-animations: true
+          script: |
+            set +e
+            gradle --no-daemon :app:connectedDebugAndroidTest
+            result=$?
+            mkdir -p app/build/outputs/fixed-lite-ui
+            adb shell am start -n com.multify.fixedpro.lite/com.multify.traderpro.MainActivity
+            sleep 5
+            adb exec-out screencap -p > app/build/outputs/fixed-lite-ui/fixed-home.png
+            exit $result
+      - name: Upload Compose test evidence and screenshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Fixed-Pro-Lite-v1.0.1-Compose-UI-evidence
+          path: |
+            app/build/reports/androidTests/
+            app/build/outputs/androidTest-results/
+            app/build/outputs/fixed-lite-ui/
+          if-no-files-found: warn
+          retention-days: 30
