@@ -259,6 +259,13 @@ class WorkingRangeRecommendationStore(context: Context) {
                 return
             }
 
+            // Two matching observations from the SAME scan are not confirmation.
+            // The v9.0.20 research stream could count both; live v9.0.21
+            // requires distinct official scan generations before Alpha BUY.
+            if (!com.multify.traderpro.engine.WorkingRangeDistinctScanPolicy.isIndependentSecondScan(
+                    existing.dto.scanStartedAtMs, scanStartedAtMs,
+                    existing.lastPassAtMs, observedAtMs)) return
+
             val ageMs = (observedAtMs - existing.dto.firstQualifiedAtMs).coerceAtLeast(0L)
             val ageMinutes = ageMs / 60_000.0
             val drift = if (existing.firstQualifiedPrice > 0.0)
