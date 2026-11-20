@@ -318,7 +318,7 @@ data class WorkingRangeRecommendationDto(
     val targetFirstTouchAtMs: Long = 0L,
     val stopFirstTouchAtMs: Long = 0L,
     val sampledOutcomeNote: String = "UNRESOLVED · SPARSE CLIENT LTP SAMPLES",
-    val researchStopLossPct: Double = 1.0,
+    val researchStopLossPct: Double = -1.0,
     val exitComparisonFixedState: String = "UNRESOLVED_CENSORED",
     val exitComparisonFixedReturnPct: Double? = null,
     val exitComparisonTrailState: String = "UNRESOLVED_CENSORED",
