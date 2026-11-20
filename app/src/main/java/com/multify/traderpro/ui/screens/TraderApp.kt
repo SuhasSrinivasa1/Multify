@@ -1171,8 +1171,14 @@ private fun WorkingRangeTable(
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically) {
                             Text(row.symbol, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                            Text(if (row.autoBuyState == "BUY_EXECUTED") "WORKING RANGE · BUY EXECUTED"
-                                else "WORKING RANGE · ALPHA AUTO-BUY", style = MaterialTheme.typography.labelSmall,
+                            Text(when {
+                                    row.autoBuyState == "BUY_EXECUTED" -> "WORKING RANGE · BUY EXECUTED"
+                                    row.autoBuyState.startsWith("BLOCKED_") ||
+                                        row.autoBuyState == "TARGET_ALREADY_REACHED" ||
+                                        row.autoBuyState == "BROKER_REJECTED" ->
+                                        "WORKING RANGE · ENTRY BLOCKED"
+                                    else -> "WORKING RANGE · ALPHA AUTO-BUY"
+                                }, style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.tertiary, fontWeight = FontWeight.Bold)
                         }
                         if (row.autoBuyState != "NOT_ATTEMPTED") {
@@ -1185,12 +1191,27 @@ private fun WorkingRangeTable(
                                     MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
-                        Text(row.state.replace('_', ' '), style = MaterialTheme.typography.labelMedium,
+                        Text(if (row.state == "IN_RANGE") "TECHNICAL RANGE MATCH · BUY eligibility checked separately"
+                            else row.state.replace('_', ' '), style = MaterialTheme.typography.labelMedium,
                             color = if (row.state.startsWith("TARGET")) MaterialTheme.colorScheme.primary
                                 else if (row.state.startsWith("STOP")) MaterialTheme.colorScheme.error
                                 else MaterialTheme.colorScheme.tertiary,
                             fontWeight = FontWeight.SemiBold)
                         if (row.confirmedAtMs > 0L) {
+                            if (row.firstQualifiedPrice.isFinite() && row.firstQualifiedPrice > 0.0) {
+                                Text(
+                                    "First qualified ₹" + String.format(Locale.US, "%.2f", row.firstQualifiedPrice) +
+                                        " · Confirmation move " +
+                                        String.format(Locale.US, "%+.2f%%",
+                                            (row.entryPrice / row.firstQualifiedPrice - 1.0) * 100.0) +
+                                        " · Max auto-BUY extension +0.75%",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if ((row.entryPrice / row.firstQualifiedPrice - 1.0) * 100.0 >
+                                        com.multify.traderpro.engine.WorkingRangeEntryMomentumPolicy.MAX_RUNUP_FROM_FIRST_QUALIFIED_PCT)
+                                        MaterialTheme.colorScheme.error
+                                    else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
                             Text("Entry ₹${String.format(Locale.US, "%.2f", row.entryPrice)}  ·  Target ₹${String.format(Locale.US, "%.2f", row.targetPrice)} (+${String.format(Locale.US, "%.2f", row.targetPct)}%)",
                                 style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
                             Text("Latest ₹${String.format(Locale.US, "%.2f", row.lastPrice)}  ·  Sampled MFE +${String.format(Locale.US, "%.2f", row.maxFavourablePct)}%  ·  MAE ${String.format(Locale.US, "%.2f", row.maxAdversePct)}%",
