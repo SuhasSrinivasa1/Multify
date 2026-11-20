@@ -1676,6 +1676,24 @@ class TradingRepository @Inject constructor(
     }
     @Volatile private var fixedAutoBuyActivationForQueue = 0L
 
+    suspend fun setLegacyPortfolioReconciled(reconciled: Boolean) {
+        if (!reconciled) {
+            val current = preferences.settings.first()
+            require(!current.fixedAutoBuyEnabled && !current.workingRangeEnabled) {
+                "Turn OFF both Auto-Buy switches before clearing portfolio reconciliation"
+            }
+        }
+        preferences.setLegacyPortfolioReconciled(reconciled)
+        auditLogger.log("SAFETY",
+            if (reconciled) "LEGACY_PORTFOLIO_RECONCILIATION_ACKNOWLEDGED"
+            else "LEGACY_PORTFOLIO_RECONCILIATION_CLEARED",
+            mapOf(
+                "fixed_auto_buy_enabled" to preferences.settings.first().fixedAutoBuyEnabled,
+                "working_range_auto_buy_enabled" to preferences.settings.first().workingRangeEnabled,
+                "new_buys_remain_fail_closed_until_acknowledged" to true
+            ))
+    }
+
     suspend fun setWorkingRangeEnabled(enabled: Boolean) {
         initializeWorkingRangeAutoBuyOptIn()
         if (enabled) require(preferences.settings.first().legacyPortfolioReconciled) {
