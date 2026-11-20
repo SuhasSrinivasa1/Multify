@@ -39,6 +39,17 @@ class WorkingRangeAutoBuyPolicyTest {
             decide(execution = "BUY_EXECUTED").reason)
     }
 
+    @Test fun sameScanEvaluationsNeverConfirmAWorkingRangeAutoBuy() {
+        assertFalse(WorkingRangeDistinctScanPolicy.isIndependentSecondScan(
+            1_000L, 1_000L, 1_100L, 1_200L))
+        assertFalse(WorkingRangeDistinctScanPolicy.isIndependentSecondScan(
+            1_000L, 900L, 1_100L, 1_200L))
+        assertFalse(WorkingRangeDistinctScanPolicy.isIndependentSecondScan(
+            1_000L, 2_000L, 1_200L, 1_150L))
+        assertTrue(WorkingRangeDistinctScanPolicy.isIndependentSecondScan(
+            1_000L, 2_000L, 1_100L, 2_100L))
+    }
+
     @Test fun staleConfirmationCannotTriggerDelayedAutoBuy() {
         assertEquals("CONFIRMATION_EXPIRED",
             decide(confirmed = 1_000L, now = 1_000L + WorkingRangeAutoBuyPolicy.MAX_CONFIRMATION_AGE_MS + 1L).reason)
