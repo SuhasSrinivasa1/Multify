@@ -1,7 +1,7 @@
 name: Multify v9.0.26 Always-on Independent Fixed + Working Range / -1% stop / Opening Watch TEST
 on:
   push:
-    branches: [v9026-working-range-always-visible-us-readonly-research]
+    branches: [v9026-independent-fixed-working-range-minus1-opening-watch]
   pull_request:
     branches: [v9025-working-range-always-visible-us-readonly-research]
   workflow_dispatch:
