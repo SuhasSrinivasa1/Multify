@@ -9,14 +9,15 @@ class WorkingRangeCandidatePolicyTest {
         green: Double = 0.86, ema9: Double = 110.0, ema20: Double = 108.0,
         ema50: Double = 104.0, ema9Slope: Double = 0.5, ema20Slope: Double = 0.3,
         macd: Double = 0.05, atr: Double = 7.28, price: Double = 767.9,
-        minutes: Double = 180.0, vwap: Double = 745.0
+        minutes: Double = 180.0, vwap: Double = 745.0,
+        spread: Double? = null
     ) = WorkingRangeCandidatePolicy.Inputs(
         price = price, atr = atr, rsi = rsi, rvol = rvol,
         volumeAcceleration = accel, greenVolumeShare = green,
         ema9 = ema9, ema20 = ema20, ema50 = ema50,
         ema9Slope = ema9Slope, ema20Slope = ema20Slope,
         macdHistogramSlope = macd, vwap = vwap,
-        range52Position = 0.99, spreadBps = null,
+        range52Position = 0.99, spreadBps = spread,
         orderBookImbalance = null, minutesToClose = minutes
     )
 
@@ -34,7 +35,7 @@ class WorkingRangeCandidatePolicyTest {
     }
 
     @Test fun wideSpreadIsOutsideWorkingRange() {
-        val result = WorkingRangeCandidatePolicy.assess(input().copy(spreadBps = 35.1))
+        val result = WorkingRangeCandidatePolicy.assess(input(spread = 35.1))
         assertFalse(result.matches)
         assertTrue(result.reasons.contains("SPREAD_ABOVE_35_BPS"))
     }
@@ -78,7 +79,7 @@ class WorkingRangeCandidatePolicyTest {
     }
 
     @Test fun missingSpreadDoesNotMasqueradeAsZeroAtCandidateStage() {
-        val result = WorkingRangeCandidatePolicy.assess(input(spreadBps = null))
+        val result = WorkingRangeCandidatePolicy.assess(input(spread = null))
         assertTrue(result.matches)
         assertNull(result.targetRequirementAtr?.takeIf { !it.isFinite() })
     }
