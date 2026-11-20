@@ -8265,7 +8265,14 @@ class TradingRepository @Inject constructor(
                 val filled = order.filledQuantity?.takeIf { it > 0 }
                     ?: error("Working Range broker fill quantity was not verified")
                 val actualFill = order.averageFillPrice?.takeIf { it.isFinite() && it > 0.0 }
-                    ?: ltp
+                    ?: run {
+                        preferences.setSafetyHalt(true)
+                        auditLogger.log("SAFETY", "WORKING_RANGE_FILL_PRICE_UNVERIFIED",
+                            mapOf("symbol" to row.symbol, "order_id" to order.growwOrderId,
+                                "reference" to reference, "new_buys_halted" to true,
+                                "manual_broker_reconciliation_required" to true))
+                        error("Working Range broker fill price unverified; reconcile $reference before any new entry")
+                    }
                 registerWorkingRangeBoughtPosition(
                     row, order.growwOrderId, reference, filled, actualFill
                 )
@@ -8388,7 +8395,6 @@ class TradingRepository @Inject constructor(
                     continue
                 }
                 val fillPrice = settled.averageFillPrice?.takeIf { it.isFinite() && it > 0.0 }
-                    ?: row.autoBuyReferencePrice?.takeIf { it.isFinite() && it > 0.0 }
                 if (fillPrice == null) {
                     preferences.setSafetyHalt(true)
                     auditLogger.log("SAFETY", "WORKING_RANGE_FILL_PRICE_UNVERIFIED",
