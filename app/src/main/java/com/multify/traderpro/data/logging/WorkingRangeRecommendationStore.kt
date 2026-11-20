@@ -407,10 +407,10 @@ class WorkingRangeRecommendationStore(context: Context) {
         runCatching { queue.submit {}.get(5, TimeUnit.SECONDS) }
         return synchronized(lock) {
         mapOf(
-            "schema" to "working_range_auto_buy_v9021",
-            "toggle_enabled" to enabled,
+            "schema" to "working_range_research_v9025",
+            "research_observation_always_on" to true,
             "enabled_setting_is_separate_from_fixed" to true,
-            "working_range_on_authorizes_new_alpha_auto_buys" to true,
+            "auto_buy_toggle_only_authorizes_new_alpha_auto_buys" to true,
             "source" to "existing_fixed_15m_evaluations_and_existing_quotes",
             // Selection/confirmation reuses Fixed's existing data. Actual live
             // Alpha BUY, quote, cash, order-read and GTT calls ARE incremental
@@ -441,7 +441,7 @@ class WorkingRangeRecommendationStore(context: Context) {
             "target_pct_unchanged_from_fixed_reference" to WorkingRangeCandidatePolicy.TARGET_PCT,
             "marketability_is_separate_from_technical_range" to true,
             "upper_circuit_or_no_offer_does_not_erase_candidate" to true,
-            "auto_buy_enabled" to enabled,
+            "auto_buy_enabled" to autoBuyEnabled,
             "auto_buy_requires_new_confirmation_after_activation" to true,
             "ambiguous_order_intent_never_resubmitted" to true,
             "validated_working_range_claim" to false,
