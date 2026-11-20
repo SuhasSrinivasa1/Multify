@@ -279,6 +279,9 @@ data class WorkingRangeRecommendationDto(
     val targetPrice: Double = 0.0,
     val targetPct: Double = 1.1161043030113955,
     val firstQualifiedAtMs: Long = 0L,
+    // Immutable first qualified Working Range price, used only by separate
+    // Auto-Buy extension guard; historical persisted rows are backfilled in store.
+    val firstQualifiedPrice: Double = 0.0,
     val confirmedAtMs: Long = 0L,
     val lastObservedAtMs: Long = 0L,
     val lastPrice: Double = 0.0,
