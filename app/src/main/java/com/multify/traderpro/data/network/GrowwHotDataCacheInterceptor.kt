@@ -134,6 +134,14 @@ internal class GrowwHotDataCacheInterceptor(
             request.header(com.multify.traderpro.engine.MarketDataPriorityAdmissionPolicy.HEADER)
         )
 
+    /** Share exact authenticated market-data GETs BEFORE reserving Alpha permits.
+     * Execution/protection quotes and every account/order endpoint are excluded.
+     */
+    internal fun safeResearchCoalescingKey(request: okhttp3.Request): String? =
+        if (request.method == "GET" && !bypassForProtection(request) &&
+            ttlFor(request.url.encodedPath, request.url.queryParameter("candle_interval")) > 0L)
+            keyFor(request) else null
+
     private fun keyFor(request: okhttp3.Request): String {
         val auth = request.header("Authorization").orEmpty()
         val fingerprint = MessageDigest.getInstance("SHA-256")
