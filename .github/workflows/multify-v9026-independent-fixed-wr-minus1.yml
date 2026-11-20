@@ -110,8 +110,8 @@ jobs:
           assert "const val HARD_STOP_LOSS_PCT = 1.0" in Path(root+"engine/ReleaseIntegrityManifest.kt").read_text()
           assert "const val CANONICAL_LEARNING_CALLS = 107" in Path(root+"engine/FixedFinalContract.kt").read_text()
           build=Path("app/build.gradle.kts").read_text()
-          assert "versionCode = 9025" in build
-          assert 'versionName = "9.0.25-working-range-always-on-research"' in build
+          assert "versionCode = 9026" in build
+          assert 'versionName = "9.0.26-independent-fixed-wr-minus1-opening-watch"' in build
           assert "const val BETA_SAFE_LIVE_60S = 40" in Path(root+"engine/FixedResearchCapacityPolicy.kt").read_text()
           assert "const val MIN_RESEARCH_GAP_MS = 1_000L" in Path(root+"engine/FixedResearchLtpPacingPolicy.kt").read_text()
           assert "const val APP_PER_MINUTE = 45" in Path(root+"data/network/GrowwHistoricalThrottlePolicy.kt").read_text()
