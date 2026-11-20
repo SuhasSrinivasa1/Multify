@@ -1712,9 +1712,7 @@ class TradingRepository @Inject constructor(
                 )
                 if (pending.isNotEmpty()) {
                     val token = ensureToken()
-                    if (token != null) reconcileWorkingRangeAutoBuyIntents(
-                        token, LocalDate.now(INDIA).toString()
-                    )
+                    if (token != null) reconcileWorkingRangeAutoBuyIntents(token)
                 }
             }.onFailure {
                 auditLogger.log("WORKING_RANGE_AUTO_BUY", "DISABLE_ORDER_RECONCILIATION_FAILED",
@@ -8084,7 +8082,7 @@ class TradingRepository @Inject constructor(
             return 0
         }
         val initialSettings = preferences.settings.first()
-        val pendingIntents = workingRangeRecommendationStore.pendingAutoBuyIntents(today)
+        val pendingIntents = workingRangeRecommendationStore.pendingAutoBuyIntents()
         val potential = if (initialSettings.workingRangeEnabled &&
             initialSettings.workingRangeActivatedAtMs > 0L) {
             workingRangeRecommendationStore.recent(today).filter { row ->
@@ -8105,7 +8103,7 @@ class TradingRepository @Inject constructor(
 
         // A crash after broker acknowledgement must reconcile by the deterministic
         // WRM reference. Never blindly resubmit an ambiguous Working Range intent.
-        reconcileWorkingRangeAutoBuyIntents(token, today)
+        reconcileWorkingRangeAutoBuyIntents(token)
 
         val settings = preferences.settings.first()
         if (!settings.workingRangeEnabled || settings.workingRangeActivatedAtMs <= 0L ||
@@ -8264,7 +8262,7 @@ class TradingRepository @Inject constructor(
         return submitted
     }
 
-    private suspend fun reconcileWorkingRangeAutoBuyIntents(token: String, today: String) {
+    private suspend fun reconcileWorkingRangeAutoBuyIntents(token: String) {
         for (row in workingRangeRecommendationStore.pendingAutoBuyIntents(today)) {
             val reference = row.autoBuyReference
             if (reference.isBlank()) continue
