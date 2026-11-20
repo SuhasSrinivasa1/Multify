@@ -1221,6 +1221,13 @@ private fun WorkingRangeTable(
                             }
                             Text("Entry ₹${String.format(Locale.US, "%.2f", row.entryPrice)}  ·  Target ₹${String.format(Locale.US, "%.2f", row.targetPrice)} (+${String.format(Locale.US, "%.2f", row.targetPct)}%)",
                                 style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                            if (row.autoBuyFillPrice != null) {
+                                Text(
+                                    "Broker fill ₹${String.format(Locale.US, "%.2f", row.autoBuyFillPrice)} · first-qualified to fill ${row.firstQualifiedToFillRunupPct?.let { String.format(Locale.US, "%+.2f%%", it) } ?: "—"} · confirmation to fill ${row.confirmationToFillDriftPct?.let { String.format(Locale.US, "%+.2f%%", it) } ?: "—"}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
                             Text("Latest ₹${String.format(Locale.US, "%.2f", row.lastPrice)}  ·  Sampled MFE +${String.format(Locale.US, "%.2f", row.maxFavourablePct)}%  ·  MAE ${String.format(Locale.US, "%.2f", row.maxAdversePct)}%",
                                 style = MaterialTheme.typography.bodySmall)
                         } else if (row.state == "OPENING_WATCH") {
