@@ -246,7 +246,7 @@ jobs:
           else
             echo "Stable signing key secret is not configured; debug APK will use runner-generated debug certificate."
           fi
-      - name: Full Android unit tests / v9.0.20 WORKING RANGE TEST APK
+      - name: Full Android unit tests / v9.0.21 WORKING RANGE AUTO-BUY TEST APK
         env:
           MULTIFY_KEYSTORE_PASSWORD: ${{ secrets.MULTIFY_KEYSTORE_PASSWORD }}
         run: gradle :app:testDebugUnitTest :app:assembleDebug --no-daemon --stacktrace
