@@ -405,6 +405,8 @@ class WorkingRangeRecommendationStore(context: Context) {
             it != "SPREAD_UNVERIFIED" && it != "VWAP_EXTENSION_UNAVAILABLE"
         }
         val notYetBought = old.autoBuyState == "NOT_ATTEMPTED"
+        val permanentlyOutOfRange = old.autoBuyState.startsWith("BLOCKED_OUT_OF_RANGE") ||
+            old.autoBuyState.startsWith("BLOCKED_STALE")
         val nextEntryState = when {
             stillMatches && bandReasons.isEmpty() -> "IN_RANGE"
             outOfRange -> "OUT_OF_RANGE"
@@ -430,6 +432,7 @@ class WorkingRangeRecommendationStore(context: Context) {
         row.dto = old.copy(
             state = when {
                 terminal -> outcome
+                permanentlyOutOfRange -> "OUT_OF_RANGE"
                 notYetBought -> nextEntryState
                 stillMatches -> "IN_RANGE"
                 else -> "MOMENTUM_WEAKENING"
@@ -497,13 +500,21 @@ class WorkingRangeRecommendationStore(context: Context) {
                 "macd_histogram_slope_positive" to true,
                 "target_requirement_max_atr" to WorkingRangeCandidatePolicy.MAX_TARGET_ATR,
                 "minutes_to_close_min" to WorkingRangeCandidatePolicy.MIN_MINUTES_TO_CLOSE,
-                "vwap_extension_single_factor_veto" to false,
+                "vwap_extension_single_factor_veto" to true,
+                "vwap_extension_max_atr" to WorkingRangeEntryBandPolicy.MAX_VWAP_EXTENSION_ATR,
                 "range52_position_single_factor_veto" to false,
                 "rsi_upper_ceiling" to null,
-                "spread_is_execution_marketability_not_technical_selection" to true
+                "spread_max_bps" to WorkingRangeEntryBandPolicy.MAX_SPREAD_BPS,
+                "spread_is_execution_marketability_not_technical_selection" to false,
+                "missing_fresh_spread_blocks_auto_buy" to true,
+                "min_drift_from_first_qualified_pct" to WorkingRangeCandidatePolicy.MIN_DRIFT_FROM_FIRST_QUALIFIED_PCT,
+                "max_confirmation_gap_ms" to WorkingRangeCandidatePolicy.MAX_CONFIRMATION_GAP_MS,
+                "max_confirmation_to_buy_ms" to WorkingRangeEntryBandPolicy.MAX_CONFIRMATION_TO_BUY_MS
             ),
             "target_pct_unchanged_from_fixed_reference" to WorkingRangeCandidatePolicy.TARGET_PCT,
-            "marketability_is_separate_from_technical_range" to true,
+            "marketability_is_separate_from_technical_range" to false,
+            "fresh_alpha_spread_is_rechecked_before_buy" to true,
+            "entry_band_rejections_are_non_actionable" to true,
             "upper_circuit_or_no_offer_does_not_erase_candidate" to true,
             "auto_buy_enabled" to enabled,
             "auto_buy_requires_new_confirmation_after_activation" to true,
