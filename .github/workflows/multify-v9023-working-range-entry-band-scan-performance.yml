@@ -295,7 +295,7 @@ jobs:
           assert "WORKING_RANGE_TARGET_FULL_EXIT" in exit
           assert "WORKING_RANGE_STOP_MINUS_1_FULL_EXIT" in exit
           assert "val initialStopPrice = if" in src
-          assert "v0.3 Alpha Auto-Buy" in src
+          assert "v0.4 Alpha Auto-Buy" in src
           assert "WORKING_RANGE_ENTRY_BAND_REJECTED" not in src or "ENTRY_BAND_REJECTED" in src
           print("PASS: isolated Working Range entry and target/stop exit")
           PY
