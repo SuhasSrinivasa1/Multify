@@ -473,7 +473,7 @@ internal fun LiteFixedScreen(state: TraderUiState, onScan: () -> Unit, onBuy: (S
                     serviceTone
                 )
                 if (positions.isEmpty()) {
-                    Text("No holdings are registered in this installation. It does not import old-app holdings; reconcile Groww before enabling Auto-Buy.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                    Text("No holdings are registered in this installation. It cannot import or monitor old-app positions; close old-app positions and pending orders in Groww before enabling Auto-Buy.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                 } else {
                     positions.forEachIndexed { index, position ->
                         PositionRow(position)
@@ -809,9 +809,9 @@ internal fun LiteSettingsScreen(
                         (!state.settings.fixedAutoBuyEnabled && !state.settings.workingRangeEnabled)
                 )
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text("Previous-app holdings reconciled", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                    Text("Previous-app positions closed", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
                     Text(
-                        "This package has a separate database. Check Groww and verify or close every old-app position. Turn both Auto-Buy switches OFF before clearing this acknowledgement.",
+                        "This package has a separate database and cannot import or monitor old-app positions. Close every old-app position and pending order in Groww before confirming. Turn both Auto-Buy switches OFF before clearing this acknowledgement.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
