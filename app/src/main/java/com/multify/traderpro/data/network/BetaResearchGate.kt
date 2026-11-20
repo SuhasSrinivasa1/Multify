@@ -29,7 +29,6 @@ class BetaResearchGate @Inject constructor(
     private val auditLogger: AuditLogger
 ) {
     enum class Type { LIVE, HISTORICAL }
-    enum class LiveEndpoint { LTP, QUOTE }
     data class UsageSnapshot(
         val liveRequests: Long, val historicalRequests: Long,
         val liveFailures: Long, val historicalFailures: Long,
@@ -60,7 +59,7 @@ class BetaResearchGate @Inject constructor(
         val rateLimitIncidents: ArrayDeque<Long> = ArrayDeque(),
         var cooldownUntil: Long = 0L,
         var lastGrantedAt: Long = 0L,
-        val lastGrantedAtByEndpoint: MutableMap<LiveEndpoint, Long> = mutableMapOf(),
+        val lastGrantedAtByEndpoint: MutableMap<BetaLiveEndpointPacingPolicy.Endpoint, Long> = mutableMapOf(),
         var probeRequired: Boolean = false,
         var probeInFlight: Boolean = false,
         var calendar: DualMinuteAdmissionPolicy.CalendarState =
@@ -92,7 +91,7 @@ class BetaResearchGate @Inject constructor(
 
     suspend fun <T> read(
         type: Type,
-        endpoint: LiveEndpoint = LiveEndpoint.QUOTE,
+        endpoint: BetaLiveEndpointPacingPolicy.Endpoint = BetaLiveEndpointPacingPolicy.Endpoint.QUOTE,
         block: suspend () -> T
     ): T =
         if (type == Type.HISTORICAL) historicalInFlight.withLock {
@@ -108,8 +107,8 @@ class BetaResearchGate @Inject constructor(
             halfOpenProbeInFlight = w.probeInFlight,
             rateLimitResponses = liveRateLimits.get(),
             activeGapMs = maxOf(
-                BetaLiveEndpointPacingPolicy.gapMs(livePacing, LiveEndpoint.LTP),
-                BetaLiveEndpointPacingPolicy.gapMs(livePacing, LiveEndpoint.QUOTE)
+                BetaLiveEndpointPacingPolicy.gapMs(livePacing, BetaLiveEndpointPacingPolicy.Endpoint.LTP),
+                BetaLiveEndpointPacingPolicy.gapMs(livePacing, BetaLiveEndpointPacingPolicy.Endpoint.QUOTE)
             ),
             ltpGapMs = BetaLiveEndpointPacingPolicy.gapMs(livePacing, LiveEndpoint.LTP),
             quoteGapMs = BetaLiveEndpointPacingPolicy.gapMs(livePacing, LiveEndpoint.QUOTE),
