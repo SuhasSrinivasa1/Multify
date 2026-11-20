@@ -8192,17 +8192,31 @@ class TradingRepository @Inject constructor(
                 com.multify.traderpro.engine.WorkingRangeEntryMomentumPolicy.rejectionReason(
                     row.entryPrice, ltp, row.confirmedAtMs, quoteReceivedAtMs
                 )
-            if (momentumReject != null) {
+            // Peak-chasing risk is independent of the confirmation-to-execution
+            // drift. ASIANHOTNR rose +1.56% between first qualification and
+            // confirmation and then filled at its local sampled peak.
+            // Preserve Working Range candidate/research rows; only reject BUY.
+            val firstPriceExtensionReject =
+                com.multify.traderpro.engine.WorkingRangeEntryMomentumPolicy.runupRejectionReason(
+                    row.firstQualifiedPrice, ltp
+                )
+            val executionReject = momentumReject ?: firstPriceExtensionReject
+            if (executionReject != null) {
                 workingRangeRecommendationStore.markAutoBuyOutcome(
                     row.symbol, row.confirmedAtMs, "BLOCKED_STALE_OR_MOMENTUM_LOST",
-                    reason = momentumReject
+                    reason = executionReject
                 )
                 auditLogger.logAsync("WORKING_RANGE_AUTO_BUY", "MOMENTUM_OR_AGE_REJECTED", mapOf(
-                    "symbol" to row.symbol, "reason" to momentumReject,
+                    "symbol" to row.symbol, "reason" to executionReject,
                     "confirmed_at_ms" to row.confirmedAtMs,
                     "confirmation_age_ms" to (quoteReceivedAtMs - row.confirmedAtMs),
+                    "first_qualified_at_ms" to row.firstQualifiedAtMs,
+                    "first_qualified_price" to row.firstQualifiedPrice,
                     "confirmed_entry" to row.entryPrice, "fresh_alpha_ltp" to ltp,
+                    "first_qualified_to_fresh_runup_pct" to
+                        ((ltp / row.firstQualifiedPrice) - 1.0) * 100.0,
                     "reference_to_quote_drift_pct" to ((ltp / row.entryPrice) - 1.0) * 100.0,
+                    "vwap_extension_atr_shadow" to row.vwapExtensionAtr,
                     "alpha_quote_receipt_ms" to quoteReceivedAtMs,
                     "fresh_independent_confirmation_required" to true,
                     "no_order_sent" to true, "fixed_model_unchanged" to true
@@ -8234,6 +8248,11 @@ class TradingRepository @Inject constructor(
                 mapOf("symbol" to row.symbol, "reference" to reference,
                     "confirmed_at_ms" to row.confirmedAtMs, "requested_quantity" to sizing.quantity,
                     "fresh_alpha_ltp" to ltp, "target_pct" to row.targetPct,
+                    "first_qualified_price" to row.firstQualifiedPrice,
+                    "first_qualified_to_fresh_runup_pct" to
+                        ((ltp / row.firstQualifiedPrice) - 1.0) * 100.0,
+                    "confirmation_to_reservation_ms" to
+                        (System.currentTimeMillis() - row.confirmedAtMs).coerceAtLeast(0L),
                     "fixed_model_changed" to false, "beta_order_route" to false,
                     "blind_resubmission" to false))
             try {
