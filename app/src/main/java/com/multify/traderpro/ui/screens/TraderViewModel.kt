@@ -227,6 +227,22 @@ class TraderViewModel @Inject constructor(
         }
     }
 
+    fun setLegacyPortfolioReconciled(reconciled: Boolean) {
+        viewModelScope.launch {
+            runCatching { preferences.setLegacyPortfolioReconciled(reconciled) }
+                .onSuccess {
+                    remote.value = remote.value.copy(
+                        message = if (reconciled)
+                            "Previous-app holdings acknowledged as reconciled against Groww"
+                        else
+                            "Auto-Buy locked until previous-app holdings are reconciled"
+                    )
+                    refresh(silent = true)
+                }
+                .onFailure { remote.value = remote.value.copy(error = it.userMessage()) }
+        }
+    }
+
     fun setFixedAutoBuy(enabled: Boolean) {
         viewModelScope.launch {
             remote.value = remote.value.copy(loading = true, error = null, message = null)
