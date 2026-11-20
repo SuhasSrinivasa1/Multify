@@ -2947,6 +2947,44 @@ class TradingRepository @Inject constructor(
         )
     }
 
+    /**
+     * Independent v9.0.24 execution/presentation overlay: no extra API calls,
+     * no changes to the frozen Fixed score, 15m inputs, confirmation, target,
+     * publication, order reconciliation, or stepped SELL protection.
+     * This consumes already captured quote+completed-candle diagnostics only.
+     */
+    private fun fixedLateEntrySafetyDecision(
+        row: FixedRecommendationRecord,
+        quote: QuotePayload?,
+        nowMs: Long = System.currentTimeMillis()
+    ): com.multify.traderpro.engine.FixedLateEntrySafetyPolicy.Decision {
+        val evidence = fixedAutoBuyPublicationEvidence.find(row.id)?.takeIf {
+            it.recommendationId == row.id &&
+                it.symbol.equals(row.symbol, true) &&
+                it.scanStartedAtMs == row.generatedAtMs
+        }
+        val presented = quote ?: fixedPublishedQuote(row, nowMs)
+        val verdict = fixedEntryVerdict(row, presented, nowMs)
+        val source = fixedShadowReferences[row.symbol.uppercase(Locale.US)]?.takeIf {
+            it.quoteCapturedAtMs in row.generatedAtMs..nowMs &&
+                nowMs - it.quoteCapturedAtMs <= 5L * 60_000L
+        }?.evaluation?.features
+        val price = presented?.lastPrice?.takeIf { it.isFinite() && it > 0.0 }
+        // Only compare with verified 15m candle ATR when the contemporaneous
+        // quote is within the same 1% feature association as Fixed's verdict.
+        val atr = source?.atr14?.takeIf { it.isFinite() && it > 0.0 }?.takeIf {
+            price != null && source.ltp > 0.0 &&
+                kotlin.math.abs(price / source.ltp - 1.0) <= 0.01
+        }
+        val targetAtr = if (atr != null && price != null && row.targetPct > 0.0)
+            price * row.targetPct / (100.0 * atr) else null
+        return com.multify.traderpro.engine.FixedLateEntrySafetyPolicy.assess(
+            nowMs, evidence?.publishedAtMs, evidence?.sourceQuoteReceivedAtMs,
+            verdict.vwapAtrExtension, targetAtr,
+            verdict.distanceFromQuoteHighPct, verdict.highEvidenceSource
+        )
+    }
+
     private fun fixedPublishedQuote(row: FixedRecommendationRecord, nowMs: Long): QuotePayload? =
         fixedShadowReferences[row.symbol.uppercase(Locale.US)]?.takeIf {
             it.quoteCapturedAtMs >= row.generatedAtMs &&
@@ -2964,14 +3002,27 @@ class TradingRepository @Inject constructor(
         val marketability = com.multify.traderpro.engine
             .FixedQuoteMarketabilityPresentationPolicy.assess(
                 presentedQuote, quoteAtMs, nowMs)
-        val riskPrefix = when (verdict.status) {
-            "RESEARCH_ONLY" -> "FIXED RESEARCH ONLY · BUY BLOCKED: " + verdict.reasons.joinToString(",") + " · "
-            "CAUTION" -> "FIXED ENTRY CAUTION: " + verdict.reasons.joinToString(",") + " · "
+        val lateEntry = fixedLateEntrySafetyDecision(row, presentedQuote, nowMs)
+        val riskPrefix = when {
+            !lateEntry.executable ->
+                "FIXED PRIMARY PRESERVED · ENTRY PAUSED (" + lateEntry.reason +
+                    ") · Frozen selection unchanged · "
+            verdict.status == "RESEARCH_ONLY" ->
+                "FIXED RESEARCH ONLY · BUY BLOCKED: " + verdict.reasons.joinToString(",") + " · "
+            verdict.status == "CAUTION" ->
+                "FIXED ENTRY CAUTION: " + verdict.reasons.joinToString(",") + " · "
             else -> ""
+        }
+        val publication = fixedAutoBuyPublicationEvidence.find(row.id)?.takeIf {
+            it.scanStartedAtMs == row.generatedAtMs &&
+                it.recommendationId == row.id
         }
         return row.toDto().copy(
             reason = riskPrefix + row.reason,
-            executionEligible = row.executionEligible && verdict.actionable,
+            executionEligible = row.executionEligible && verdict.actionable && lateEntry.executable,
+            fixedActualPublishedAtMs = publication?.publishedAtMs,
+            fixedSourceQuoteReceivedAtMs = publication?.sourceQuoteReceivedAtMs,
+            fixedFirstPrimaryPrice = fixedFirstPrimaryPrice(row),
             quoteMarketabilityState = marketability.state,
             quoteUpperCircuitPrice = marketability.brokerUpperCircuit,
             quoteBestSellOffer = marketability.bestObservedOffer,
@@ -8493,6 +8544,20 @@ class TradingRepository @Inject constructor(
             error("Fixed BUY blocked: extremely thin reported turnover ($thinLiquidityReject)")
         }
         val entryActionability = fixedEntryVerdict(row, quote)
+        val lateEntryDecision = fixedLateEntrySafetyDecision(row, quote)
+        if (!lateEntryDecision.executable) {
+            auditLogger.log("FIXED_BUY", "LATE_OR_EXTREME_PEAK_ENTRY_HELD", mapOf(
+                "symbol" to row.symbol, "recommendation_id" to row.id,
+                "reason" to lateEntryDecision.reason,
+                "peak_risk" to lateEntryDecision.peakRisk,
+                "publication_age_ms" to lateEntryDecision.publicationAgeMs,
+                "source_quote_age_ms" to lateEntryDecision.sourceQuoteAgeMs,
+                "fresh_alpha_quote_price" to ltp,
+                "no_order_submitted" to true, "fixed_model_unchanged" to true
+            ))
+            error("Fixed PRIMARY retained for research; new entry paused: " +
+                lateEntryDecision.reason)
+        }
         if (!entryActionability.actionable) {
             auditLogger.logAsync("FIXED_BUY", "ENTRY_QUALITY_BLOCKED", mapOf(
                 "symbol" to row.symbol, "reasons" to entryActionability.reasons,
@@ -8805,6 +8870,20 @@ class TradingRepository @Inject constructor(
                 "source_exchange_timestamp_provided" to false
             ))
             val entryActionability = fixedEntryVerdict(row, quote)
+            val lateEntryDecision = fixedLateEntrySafetyDecision(row, quote)
+            if (!lateEntryDecision.executable) {
+                auditLogger.log("FIXED_AUTO_BUY", "LATE_OR_EXTREME_PEAK_ENTRY_HELD", mapOf(
+                    "symbol" to row.symbol, "recommendation_id" to row.id,
+                    "reason" to lateEntryDecision.reason,
+                    "peak_risk" to lateEntryDecision.peakRisk,
+                    "publication_age_ms" to lateEntryDecision.publicationAgeMs,
+                    "source_quote_age_ms" to lateEntryDecision.sourceQuoteAgeMs,
+                    "fresh_alpha_quote_price" to ltp,
+                    "order_intent_not_reserved" to true, "no_order_submitted" to true,
+                    "frozen_selection_and_target_unchanged" to true
+                ))
+                continue
+            }
             if (!entryActionability.actionable) {
                 auditLogger.logAsync("FIXED_AUTO_BUY", "ENTRY_QUALITY_BLOCKED", mapOf(
                     "symbol" to row.symbol, "reasons" to entryActionability.reasons,
