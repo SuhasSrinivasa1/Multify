@@ -6,11 +6,12 @@ package com.multify.traderpro.engine
  * Boundaries are retrospective candidate ranges from 19-Nov logs. The original
  * 9/9 success claim was not a valid independent result: replaying the same
  * envelope also admits GPIL, which was a clear adverse/unsuccessful example.
- * Therefore this remains manual-review-only and must be validated prospectively.
+ * Therefore it remains a pilot rule. Live Auto-Buy requires an explicit fresh
+ * Working Range toggle activation and passes the independent broker execution guard.
  *
  * This policy consumes an evaluation and quote already fetched by Fixed. It
  * makes no API calls and never changes Fixed scoring, rank, publication, orders,
- * target, stop, GTT or trailing.
+ * target, stop, GTT or trailing. The separate Auto-Buy consumer is outside Fixed.
  */
 internal object WorkingRangeCandidatePolicy {
     const val TARGET_PCT = FixedFinalContract.CANONICAL_MULTIFY_MFE_AVG_PCT
