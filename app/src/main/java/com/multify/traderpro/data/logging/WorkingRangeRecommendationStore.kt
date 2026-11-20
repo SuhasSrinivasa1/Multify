@@ -88,18 +88,20 @@ class WorkingRangeRecommendationStore(context: Context) {
         runCatching { queue.submit {}.get(timeoutMs, TimeUnit.MILLISECONDS); true }.getOrDefault(false)
 
     /** Durable one-shot order intent, keyed by the confirmed symbol/event timestamp. */
-    fun reserveAutoBuy(symbol: String, confirmedAtMs: Long, reference: String, quantity: Int): Boolean =
+    fun reserveAutoBuy(symbol: String, confirmedAtMs: Long, reference: String, quantity: Int,
+        referencePrice: Double): Boolean =
         synchronized(lock) {
             val row = rows.firstOrNull {
                 it.symbol.equals(symbol, true) && it.dto.confirmedAtMs == confirmedAtMs
             } ?: return@synchronized false
             if (!enabled || row.dto.state != "IN_RANGE" ||
                 row.dto.autoBuyState !in setOf("NOT_ATTEMPTED", "RETRYABLE_BLOCKED") ||
-                reference.isBlank() || quantity <= 0)
+                reference.isBlank() || quantity <= 0 || !referencePrice.isFinite() || referencePrice <= 0.0)
                 return@synchronized false
             row.dto = row.dto.copy(
                 autoBuyEnabled = true, autoBuyState = "ORDER_INTENT_RESERVED",
                 autoBuyReference = reference, autoBuyQuantity = quantity,
+                autoBuyReferencePrice = referencePrice,
                 reason = "Working Range confirmed · durable Alpha order intent reserved · awaiting broker result"
             )
             // Keep the in-memory reservation even if disk commit reports failure:
