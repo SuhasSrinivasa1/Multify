@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -43,6 +44,7 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.multify.traderpro.data.network.EngineHealthDto
+import com.multify.traderpro.data.network.FixedScanTrendStore
 import com.multify.traderpro.data.network.ForecastDto
 import com.multify.traderpro.data.network.PositionDto
 import com.multify.traderpro.data.network.WorkingRangeRecommendationDto
@@ -371,6 +373,13 @@ internal fun LiteFixedScreen(
     onBuy: (String) -> Unit
 ) {
     val dashboard = state.dashboard
+    val localContext = LocalContext.current
+    val recentScans = remember(dashboard?.asOf) {
+        FixedScanTrendStore.read(localContext)
+            .filter { it.result == "COMPLETED" }.takeLast(30)
+    }
+    val scanMedianMs = FixedScanTrendStore.percentile(recentScans.map { it.elapsedMs }, .50)
+    val scanP90Ms = FixedScanTrendStore.percentile(recentScans.map { it.elapsedMs }, .90)
     val health = dashboard?.fixedHealth ?: EngineHealthDto()
     val recommendations = dashboard?.fixedForecasts.orEmpty()
         .sortedWith(compareBy<ForecastDto> { it.rank }.thenByDescending { it.generatedAtMs })
@@ -464,6 +473,20 @@ internal fun LiteFixedScreen(
                     else "Available in NSE market hours. Outside-session scans are not queued.",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+
+        item(key = "fixed-scan-performance") {
+            LiteCard {
+                SectionTitle("Scan performance", "Last 30 completed · local logs only")
+                MetricPair(
+                    { MetricTile("Median scan",
+                        scanMedianMs?.let { fmt(it / 1000.0) + " s" } ?: "—",
+                        recentScans.size.toString() + " completed") },
+                    { MetricTile("P90 scan",
+                        scanP90Ms?.let { fmt(it / 1000.0) + " s" } ?: "—",
+                        "Actual elapsed · not a target") }
                 )
             }
         }
