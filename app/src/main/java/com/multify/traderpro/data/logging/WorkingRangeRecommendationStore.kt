@@ -185,8 +185,8 @@ class WorkingRangeRecommendationStore(context: Context) {
 
     private fun recordQueueDrop() {
         droppedQueueItems.incrementAndGet()
-        val at = System.currentTimeMillis()
         synchronized(lock) {
+            val at = max(System.currentTimeMillis(), lastQueueDropAtMs + 1L)
             lastQueueDropAtMs = at
             prefs.edit().putLong(KEY_QUEUE_DROP_AT_MS, at).apply()
         }
