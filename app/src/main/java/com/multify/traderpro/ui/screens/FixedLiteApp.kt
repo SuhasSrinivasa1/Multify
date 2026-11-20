@@ -341,6 +341,9 @@ internal fun LiteFixedScreen(state: TraderUiState, onScan: () -> Unit, onBuy: (S
     val recommendations = dashboard?.fixedForecasts.orEmpty()
         .sortedWith(compareBy<ForecastDto> { it.rank }.thenByDescending { it.generatedAtMs })
     val positions = dashboard?.positions.orEmpty().filter { it.quantity > 0 }
+    val manualEntryReady = dashboard != null && state.settings.legacyPortfolioReconciled &&
+        state.settings.brokerAuthenticated && state.settings.staticIpMatched &&
+        !state.settings.safetyHalt && dashboard.halted.not()
     val discoveryTone = when (health.discovery.uppercase(Locale.US)) {
         "READY", "HEALTHY", "COMPLETE" -> LiteTone.POSITIVE
         "DEGRADED", "ERROR", "FAILED" -> LiteTone.NEGATIVE
@@ -455,7 +458,7 @@ internal fun LiteFixedScreen(state: TraderUiState, onScan: () -> Unit, onBuy: (S
             }
         } else {
             items(recommendations, key = { "fixed-" + it.symbol + "-" + it.generatedAtMs }) { row ->
-                FixedRecommendationCard(row, onBuy)
+                FixedRecommendationCard(row, manualEntryReady, onBuy)
             }
         }
     }
@@ -481,7 +484,7 @@ private fun PositionRow(position: PositionDto) {
 }
 
 @Composable
-private fun FixedRecommendationCard(row: ForecastDto, onBuy: (String) -> Unit) {
+private fun FixedRecommendationCard(row: ForecastDto, manualEntryReady: Boolean, onBuy: (String) -> Unit) {
     val tierTone = when (row.qualityTier.uppercase(Locale.US)) {
         "PRIMARY" -> LiteTone.POSITIVE
         "SECONDARY" -> LiteTone.INFO
@@ -518,8 +521,15 @@ private fun FixedRecommendationCard(row: ForecastDto, onBuy: (String) -> Unit) {
         Text("Scan " + timeLabel(row.generatedAtMs) + " · published " + timeLabel(row.fixedActualPublishedAtMs ?: 0L), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Text(row.reason, style = MaterialTheme.typography.bodySmall, maxLines = 3, overflow = TextOverflow.Ellipsis)
         if (row.executionEligible) {
-            OutlinedButton(onClick = { onBuy(row.symbol) }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+            OutlinedButton(
+                onClick = { onBuy(row.symbol) },
+                enabled = manualEntryReady,
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
+            ) {
                 Text("Manual BUY · Alpha")
+            }
+            if (!manualEntryReady) {
+                Text("Locked until Alpha is verified and previous-app holdings are reconciled.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
             }
         } else {
             Text("No manual order permission for this observation.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
