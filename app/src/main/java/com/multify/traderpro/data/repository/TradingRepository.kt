@@ -1678,6 +1678,9 @@ class TradingRepository @Inject constructor(
 
     suspend fun setWorkingRangeEnabled(enabled: Boolean) {
         initializeWorkingRangeAutoBuyOptIn()
+        if (enabled) require(preferences.settings.first().legacyPortfolioReconciled) {
+            "Reconcile previous-app holdings in Groww before enabling Working Range Auto-Buy"
+        }
         val previous = workingRangeAutoBuyEnabledNow()
         preferences.setWorkingRangeEnabled(enabled)
         val live = preferences.settings.first()
@@ -1706,6 +1709,9 @@ class TradingRepository @Inject constructor(
     }
 
     suspend fun setFixedAutoBuy(enabled: Boolean) {
+        if (enabled) require(preferences.settings.first().legacyPortfolioReconciled) {
+            "Reconcile previous-app holdings in Groww before enabling Fixed Auto-Buy"
+        }
         preferences.setFixedAutoBuy(enabled)
         // OFF/ON cannot inherit any old pending intent or a previous session wake.
         fixedAutoBuyCooldownQueue.clear()
@@ -8133,6 +8139,11 @@ class TradingRepository @Inject constructor(
         reconcileWorkingRangeAutoBuyIntents(token, today)
 
         val settings = preferences.settings.first()
+        if (!settings.legacyPortfolioReconciled) {
+            auditLogger.logAsync("SAFETY", "NEW_BUYS_BLOCKED_LEGACY_PORTFOLIO_NOT_RECONCILED",
+                mapOf("engine" to "WORKING_RANGE", "new_buy_submitted" to false))
+            return 0
+        }
         if (!settings.workingRangeEnabled || settings.workingRangeActivatedAtMs <= 0L ||
             settings.safetyHalt || potential.isEmpty()) return 0
         val now = ZonedDateTime.now(INDIA)
@@ -8644,6 +8655,11 @@ class TradingRepository @Inject constructor(
         val now = ZonedDateTime.now(INDIA)
         if (!com.multify.traderpro.engine.NseEquitySessionCalendar.isFixedNewEntryWindow(now) || marketSession() != "OPEN") return 0
         val settings = preferences.settings.first()
+        if (!settings.legacyPortfolioReconciled) {
+            auditLogger.logAsync("SAFETY", "NEW_BUYS_BLOCKED_LEGACY_PORTFOLIO_NOT_RECONCILED",
+                mapOf("engine" to "FIXED", "new_buy_submitted" to false))
+            return 0
+        }
         if (!settings.fixedAutoBuyEnabled || settings.safetyHalt) return 0
         // Old installations can contain ON=true without the new activation timestamp.
         // Fail closed until the user explicitly switches OFF and then ON again.
@@ -13451,6 +13467,9 @@ class TradingRepository @Inject constructor(
     }
 
     private fun preIndependentExecutionGuard(settings: AppSettings) {
+        require(settings.legacyPortfolioReconciled) {
+            "Reconcile previous-app holdings in Groww before submitting a new BUY"
+        }
         require(tradingRecoveryReady) { "Broker recovery is still reconciling holdings and sell protection" }
         require(settings.brokerAuthenticated) { "Groww is not authenticated" }
         require(settings.staticIpMatched) { "Static IP verification failed" }
@@ -13526,6 +13545,9 @@ class TradingRepository @Inject constructor(
     }
 
     private fun preFixedAutoBuyExecutionGuard(settings: AppSettings) {
+        require(settings.legacyPortfolioReconciled) {
+            "Reconcile previous-app holdings in Groww before submitting a new BUY"
+        }
         require(settings.brokerAuthenticated) { "Groww is not authenticated" }
         require(settings.staticIpMatched) { "Static IP verification failed" }
         require(settings.brokerDdpiEnabled) { "DDPI is required for CNC holdings" }
@@ -13544,6 +13566,9 @@ class TradingRepository @Inject constructor(
         allowOtherSymbolProtectionRecovery: Boolean = false,
         recommendationId: Long? = null
     ): OrderPayload = appOwnedBuyMutex.withLock {
+        require(preferences.settings.first().legacyPortfolioReconciled) {
+            "BUY blocked: reconcile previous-app holdings in Groww before enabling this installation"
+        }
         if (recommendationId != null && isFixedRecommendationExecutionConsumed(recommendationId)) {
             auditLogger.log("FIXED_AUTO_BUY", "RECOMMENDATION_EVENT_ALREADY_CONSUMED", mapOf(
                 "recommendation_id" to recommendationId,
