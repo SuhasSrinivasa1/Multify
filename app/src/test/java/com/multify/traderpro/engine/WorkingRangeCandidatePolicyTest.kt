@@ -9,7 +9,7 @@ class WorkingRangeCandidatePolicyTest {
         green: Double = 0.86, ema9: Double = 110.0, ema20: Double = 108.0,
         ema50: Double = 104.0, ema9Slope: Double = 0.5, ema20Slope: Double = 0.3,
         macd: Double = 0.05, atr: Double = 7.28, price: Double = 767.9,
-        minutes: Double = 180.0, vwap: Double = 700.0
+        minutes: Double = 180.0, vwap: Double = 745.0
     ) = WorkingRangeCandidatePolicy.Inputs(
         price = price, atr = atr, rsi = rsi, rvol = rvol,
         volumeAcceleration = accel, greenVolumeShare = green,
@@ -20,14 +20,26 @@ class WorkingRangeCandidatePolicyTest {
         orderBookImbalance = null, minutesToClose = minutes
     )
 
-    @Test fun highRsiAndLargeVwapExtensionAreNotSoloVetoes() {
-        val result = WorkingRangeCandidatePolicy.assess(input(rsi = 96.0, vwap = 700.0))
+    @Test fun highRsiIsNotSoloVetoWhenPriceRemainsInsideTheVwapBand() {
+        val result = WorkingRangeCandidatePolicy.assess(input(rsi = 96.0, vwap = 742.5))
         assertTrue(result.matches)
-        assertTrue(result.vwapExtensionAtr!! > 4.0)
+        assertTrue(result.vwapExtensionAtr!! <= 3.5)
         assertTrue(result.targetRequirementAtr!! <= 1.6)
     }
 
-    @Test fun replayedGpilIsKnownInSampleFalsePositiveAndMustNotBeCalledValidated() {
+    @Test fun vwapExtensionAboveThreeAndAHalfAtrIsOutsideWorkingRange() {
+        val result = WorkingRangeCandidatePolicy.assess(input(vwap = 740.0))
+        assertFalse(result.matches)
+        assertTrue(result.reasons.contains("VWAP_EXTENSION_ABOVE_3_50_ATR"))
+    }
+
+    @Test fun wideSpreadIsOutsideWorkingRange() {
+        val result = WorkingRangeCandidatePolicy.assess(input().copy(spreadBps = 35.1))
+        assertFalse(result.matches)
+        assertTrue(result.reasons.contains("SPREAD_ABOVE_35_BPS"))
+    }
+
+    @Test fun replayedGpilIsOutsideTheNewVwapEntryBandAndMustNotBeCalledValidated() {
         // 19-Nov GPIL matched the candidate envelope but did not reach target in
         // the available market path. This test guards against repeating the old 9/9 claim.
         val result = WorkingRangeCandidatePolicy.assess(input(
@@ -36,7 +48,8 @@ class WorkingRangeCandidatePolicyTest {
             ema9Slope = 0.57, ema20Slope = 0.35, macd = 0.118,
             price = 234.79, atr = 1.776, vwap = 225.0
         ))
-        assertTrue(result.matches)
+        assertFalse(result.matches)
+        assertTrue(result.reasons.contains("VWAP_EXTENSION_ABOVE_3_50_ATR"))
     }
 
     @Test fun extremeImpulseAboveThirtyIsOutsidePilotRange() {
@@ -64,8 +77,8 @@ class WorkingRangeCandidatePolicyTest {
         assertTrue(result.reasons.contains("LESS_THAN_38_MINUTES_TO_CLOSE"))
     }
 
-    @Test fun spreadAndMissingSellOfferAreNotTechnicalVetoes() {
-        val result = WorkingRangeCandidatePolicy.assess(input())
+    @Test fun missingSpreadDoesNotMasqueradeAsZeroAtCandidateStage() {
+        val result = WorkingRangeCandidatePolicy.assess(input(spreadBps = null))
         assertTrue(result.matches)
         assertNull(result.targetRequirementAtr?.takeIf { !it.isFinite() })
     }
