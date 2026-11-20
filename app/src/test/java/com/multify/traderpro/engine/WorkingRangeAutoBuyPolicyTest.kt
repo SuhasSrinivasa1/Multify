@@ -52,7 +52,7 @@ class WorkingRangeAutoBuyPolicyTest {
             1_000L, 2_000L, 1_100L, 2_100L))
     }
 
-    @Test fun firstQualifiedSignalOlderThanTwoMinutesCannotBuy() {
+    @Test fun firstQualifiedSignalOlderThanThreeMinutesCannotBuy() {
         assertEquals("FIRST_QUALIFIED_SIGNAL_EXPIRED",
             decide(activated = 500L, confirmed = 10_000L,
                 first = 1_000L, now = 181_001L).reason)
