@@ -181,6 +181,7 @@ jobs:
           assert 'migrateWorkingRangeToExplicitAutoBuyOptInOnce' in pref
           assert 'working_range_auto_buy_reset_v9021' in pref
           assert 'WorkingRangeAutoBuyPolicy.decide(' in source_text
+          assert 'RETRYABLE_BLOCKED' in source_text and 'retry_on_next_fresh_scan' in source_text
           assert 'autoBuyWorkingRangeRecommendations()' in source_text
           assert 'workingRangeRecommendationStore.reserveAutoBuy(' in source_text
           assert 'reconcileWorkingRangeAutoBuyIntents(' in source_text
