@@ -59,7 +59,7 @@ class WorkingRangeCandidatePolicyTest {
     }
 
     @Test fun oalNearEma20Ema50CrossIsRecordedButNotPromotedBeforeEndOfDayReview() {
-        // 20-Nov OAL: strong participation/book/momentum and a 0.22 INR EMA20/EMA50 gap.
+        // 20-Nov OAL: strong participation/book/momentum and a 0.21 INR EMA20/EMA50 gap.
         // Keep strict selection unchanged today; telemetry records this near-cross for replay.
         val result = WorkingRangeCandidatePolicy.assess(input(
             rsi = 79.05, rvol = 20.35, accel = 2.66, green = 0.8145,
