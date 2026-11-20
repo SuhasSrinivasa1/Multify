@@ -1,6 +1,7 @@
 package com.multify.traderpro.ui.screens
 
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
@@ -64,6 +65,7 @@ class FixedLiteUiTest {
         compose.onNodeWithText("PRIMARY").assertIsDisplayed()
         compose.onNodeWithText("ACTIONABLE").assertIsDisplayed()
         compose.onNodeWithText("Manual BUY · Alpha").assertIsDisplayed()
+        compose.onNodeWithText("Manual BUY · Alpha").assertIsNotEnabled()
     }
 
     @Test fun workingRangeCardShowsTwoScanPilotAndKeepsOutcomeSamplingExplicit() {
