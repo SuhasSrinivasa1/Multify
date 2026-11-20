@@ -265,14 +265,25 @@ class TradingRepository @Inject constructor(
         com.multify.traderpro.data.logging.WorkingRangeRecommendationStore(appContext)
     }
     @Volatile private var workingRangeEnabledCache: Boolean? = null
+    @Volatile private var workingRangeMigrationReady = false
+    private val workingRangeMigrationMutex = Mutex()
+
+    /** Called from UI startup and the scanner; the legacy research-only ON state is reset once. */
+    suspend fun initializeWorkingRangeAutoBuyOptIn() {
+        workingRangeMigrationMutex.withLock {
+            if (workingRangeMigrationReady) return
+            preferences.migrateWorkingRangeToExplicitAutoBuyOptInOnce()
+            val enabled = preferences.settings.first().workingRangeEnabled
+            workingRangeEnabledCache = enabled
+            workingRangeRecommendationStore.setEnabled(enabled,
+                "Working Range initialized after v9.0.21 explicit Auto-Buy opt-in migration")
+            workingRangeMigrationReady = true
+        }
+    }
 
     private suspend fun workingRangeEnabledNow(): Boolean {
-        workingRangeEnabledCache?.let { return it }
-        val enabled = preferences.settings.first().workingRangeEnabled
-        workingRangeEnabledCache = enabled
-        workingRangeRecommendationStore.setEnabled(enabled,
-            "Working Range initialized from persisted operator setting")
-        return enabled
+        initializeWorkingRangeAutoBuyOptIn()
+        return workingRangeEnabledCache ?: preferences.settings.first().workingRangeEnabled
     }
 
     private val fixedRecommendationExecutionPrefs by lazy {
@@ -1667,23 +1678,32 @@ class TradingRepository @Inject constructor(
     @Volatile private var fixedAutoBuyActivationForQueue = 0L
 
     suspend fun setWorkingRangeEnabled(enabled: Boolean) {
+        initializeWorkingRangeAutoBuyOptIn()
         val previous = workingRangeEnabledNow()
         preferences.setWorkingRangeEnabled(enabled)
+        val live = preferences.settings.first()
         workingRangeEnabledCache = enabled
         if (previous != enabled) {
             workingRangeRecommendationStore.setEnabled(enabled,
-                if (enabled) "Working Range re-enabled; new candidate baseline required"
-                else "Working Range disabled by operator")
+                if (enabled) "Working Range Auto-Buy enabled; new candidate baseline and activation timestamp required"
+                else "Working Range Auto-Buy disabled by operator")
         }
         auditLogger.log("SETTINGS",
-            if (enabled) "WORKING_RANGE_ENABLED" else "WORKING_RANGE_DISABLED",
+            if (enabled) "WORKING_RANGE_AUTO_BUY_ENABLED" else "WORKING_RANGE_AUTO_BUY_DISABLED",
             mapOf(
                 "fixed_scoring_changed" to false,
                 "fixed_recommendations_suppressed" to false,
-                "working_range_auto_buy_enabled" to false,
+                "working_range_auto_buy_enabled" to enabled,
+                "activation_at_ms" to live.workingRangeActivatedAtMs,
+                "only_new_confirmations_after_activation_eligible" to true,
+                "alpha_only_execution" to true,
+                "beta_read_only" to true,
                 "source" to "existing_fixed_15m_evaluation_and_quote",
-                "extra_broker_requests" to 0
+                "extra_broker_requests_for_discovery" to 0
             ))
+        if (enabled && !live.safetyHalt && marketSession() == "OPEN") {
+            runCatching { prepareArmHotPath(force = false) }
+        }
     }
 
     suspend fun setFixedAutoBuy(enabled: Boolean) {
