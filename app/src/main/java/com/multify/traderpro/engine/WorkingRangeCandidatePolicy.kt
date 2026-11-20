@@ -1,7 +1,7 @@
 package com.multify.traderpro.engine
 
 /**
- * Working Range v0.1 is a separate pilot filter, not the Fixed model.
+ * Working Range v0.2 is a separate pilot filter, not the Fixed model.
  *
  * Boundaries are retrospective candidate ranges from 19-Nov logs. The original
  * 9/9 success claim was not a valid independent result: replaying the same
