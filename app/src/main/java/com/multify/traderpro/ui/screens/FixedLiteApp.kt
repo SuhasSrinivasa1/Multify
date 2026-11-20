@@ -804,12 +804,14 @@ internal fun LiteSettingsScreen(
             ) {
                 Checkbox(
                     checked = state.settings.legacyPortfolioReconciled,
-                    onCheckedChange = vm::setLegacyPortfolioReconciled
+                    onCheckedChange = vm::setLegacyPortfolioReconciled,
+                    enabled = !state.settings.legacyPortfolioReconciled ||
+                        (!state.settings.fixedAutoBuyEnabled && !state.settings.workingRangeEnabled)
                 )
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Text("Previous-app holdings reconciled", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
                     Text(
-                        "This package has a separate database. Check Groww and verify or close every position from the old app before confirming.",
+                        "This package has a separate database. Check Groww and verify or close every old-app position. Turn both Auto-Buy switches OFF before clearing this acknowledgement.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
