@@ -275,13 +275,12 @@ class TradingRepository @Inject constructor(
             preferences.migrateWorkingRangeToExplicitAutoBuyOptInOnce()
             val enabled = preferences.settings.first().workingRangeEnabled
             workingRangeEnabledCache = enabled
-            workingRangeRecommendationStore.setEnabled(enabled,
-                "Working Range initialized after v9.0.21 explicit Auto-Buy opt-in migration")
+            workingRangeRecommendationStore.setAutoBuyEnabled(enabled)
             workingRangeMigrationReady = true
         }
     }
 
-    private suspend fun workingRangeEnabledNow(): Boolean {
+    private suspend fun workingRangeAutoBuyEnabledNow(): Boolean {
         initializeWorkingRangeAutoBuyOptIn()
         return workingRangeEnabledCache ?: preferences.settings.first().workingRangeEnabled
     }
@@ -1679,14 +1678,14 @@ class TradingRepository @Inject constructor(
 
     suspend fun setWorkingRangeEnabled(enabled: Boolean) {
         initializeWorkingRangeAutoBuyOptIn()
-        val previous = workingRangeEnabledNow()
+        val previous = workingRangeAutoBuyEnabledNow()
         preferences.setWorkingRangeEnabled(enabled)
         val live = preferences.settings.first()
         workingRangeEnabledCache = enabled
         if (previous != enabled) {
-            workingRangeRecommendationStore.setEnabled(enabled,
-                if (enabled) "Working Range Auto-Buy enabled; new candidate baseline and activation timestamp required"
-                else "Working Range Auto-Buy disabled by operator")
+            // Toggle only the order permission. Research observations and pending
+            // confirmation candidates are never cleared by this setting.
+            workingRangeRecommendationStore.setAutoBuyEnabled(enabled)
         }
         auditLogger.log("SETTINGS",
             if (enabled) "WORKING_RANGE_AUTO_BUY_ENABLED" else "WORKING_RANGE_AUTO_BUY_DISABLED",
@@ -1958,8 +1957,7 @@ class TradingRepository @Inject constructor(
             fixedResearchSafety = fixedResearchSafety,
             forecasts = forecasts,
             fixedForecasts = fixedForecasts,
-            workingRangeRecommendations = if (settings.workingRangeEnabled)
-                workingRangeRecommendationStore.recent(today) else emptyList(),
+            workingRangeRecommendations = workingRangeRecommendationStore.recent(today),
             forecastWatchlist = secondaryForecastWatchlist(today),
             fixedWatchlist = emptyList(),
             fixedEarlyWatch = fixedEarlyWatchJournal.recent(today),
@@ -2133,8 +2131,7 @@ class TradingRepository @Inject constructor(
                 summary = snapshot.summary, execution = execution, learning = learning, forecastLearning = forecastLearning,
                 forecastReferences = forecastReferences,
                 forecasts = forecasts, fixedForecasts = fixedForecasts,
-                workingRangeRecommendations = if (settings.workingRangeEnabled)
-                    workingRangeRecommendationStore.recent(today) else emptyList(),
+                workingRangeRecommendations = workingRangeRecommendationStore.recent(today),
                 forecastWatchlist = secondaryForecastWatchlist(today),
             fixedWatchlist = emptyList(),
             fixedEarlyWatch = fixedEarlyWatchJournal.recent(today),
@@ -4856,13 +4853,12 @@ class TradingRepository @Inject constructor(
             FixedResearchQuoteReceipt(lastFixedScanAtMs, fixedQuoteReceivedAtMs)
         fixedShadowReferences[symbol] = FixedShadowReference(quote, evaluation, referenceAt)
         fixedFactorTelemetry.tryRecord(symbol, evaluation, lastFixedScanAtMs, quote, referenceAt)
-        // Independent optional Working Range stream: reuse this already-fetched
-        // quote + completed 15m evaluation. No extra Groww calls and no Fixed mutation.
-        if (workingRangeEnabledNow()) {
-            workingRangeRecommendationStore.offer(
-                symbol, evaluation, quote, fixedQuoteReceivedAtMs, lastFixedScanAtMs
-            )
-        }
+        // Always-on independent Working Range research stream: reuse this already-fetched
+        // quote + completed 15m evaluation whether Auto-Buy is ON or OFF.
+        // No extra Groww calls, no Fixed mutation and no execution permission is implied.
+        workingRangeRecommendationStore.offer(
+            symbol, evaluation, quote, fixedQuoteReceivedAtMs, lastFixedScanAtMs
+        )
         v9MasterShadowCollector.offer(
             symbol, quote, verifiedHistory, evaluation, lastFixedScanAtMs, referenceAt
         )
