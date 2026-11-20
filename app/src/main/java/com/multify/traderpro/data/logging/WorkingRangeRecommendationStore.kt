@@ -192,13 +192,15 @@ class WorkingRangeRecommendationStore(context: Context) {
     /** Called only after a broker-confirmed close; later re-qualification remains research-only. */
     fun markPositionClosed(
         symbol: String,
-        confirmedAtMs: Long,
+        reference: String,
         closedAtMs: Long,
         closePrice: Double?,
         closeReason: String
     ) = synchronized(lock) {
         val row = rows.firstOrNull {
-            it.symbol.equals(symbol, true) && it.dto.confirmedAtMs == confirmedAtMs
+            it.symbol.equals(symbol, true) &&
+                (it.dto.autoBuyReference == reference || it.dto.confirmedAtMs > 0L &&
+                    reference.isBlank() && it.dto.autoBuyState == "BUY_EXECUTED")
         } ?: return@synchronized
         row.dto = row.dto.copy(
             state = "POSITION_CLOSED",
@@ -368,10 +370,10 @@ class WorkingRangeRecommendationStore(context: Context) {
             if (existing == null || existing.dto.state != "PENDING_CONFIRMATION") {
                 val first = recommendationDto(
                     symbol, scanStartedAtMs, "PENDING_CONFIRMATION", price, 0.0,
-                    targetPct, observedAtMs, 0L, 0.0, inputs, decision,
+                    targetPct, observedAtMs, 0L, price, inputs, decision,
                     marketabilityState, marketability,
                     autoBuyEnabled, "Working Range · first matching independent scan · confirmation 1/2"
-                )
+                ).copy(lastObservedAtMs = observedAtMs, lastPrice = price)
                 val row = StoredRow(date, symbol, first, price, 1, observedAtMs)
                 if (index >= 0) rows[index] = row else rows.add(row)
                 trimLocked()
@@ -435,6 +437,8 @@ class WorkingRangeRecommendationStore(context: Context) {
                     "WORKING RANGE · two independent scan evaluations · Alpha execution eligibility checked separately"
                 else "Working Range · confirmation 2/2 pending"
             ).copy(
+                lastObservedAtMs = observedAtMs,
+                lastPrice = price,
                 candidateAgeMinutes = ageMinutes,
                 driftFromFirstQualifiedPct = drift
             )
