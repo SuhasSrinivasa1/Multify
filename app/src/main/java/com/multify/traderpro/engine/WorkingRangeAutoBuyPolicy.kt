@@ -27,3 +27,14 @@ object WorkingRangeAutoBuyPolicy {
         return Decision(true, "NEW_CONFIRMED_WORKING_RANGE_EVENT")
     }
 }
+
+/** Enforces two DIFFERENT official scan generations. Duplicate evaluation calls
+ * within one scan must never satisfy the live Auto-Buy confirmation. */
+object WorkingRangeDistinctScanPolicy {
+    fun isIndependentSecondScan(
+        firstScanStartedAtMs: Long, currentScanStartedAtMs: Long,
+        previousEvidenceAtMs: Long, currentEvidenceAtMs: Long
+    ): Boolean =
+        firstScanStartedAtMs > 0L && currentScanStartedAtMs > firstScanStartedAtMs &&
+            previousEvidenceAtMs > 0L && currentEvidenceAtMs > previousEvidenceAtMs
+}
