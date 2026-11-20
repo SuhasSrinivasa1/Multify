@@ -2,12 +2,13 @@ package com.multify.traderpro.engine
 
 /**
  * Working Range v0.4 is a separate bounded entry-range filter, not the Fixed model.
+ * It requires VWAP extension <=3.50 ATR, spread <=35 bps when observed,
+ * drift within +0.50% / -0.75% of first qualification and a 120s confirmation
+ * horizon. RSI has no upper ceiling; high RSI alone is not a veto.
  *
- * Boundaries are retrospective candidate ranges from 19-Nov logs. The original
- * 9/9 success claim was not a valid independent result: replaying the same
- * envelope also admits GPIL, which was a clear adverse/unsuccessful example.
- * Therefore it remains a pilot rule. Live Auto-Buy requires an explicit fresh
- * Working Range toggle activation and passes the independent broker execution guard.
+ * Boundaries are conservative operating guards informed by the 20-Nov ASIANHOTNR
+ * chase, not historically optimized parameters. Live Auto-Buy also requires a
+ * fresh Alpha quote and an explicit Working Range toggle activation.
  *
  * This policy consumes an evaluation and quote already fetched by Fixed. It
  * makes no API calls or direct orders and never changes Fixed scoring,
