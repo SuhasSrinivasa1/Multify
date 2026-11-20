@@ -11,6 +11,7 @@ internal data class WorkingRangeCandle(
 )
 
 internal data class WorkingRangeMarketSnapshot(
+    val intervalMinutes: Int = 15,
     val price: Double,
     val atr: Double?,
     val rsi: Double?,
