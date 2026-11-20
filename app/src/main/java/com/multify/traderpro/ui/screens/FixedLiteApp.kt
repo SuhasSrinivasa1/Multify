@@ -705,7 +705,7 @@ internal fun LiteSettingsScreen(
         GttProtectionReadinessPolicy.verified(it.smartOrderMode, it.smartOrderId, it.smartOrderStatus)
     }
     val alphaReady = state.settings.brokerAuthenticated && state.settings.staticIpMatched
-    val canEnableAutoBuy = alphaReady && !state.settings.safetyHalt && allProtected
+    val canEnableAutoBuy = alphaReady && state.dashboard != null && !state.settings.safetyHalt && state.dashboard?.halted != true && allProtected
 
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).testTag("settings-screen")
@@ -715,8 +715,8 @@ internal fun LiteSettingsScreen(
         LiteCard {
             SectionTitle("Engine controls", "Discovery and order permission are separate")
             SwitchRow(
-                "Fixed market scanner",
-                "OFF pauses new discovery only. Open-position SELL and GTT monitoring continues.",
+                "Fixed + Working Range scanner",
+                "OFF pauses both research scans. Open-position SELL and GTT monitoring continues.",
                 state.settings.fixedScannerEnabled,
                 vm::setFixedScannerEnabled,
                 contentDescription = "Fixed market scanner"
