@@ -94,7 +94,8 @@ class WorkingRangeRecommendationStore(context: Context) {
                 it.symbol.equals(symbol, true) && it.dto.confirmedAtMs == confirmedAtMs
             } ?: return@synchronized false
             if (!enabled || row.dto.state != "IN_RANGE" ||
-                row.dto.autoBuyState != "NOT_ATTEMPTED" || reference.isBlank() || quantity <= 0)
+                row.dto.autoBuyState !in setOf("NOT_ATTEMPTED", "RETRYABLE_BLOCKED") ||
+                reference.isBlank() || quantity <= 0)
                 return@synchronized false
             val previous = row.dto
             row.dto = row.dto.copy(
