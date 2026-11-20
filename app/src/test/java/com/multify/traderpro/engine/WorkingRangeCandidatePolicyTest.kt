@@ -64,6 +64,32 @@ class WorkingRangeCandidatePolicyTest {
         assertTrue(result.reasons.contains("LESS_THAN_38_MINUTES_TO_CLOSE"))
     }
 
+    @Test fun openingModeRequiresIndependentQuoteSamplesAndLiveMomentum() {
+        val underSampled = WorkingRangeCandidatePolicy.assess(
+            input().copy(openingMode = true, openingSampleCount = 2, openingMomentumPct = 0.45)
+        )
+        assertFalse(underSampled.matches)
+        assertTrue(underSampled.reasons.contains("OPENING_MOMENTUM_SAMPLES_INSUFFICIENT"))
+
+        val weakMomentum = WorkingRangeCandidatePolicy.assess(
+            input().copy(openingMode = true, openingSampleCount = 3, openingMomentumPct = 0.10)
+        )
+        assertFalse(weakMomentum.matches)
+        assertTrue(weakMomentum.reasons.contains("OPENING_MOMENTUM_BELOW_0_20_PCT"))
+
+        val confirmedOpening = WorkingRangeCandidatePolicy.assess(
+            input().copy(openingMode = true, openingSampleCount = 3, openingMomentumPct = 0.35)
+        )
+        assertTrue(confirmedOpening.matches)
+    }
+
+    @Test fun standalonePriceBandDoesNotCallFixedPricePolicy() {
+        assertTrue(WorkingRangeCandidatePolicy.priceEligible(200.01))
+        assertTrue(WorkingRangeCandidatePolicy.priceEligible(4_999.99))
+        assertFalse(WorkingRangeCandidatePolicy.priceEligible(200.0))
+        assertFalse(WorkingRangeCandidatePolicy.priceEligible(5_000.0))
+    }
+
     @Test fun spreadAndMissingSellOfferAreNotTechnicalVetoes() {
         val result = WorkingRangeCandidatePolicy.assess(input())
         assertTrue(result.matches)
