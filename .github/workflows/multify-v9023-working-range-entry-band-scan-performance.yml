@@ -285,7 +285,7 @@ jobs:
           assert "MAX_VWAP_EXTENSION_ATR = 3.50" in band
           assert "MAX_SPREAD_BPS = 35.0" in band
           assert "HISTORICAL_15M_TTL_MS = 10 * 60_000L" in cache
-          assert "bar.ts + candleDurationMs <= asOfMs" in root/"engine/FixedLocalStrategyEngine.kt".read_text()
+          assert "bar.ts + candleDurationMs <= asOfMs" in (root/"engine/FixedLocalStrategyEngine.kt").read_text()
           assert "lastGrantedAtByEndpoint" in beta
           assert "BetaLiveEndpointPacingPolicy.on429(livePacing, endpoint, now)" in beta
           assert "quote429DoesNotSlowLtpDiscoveryLane" in Path("app/src/test/java/com/multify/traderpro/engine/BetaLiveEndpointPacingPolicyTest.kt").read_text()
