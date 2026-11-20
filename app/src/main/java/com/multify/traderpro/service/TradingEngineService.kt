@@ -492,15 +492,8 @@ class TradingEngineService : Service() {
                         nowMs, lastFixedCycleCompletedAtMs, lastPositionPassSucceededAtMs,
                         lastKnownManagedCount, brokerCooldownActive = brokerCooldown
                     )
-                    val listenerGranted = NotificationManagerCompat
-                        .getEnabledListenerPackages(this@TradingEngineService).contains(packageName)
-                    val listenerPrefs = getSharedPreferences("notification_listener_state_v801", MODE_PRIVATE)
-                    val listenerConnected = listenerPrefs.getBoolean("connected", false)
-                    mobileHealthStatus = when {
-                        !listenerGranted -> snapshot.status + " / NOTIFICATION_ACCESS_OFF"
-                        !listenerConnected -> snapshot.status + " / LISTENER_DISCONNECTED"
-                        else -> snapshot.status
-                    }
+                    // Independent engine: no Univest/Multify notification permission required.
+                    mobileHealthStatus = snapshot.status
                     if (mobileHealthStatus != previousStatus ||
                         nowMs - lastAuditedAtMs >= MOBILE_HEALTH_AUDIT_INTERVAL_MS) {
                         auditLogger.logAsync("MOBILE_HEALTH", "ENGINE_WATCHDOG", mapOf(
@@ -517,31 +510,13 @@ class TradingEngineService : Service() {
                             "cpu_wake_lock_held" to (positionMonitoringWakeLock?.isHeld == true),
                             "screen_interactive" to
                                 (getSystemService(Context.POWER_SERVICE) as PowerManager).isInteractive,
-                            "notification_access_granted" to listenerGranted,
-                            "notification_listener_connected" to listenerConnected,
-                            "listener_last_connected_ms" to listenerPrefs.getLong("last_connected_ms", 0L),
-                            "listener_last_notification_ms" to listenerPrefs.getLong("last_notification_ms", 0L),
-                            "notification_rebind_requires_user_permission" to true,
+                            "external_signal_listener_enabled" to false,
                             "fixed_formula_changed" to false
                         ))
                         previousStatus = mobileHealthStatus
                         lastAuditedAtMs = nowMs
                     }
-                    // Android controls notification access. Never claim successful
-                    // signal capture when permission is missing. Rebind only when
-                    // access exists and a previous connection is absent.
-                    if (listenerGranted && !listenerConnected &&
-                        nowMs - lastListenerRebindAtMs >= 5L * 60_000L) {
-                        lastListenerRebindAtMs = nowMs
-                        runCatching {
-                            NotificationListenerService.requestRebind(ComponentName(
-                                this@TradingEngineService,
-                                MultifyNotificationListenerService::class.java))
-                        }.onFailure {
-                            auditLogger.logAsync("MOBILE_HEALTH", "LISTENER_REBIND_ERROR",
-                                mapOf("error" to it.javaClass.simpleName))
-                        }
-                    }
+                    // No notification-listener rebind or external app polling.
                     // Only exited jobs are restarted. Active scans/SELLs may be
                     // broker-blocked and MUST NOT be cancelled or duplicated.
                     if (positionMonitorJob?.isActive != true) startPositionMonitorWorker()
@@ -961,6 +936,13 @@ class TradingEngineService : Service() {
                             // No Early Watch/Pulse/Fast Watch background research.
                             // Prepare NEXT official NSE sweep, using no more full-market
                             // LTP batches per successful cycle than original v8.
+                            // Reuse already-completed Fixed full-NSE snapshots for
+                            // observational opening momentum from 09:15 IST.
+                            // No extra broker calls, no Fixed selection/order changes.
+                            runCatching { repository.captureFixedMarketPulseAfterScan() }
+                                .onFailure { auditLogger.logAsync("FIXED_OPENING_WATCH",
+                                    "PULSE_PERSIST_ERROR", mapOf("reason" to it.javaClass.simpleName,
+                                    "extra_network_requests" to 0)) }
                             // Alert after the completed order/protection path,
                             // BEFORE launching optional I/O-intensive market prefetch.
                             // This never posts mid-scan or before SELL/GTT safeguards.

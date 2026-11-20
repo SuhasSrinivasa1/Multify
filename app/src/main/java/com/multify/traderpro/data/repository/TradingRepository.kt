@@ -2399,7 +2399,7 @@ class TradingRepository @Inject constructor(
                 engine = ENGINE_MULTIFY_HOLDING, symbol = symbol, product = "CNC", side = "LONG", quantity = filled,
                 entryPrice = entry, stopPrice = HardStopLossPolicy.stopPrice(entry),
                 targetPrice = signal.target,
-                strategy = "Multify ARM holding · hard -3% floor · common trail 0.55→0.50, 0.75→0.60, 0.85→0.70 then +0.10%",
+                strategy = "Multify ARM holding · hard -1% floor · common trail 0.55→0.50, 0.75→0.60, 0.85→0.70 then +0.10%",
                 regime = "HOLDING_LONG", confidence = 1.0, sourceEventId = eventId,
                 openOrderId = order.growwOrderId, openReferenceId = ref, openedAtMs = System.currentTimeMillis(),
                 lastPrice = entry, maxFavourablePrice = entry, maxAdversePrice = entry, lastEvaluatedAtMs = System.currentTimeMillis(),
@@ -2461,7 +2461,7 @@ class TradingRepository @Inject constructor(
 
         dao.updateForwarding(
             eventId, "ANALYZED", "MULTIFY_EXIT_TRAIL_CONTINUES",
-            "Multify Book Profit recorded for MFE learning only. $symbol remains held; the common -3% hard stop and fixed stepped profitable trail remain the mandatory sell logic.",
+            "Multify Book Profit recorded for MFE learning only. $symbol remains held; the common -1% hard stop and fixed stepped profitable trail remain the mandatory sell logic.",
             null
         )
         auditLogger.log("HOLDING", "MULTIFY_BOOK_PROFIT_IGNORED_FOR_EXECUTION", mapOf(
@@ -6267,7 +6267,7 @@ class TradingRepository @Inject constructor(
                 engine = ENGINE_UNIVEST_HOLDING, symbol = symbol, product = "CNC",
                 side = "LONG", quantity = filled, entryPrice = actualEntry,
                 stopPrice = HardStopLossPolicy.stopPrice(actualEntry), targetPrice = null,
-                strategy = "Official Univest ENTRY via Fixed Auto Buy · Alpha CNC · hard -3% · common stepped trailing exit",
+                strategy = "Official Univest ENTRY via Fixed Auto Buy · Alpha CNC · hard -1% · common stepped trailing exit",
                 regime = "UNIVEST_LONG", confidence = 1.0, sourceEventId = null,
                 openOrderId = order.growwOrderId, openReferenceId = reference,
                 openedAtMs = openedAt, lastPrice = actualEntry,
@@ -7643,7 +7643,7 @@ class TradingRepository @Inject constructor(
                 engine = ENGINE_FORECAST_HOLDING, symbol = row.symbol, product = "CNC", side = "LONG", quantity = filled,
                 entryPrice = entry, stopPrice = HardStopLossPolicy.stopPrice(entry),
                 targetPrice = entry * (1.0 + row.targetPct / 100.0),
-                strategy = "Forecast holding · ${row.strategy} · hard -3% floor · v7 fixed stepped trail 0.55→0.50 then +0.10%",
+                strategy = "Forecast holding · ${row.strategy} · hard -1% floor · v7 fixed stepped trail 0.55→0.50 then +0.10%",
                 regime = row.regime, confidence = row.confidence,
                 sourceEventId = null, openOrderId = order.growwOrderId, openReferenceId = ref,
                 openedAtMs = System.currentTimeMillis(), lastPrice = entry,
@@ -7983,7 +7983,7 @@ class TradingRepository @Inject constructor(
                     append(" · MARKET child · fixed target ₹")
                     append(fmt(state.fixedTargetPrice))
                     forecast?.strategy?.takeIf { it.isNotBlank() }?.let { append(" · "); append(it) }
-                    append(" · hard -3% floor · v7 fixed stepped trail 0.55→0.50 then +0.10%")
+                    append(" · hard -1% floor · v7 fixed stepped trail 0.55→0.50 then +0.10%")
                 },
                 regime = forecast?.regime ?: "FORECAST_AUTO_BUY",
                 confidence = forecast?.confidence ?: 1.0,
@@ -8077,7 +8077,7 @@ class TradingRepository @Inject constructor(
                 entryPrice = actualFill,
                 stopPrice = HardStopLossPolicy.stopPrice(actualFill),
                 targetPrice = state.fixedTargetPrice,
-                strategy = "Migrated legacy forecast LIMIT fill · fixed target ₹${fmt(state.fixedTargetPrice)} · hard -3% floor · v7 fixed stepped trail 0.55→0.50 then +0.10%",
+                strategy = "Migrated legacy forecast LIMIT fill · fixed target ₹${fmt(state.fixedTargetPrice)} · hard -1% floor · v7 fixed stepped trail 0.55→0.50 then +0.10%",
                 regime = "FORECAST_AUTO_BUY",
                 confidence = 1.0,
                 sourceEventId = null,
@@ -8107,7 +8107,13 @@ class TradingRepository @Inject constructor(
     private suspend fun autoBuyWorkingRangeRecommendationsLocked(): Int {
         initializeWorkingRangeAutoBuyOptIn()
         val today = LocalDate.now(INDIA).toString()
-        workingRangeRecommendationStore.flush()
+        // A delayed/failed writer must not authorize an outdated BUY.
+        // Pending broker intents remain governed by the separate reconciliation path.
+        if (!workingRangeRecommendationStore.flush()) {
+            auditLogger.logAsync("WORKING_RANGE_AUTO_BUY", "RESEARCH_QUEUE_FLUSH_UNVERIFIED", mapOf(
+                "new_buy_sent" to false, "pending_reference_reconciliation_not_bypassed" to true))
+            return 0
+        }
         val initialSettings = preferences.settings.first()
         val pendingIntents = workingRangeRecommendationStore.pendingAutoBuyIntents()
         val potential = if (initialSettings.workingRangeEnabled &&
@@ -8606,7 +8612,7 @@ class TradingRepository @Inject constructor(
                 entryPrice = actualFill,
                 stopPrice = HardStopLossPolicy.stopPrice(actualFill),
                 targetPrice = executionTarget,
-                strategy = "Fixed ${FixedEngineSnapshotStore.SNAPSHOT_ID} manual direct MARKET BUY · published entry ₹${fmt(row.entryPrice)} · broker fill ₹${fmt(actualFill)} · execution target ₹${fmt(executionTarget)} · ${row.strategy} · hard -3% floor · v7 stepped trail 0.55→0.50 then +0.10%",
+                strategy = "Fixed ${FixedEngineSnapshotStore.SNAPSHOT_ID} manual direct MARKET BUY · published entry ₹${fmt(row.entryPrice)} · broker fill ₹${fmt(actualFill)} · execution target ₹${fmt(executionTarget)} · ${row.strategy} · hard -1% floor · v7 stepped trail 0.55→0.50 then +0.10%",
                 regime = row.regime,
                 confidence = row.confidence,
                 sourceEventId = null,
@@ -9036,7 +9042,7 @@ class TradingRepository @Inject constructor(
                     entryPrice = actualFill,
                     stopPrice = HardStopLossPolicy.stopPrice(actualFill),
                     targetPrice = executionTarget,
-                    strategy = "Fixed ${FixedEngineSnapshotStore.SNAPSHOT_ID} auto-buy · direct MARKET · published entry ₹${fmt(row.entryPrice)} · fill ₹${fmt(actualFill)} · execution target ₹${fmt(executionTarget)} · ${row.strategy} · hard -3% floor · v7 stepped trail 0.55→0.50 then +0.10%",
+                    strategy = "Fixed ${FixedEngineSnapshotStore.SNAPSHOT_ID} auto-buy · direct MARKET · published entry ₹${fmt(row.entryPrice)} · fill ₹${fmt(actualFill)} · execution target ₹${fmt(executionTarget)} · ${row.strategy} · hard -1% floor · v7 stepped trail 0.55→0.50 then +0.10%",
                     regime = row.regime,
                     confidence = row.confidence,
                     sourceEventId = null,
@@ -9274,7 +9280,7 @@ class TradingRepository @Inject constructor(
                 entryPrice = actualEntry,
                 stopPrice = HardStopLossPolicy.stopPrice(actualEntry),
                 targetPrice = executionTarget,
-                strategy = "Fixed ${FixedEngineSnapshotStore.SNAPSHOT_ID} legacy GTT migrated · actual entry ₹${fmt(actualEntry)} · execution target ₹${fmt(executionTarget)} · ${row?.strategy.orEmpty()} · hard -3% floor · v7 stepped trail 0.55→0.50 then +0.10%",
+                strategy = "Fixed ${FixedEngineSnapshotStore.SNAPSHOT_ID} legacy GTT migrated · actual entry ₹${fmt(actualEntry)} · execution target ₹${fmt(executionTarget)} · ${row?.strategy.orEmpty()} · hard -1% floor · v7 stepped trail 0.55→0.50 then +0.10%",
                 regime = row?.regime ?: "FIXED_ENGINE",
                 confidence = row?.confidence ?: 1.0,
                 sourceEventId = null,
@@ -10704,7 +10710,7 @@ class TradingRepository @Inject constructor(
 
         if (!marketOpen) {
             // Keep every managed LONG protected overnight. Existing profitable trailing GTTs are
-            // preserved; an unarmed holding receives the common -3% server-side hard stop. This
+            // preserved; an unarmed holding receives the common -1% server-side hard stop. This
             // also self-recovers protection after an app/service restart or a prior GTT failure.
             var hardStopReady = 0
             var hardStopFailures = 0
@@ -11045,7 +11051,7 @@ class TradingRepository @Inject constructor(
             existingTrigger != null && existingTrigger + SMART_ORDER_PRICE_EPSILON >= hardStop
         ) return position
 
-        // Upgrade existing broker GTTs to the new -3% floor without cancelling
+        // Upgrade existing broker GTTs to the new -1% floor without cancelling
         // the protective SELL order first. On API failure retain the older
         // server GTT for continued position-monitor retries.
         if ((isWorkingRange &&
@@ -11069,7 +11075,7 @@ class TradingRepository @Inject constructor(
                 )
                 auditLogger.log("PROTECTION",
                     if (isWorkingRange) "WORKING_RANGE_MINUS_1_EXISTING_GTT_UPGRADED"
-                    else "HARD_STOP_MINUS_3_EXISTING_GTT_UPGRADED", mapOf(
+                    else "HARD_STOP_MINUS_1_EXISTING_GTT_UPGRADED", mapOf(
                     "symbol" to position.symbol, "position_id" to position.id,
                     "old_trigger" to existingTrigger, "new_trigger" to modified.smartOrderTriggerPrice,
                     "gtt_id" to position.smartOrderId,
@@ -11081,7 +11087,7 @@ class TradingRepository @Inject constructor(
             } catch (error: Throwable) {
                 auditLogger.log("PROTECTION",
                     if (isWorkingRange) "WORKING_RANGE_MINUS_1_GTT_UPGRADE_DEFERRED"
-                    else "HARD_STOP_MINUS_3_GTT_UPGRADE_DEFERRED", mapOf(
+                    else "HARD_STOP_MINUS_1_GTT_UPGRADE_DEFERRED", mapOf(
                     "symbol" to position.symbol, "position_id" to position.id,
                     "existing_active_gtt_preserved" to true,
                     "existing_trigger" to existingTrigger, "desired_trigger" to hardStop,
@@ -11197,7 +11203,7 @@ class TradingRepository @Inject constructor(
         }
         // Original common Fixed/Univest sell protection remains unchanged:
 
-        // 1) hard -3% loss floor from the actual holding cost basis;
+        // 1) hard -1% loss floor from the actual holding cost basis;
         // 2) once +0.55% high-water is reached, the existing stepped profitable trail takes over;
         // 3) the active stop only moves upward. There is no averaging-down path.
         val decisionStartedNs = SystemClock.elapsedRealtimeNanos()
@@ -11262,7 +11268,7 @@ class TradingRepository @Inject constructor(
                 working,
                 ltp,
                 if (desiredMode == HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT)
-                    "COMMON_HARD_STOP_MINUS_3_LOCAL_FALLBACK"
+                    "COMMON_HARD_STOP_MINUS_1_LOCAL_FALLBACK"
                 else "LONG_TRAILING_PROFIT_STOP_V7_1_LOCAL_FALLBACK",
                 decisionStartedNs
             )
@@ -11287,7 +11293,7 @@ class TradingRepository @Inject constructor(
                             protected,
                             ltp,
                             if (desiredMode == HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT)
-                                "COMMON_HARD_STOP_MINUS_3_STALE_GTT_FALLBACK"
+                                "COMMON_HARD_STOP_MINUS_1_STALE_GTT_FALLBACK"
                             else "LONG_TRAILING_PROFIT_STOP_V7_1_STALE_GTT_FALLBACK",
                             decisionStartedNs
                         )
@@ -11356,7 +11362,7 @@ class TradingRepository @Inject constructor(
                             cleared,
                             ltp,
                             if (working.smartOrderMode == HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT)
-                                "COMMON_HARD_STOP_MINUS_3_GTT_FAILED_FALLBACK"
+                                "COMMON_HARD_STOP_MINUS_1_GTT_FAILED_FALLBACK"
                             else "LONG_TRAILING_PROFIT_STOP_V7_1_GTT_FAILED_FALLBACK",
                             decisionStartedNs
                         )
@@ -11377,7 +11383,7 @@ class TradingRepository @Inject constructor(
                     working,
                     ltp,
                     if (desiredMode == HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT)
-                        "COMMON_HARD_STOP_MINUS_3_LOCAL_FALLBACK"
+                        "COMMON_HARD_STOP_MINUS_1_LOCAL_FALLBACK"
                     else "LONG_TRAILING_PROFIT_STOP_V7_1_LOCAL_FALLBACK",
                     decisionStartedNs
                 )
@@ -11391,7 +11397,7 @@ class TradingRepository @Inject constructor(
             position.smartOrderMode != HoldingSmartOrderPolicy.MODE_TRAILING_GTT
         if (stopRaised || trailJustArmed) {
             val event = when {
-                desiredMode == HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT && previousProtected == null -> "HARD_STOP_MINUS_3_ARMED"
+                desiredMode == HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT && previousProtected == null -> "HARD_STOP_MINUS_1_ARMED"
                 trailJustArmed -> "V7_1_TRAIL_ARMED"
                 else -> "V7_1_STEP_RATCHET"
             }

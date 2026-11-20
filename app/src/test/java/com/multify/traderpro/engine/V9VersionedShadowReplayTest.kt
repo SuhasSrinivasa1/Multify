@@ -49,6 +49,6 @@ class V9VersionedShadowReplayTest {
     @Test fun frozenTargetsAndQualifiersAreStillAvailable() {
         assertEquals(1.1161043030113955, FixedFinalContract.CANONICAL_MULTIFY_MFE_AVG_PCT, 0.000001)
         assertEquals(1.0, V9Fixed8316QualityShadow.MIN_TARGET_PCT, 0.00001)
-        assertEquals(3.0, HardStopLossPolicy.MAX_LOSS_PCT, 0.00001)
+        assertEquals(1.0, HardStopLossPolicy.MAX_LOSS_PCT, 0.00001)
     }
 }
