@@ -1,9 +1,9 @@
-name: Multify v9.0.25 Always-on Working Range research / Auto-Buy isolation TEST
+name: Multify v9.0.26 Independent Working Range opening momentum / -1% stop TEST
 on:
   push:
-    branches: [v9025-working-range-always-visible-us-readonly-research]
+    branches: [v9025-working-range-always-visible-us-readonly-research, v9026-working-range-independent-opening-momentum-20261120]
   pull_request:
-    branches: [v9024-fixed-entry-timing-peak-safety-20261120]
+    branches: [v9025-working-range-always-visible-us-readonly-research]
   workflow_dispatch:
 permissions:
   contents: read
@@ -110,8 +110,8 @@ jobs:
           assert "const val HARD_STOP_LOSS_PCT = 3.0" in Path(root+"engine/ReleaseIntegrityManifest.kt").read_text()
           assert "const val CANONICAL_LEARNING_CALLS = 107" in Path(root+"engine/FixedFinalContract.kt").read_text()
           build=Path("app/build.gradle.kts").read_text()
-          assert "versionCode = 9025" in build
-          assert 'versionName = "9.0.25-working-range-always-on-research"' in build
+          assert "versionCode = 9026" in build
+          assert 'versionName = "9.0.26-working-range-opening"' in build
           assert "const val BETA_SAFE_LIVE_60S = 40" in Path(root+"engine/FixedResearchCapacityPolicy.kt").read_text()
           assert "const val MIN_RESEARCH_GAP_MS = 1_000L" in Path(root+"engine/FixedResearchLtpPacingPolicy.kt").read_text()
           assert "const val APP_PER_MINUTE = 45" in Path(root+"data/network/GrowwHistoricalThrottlePolicy.kt").read_text()
@@ -181,8 +181,8 @@ jobs:
           assert '!autoBuyEnabled' not in offer and '!autoBuyEnabled' not in observer
           assert 'workingRangeRecommendationStore.setAutoBuyEnabled(enabled)' in source_text
           assert 'research_observation_always_on' in wrstore
-          assert 'Always-on research scanner' in ui
-          assert 'recommendations remain visible' in ui
+          assert 'Independent momentum rules' in ui
+          assert 'opening watch visible from 9:15' in ui
           assert 'research observation only' in ui
           assert '"extra_discovery_broker_requests" to 0' in wrstore
           assert 'working_range_live_autobuy_adds_alpha_execution_and_protection_calls' in wrstore
@@ -282,13 +282,13 @@ jobs:
           assert "WORKING_RANGE_TARGET_FULL_EXIT" in exit
           assert "WORKING_RANGE_STOP_MINUS_1_FULL_EXIT" in exit
           assert "val initialStopPrice = if" in src
-          assert "v0.3 Alpha Auto-Buy" in src
+          assert "v0.4 independent momentum Auto-Buy" in src
           assert "MAX_RUNUP_FROM_FIRST_QUALIFIED_PCT = 0.75" in entry
           assert "firstQualifiedPrice = existing.firstQualifiedPrice" in (root/"data/logging/WorkingRangeRecommendationStore.kt").read_text()
           assert "first_qualified_to_fresh_runup_pct" in src
           print("PASS: isolated Working Range entry and target/stop exit")
           PY
-      - name: Verify v9.0.25 Working Range visibility / independent Auto-Buy
+      - name: Verify v9.0.26 independent Working Range opening and stop invariants
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -308,7 +308,44 @@ jobs:
           assert 'Quote' not in overlay or True
           print("PASS: v9.0.24 safety overlay without broker call or scoring change")
           PY
-      - name: Full Android unit tests / v9.0.25 WORKING RANGE RESEARCH TEST APK
+      - name: Verify v9.0.26 Working Range opening, independence, stop and API invariants
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          root=Path("app/src/main/java/com/multify/traderpro")
+          src=(root/"data/repository/TradingRepository.kt").read_text()
+          wr=(root/"engine/WorkingRangeCandidatePolicy.kt").read_text()
+          wrstore=(root/"data/logging/WorkingRangeRecommendationStore.kt").read_text()
+          opening=(root/"engine/WorkingRangeOpeningMomentumPolicy.kt").read_text()
+          ownership=(root/"engine/AppPositionOwnershipPolicy.kt").read_text()
+          dto=(root/"data/network/ApiModels.kt").read_text()
+          auto=src[src.index("private suspend fun autoBuyWorkingRangeRecommendationsLocked"):src.index("private suspend fun reconcileWorkingRangeAutoBuyIntents")]
+          assert "FixedStrategyEvaluation" not in wrstore
+          assert "FixedFinalContract" not in wr
+          assert "RecommendationPriceBandPolicy" not in wr
+          assert "UnivestAutoBuyPolicy" not in wrstore
+          assert "FixedExecutionThinLiquidityPolicy" not in auto
+          assert "WorkingRangeExecutionLiquidityPolicy.rejectionReason(quote)" in auto
+          assert "WorkingRangeCandidatePolicy.priceEligible(ltp)" in auto
+          assert "preIndependentExecutionGuard(settings)" in auto
+          assert "EVIDENCE_QUEUE_FLUSH_FAILED_NO_NEW_BUYS" in auto
+          assert "WORKING_RANGE_HOLDING" in ownership and "WORKING_RANGE_HOLDING" in src
+          assert "WorkingRangeExitPolicy.stopPrice(old.entryPrice)" in wrstore
+          assert "researchStopLossPct = WorkingRangeExitPolicy.HARD_STOP_LOSS_PCT" in wrstore
+          assert "WorkingRangeExitComparisonPolicy.evaluate(" in wrstore
+          assert "markPositionClosed(" in wrstore and "newBuyAllowed: Boolean = false" in wrstore
+          assert "CHILD_SELL_RECONCILED" in src and "BROKER_CLOSE_RECONCILED" in src
+          assert "OPENING_WINDOW_END: LocalTime = LocalTime.of(9, 45)" in opening
+          assert "MIN_OPENING_SAMPLES = 3" in opening
+          assert "MIN_OPENING_MOMENTUM_PCT = 0.20" in opening
+          assert "quote.volume" in opening and "estimateVolumePaceRvol" in opening
+          assert '"extra_opening_quote_requests" to 0' in wrstore
+          assert '"extra_opening_5m_requests" to 0' in wrstore
+          assert "WORKING_RANGE_5M_SHADOW" in src and '"additional_broker_requests" to 0' in src
+          assert "openingMomentumPct" in dto and "exitComparisonTrailState" in dto
+          print("PASS: v9.0.26 Working Range opening, independent strategy, -1% stop, broker reconciliation and no added market-data calls")
+          PY
+      - name: Full Android unit tests / v9.0.26 WORKING RANGE OPENING TEST APK
         env:
           MULTIFY_KEYSTORE_PASSWORD: ${{ secrets.MULTIFY_KEYSTORE_PASSWORD }}
         run: gradle :app:testDebugUnitTest :app:assembleDebug --no-daemon --stacktrace
@@ -317,33 +354,33 @@ jobs:
           apk=$(find app/build/outputs/apk/debug -maxdepth 1 -name '*.apk' -type f | head -n 1)
           test -n "$apk" && test -s "$apk"
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$apk" \
-            | tee app/build/outputs/apk/debug/v9025-signature-verification.txt
-          cert=$(grep -m1 'Signer #1 certificate SHA-256 digest:' app/build/outputs/apk/debug/v9024-signature-verification.txt | awk '{print tolower($NF)}')
-          echo "SIGNER_SHA256=$cert" | tee app/build/outputs/apk/debug/v9025-install-compatibility.txt
+            | tee app/build/outputs/apk/debug/v9026-signature-verification.txt
+          cert=$(grep -m1 'Signer #1 certificate SHA-256 digest:' app/build/outputs/apk/debug/v9026-signature-verification.txt | awk '{print tolower($NF)}')
+          echo "SIGNER_SHA256=$cert" | tee app/build/outputs/apk/debug/v9026-install-compatibility.txt
           if [ "$cert" = "9021b05e9a18113b689a4df2e6f242c9a70ad0cd10f8f2a8daa0b631e3b68e9c" ]; then
-            echo "IN_PLACE_UPDATE_COMPATIBLE_WITH_V9018_STABLE=YES" | tee -a app/build/outputs/apk/debug/v9024-install-compatibility.txt
+            echo "IN_PLACE_UPDATE_COMPATIBLE_WITH_V9018_STABLE=YES" | tee -a app/build/outputs/apk/debug/v9026-install-compatibility.txt
           else
-            echo "IN_PLACE_UPDATE_COMPATIBLE_WITH_V9018_STABLE=NO_OR_UNKNOWN" | tee -a app/build/outputs/apk/debug/v9024-install-compatibility.txt
+            echo "IN_PLACE_UPDATE_COMPATIBLE_WITH_V9018_STABLE=NO_OR_UNKNOWN" | tee -a app/build/outputs/apk/debug/v9026-install-compatibility.txt
           fi
           if [ "$cert" = "829c96c7369aaf849cb4cf5f770da77ebfe569d0b640bf6f1981aaf0d024fae6" ]; then
-            echo "IN_PLACE_UPDATE_COMPATIBLE_WITH_V9020_WORKING_RANGE=YES" | tee -a app/build/outputs/apk/debug/v9024-install-compatibility.txt
+            echo "IN_PLACE_UPDATE_COMPATIBLE_WITH_V9020_WORKING_RANGE=YES" | tee -a app/build/outputs/apk/debug/v9026-install-compatibility.txt
           else
-            echo "IN_PLACE_UPDATE_COMPATIBLE_WITH_V9020_WORKING_RANGE=NO" | tee -a app/build/outputs/apk/debug/v9024-install-compatibility.txt
+            echo "IN_PLACE_UPDATE_COMPATIBLE_WITH_V9020_WORKING_RANGE=NO" | tee -a app/build/outputs/apk/debug/v9026-install-compatibility.txt
           fi
           if [ "$cert" = "6e0fc9f69890c8a47eaeb3612e7fb71ea1bf567d3bd1bdae5ce19ed74afe982b" ]; then
-            echo "IN_PLACE_UPDATE_COMPATIBLE_WITH_V9019_TEST=YES" | tee -a app/build/outputs/apk/debug/v9024-install-compatibility.txt
+            echo "IN_PLACE_UPDATE_COMPATIBLE_WITH_V9019_TEST=YES" | tee -a app/build/outputs/apk/debug/v9026-install-compatibility.txt
           else
-            echo "IN_PLACE_UPDATE_COMPATIBLE_WITH_V9019_TEST=NO" | tee -a app/build/outputs/apk/debug/v9024-install-compatibility.txt
+            echo "IN_PLACE_UPDATE_COMPATIBLE_WITH_V9019_TEST=NO" | tee -a app/build/outputs/apk/debug/v9026-install-compatibility.txt
           fi
-          echo "IN_PLACE_UPDATE_FROM_V9021_REQUIRES_CERTIFICATE_MATCH=YES" | tee -a app/build/outputs/apk/debug/v9024-install-compatibility.txt
+          echo "IN_PLACE_UPDATE_FROM_V9021_REQUIRES_CERTIFICATE_MATCH=YES" | tee -a app/build/outputs/apk/debug/v9026-install-compatibility.txt
           echo "Never uninstall the installed trading app to work around a signer mismatch while holdings, GTTs or unexported state exist."
-          sha256sum "$apk" | tee app/build/outputs/apk/debug/v9025-SHA256SUMS.txt
+          sha256sum "$apk" | tee app/build/outputs/apk/debug/v9026-SHA256SUMS.txt
       - name: Upload CI verified package
         uses: actions/upload-artifact@v4
         with:
-          name: Multify-v9.0.25-Working-Range-Always-On-Research-TEST-debug
+          name: Multify-v9.0.26-Working-Range-Independent-Opening-TEST-debug
           path: |
             app/build/outputs/apk/debug/*.apk
-            app/build/outputs/apk/debug/v9024-signature-verification.txt
-            app/build/outputs/apk/debug/v9024-SHA256SUMS.txt
-            app/build/outputs/apk/debug/v9024-install-compatibility.txt
+            app/build/outputs/apk/debug/v9026-signature-verification.txt
+            app/build/outputs/apk/debug/v9026-SHA256SUMS.txt
+            app/build/outputs/apk/debug/v9026-install-compatibility.txt
