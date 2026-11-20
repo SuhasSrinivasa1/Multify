@@ -23,8 +23,7 @@ internal object WorkingRangeCandidatePolicy {
     const val MAX_VOLUME_ACCELERATION = 30.0
     const val MAX_TARGET_ATR = 1.60
     const val MIN_MINUTES_TO_CLOSE = 38.0
-    const val MAX_CANDIDATE_AGE_MINUTES =
-        WorkingRangeEntryBandPolicy.MAX_FIRST_QUALIFIED_TO_BUY_MS / 60_000.0
+    const val MAX_CANDIDATE_AGE_MINUTES = 2.0
     const val MAX_DRIFT_FROM_FIRST_QUALIFIED_PCT =
         WorkingRangeEntryBandPolicy.MAX_UPWARD_DRIFT_FROM_FIRST_QUALIFIED_PCT
     const val MIN_DRIFT_FROM_FIRST_QUALIFIED_PCT =
