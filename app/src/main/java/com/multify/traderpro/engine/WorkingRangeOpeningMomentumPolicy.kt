@@ -39,7 +39,8 @@ internal object WorkingRangeOpeningMomentumPolicy {
         samples: List<QuoteSample>,
         quoteVolume: Long?,
         candles: List<WorkingRangeCandle>,
-        observedAtMs: Long
+        observedAtMs: Long,
+        intervalMinutes: Int = 15
     ): Metrics {
         val at = Instant.ofEpochMilli(observedAtMs).atZone(INDIA)
         val openingMode = at.toLocalTime().isBefore(OPENING_WINDOW_END)
@@ -49,7 +50,7 @@ internal object WorkingRangeOpeningMomentumPolicy {
         }.sortedBy { it.observedAtMs }
         val momentum = if (daySamples.size >= 2 && daySamples.first().price > 0.0)
             (daySamples.last().price / daySamples.first().price - 1.0) * 100.0 else null
-        val pace = estimateVolumePaceRvol(quoteVolume, candles, observedAtMs)
+        val pace = estimateVolumePaceRvol(quoteVolume, candles, observedAtMs, intervalMinutes)
         val acceleration = sampleVolumeAcceleration(daySamples)
         val greenShare = sampleGreenVolumeShare(daySamples)
         return Metrics(
@@ -71,7 +72,8 @@ internal object WorkingRangeOpeningMomentumPolicy {
         samples: List<QuoteSample>,
         openingModeOverride: Boolean? = null
     ): WorkingRangeCandidatePolicy.Inputs {
-        val metrics = assess(samples, quote.volume, snapshot.candles, observedAtMs)
+        val intervalMinutes = snapshot.intervalMinutes.coerceAtLeast(1)
+        val metrics = assess(samples, quote.volume, snapshot.candles, observedAtMs, intervalMinutes)
         val openingMode = openingModeOverride ?: metrics.openingMode
         val at = Instant.ofEpochMilli(observedAtMs).atZone(INDIA)
         val today = at.toLocalDate()
@@ -80,7 +82,7 @@ internal object WorkingRangeOpeningMomentumPolicy {
             local.toLocalDate() == today &&
                 !local.toLocalTime().isBefore(LocalTime.of(9, 15)) &&
                 local.toLocalTime().isBefore(LocalTime.of(15, 30)) &&
-                candle.atMs + 15L * 60_000L <= observedAtMs
+                candle.atMs + intervalMinutes.toLong() * 60_000L <= observedAtMs
         }.sortedBy { it.atMs }
 
         val sessionGreenShare = if (session.isNotEmpty()) {
@@ -140,7 +142,8 @@ internal object WorkingRangeOpeningMomentumPolicy {
     private fun estimateVolumePaceRvol(
         currentVolume: Long?,
         candles: List<WorkingRangeCandle>,
-        observedAtMs: Long
+        observedAtMs: Long,
+        intervalMinutes: Int
     ): Double? {
         val volume = currentVolume?.takeIf { it >= 0L }?.toDouble() ?: return null
         val at = Instant.ofEpochMilli(observedAtMs).atZone(INDIA)
@@ -154,13 +157,13 @@ internal object WorkingRangeOpeningMomentumPolicy {
                 val local = Instant.ofEpochMilli(bar.atMs).atZone(INDIA)
                 val start = local.toLocalTime()
                 if (start < LocalTime.of(9, 15) || start >= LocalTime.of(15, 30)) return@sumOf 0.0
-                val end = start.plusMinutes(15)
+                val end = start.plusMinutes(intervalMinutes.toLong())
                 val elapsed = when {
-                    clock >= end -> 15.0
+                    clock >= end -> intervalMinutes.toDouble()
                     clock <= start -> 0.0
                     else -> Duration.between(start, clock).toMillis() / 60_000.0
-                }.coerceIn(0.0, 15.0)
-                bar.volume.coerceAtLeast(0.0) * elapsed / 15.0
+                }.coerceIn(0.0, intervalMinutes.toDouble())
+                bar.volume.coerceAtLeast(0.0) * elapsed / intervalMinutes.toDouble()
             }
             value.takeIf { it > 0.0 && it.isFinite() }
         }
