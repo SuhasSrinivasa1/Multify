@@ -10,8 +10,8 @@ package com.multify.traderpro.engine
  * Working Range toggle activation and passes the independent broker execution guard.
  *
  * This policy consumes an evaluation and quote already fetched by Fixed. It
- * makes no API calls and never changes Fixed scoring, rank, publication, orders,
- * target, stop, GTT or trailing. The separate Auto-Buy consumer is outside Fixed.
+ * makes no API calls or direct orders and never changes Fixed scoring,
+ * rank, publication, target, stop, GTT or trailing. The separate Auto-Buy consumer is outside Fixed.
  */
 internal object WorkingRangeCandidatePolicy {
     const val TARGET_PCT = FixedFinalContract.CANONICAL_MULTIFY_MFE_AVG_PCT
