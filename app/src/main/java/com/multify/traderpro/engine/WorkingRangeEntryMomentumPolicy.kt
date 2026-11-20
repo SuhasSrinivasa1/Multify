@@ -9,7 +9,7 @@ package com.multify.traderpro.engine
  * revived by a later quote; a new independently confirmed event is required.
  */
 object WorkingRangeEntryMomentumPolicy {
-    const val MAX_CONFIRMATION_AGE_MS = 30_000L
+    const val MAX_CONFIRMATION_AGE_MS = 45_000L
     const val MAX_DRAWDOWN_FROM_CONFIRMATION_PCT = 0.75
 
     fun rejectionReason(
