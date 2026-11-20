@@ -227,7 +227,7 @@ class WorkingRangeRecommendationStore(context: Context) {
                 .map { it.dto }
         }
 
-    fun offer(
+    internal fun offer(
         symbol: String,
         snapshot: WorkingRangeMarketSnapshot,
         quote: QuotePayload,
