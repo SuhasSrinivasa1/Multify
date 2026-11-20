@@ -1,20 +1,15 @@
 package com.multify.traderpro.engine
 
 /**
- * Working Range v0.1 is a separate pilot filter, not the Fixed model.
+ * Standalone Working Range momentum filter.
  *
- * Boundaries are retrospective candidate ranges from 19-Nov logs. The original
- * 9/9 success claim was not a valid independent result: replaying the same
- * envelope also admits GPIL, which was a clear adverse/unsuccessful example.
- * Therefore it remains a pilot rule. Live Auto-Buy requires an explicit fresh
- * Working Range toggle activation and passes the independent broker execution guard.
- *
- * This policy consumes an evaluation and quote already fetched by Fixed. It
- * makes no API calls or direct orders and never changes Fixed scoring,
- * rank, publication, target, stop, GTT or trailing. The separate Auto-Buy consumer is outside Fixed.
+ * It consumes a strategy-owned snapshot made from market data already fetched by the
+ * shared scan transport. It does not read Fixed scores, FixedFinalContract, Univest
+ * notifications, Multify learning priors or another strategy's recommendation state.
+ * The target constant is owned here and is intentionally frozen for comparable replay.
  */
 internal object WorkingRangeCandidatePolicy {
-    const val TARGET_PCT = FixedFinalContract.CANONICAL_MULTIFY_MFE_AVG_PCT
+    const val TARGET_PCT = 1.1161043030113955
     const val MIN_RSI = 75.0
     const val MIN_RVOL = 1.0
     const val MIN_GREEN_VOLUME_SHARE = 0.80
@@ -26,6 +21,10 @@ internal object WorkingRangeCandidatePolicy {
     const val MAX_DRIFT_FROM_FIRST_QUALIFIED_PCT = 1.60
     const val REQUIRED_CONSECUTIVE_OBSERVATIONS = 2
     const val MAX_CONFIRMATION_GAP_MS = 5 * 60_000L
+    const val MIN_OPENING_MOMENTUM_PCT = WorkingRangeOpeningMomentumPolicy.MIN_OPENING_MOMENTUM_PCT
+    const val MIN_OPENING_SAMPLES = WorkingRangeOpeningMomentumPolicy.MIN_OPENING_SAMPLES
+    const val MIN_PRICE = 200.0
+    const val MAX_PRICE = 5_000.0
 
     data class Inputs(
         val price: Double,
@@ -44,7 +43,13 @@ internal object WorkingRangeCandidatePolicy {
         val range52Position: Double?,
         val spreadBps: Double?,
         val orderBookImbalance: Double?,
-        val minutesToClose: Double
+        val minutesToClose: Double,
+        val rsiSlope: Double? = null,
+        val openingMode: Boolean = false,
+        val openingSampleCount: Int = 0,
+        val openingMomentumPct: Double? = null,
+        val openingVolumePaceRvol: Double? = null,
+        val openingSignalBasis: String = "COMPLETED_15M_SESSION_CANDLES"
     )
 
     data class Decision(
@@ -81,8 +86,8 @@ internal object WorkingRangeCandidatePolicy {
             else -> "NOT_ALIGNED"
         }
 
-        if (price == null || !RecommendationPriceBandPolicy.eligible(price))
-            reasons += "PRICE_OUTSIDE_FIXED_EQUITY_BAND"
+        if (price == null || price <= MIN_PRICE || price >= MAX_PRICE)
+            reasons += "PRICE_OUTSIDE_WORKING_RANGE_EQUITY_BAND"
         if (rsi == null) reasons += "RSI_MISSING" else if (rsi < MIN_RSI) reasons += "RSI_BELOW_75"
         if (rvol == null) reasons += "RVOL_MISSING" else if (rvol < MIN_RVOL) reasons += "RVOL_BELOW_1"
         if (green == null) reasons += "GREEN_VOLUME_SHARE_MISSING"
@@ -96,6 +101,14 @@ internal object WorkingRangeCandidatePolicy {
         else if (s9 <= 0.0 || s20 <= 0.0) reasons += "EMA_SLOPE_NOT_POSITIVE"
         if (macd == null) reasons += "MACD_SLOPE_MISSING"
         else if (macd <= 0.0) reasons += "MACD_SLOPE_NOT_POSITIVE"
+        if (i.openingMode) {
+            if (i.openingSampleCount < MIN_OPENING_SAMPLES)
+                reasons += "OPENING_MOMENTUM_SAMPLES_INSUFFICIENT"
+            val momentum = valid(i.openingMomentumPct)
+            if (momentum == null) reasons += "OPENING_MOMENTUM_MISSING"
+            else if (momentum < MIN_OPENING_MOMENTUM_PCT)
+                reasons += "OPENING_MOMENTUM_BELOW_0_20_PCT"
+        }
         if (targetAtr == null) reasons += "TARGET_ATR_UNAVAILABLE"
         else if (targetAtr > MAX_TARGET_ATR) reasons += "TARGET_REQUIREMENT_ABOVE_1_6_ATR"
         if (!i.minutesToClose.isFinite() || i.minutesToClose < MIN_MINUTES_TO_CLOSE)
@@ -108,19 +121,6 @@ internal object WorkingRangeCandidatePolicy {
             vwapExtensionAtr = vwapExtension,
             emaAligned = emaAligned,
             emaAlignmentMode = emaAlignmentMode
-        )
-    }
-
-    fun inputs(e: FixedStrategyEvaluation, minutesToClose: Double): Inputs {
-        val f = e.features
-        return Inputs(
-            price = f.ltp, atr = f.atr14, rsi = f.rsi14, rvol = f.rvol,
-            volumeAcceleration = f.volumeAcceleration, greenVolumeShare = f.greenVolumeShare,
-            ema9 = f.ema9, ema20 = f.ema20, ema50 = f.ema50,
-            ema9Slope = f.ema9Slope, ema20Slope = f.ema20Slope,
-            macdHistogramSlope = f.macdHistogramSlope, vwap = f.vwap,
-            range52Position = f.range52Position, spreadBps = f.spreadBps,
-            orderBookImbalance = f.orderBookImbalance, minutesToClose = minutesToClose
         )
     }
 }
