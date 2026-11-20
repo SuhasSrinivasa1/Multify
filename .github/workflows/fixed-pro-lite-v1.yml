@@ -123,7 +123,12 @@ jobs:
           target: google_apis
           profile: pixel_6
           disable-animations: true
-          script: gradle --no-daemon :app:connectedDebugAndroidTest
+          script: |
+            gradle --no-daemon :app:connectedDebugAndroidTest
+            adb shell am start -n com.multify.fixedpro.lite/com.multify.traderpro.MainActivity
+            sleep 8
+            adb shell screencap -p /sdcard/fixed-lite-home.png
+            adb pull /sdcard/fixed-lite-home.png fixed-lite-home.png
       - name: Upload UI test reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -132,5 +137,6 @@ jobs:
           path: |
             app/build/reports/androidTests/
             app/build/outputs/androidTest-results/
+            fixed-lite-home.png
           if-no-files-found: warn
           retention-days: 30
