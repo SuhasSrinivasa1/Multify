@@ -264,7 +264,11 @@ data class ForecastDto(
     val quoteMarketabilityState: String = "NO_RECENT_QUOTE",
     val quoteUpperCircuitPrice: Double? = null,
     val quoteBestSellOffer: Double? = null,
-    val quoteClientReceivedAtMs: Long? = null
+    val quoteClientReceivedAtMs: Long? = null,
+    // v9.0.24 non-scoring operator evidence. generatedAtMs remains FROZEN scan start.
+    val fixedActualPublishedAtMs: Long? = null,
+    val fixedSourceQuoteReceivedAtMs: Long? = null,
+    val fixedFirstPrimaryPrice: Double? = null
 )
 
 /**
