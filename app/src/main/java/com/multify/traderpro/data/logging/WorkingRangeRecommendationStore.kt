@@ -128,9 +128,10 @@ class WorkingRangeRecommendationStore(context: Context) {
         persistLocked()
     }
 
-    fun pendingAutoBuyIntents(dateIst: String): List<WorkingRangeRecommendationDto> =
+    /** Pending order intents survive midnight and are always reconciled before new entries. */
+    fun pendingAutoBuyIntents(): List<WorkingRangeRecommendationDto> =
         synchronized(lock) {
-            rows.filter { it.dateIst == dateIst && it.dto.autoBuyState == "ORDER_INTENT_RESERVED" }
+            rows.filter { it.dto.autoBuyState == "ORDER_INTENT_RESERVED" }
                 .map { it.dto }
         }
 
@@ -436,7 +437,13 @@ class WorkingRangeRecommendationStore(context: Context) {
     }
 
     private fun trimLocked() {
-        if (rows.size > 400) rows.subList(0, rows.size - 400).clear()
+        if (rows.size <= 400) return
+        val excess = rows.size - 400
+        val removable = rows.indices.filter {
+            rows[it].dto.autoBuyState != "ORDER_INTENT_RESERVED"
+        }.take(excess).toSet()
+        for (index in removable.sortedDescending()) rows.removeAt(index)
+        // If every excess row has an unresolved broker order intent, retain it.
     }
 
     private fun persistLocked(commit: Boolean = false): Boolean {
