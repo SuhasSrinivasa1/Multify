@@ -181,7 +181,7 @@ internal class GrowwHotDataCacheInterceptor(
     }
 
     companion object {
-        private const val SINGLE_FLIGHT_WAIT_MS = 8_000L
+        private const val SINGLE_FLIGHT_WAIT_MS = 21_000L
         private const val MAX_ENTRIES = 512
         private const val HISTORICAL_15M_TTL_MS = 22_000L
         private const val HISTORICAL_5M_TTL_MS = 15_000L
