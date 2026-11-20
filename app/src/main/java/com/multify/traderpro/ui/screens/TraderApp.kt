@@ -1178,9 +1178,9 @@ private fun WorkingRangeTable(
                                         row.autoBuyState == "TARGET_ALREADY_REACHED" ||
                                         row.autoBuyState == "BROKER_REJECTED" ->
                                         "WORKING RANGE · ENTRY BLOCKED"
-                                    else -> if (autoBuyEnabled)
-                                        "WORKING RANGE · AUTO-BUY ON"
-                                    else "WORKING RANGE · RESEARCH ONLY · AUTO-BUY OFF"
+                                    else -> if (autoBuyEnabled && row.autoBuyEnabled)
+                                        "WORKING RANGE · AUTO-BUY PERMISSION ON"
+                                    else "WORKING RANGE · RESEARCH ONLY · NO BUY PERMISSION"
                                 }, style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.tertiary, fontWeight = FontWeight.Bold)
                         }
@@ -1240,9 +1240,14 @@ private fun WorkingRangeTable(
                         )
                         Text(row.reason, style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Text("MANUAL REVIEW ONLY · NO WORKING RANGE AUTO-BUY · sparse client LTP samples are not intrabar paths",
+                        Text(
+                            if (autoBuyEnabled && row.autoBuyEnabled)
+                                "AUTO-BUY PERMISSION ON FOR THIS EVENT · fresh Alpha quote, cash, order and verified GTT checks still required · sparse LTP samples are not intrabar paths"
+                            else
+                                "RESEARCH ONLY · no BUY permission for this event · sparse client LTP samples are not intrabar paths",
                             style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold,
-                            color = MaterialTheme.colorScheme.tertiary)
+                            color = MaterialTheme.colorScheme.tertiary
+                        )
                     }
                 }
             }
