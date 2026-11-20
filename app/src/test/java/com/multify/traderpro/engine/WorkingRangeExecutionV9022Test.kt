@@ -7,7 +7,7 @@ class WorkingRangeEntryMomentumPolicyTest {
     @Test fun welspunReversalIsRejectedEvenIfPriceIsCheaper() {
         val at = 1_000_000L
         assertEquals("WORKING_RANGE_MOMENTUM_LOST_PRICE_RETRACE",
-            WorkingRangeEntryMomentumPolicy.rejectionReason(271.20, 267.12, at, at + 65_000))
+            WorkingRangeEntryMomentumPolicy.rejectionReason(271.20, 267.12, at, at + 20_000))
     }
 
     @Test fun lateConfirmationCannotBeRevived() {
