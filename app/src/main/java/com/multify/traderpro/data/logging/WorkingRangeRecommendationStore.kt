@@ -187,7 +187,7 @@ class WorkingRangeRecommendationStore(context: Context) {
             val index = rows.indexOfFirst { it.dateIst == date && it.symbol == symbol }
             val existing = rows.getOrNull(index)
             if (existing != null && existing.dto.confirmedAtMs > 0L) {
-                updateConfirmed(existing, decision.matches, decision.reasons, price,
+                updateConfirmed(existing, decision.matches, decision.reasons, decision.emaAlignmentMode, price,
                     observedAtMs, marketabilityState, marketability, evaluation)
                 persistLocked()
                 return
@@ -315,6 +315,7 @@ class WorkingRangeRecommendationStore(context: Context) {
         row: StoredRow,
         stillMatches: Boolean,
         reasons: List<String>,
+        emaAlignmentMode: String,
         price: Double,
         observedAtMs: Long,
         marketabilityState: String,
@@ -361,9 +362,7 @@ class WorkingRangeRecommendationStore(context: Context) {
             upperCircuitPrice = marketability.brokerUpperCircuit,
             bestSellOffer = marketability.bestObservedOffer,
             quoteClientReceiptAgeMs = marketability.clientReceiptAgeMs,
-            emaAlignmentMode = WorkingRangeCandidatePolicy.inputs(evaluation, 0.0).let {
-                WorkingRangeCandidatePolicy.assess(it).emaAlignmentMode
-            },
+            emaAlignmentMode = emaAlignmentMode,
             maxFavourablePct = mfe,
             maxAdversePct = mae,
             targetFirstTouchAtMs = targetAt,
