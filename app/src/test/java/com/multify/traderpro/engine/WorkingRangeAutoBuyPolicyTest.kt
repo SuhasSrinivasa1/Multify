@@ -51,7 +51,7 @@ class WorkingRangeAutoBuyPolicyTest {
     }
 
     @Test fun staleConfirmationCannotTriggerDelayedAutoBuy() {
-        assertEquals("CONFIRMATION_EXPIRED",
+        assertEquals("CONFIRMATION_TO_BUY_EXPIRED_30S",
             decide(activated = 500L, confirmed = 1_000L,
                 now = 1_000L + WorkingRangeAutoBuyPolicy.MAX_CONFIRMATION_AGE_MS + 1L).reason)
     }
