@@ -2781,7 +2781,9 @@ class TradingRepository @Inject constructor(
                     ))
                 }
                 var autoBuySubmitted = 0
+                var workingRangeAutoBuySubmitted = 0
                 var autoBuyElapsedMs = 0L
+                var workingRangeAutoBuyElapsedMs = 0L
                 if (scanned) {
                     val autoBuyStartedAtMs = System.currentTimeMillis()
                     // Execution readiness is independent of the already completed frozen
@@ -2801,6 +2803,18 @@ class TradingRepository @Inject constructor(
                         }
                     )
                     autoBuyElapsedMs = (System.currentTimeMillis() - autoBuyStartedAtMs).coerceAtLeast(0L)
+                    val workingRangeStartedAtMs = System.currentTimeMillis()
+                    workingRangeAutoBuySubmitted = FixedScanBuyIsolationPolicy.execute(
+                        buy = { autoBuyWorkingRangeRecommendations() },
+                        onFailure = { cause ->
+                            auditLogger.log("WORKING_RANGE_AUTO_BUY", "EXECUTION_DEFERRED_SCAN_PRESERVED",
+                                mapOf("reason" to (cause.message ?: cause.javaClass.simpleName),
+                                    "fixed_scan_completed" to true, "fixed_model_changed" to false,
+                                    "blind_resubmission" to false))
+                        }
+                    )
+                    workingRangeAutoBuyElapsedMs =
+                        (System.currentTimeMillis() - workingRangeStartedAtMs).coerceAtLeast(0L)
                 }
                 if (scanned) {
                     auditLogger.logAsync("RUNTIME", "FIXED_PRIORITY_PHASE_PROFILE", mapOf(
@@ -2808,6 +2822,8 @@ class TradingRepository @Inject constructor(
                         "recommendation_stage_ms" to (recommendationCompletedAtMs - recommendationStartedAtMs).coerceAtLeast(0L),
                         "auto_buy_stage_ms" to autoBuyElapsedMs,
                         "auto_buy_submitted" to autoBuySubmitted,
+                        "working_range_auto_buy_stage_ms" to workingRangeAutoBuyElapsedMs,
+                        "working_range_auto_buy_submitted" to workingRangeAutoBuySubmitted,
                         "cycle_total_ms" to (System.currentTimeMillis() - cycleStartedAtMs).coerceAtLeast(0L),
                         "order_before_notification" to true,
                         "fixed_formula_changed" to false
