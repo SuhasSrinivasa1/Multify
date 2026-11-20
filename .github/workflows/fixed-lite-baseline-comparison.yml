@@ -1,5 +1,7 @@
 name: Fixed Lite vs v9.0.25 Baseline Replay
 on:
+  push:
+    branches: [fixed-pro-lite-independent-app-v1]
   workflow_dispatch:
 permissions:
   contents: read
