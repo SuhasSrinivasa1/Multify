@@ -127,6 +127,8 @@ class WorkingRangeRecommendationStore(context: Context) {
             autoBuyQuantity = quantity ?: row.dto.autoBuyQuantity,
             autoBuyFillPrice = fillPrice ?: row.dto.autoBuyFillPrice,
             autoBuyEnabled = true,
+            state = if (state.startsWith("BLOCKED_OUT_OF_RANGE") ||
+                state.startsWith("BLOCKED_STALE")) "OUT_OF_RANGE" else row.dto.state,
             reason = reason ?: row.dto.reason
         )
         persistLocked()
