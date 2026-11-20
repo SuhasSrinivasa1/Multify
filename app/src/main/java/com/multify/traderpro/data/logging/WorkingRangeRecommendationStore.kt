@@ -62,6 +62,8 @@ class WorkingRangeRecommendationStore(context: Context) {
     private data class StoredRejection(
         val dateIst: String, val symbol: String, val observedAtMs: Long, val price: Double,
         val reasons: List<String>, val rsi: Double?, val rvol: Double?,
+        val rsiSlope: Double? = null, val ema9Slope: Double? = null,
+        val ema20Slope: Double? = null, val macdHistogramSlope: Double? = null,
         val greenVolumeShare: Double?, val volumeAcceleration: Double?,
         val ema9: Double?, val ema20: Double?, val ema50: Double?,
         val targetRequirementAtr: Double?, val vwapExtensionAtr: Double?
@@ -195,14 +197,16 @@ class WorkingRangeRecommendationStore(context: Context) {
             val existing = rows.getOrNull(index)
             if (existing != null && existing.dto.confirmedAtMs > 0L) {
                 updateConfirmed(existing, decision.matches, decision.reasons, decision.emaAlignmentMode, price,
-                    observedAtMs, marketabilityState, marketability, evaluation)
+                    observedAtMs, marketabilityState, marketability, evaluation, scanStartedAtMs)
                 persistLocked()
                 return
             }
             if (!decision.matches) {
                 rejections.add(StoredRejection(
                     dateIst = date, symbol = symbol, observedAtMs = observedAtMs, price = price,
-                    reasons = decision.reasons, rsi = f.rsi14, rvol = f.rvol,
+                    reasons = decision.reasons, rsi = f.rsi14, rsiSlope = f.rsiSlope,
+                    ema9Slope = f.ema9Slope, ema20Slope = f.ema20Slope,
+                    macdHistogramSlope = f.macdHistogramSlope, rvol = f.rvol,
                     greenVolumeShare = f.greenVolumeShare, volumeAcceleration = f.volumeAcceleration,
                     ema9 = f.ema9, ema20 = f.ema20, ema50 = f.ema50,
                     targetRequirementAtr = decision.targetRequirementAtr,
@@ -228,13 +232,16 @@ class WorkingRangeRecommendationStore(context: Context) {
                     scanStartedAtMs = scanStartedAtMs,
                     state = "PENDING_CONFIRMATION",
                     targetPct = targetPct,
+                    researchStopPct = com.multify.traderpro.engine.WorkingRangeExitPolicy.HARD_STOP_LOSS_PCT,
                     firstQualifiedAtMs = observedAtMs,
                     firstQualifiedPrice = price,
                     lastObservedAtMs = observedAtMs,
                     lastPrice = price,
                     candidateAgeMinutes = 0.0,
                     driftFromFirstQualifiedPct = 0.0,
-                    rsi = f.rsi14, rvol = f.rvol,
+                    rsi = f.rsi14, rsiSlope = f.rsiSlope,
+                    ema9Slope = f.ema9Slope, ema20Slope = f.ema20Slope,
+                    macdHistogramSlope = f.macdHistogramSlope, rvol = f.rvol,
                     volumeAcceleration = f.volumeAcceleration,
                     greenVolumeShare = f.greenVolumeShare,
                     targetRequirementAtr = decision.targetRequirementAtr,
@@ -305,7 +312,9 @@ class WorkingRangeRecommendationStore(context: Context) {
                 lastPrice = price,
                 candidateAgeMinutes = ageMinutes,
                 driftFromFirstQualifiedPct = drift,
-                rsi = f.rsi14, rvol = f.rvol,
+                rsi = f.rsi14, rsiSlope = f.rsiSlope,
+                    ema9Slope = f.ema9Slope, ema20Slope = f.ema20Slope,
+                    macdHistogramSlope = f.macdHistogramSlope, rvol = f.rvol,
                 volumeAcceleration = f.volumeAcceleration,
                 greenVolumeShare = f.greenVolumeShare,
                 targetRequirementAtr = decision.targetRequirementAtr,
@@ -338,7 +347,8 @@ class WorkingRangeRecommendationStore(context: Context) {
         observedAtMs: Long,
         marketabilityState: String,
         marketability: FixedQuoteMarketabilityPresentationPolicy.Result,
-        evaluation: FixedStrategyEvaluation
+        evaluation: FixedStrategyEvaluation,
+        scanStartedAtMs: Long
     ) {
         val f = evaluation.features
         val old = row.dto
@@ -347,10 +357,39 @@ class WorkingRangeRecommendationStore(context: Context) {
         val mae = min(old.maxAdversePct, move)
         val targetAt = if (old.targetFirstTouchAtMs == 0L && price >= old.targetPrice)
             observedAtMs else old.targetFirstTouchAtMs
-        // Research comparison uses the currently deployed -3% hard-stop level.
-        // This is sampled LTP chronology, not a broker stop or intrabar path.
-        val stopAt = if (old.stopFirstTouchAtMs == 0L && price <= old.entryPrice * 0.97)
+        // Preserve the historical basis of pre-upgrade -3% research rows.
+        // New events use the exact -1% Working Range broker-stop threshold.
+        val stopAt = if (old.stopFirstTouchAtMs == 0L &&
+            price <= old.entryPrice * (1.0 - old.researchStopPct / 100.0))
             observedAtMs else old.stopFirstTouchAtMs
+        val plus050 = if (old.firstPlus050AtMs == 0L && price >= old.entryPrice * 1.005)
+            observedAtMs else old.firstPlus050AtMs
+        val plus055 = if (old.firstPlus055AtMs == 0L && price >= old.entryPrice * 1.0055)
+            observedAtMs else old.firstPlus055AtMs
+        val minus2 = if (old.shadowMinus2AtMs == 0L && price <= old.entryPrice * 0.98)
+            observedAtMs else old.shadowMinus2AtMs
+        val minus3 = if (old.shadowMinus3AtMs == 0L && price <= old.entryPrice * 0.97)
+            observedAtMs else old.shadowMinus3AtMs
+        // A second setup after a terminal result is recorded but NEVER executable.
+        val previousTerminal = old.state in setOf(
+            "TARGET_HIT_SAMPLED", "TARGET_FIRST_SAMPLED", "STOP_FIRST_SAMPLED")
+        val newRepeatScan = previousTerminal && stillMatches &&
+            scanStartedAtMs > old.scanStartedAtMs &&
+            scanStartedAtMs > old.repeatShadowLastScanAtMs
+        val withinGap = old.repeatShadowLastScanAtMs > 0L &&
+            scanStartedAtMs - old.repeatShadowLastScanAtMs in
+                1L..WorkingRangeCandidatePolicy.MAX_CONFIRMATION_GAP_MS
+        val repeatCount = when {
+            !newRepeatScan -> old.repeatShadowConsecutiveScans
+            withinGap -> old.repeatShadowConsecutiveScans + 1
+            else -> 1
+        }
+        val repeatFirst = if (newRepeatScan && !withinGap) scanStartedAtMs
+            else old.repeatShadowFirstScanAtMs
+        val repeatLast = if (newRepeatScan) scanStartedAtMs
+            else old.repeatShadowLastScanAtMs
+        val repeatConfirmed = if (repeatCount >= 2 && old.repeatShadowConfirmedAtMs == 0L)
+            observedAtMs else old.repeatShadowConfirmedAtMs
         val outcome = when {
             targetAt > 0L && stopAt == 0L -> "TARGET_HIT_SAMPLED"
             stopAt > 0L && targetAt == 0L -> "STOP_FIRST_SAMPLED"
@@ -371,7 +410,9 @@ class WorkingRangeRecommendationStore(context: Context) {
             candidateAgeMinutes = (observedAtMs - old.firstQualifiedAtMs).coerceAtLeast(0L) / 60_000.0,
             driftFromFirstQualifiedPct = if (row.firstQualifiedPrice > 0.0)
                 (price / row.firstQualifiedPrice - 1.0) * 100.0 else old.driftFromFirstQualifiedPct,
-            rsi = f.rsi14, rvol = f.rvol,
+            rsi = f.rsi14, rsiSlope = f.rsiSlope,
+                    ema9Slope = f.ema9Slope, ema20Slope = f.ema20Slope,
+                    macdHistogramSlope = f.macdHistogramSlope, rvol = f.rvol,
             volumeAcceleration = f.volumeAcceleration,
             greenVolumeShare = f.greenVolumeShare,
             spreadBps = f.spreadBps,
@@ -383,9 +424,20 @@ class WorkingRangeRecommendationStore(context: Context) {
             emaAlignmentMode = emaAlignmentMode,
             maxFavourablePct = mfe,
             maxAdversePct = mae,
+            firstPlus050AtMs = plus050,
+            firstPlus055AtMs = plus055,
+            shadowMinus2AtMs = minus2,
+            shadowMinus3AtMs = minus3,
+            repeatShadowFirstScanAtMs = repeatFirst,
+            repeatShadowLastScanAtMs = repeatLast,
+            repeatShadowConsecutiveScans = repeatCount,
+            repeatShadowConfirmedAtMs = repeatConfirmed,
             targetFirstTouchAtMs = targetAt,
             stopFirstTouchAtMs = stopAt,
-            sampledOutcomeNote = outcome,
+            sampledOutcomeNote = if (old.researchStopPct !=
+                com.multify.traderpro.engine.WorkingRangeExitPolicy.HARD_STOP_LOSS_PCT)
+                "LEGACY_MINUS_3_RESEARCH_STOP_NOT_COMPARABLE_TO_LIVE_MINUS_1; REPLAY_REQUIRED"
+                else outcome,
             reason = if (terminal) "Sampled LTP touched target/stop threshold; sparse observations cannot prove intrabar order"
                 else if (stillMatches) "Working Range conditions still match"
                 else "Momentum conditions weakened: " + reasons.joinToString(", ")
@@ -439,6 +491,10 @@ class WorkingRangeRecommendationStore(context: Context) {
                 "spread_is_execution_marketability_not_technical_selection" to true
             ),
             "target_pct_unchanged_from_fixed_reference" to WorkingRangeCandidatePolicy.TARGET_PCT,
+            "new_event_stop_basis_pct" to com.multify.traderpro.engine.WorkingRangeExitPolicy.HARD_STOP_LOSS_PCT,
+            "legacy_minus3_rows_require_replay" to true,
+            "research_milestones_plus050_plus055_minus2_minus3" to true,
+            "repeat_same_day_signals_shadow_only" to true,
             "marketability_is_separate_from_technical_range" to true,
             "upper_circuit_or_no_offer_does_not_erase_candidate" to true,
             "auto_buy_enabled" to autoBuyEnabled,
