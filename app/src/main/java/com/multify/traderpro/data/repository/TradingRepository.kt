@@ -1156,7 +1156,8 @@ class TradingRepository @Inject constructor(
             apiFactory.betaGroww.ltp(bearer(token),
                 exchangeSymbols = chunk.joinToString(",") { "NSE_$it" })
                 .requirePayload("Fixed Beta NSE LTP")
-        }
+        },
+        liveEndpoint = BetaResearchGate.LiveEndpoint.LTP
     )
 
     private suspend fun forecastMarketToken(): String? {
@@ -1170,8 +1171,13 @@ class TradingRepository @Inject constructor(
     private fun forecastUsesBeta(token: String): Boolean = secretStore.hasBetaCredentials() &&
         cachedBetaResearchToken == token && !betaSessionInvalid
 
-    private suspend fun <T> betaMarketRead(token: String, type: BetaResearchGate.Type,
-                                           alphaCall: suspend () -> T, betaCall: suspend () -> T): T {
+    private suspend fun <T> betaMarketRead(
+        token: String,
+        type: BetaResearchGate.Type,
+        alphaCall: suspend () -> T,
+        betaCall: suspend () -> T,
+        liveEndpoint: BetaResearchGate.LiveEndpoint = BetaResearchGate.LiveEndpoint.QUOTE
+    ): T {
         val tokenIsBeta = cachedBetaResearchToken == token || secretStore.getBetaAccessToken() == token
         if (tokenIsBeta || secretStore.hasBetaCredentials()) {
             if (!forecastUsesBeta(token)) {
@@ -1185,10 +1191,12 @@ class TradingRepository @Inject constructor(
         }
         val started = SystemClock.elapsedRealtime()
         return try {
-            val result = betaResearchGate.read(type, betaCall)
+            val result = betaResearchGate.read(type, liveEndpoint, betaCall)
             val usage = betaResearchGate.snapshot()
             auditLogger.logAsync("BETA_API", "REQUEST_PROFILE", mapOf(
-                "account" to "BETA", "category" to type.name, "outcome" to "SUCCESS",
+                "account" to "BETA", "category" to type.name,
+                "endpoint_lane" to if (type == BetaResearchGate.Type.LIVE) liveEndpoint.name else "HISTORICAL",
+                "outcome" to "SUCCESS",
                 "elapsed_ms" to (SystemClock.elapsedRealtime() - started).coerceAtLeast(0L),
                 "live_requests" to usage.liveRequests, "historical_requests" to usage.historicalRequests,
                 "live_429" to usage.liveRateLimits, "historical_429" to usage.historicalRateLimits,
@@ -1199,8 +1207,9 @@ class TradingRepository @Inject constructor(
             val code = (t as? HttpException)?.code()
             val usage = betaResearchGate.snapshot()
             auditLogger.logAsync("BETA_API", "REQUEST_PROFILE", mapOf(
-                "account" to "BETA", "category" to type.name, "outcome" to "FAILURE",
-                "http_code" to (code ?: 0),
+                "account" to "BETA", "category" to type.name,
+                "endpoint_lane" to if (type == BetaResearchGate.Type.LIVE) liveEndpoint.name else "HISTORICAL",
+                "outcome" to "FAILURE", "http_code" to (code ?: 0),
                 "origin" to (if (code != null) "BROKER_HTTP_RESPONSE" else if (
                     t is IOException && t.message.orEmpty().startsWith("BETA_")
                 ) "LOCAL_ADMISSION" else "TRANSPORT_OR_PRE_DISPATCH"),
