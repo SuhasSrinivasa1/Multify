@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.multify.traderpro.data.local.SignalEventEntity
 import com.multify.traderpro.data.network.DashboardDto
 import com.multify.traderpro.data.preferences.AppSettings
+import com.multify.traderpro.data.preferences.AppPreferences
 import com.multify.traderpro.data.repository.TradingRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.delay
@@ -33,7 +34,8 @@ data class TraderUiState(
 
 @HiltViewModel
 class TraderViewModel @Inject constructor(
-    private val repository: TradingRepository
+    private val repository: TradingRepository,
+    private val preferences: AppPreferences
 ) : ViewModel() {
     private val remote = MutableStateFlow(RemoteState())
 
@@ -208,6 +210,20 @@ class TraderViewModel @Inject constructor(
                     refresh(silent = true)
                 }
                 .onFailure { remote.value = remote.value.copy(loading = false, error = it.userMessage()) }
+        }
+    }
+
+    fun setFixedScannerEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            runCatching { preferences.setFixedScannerEnabled(enabled) }
+                .onSuccess {
+                    remote.value = remote.value.copy(
+                        message = if (enabled) "Fixed/Working Range scanning ON"
+                        else "Discovery paused; verified SELL/GTT monitoring continues"
+                    )
+                    refresh(silent = true)
+                }
+                .onFailure { remote.value = remote.value.copy(error = it.userMessage()) }
         }
     }
 
