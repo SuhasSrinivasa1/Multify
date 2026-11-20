@@ -232,6 +232,7 @@ class WorkingRangeRecommendationStore(context: Context) {
                     state = "PENDING_CONFIRMATION",
                     targetPct = targetPct,
                     firstQualifiedAtMs = observedAtMs,
+                    firstQualifiedPrice = price,
                     lastObservedAtMs = observedAtMs,
                     lastPrice = price,
                     candidateAgeMinutes = 0.0,
@@ -302,6 +303,7 @@ class WorkingRangeRecommendationStore(context: Context) {
                 targetPrice = target,
                 targetPct = targetPct,
                 confirmedAtMs = if (confirmed) observedAtMs else 0L,
+                firstQualifiedPrice = existing.firstQualifiedPrice,
                 lastObservedAtMs = observedAtMs,
                 lastPrice = price,
                 candidateAgeMinutes = ageMinutes,
@@ -396,7 +398,10 @@ class WorkingRangeRecommendationStore(context: Context) {
             it.dto.state !in setOf("PENDING_DROPPED", "PENDING_EXPIRED") }
             .sortedWith(compareByDescending<StoredRow> { it.dto.confirmedAtMs }
                 .thenByDescending { it.dto.firstQualifiedAtMs })
-            .map { it.dto }
+            // Backfill rows from v9.0.21/v9.0.22: the already-persisted
+            // StoredRow firstQualifiedPrice is authoritative, not the mutable
+            // latest research drift or a guessed quote.
+            .map { it.dto.copy(firstQualifiedPrice = it.firstQualifiedPrice) }
     }
 
     fun export(): Map<String, Any?> {
