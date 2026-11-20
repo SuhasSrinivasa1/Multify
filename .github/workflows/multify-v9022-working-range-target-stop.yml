@@ -1,4 +1,4 @@
-name: Multify v9.0.22 Working Range Alpha Auto-Buy / Frozen Fixed regression TEST
+name: Multify v9.0.22 Working Range Target/Stop and Momentum / Frozen Fixed regression TEST
 on:
   push:
     branches: [v9022-working-range-target-stop-momentum-20261120]
@@ -110,8 +110,8 @@ jobs:
           assert "const val HARD_STOP_LOSS_PCT = 3.0" in Path(root+"engine/ReleaseIntegrityManifest.kt").read_text()
           assert "const val CANONICAL_LEARNING_CALLS = 107" in Path(root+"engine/FixedFinalContract.kt").read_text()
           build=Path("app/build.gradle.kts").read_text()
-          assert "versionCode = 9021" in build
-          assert 'versionName = "9.0.21-working-range-auto-buy"' in build
+          assert "versionCode = 9022" in build
+          assert 'versionName = "9.0.22-working-range-target-stop-momentum"' in build
           assert "const val BETA_SAFE_LIVE_60S = 40" in Path(root+"engine/FixedResearchCapacityPolicy.kt").read_text()
           assert "const val MIN_RESEARCH_GAP_MS = 1_000L" in Path(root+"engine/FixedResearchLtpPacingPolicy.kt").read_text()
           assert "const val APP_PER_MINUTE = 45" in Path(root+"data/network/GrowwHistoricalThrottlePolicy.kt").read_text()
@@ -168,7 +168,7 @@ jobs:
           assert 'Working Range' in ui and 'FIXED · FROZEN v7.4.1' in ui and 'WORKING RANGE · ALPHA AUTO-BUY' in ui
           assert 'workingRangeRecommendationStore.offer(' in source_text
           assert 'workingRangeRecommendations = if (settings.workingRangeEnabled)' in source_text
-          assert 'working_range_recommendations_v9022.json' in source_text
+          assert 'working_range_recommendations_v9021.json' in source_text
           assert 'REQUIRED_CONSECUTIVE_OBSERVATIONS = 2' in wr
           assert 'MAX_CANDIDATE_AGE_MINUTES = 36.0' in wr
           assert 'MAX_DRIFT_FROM_FIRST_QUALIFIED_PCT = 1.60' in wr
@@ -214,7 +214,7 @@ jobs:
           assert 'engine = ENGINE_UNIVEST_HOLDING' in Path(repo).read_text()
           assert 'HardStopLossPolicy.stopPrice(actualEntry)' in Path(repo).read_text()
           assert 'univest_exit_can_sell" to false' in Path(repo).read_text()
-          # v9.0.22: live Working Range is separately opted-in; source guard has
+          # v9.0.21: live Working Range is separately opted-in; source guard has
           # immutable reservation, no blind resubmission and shared Alpha/GTT protection.
           wrbuy=Path(root+"engine/WorkingRangeAutoBuyPolicy.kt").read_text()
           wrstore=Path(root+"data/logging/WorkingRangeRecommendationStore.kt").read_text()
@@ -224,7 +224,7 @@ jobs:
           assert "CONFIRMED_BEFORE_ACTIVATION" in wrbuy
           assert "EVENT_ALREADY_RESERVED_OR_CONSUMED" in wrbuy
           assert "MAX_CONFIRMATION_AGE_MS = 300_000L" in wrbuy
-          assert 'working_range_recommendations_v9022' in wrstore
+          assert 'working_range_recommendations_v9021' in wrstore
           assert 'persistOrderIntentDurablyLocked()' in wrstore
           assert 'WorkingRangeDistinctScanPolicy.isIndependentSecondScan(' in wrstore
           assert '.commit()' in wrstore and 'fun pendingAutoBuyIntents(dateIst: String? = null)' in wrstore
@@ -256,25 +256,25 @@ jobs:
           else
             echo "Stable signing key secret is not configured; debug APK will use runner-generated debug certificate."
           fi
-      - name: Verify v9.0.22 source-isolated Working Range execution
+      - name: Verify v9.0.22 Working Range exit separation and late-entry guard
         run: |
           python - <<'PY'
           from pathlib import Path
-          root = Path("app/src/main/java/com/multify/traderpro")
-          src = (root / "data/repository/TradingRepository.kt").read_text()
-          entry = (root / "engine/WorkingRangeEntryMomentumPolicy.kt").read_text()
-          wr = (root / "engine/WorkingRangeExitPolicy.kt").read_text()
+          root=Path("app/src/main/java/com/multify/traderpro")
+          src=(root/"data/repository/TradingRepository.kt").read_text()
+          entry=(root/"engine/WorkingRangeEntryMomentumPolicy.kt").read_text()
+          exit=(root/"engine/WorkingRangeExitPolicy.kt").read_text()
           assert "MAX_CONFIRMATION_AGE_MS = 120_000L" in entry
           assert "MAX_DRAWDOWN_FROM_CONFIRMATION_PCT = 0.75" in entry
           assert "MOMENTUM_OR_AGE_REJECTED" in src
           assert "monitorWorkingRangeHoldingLocked(" in src
-          assert "WORKING_RANGE_TARGET_FULL_EXIT" in wr
-          assert "WORKING_RANGE_STOP_MINUS_1_FULL_EXIT" in wr
+          assert "WORKING_RANGE_TARGET_FULL_EXIT" in exit
+          assert "WORKING_RANGE_STOP_MINUS_1_FULL_EXIT" in exit
           assert "val initialStopPrice = if" in src
           assert "v0.3 Alpha Auto-Buy" in src
-          print("PASS: source-isolated Working Range entry and stop/target exit")
+          print("PASS: isolated Working Range entry and target/stop exit")
           PY
-      - name: Full Android unit tests / v9.0.22 WORKING RANGE AUTO-BUY TEST APK
+      - name: Full Android unit tests / v9.0.22 WORKING RANGE TARGET/STOP TEST APK
         env:
           MULTIFY_KEYSTORE_PASSWORD: ${{ secrets.MULTIFY_KEYSTORE_PASSWORD }}
         run: gradle :app:testDebugUnitTest :app:assembleDebug --no-daemon --stacktrace
@@ -301,6 +301,7 @@ jobs:
           else
             echo "IN_PLACE_UPDATE_COMPATIBLE_WITH_V9019_TEST=NO" | tee -a app/build/outputs/apk/debug/v9022-install-compatibility.txt
           fi
+          echo "IN_PLACE_UPDATE_FROM_V9021_REQUIRES_CERTIFICATE_MATCH=YES" | tee -a app/build/outputs/apk/debug/v9022-install-compatibility.txt
           echo "Never uninstall the installed trading app to work around a signer mismatch while holdings, GTTs or unexported state exist."
           sha256sum "$apk" | tee app/build/outputs/apk/debug/v9022-SHA256SUMS.txt
       - name: Upload CI verified package
