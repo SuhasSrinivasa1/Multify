@@ -8180,24 +8180,54 @@ class TradingRepository @Inject constructor(
     private suspend fun autoBuyWorkingRangeRecommendationsLocked(): Int {
         initializeWorkingRangeAutoBuyOptIn()
         val today = LocalDate.now(INDIA).toString()
-        workingRangeRecommendationStore.flush()
+        val flushed = workingRangeRecommendationStore.flush()
+        if (!flushed) {
+            auditLogger.log("WORKING_RANGE_AUTO_BUY", "EVIDENCE_QUEUE_FLUSH_FAILED_NO_NEW_BUYS",
+                mapOf("new_buys_submitted" to false, "protection_and_pending_order_reconciliation_preserved" to true))
+            val pending = workingRangeRecommendationStore.pendingAutoBuyIntents()
+            if (pending.isNotEmpty()) {
+                ensureToken()?.let { reconcileWorkingRangeAutoBuyIntents(it, today) }
+            }
+            return 0
+        }
+
         val initialSettings = preferences.settings.first()
         val pendingIntents = workingRangeRecommendationStore.pendingAutoBuyIntents()
-        val potential = if (initialSettings.workingRangeEnabled &&
+        val candidateRows = if (initialSettings.workingRangeEnabled &&
             initialSettings.workingRangeActivatedAtMs > 0L) {
-            workingRangeRecommendationStore.recent(today).filter { row ->
-                com.multify.traderpro.engine.WorkingRangeAutoBuyPolicy.decide(
-                    initialSettings.workingRangeEnabled, initialSettings.safetyHalt,
-                    initialSettings.workingRangeActivatedAtMs, row.confirmedAtMs,
-                    row.state, row.autoBuyState, System.currentTimeMillis()
-                ).eligible
+            workingRangeRecommendationStore.recent(today).filter {
+                it.confirmedAtMs > 0L && it.state == "IN_RANGE" && it.autoBuyState == "NOT_ATTEMPTED"
             }
         } else emptyList()
+        val eligibility = candidateRows.map { row ->
+            row to com.multify.traderpro.engine.WorkingRangeAutoBuyPolicy.decide(
+                initialSettings.workingRangeEnabled, initialSettings.safetyHalt,
+                initialSettings.workingRangeActivatedAtMs, row.confirmedAtMs,
+                row.state, row.autoBuyState, System.currentTimeMillis()
+            )
+        }
+        eligibility.filterNot { it.second.eligible }.forEach { (row, decision) ->
+            workingRangeRecommendationStore.markAutoBuyOutcome(
+                row.symbol, row.confirmedAtMs, "BLOCKED_" + decision.reason,
+                reason = "Working Range Auto-Buy blocked: " + decision.reason
+            )
+            auditLogger.logAsync("WORKING_RANGE_AUTO_BUY", "CANDIDATE_NOT_EXECUTABLE",
+                mapOf("symbol" to row.symbol, "reason" to decision.reason,
+                    "confirmed_at_ms" to row.confirmedAtMs, "no_broker_request" to true))
+        }
+        val potential = eligibility.filter { it.second.eligible }.map { it.first }
 
         if (pendingIntents.isEmpty() && potential.isEmpty()) return 0
         val token = ensureToken() ?: run {
+            potential.forEach { row ->
+                workingRangeRecommendationStore.markAutoBuyOutcome(
+                    row.symbol, row.confirmedAtMs, "BLOCKED_ALPHA_AUTH_REQUIRED",
+                    reason = "Alpha authentication unavailable; no BUY request was sent"
+                )
+            }
             auditLogger.logAsync("WORKING_RANGE_AUTO_BUY", "ALPHA_AUTH_REQUIRED",
-                mapOf("new_buys_submitted" to false, "pending_intents" to pendingIntents.size))
+                mapOf("new_buys_submitted" to false, "pending_intents" to pendingIntents.size,
+                    "eligible_candidates" to potential.size))
             return 0
         }
 
@@ -8207,10 +8237,27 @@ class TradingRepository @Inject constructor(
 
         val settings = preferences.settings.first()
         if (!settings.workingRangeEnabled || settings.workingRangeActivatedAtMs <= 0L ||
-            settings.safetyHalt || potential.isEmpty()) return 0
+            potential.isEmpty()) return 0
+        if (settings.safetyHalt) {
+            potential.forEach { row ->
+                workingRangeRecommendationStore.markAutoBuyOutcome(
+                    row.symbol, row.confirmedAtMs, "BLOCKED_SAFETY_HALT",
+                    reason = "Global safety halt is active; no BUY request was sent"
+                )
+            }
+            return 0
+        }
         val now = ZonedDateTime.now(INDIA)
         if (!com.multify.traderpro.engine.NseEquitySessionCalendar.isFixedNewEntryWindow(now) ||
-            marketSession() != "OPEN") return 0
+            marketSession() != "OPEN") {
+            potential.forEach { row ->
+                workingRangeRecommendationStore.markAutoBuyOutcome(
+                    row.symbol, row.confirmedAtMs, "BLOCKED_OUTSIDE_ENTRY_WINDOW",
+                    reason = "NSE Working Range new-entry window is closed"
+                )
+            }
+            return 0
+        }
 
         val cooldown = buyApiCooldownOrNull(
             GrowwApiUsageLedger.Category.LIVE_DATA,
@@ -8218,10 +8265,30 @@ class TradingRepository @Inject constructor(
             GrowwApiUsageLedger.Category.ORDERS
         )
         if (cooldown != null) {
+            potential.forEach { row ->
+                workingRangeRecommendationStore.markAutoBuyOutcome(
+                    row.symbol, row.confirmedAtMs, "BLOCKED_API_COOLDOWN",
+                    reason = "Broker API cooldown: " + cooldown
+                )
+            }
             auditAutoBuyBlocked("WORKING_RANGE_AUTO_BUY", cooldown)
             return 0
         }
-        preFixedAutoBuyExecutionGuard(settings)
+        try {
+            // Shared broker/account safety only; no Fixed scoring, ranking or recommendation state.
+            preIndependentExecutionGuard(settings)
+        } catch (failure: Throwable) {
+            potential.forEach { row ->
+                workingRangeRecommendationStore.markAutoBuyOutcome(
+                    row.symbol, row.confirmedAtMs, "BLOCKED_EXECUTION_PREFLIGHT",
+                    reason = failure.message ?: failure.javaClass.simpleName
+                )
+            }
+            auditLogger.log("WORKING_RANGE_AUTO_BUY", "EXECUTION_PREFLIGHT_BLOCKED",
+                mapOf("reason" to (failure.message ?: failure.javaClass.simpleName),
+                    "new_buys_submitted" to false))
+            return 0
+        }
 
         var submitted = 0
         for (row in potential) {
@@ -8231,13 +8298,23 @@ class TradingRepository @Inject constructor(
                 row.confirmedAtMs, row.state, row.autoBuyState, System.currentTimeMillis()
             )
             if (!decision.eligible) {
+                workingRangeRecommendationStore.markAutoBuyOutcome(
+                    row.symbol, row.confirmedAtMs, "BLOCKED_" + decision.reason,
+                    reason = "Working Range Auto-Buy blocked: " + decision.reason
+                )
                 auditLogger.logAsync("WORKING_RANGE_AUTO_BUY", "CANDIDATE_NOT_EXECUTABLE",
                     mapOf("symbol" to row.symbol, "reason" to decision.reason,
                         "confirmed_at_ms" to row.confirmedAtMs))
                 continue
             }
             if (!com.multify.traderpro.engine.NseEquitySessionCalendar.isFixedNewEntryWindow(
-                    ZonedDateTime.now(INDIA)) || marketSession() != "OPEN") break
+                    ZonedDateTime.now(INDIA)) || marketSession() != "OPEN") {
+                workingRangeRecommendationStore.markAutoBuyOutcome(
+                    row.symbol, row.confirmedAtMs, "BLOCKED_OUTSIDE_ENTRY_WINDOW",
+                    reason = "NSE Working Range new-entry window closed before order dispatch"
+                )
+                break
+            }
             if (row.entryPrice <= 0.0 || row.targetPrice <= 0.0 ||
                 row.targetFirstTouchAtMs > 0L) {
                 workingRangeRecommendationStore.markAutoBuyOutcome(
@@ -8259,30 +8336,55 @@ class TradingRepository @Inject constructor(
                 apiFactory.groww.quote(
                     bearer(token), tradingSymbol = row.symbol,
                     trafficPriority = MarketDataPriorityAdmissionPolicy.PROTECTION
-                ).requirePayload("Working Range fresh Alpha quote ${row.symbol}")
+                ).requirePayload("Working Range fresh Alpha quote " + row.symbol)
             }.onFailure {
                 auditLogger.logAsync("WORKING_RANGE_AUTO_BUY", "ALPHA_QUOTE_FAILED",
                     mapOf("symbol" to row.symbol,
                         "message" to (it.message ?: it.javaClass.simpleName)))
-            }.getOrNull() ?: continue
+            }.getOrNull()
+            if (quote == null) {
+                workingRangeRecommendationStore.markAutoBuyOutcome(
+                    row.symbol, row.confirmedAtMs, "BLOCKED_ALPHA_QUOTE_FAILED",
+                    reason = "Fresh Alpha quote failed; no BUY request was sent"
+                )
+                continue
+            }
             val quoteReceivedAtMs = System.currentTimeMillis()
             preferences.recordMarketData()
             val quoteElapsedMs = (quoteReceivedAtMs - quoteStartedAtMs).coerceAtLeast(0L)
-            val ltp = quote.lastPrice?.takeIf { it.isFinite() && it > 0.0 } ?: continue
-            if (!RecommendationPriceBandPolicy.eligible(ltp)) {
-                auditLogger.logAsync("WORKING_RANGE_AUTO_BUY", "PRICE_BAND_REJECTED",
-                    mapOf("symbol" to row.symbol, "fresh_alpha_ltp" to ltp))
+            val ltp = quote.lastPrice?.takeIf { it.isFinite() && it > 0.0 }
+            if (ltp == null) {
+                workingRangeRecommendationStore.markAutoBuyOutcome(
+                    row.symbol, row.confirmedAtMs, "BLOCKED_ALPHA_QUOTE_NO_LTP",
+                    reason = "Fresh Alpha quote did not contain a valid LTP"
+                )
+                continue
+            }
+            if (!com.multify.traderpro.engine.WorkingRangeCandidatePolicy.priceEligible(ltp)) {
+                workingRangeRecommendationStore.markAutoBuyOutcome(
+                    row.symbol, row.confirmedAtMs, "BLOCKED_PRICE_BAND",
+                    reason = "Fresh Alpha LTP is outside the Working Range equity price band"
+                )
                 continue
             }
             val liquidityReject = ExecutionQuoteLiquidityPolicy.rejectionReason(quote)
             if (liquidityReject != null) {
+                workingRangeRecommendationStore.markAutoBuyOutcome(
+                    row.symbol, row.confirmedAtMs, "BLOCKED_LIQUIDITY",
+                    reason = liquidityReject
+                )
                 auditLogger.logAsync("WORKING_RANGE_AUTO_BUY", "ENTRY_LIQUIDITY_UNVERIFIED",
                     mapOf("symbol" to row.symbol, "reason" to liquidityReject,
                         "fresh_alpha_quote" to true))
                 continue
             }
-            val thinLiquidityReject = FixedExecutionThinLiquidityPolicy.rejectionReason(quote)
+            val thinLiquidityReject =
+                com.multify.traderpro.engine.WorkingRangeExecutionLiquidityPolicy.rejectionReason(quote)
             if (thinLiquidityReject != null) {
+                workingRangeRecommendationStore.markAutoBuyOutcome(
+                    row.symbol, row.confirmedAtMs, "BLOCKED_THIN_LIQUIDITY",
+                    reason = thinLiquidityReject
+                )
                 auditLogger.logAsync("WORKING_RANGE_AUTO_BUY", "ENTRY_MICRO_LIQUIDITY_REJECTED",
                     mapOf("symbol" to row.symbol, "reason" to thinLiquidityReject,
                         "reported_day_shares" to quote.volume))
@@ -8292,6 +8394,10 @@ class TradingRepository @Inject constructor(
                 row.entryPrice, ltp, quoteElapsedMs
             )
             if (extensionReject != null) {
+                workingRangeRecommendationStore.markAutoBuyOutcome(
+                    row.symbol, row.confirmedAtMs, "BLOCKED_PRICE_EXTENSION",
+                    reason = extensionReject
+                )
                 auditLogger.logAsync("WORKING_RANGE_AUTO_BUY", "ENTRY_PRICE_GUARD_REJECTED",
                     mapOf("symbol" to row.symbol, "reason" to extensionReject,
                         "confirmed_entry" to row.entryPrice, "fresh_alpha_ltp" to ltp,
@@ -8305,17 +8411,10 @@ class TradingRepository @Inject constructor(
                 )
                 continue
             }
-            // A second scan or a lower price is not proof that the original
-            // breakout momentum remains intact. This is execution-only; never
-            // mutate Fixed scoring, PRIMARY confirmation or ranked candidates.
             val momentumReject =
                 com.multify.traderpro.engine.WorkingRangeEntryMomentumPolicy.rejectionReason(
                     row.entryPrice, ltp, row.confirmedAtMs, quoteReceivedAtMs
                 )
-            // Peak-chasing risk is independent of the confirmation-to-execution
-            // drift. ASIANHOTNR rose +1.56% between first qualification and
-            // confirmation and then filled at its local sampled peak.
-            // Preserve Working Range candidate/research rows; only reject BUY.
             val firstPriceExtensionReject =
                 com.multify.traderpro.engine.WorkingRangeEntryMomentumPolicy.runupRejectionReason(
                     row.firstQualifiedPrice, ltp
@@ -8338,6 +8437,7 @@ class TradingRepository @Inject constructor(
                     "reference_to_quote_drift_pct" to ((ltp / row.entryPrice) - 1.0) * 100.0,
                     "vwap_extension_atr_shadow" to row.vwapExtensionAtr,
                     "alpha_quote_receipt_ms" to quoteReceivedAtMs,
+                    "client_receipt_is_not_exchange_tick_age" to true,
                     "fresh_independent_confirmation_required" to true,
                     "no_order_sent" to true, "fixed_model_unchanged" to true
                 ))
@@ -8347,6 +8447,10 @@ class TradingRepository @Inject constructor(
                 live.holdingBudgetRupees.toDouble(), ltp
             )
             if (sizing.quantity <= 0) {
+                workingRangeRecommendationStore.markAutoBuyOutcome(
+                    row.symbol, row.confirmedAtMs, "BLOCKED_INVALID_SIZING",
+                    reason = "Invalid Working Range per-order budget or fresh Alpha price"
+                )
                 auditLogger.logAsync("WORKING_RANGE_AUTO_BUY", "SKIPPED_INVALID_BUDGET_OR_PRICE",
                     mapOf("symbol" to row.symbol, "fresh_ltp" to ltp,
                         "per_order_budget" to live.holdingBudgetRupees))
@@ -8354,9 +8458,13 @@ class TradingRepository @Inject constructor(
             }
 
             val reference = stableRef("WRM",
-                "${today}|${row.symbol.uppercase(Locale.US)}|${row.confirmedAtMs}")
+                today + "|" + row.symbol.uppercase(Locale.US) + "|" + row.confirmedAtMs)
             if (!workingRangeRecommendationStore.reserveAutoBuy(
                     row.symbol, row.confirmedAtMs, reference, sizing.quantity)) {
+                workingRangeRecommendationStore.markAutoBuyOutcome(
+                    row.symbol, row.confirmedAtMs, "BLOCKED_ORDER_INTENT_NOT_DURABLE",
+                    reason = "Durable Working Range order-intent reservation failed; no BUY POST sent"
+                )
                 auditLogger.log("WORKING_RANGE_AUTO_BUY",
                     "ORDER_INTENT_RESERVATION_NOT_DURABLY_ACCEPTED",
                     mapOf("symbol" to row.symbol, "reference" to reference,
@@ -8396,7 +8504,8 @@ class TradingRepository @Inject constructor(
                     mapOf("symbol" to row.symbol, "order_id" to order.growwOrderId,
                         "reference" to reference, "quantity" to filled, "fill_price" to actualFill,
                         "confirmed_entry" to row.entryPrice, "fresh_alpha_quote" to ltp,
-                        "target_pct" to row.targetPct, "alpha_only" to true, "beta_read_only" to true))
+                        "target_pct" to row.targetPct, "alpha_only" to true, "beta_read_only" to true,
+                        "stop_loss_pct" to -com.multify.traderpro.engine.WorkingRangeExitPolicy.HARD_STOP_LOSS_PCT))
                 submitted++
                 _fixedDeliveryEvents.tryEmit(System.currentTimeMillis())
             } catch (failure: Throwable) {
