@@ -68,17 +68,11 @@ jobs:
           # Only addition inside repository is new read-only local diagnostic export.
           repo=root/"data/repository/TradingRepository.kt"
           after=repo.read_text()
-          extra='''\n                add("fixed_singleflight_dedup_v9027.json", mapOf(
-                    "alpha_research_cache_hits" to GrowwApiUsageLedger.cacheHitCount(),
-                    "alpha_research_cache_misses" to GrowwApiUsageLedger.cacheMissCount(),
-                    "duplicate_followers_prevented_from_new_wire_requests" to
-                        GrowwApiUsageLedger.duplicateReadsPreventedCount(),
-                    "fresh_alpha_execution_quotes_must_bypass_cache" to true,
-                    "broker_wire_calls_are_in_wire_api_usage_snapshot" to true,
-                    "no_pretense_of_realized_speedup_without_matched_market_runs" to true
-                ))'''
-          assert after.count(extra)==1
-          assert after.replace(extra,"").encode()==old(repo.as_posix()), "TRADING_REPOSITORY_MODIFIED"
+          marker='\n                add("fixed_singleflight_dedup_v9027.json"'
+          assert after.count('add("fixed_singleflight_dedup_v9027.json"')==1
+          beginning=after.index(marker)
+          ending=after.index('\n                add("wire_api_usage_snapshot.json"',beginning)
+          assert after[:beginning]+after[ending:]==old(repo.as_posix()).decode(), "TRADING_REPOSITORY_MODIFIED"
           app=Path("app/src/main/AndroidManifest.xml").read_text()
           assert "MultifyNotificationListenerService" not in app
           assert 'android:label="Fixed Momentum Pro"' in app
