@@ -1619,6 +1619,14 @@ private fun SettingsScreen(
                             onCheckedChange = onWorkingRangeChanged
                         )
                     }
+                    if (state.settings.workingRangeEnabled) {
+                        Text(
+                            "LIVE AUTO-BUY ARMED · New confirmed Working Range events may submit real CNC orders through Groww Alpha. Switch OFF to stop new entries; it does not close or disable protection for existing holdings.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.error,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
                     KeyValueRow("Working Range Auto-Buy", if (state.settings.workingRangeEnabled)
                         "ON · Alpha BUY after two-scan confirmation" else "OFF · no new Working Range BUY")
                     Text(
