@@ -1174,7 +1174,8 @@ private fun WorkingRangeTable(
                             Text(
                                 when {
                                     row.autoBuyState == "BUY_EXECUTED" -> "WORKING RANGE · BUY EXECUTED"
-                                    row.autoBuyEnabled -> "WORKING RANGE · ALPHA AUTO-BUY"
+                                    row.confirmedAtMs <= 0L && row.autoBuyEnabled -> "WORKING RANGE · CONFIRMATION 1/2"
+                                    row.autoBuyEnabled -> "WORKING RANGE · ALPHA AUTO-BUY ARMED"
                                     else -> "WORKING RANGE · PRIOR RESEARCH"
                                 }, style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.tertiary, fontWeight = FontWeight.Bold)
