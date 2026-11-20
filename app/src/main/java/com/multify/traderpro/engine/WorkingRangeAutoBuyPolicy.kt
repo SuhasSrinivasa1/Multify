@@ -2,7 +2,7 @@ package com.multify.traderpro.engine
 
 /** Execution-only eligibility for newly confirmed Working Range events. */
 object WorkingRangeAutoBuyPolicy {
-    const val MAX_CONFIRMATION_AGE_MS = 300_000L
+    const val MAX_CONFIRMATION_AGE_MS = WorkingRangeEntryMomentumPolicy.MAX_CONFIRMATION_AGE_MS
 
     data class Decision(val eligible: Boolean, val reason: String)
 
