@@ -81,7 +81,8 @@ jobs:
           set -euo pipefail
           apk=app/build/outputs/apk/debug/app-debug.apk
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$apk" | tee app/build/outputs/apk/debug/fixed-lite-signature.txt
-          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$apk" | head -n 2 | tee app/build/outputs/apk/debug/fixed-lite-package.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$apk" > app/build/outputs/apk/debug/fixed-lite-package-full.txt
+          head -n 2 app/build/outputs/apk/debug/fixed-lite-package-full.txt | tee app/build/outputs/apk/debug/fixed-lite-package.txt
           sha256sum "$apk" | tee app/build/outputs/apk/debug/fixed-lite-SHA256SUMS.txt
       - name: Upload debug APK and build metadata
         uses: actions/upload-artifact@v4
@@ -91,6 +92,7 @@ jobs:
             app/build/outputs/apk/debug/app-debug.apk
             app/build/outputs/apk/debug/fixed-lite-signature.txt
             app/build/outputs/apk/debug/fixed-lite-package.txt
+            app/build/outputs/apk/debug/fixed-lite-package-full.txt
             app/build/outputs/apk/debug/fixed-lite-SHA256SUMS.txt
           retention-days: 30
 
