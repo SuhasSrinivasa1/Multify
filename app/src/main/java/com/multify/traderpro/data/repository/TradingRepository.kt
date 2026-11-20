@@ -1703,6 +1703,24 @@ class TradingRepository @Inject constructor(
             ))
         if (enabled && !live.safetyHalt && marketSession() == "OPEN") {
             runCatching { prepareArmHotPath(force = false) }
+        } else if (!enabled) {
+            // OFF stops new entries and immediately reconciles/cancels any still-open
+            // Working Range entry intent. Filled shares are registered and protected.
+            runCatching {
+                val pending = workingRangeRecommendationStore.pendingAutoBuyIntents(
+                    LocalDate.now(INDIA).toString()
+                )
+                if (pending.isNotEmpty()) {
+                    val token = ensureToken()
+                    if (token != null) reconcileWorkingRangeAutoBuyIntents(
+                        token, LocalDate.now(INDIA).toString()
+                    )
+                }
+            }.onFailure {
+                auditLogger.log("WORKING_RANGE_AUTO_BUY", "DISABLE_ORDER_RECONCILIATION_FAILED",
+                    mapOf("message" to (it.message ?: it.javaClass.simpleName),
+                        "no_new_entries" to true, "manual_order_check_required" to true))
+            }
         }
     }
 
