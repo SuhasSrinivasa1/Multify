@@ -331,7 +331,7 @@ jobs:
           assert "EVIDENCE_QUEUE_FLUSH_FAILED_NO_NEW_BUYS" in auto
           assert "WORKING_RANGE_HOLDING" in ownership and "WORKING_RANGE_HOLDING" in src
           assert "WorkingRangeExitPolicy.stopPrice(old.entryPrice)" in wrstore
-          assert "researchStopLossPct = WorkingRangeExitPolicy.HARD_STOP_LOSS_PCT" in wrstore
+          assert "researchStopLossPct = -WorkingRangeExitPolicy.HARD_STOP_LOSS_PCT" in wrstore
           assert "WorkingRangeExitComparisonPolicy.evaluate(" in wrstore
           assert "markPositionClosed(" in wrstore and "newBuyAllowed: Boolean = false" in wrstore
           assert "CHILD_SELL_RECONCILED" in src and "BROKER_CLOSE_RECONCILED" in src
