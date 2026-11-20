@@ -1,5 +1,6 @@
 package com.multify.traderpro.engine
 
+import com.multify.traderpro.data.network.BetaReadOnlyInterceptor
 import org.junit.Assert.*
 import org.junit.Test
 import java.time.LocalDateTime
