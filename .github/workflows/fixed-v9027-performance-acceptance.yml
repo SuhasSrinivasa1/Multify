@@ -34,7 +34,7 @@ jobs:
           python - <<'PY'
           from pathlib import Path
           import subprocess
-          baseline="v9026-independent-fixed-working-range-minus1-opening-watch"
+          baseline="5582c093147ab768a147c7283f7f5a473bf3a501"
           root=Path("app/src/main/java/com/multify/traderpro")
           def old(p):return subprocess.check_output(["git","show",f"{baseline}:{p}"])
           locked=[
