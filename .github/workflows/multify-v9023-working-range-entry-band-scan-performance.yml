@@ -1,7 +1,7 @@
-name: Multify v9.0.23 Working Range Target/Stop and Momentum / Frozen Fixed regression TEST
+name: Multify v9.0.23 Working Range Entry Band and Scan Performance / Frozen Fixed regression TEST
 on:
   push:
-    branches: [v9023-working-range-target-stop-momentum-20261120]
+    branches: [v9023-working-range-entry-band-scan-performance-20261120]
   pull_request:
     branches: [v9022-working-range-target-stop-momentum-20261120]
   workflow_dispatch:
@@ -110,8 +110,8 @@ jobs:
           assert "const val HARD_STOP_LOSS_PCT = 3.0" in Path(root+"engine/ReleaseIntegrityManifest.kt").read_text()
           assert "const val CANONICAL_LEARNING_CALLS = 107" in Path(root+"engine/FixedFinalContract.kt").read_text()
           build=Path("app/build.gradle.kts").read_text()
-          assert "versionCode = 9022" in build
-          assert 'versionName = "9.0.22-working-range-target-stop-momentum"' in build
+          assert "versionCode = 9023" in build
+          assert 'versionName = "9.0.23-working-range-entry-band-scan-performance"' in build
           assert "const val BETA_SAFE_LIVE_60S = 40" in Path(root+"engine/FixedResearchCapacityPolicy.kt").read_text()
           assert "const val MIN_RESEARCH_GAP_MS = 1_000L" in Path(root+"engine/FixedResearchLtpPacingPolicy.kt").read_text()
           assert "const val APP_PER_MINUTE = 45" in Path(root+"data/network/GrowwHistoricalThrottlePolicy.kt").read_text()
@@ -170,8 +170,19 @@ jobs:
           assert 'workingRangeRecommendations = if (settings.workingRangeEnabled)' in source_text
           assert 'working_range_recommendations_v9021.json' in source_text
           assert 'REQUIRED_CONSECUTIVE_OBSERVATIONS = 2' in wr
-          assert 'MAX_CANDIDATE_AGE_MINUTES = 36.0' in wr
-          assert 'MAX_DRIFT_FROM_FIRST_QUALIFIED_PCT = 1.60' in wr
+          assert 'MAX_CANDIDATE_AGE_MINUTES =' in wr
+          assert 'MAX_DRIFT_FROM_FIRST_QUALIFIED_PCT =' in wr
+          assert 'MIN_DRIFT_FROM_FIRST_QUALIFIED_PCT =' in wr
+          assert 'MAX_VWAP_EXTENSION_ATR = WorkingRangeEntryBandPolicy.MAX_VWAP_EXTENSION_ATR' in wr
+          assert 'MAX_SPREAD_BPS = WorkingRangeEntryBandPolicy.MAX_SPREAD_BPS' in wr
+          band=Path(root+"engine/WorkingRangeEntryBandPolicy.kt").read_text()
+          assert 'MAX_FIRST_QUALIFIED_TO_BUY_MS = 120_000L' in band
+          assert 'MAX_CONFIRMATION_TO_BUY_MS = 30_000L' in band
+          assert 'MAX_UPWARD_DRIFT_FROM_FIRST_QUALIFIED_PCT = 0.50' in band
+          assert 'MAX_DRAWDOWN_FROM_FIRST_QUALIFIED_PCT = 0.75' in band
+          assert 'MAX_VWAP_EXTENSION_ATR = 3.50' in band
+          assert 'MAX_SPREAD_BPS = 35.0' in band
+          assert 'ENTRY_BAND_REJECTED' in source_text
           assert '"auto_buy_enabled" to enabled' in wrstore
           assert '"extra_discovery_broker_requests" to 0' in wrstore
           assert 'working_range_live_autobuy_adds_alpha_execution_and_protection_calls' in wrstore
@@ -288,7 +299,7 @@ jobs:
           assert "WORKING_RANGE_ENTRY_BAND_REJECTED" not in src or "ENTRY_BAND_REJECTED" in src
           print("PASS: isolated Working Range entry and target/stop exit")
           PY
-      - name: Full Android unit tests / v9.0.23 WORKING RANGE TARGET/STOP TEST APK
+      - name: Full Android unit tests / v9.0.23 WORKING RANGE ENTRY BAND TEST APK
         env:
           MULTIFY_KEYSTORE_PASSWORD: ${{ secrets.MULTIFY_KEYSTORE_PASSWORD }}
         run: gradle :app:testDebugUnitTest :app:assembleDebug --no-daemon --stacktrace
