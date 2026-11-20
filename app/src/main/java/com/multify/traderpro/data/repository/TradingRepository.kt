@@ -8626,7 +8626,7 @@ class TradingRepository @Inject constructor(
         val openedAtMs = System.currentTimeMillis()
         registerBoughtPositionAndProtect(
             ManagedPositionEntity(
-                engine = ENGINE_FIXED_HOLDING,
+                engine = ENGINE_WORKING_RANGE_HOLDING,
                 symbol = row.symbol,
                 product = "CNC",
                 side = "LONG",
@@ -8634,7 +8634,7 @@ class TradingRepository @Inject constructor(
                 entryPrice = actualFill,
                 stopPrice = com.multify.traderpro.engine.WorkingRangeExitPolicy.stopPrice(actualFill),
                 targetPrice = actualFill * (1.0 + row.targetPct / 100.0),
-                strategy = "Working Range v0.3 Alpha Auto-Buy · full target or hard -1% stop only · no stepped trailing",
+                strategy = "Working Range v0.4 independent momentum Auto-Buy · full target or fixed -1% stop · no stepped trailing",
                 regime = "WORKING_RANGE_LONG",
                 confidence = 1.0,
                 sourceEventId = null,
@@ -8652,11 +8652,27 @@ class TradingRepository @Inject constructor(
             allowFreshPostFillProof = true,
             deferProtectionRetryToMonitor = true
         )
-        val protected = managedDao.openPosition(ENGINE_FIXED_HOLDING, row.symbol)?.let {
+        val protectedPosition = managedDao.openPosition(ENGINE_WORKING_RANGE_HOLDING, row.symbol)
+        val protected = protectedPosition?.let {
             com.multify.traderpro.engine.GttProtectionReadinessPolicy.verified(
                 it.smartOrderMode, it.smartOrderId, it.smartOrderStatus
             )
         } == true
+        auditLogger.log("WORKING_RANGE_PROTECTION", "INITIAL_GTT_VERIFICATION", mapOf(
+            "symbol" to row.symbol,
+            "order_id" to orderId,
+            "reference" to reference,
+            "quantity" to filled,
+            "actual_fill_price" to actualFill,
+            "stop_loss_pct" to -com.multify.traderpro.engine.WorkingRangeExitPolicy.HARD_STOP_LOSS_PCT,
+            "expected_stop_trigger" to com.multify.traderpro.engine.WorkingRangeExitPolicy.stopPrice(actualFill),
+            "gtt_id" to protectedPosition?.smartOrderId,
+            "gtt_trigger_price" to protectedPosition?.smartOrderTriggerPrice,
+            "gtt_status" to protectedPosition?.smartOrderStatus,
+            "broker_gtt_verified" to protected,
+            "alpha_only" to true,
+            "beta_read_only" to true
+        ))
         if (!protected) {
             auditLogger.log("SAFETY", "WORKING_RANGE_BUY_UNPROTECTED_CRITICAL",
                 mapOf("symbol" to row.symbol, "order_id" to orderId,
@@ -10455,6 +10471,7 @@ class TradingRepository @Inject constructor(
     ) {
         val gross = (exit - position.entryPrice) * quantity
         val costs = estimatedCashCosts(position.entryPrice, exit, quantity)
+        val closedAtMs = System.currentTimeMillis()
         managedDao.insertTrade(
             ManagedTradeEntity(
                 engine = position.engine, symbol = position.symbol, product = "CNC", side = "LONG",
@@ -10464,9 +10481,30 @@ class TradingRepository @Inject constructor(
                 mfeRupees = max(0.0, position.maxFavourablePrice - position.entryPrice) * quantity,
                 maeRupees = max(0.0, position.entryPrice - position.maxAdversePrice) * quantity,
                 sourceEventId = position.sourceEventId, openOrderId = position.openOrderId, closeOrderId = confirmedChildOrderId ?: position.smartOrderId ?: "EXTERNAL",
-                openedAtMs = position.openedAtMs, closedAtMs = System.currentTimeMillis()
+                openedAtMs = position.openedAtMs, closedAtMs = closedAtMs
             )
         )
+        if (com.multify.traderpro.engine.WorkingRangeExitPolicy.owns(
+                position.openReferenceId, position.regime
+            )) {
+            workingRangeRecommendationStore.markPositionClosed(
+                position.symbol, position.openReferenceId, closedAtMs, exit, reason
+            )
+            auditLogger.log("WORKING_RANGE_GTT", "BROKER_CLOSE_RECONCILED", mapOf(
+                "symbol" to position.symbol,
+                "gtt_id" to position.smartOrderId,
+                "gtt_status" to position.smartOrderStatus,
+                "gtt_trigger_price" to position.smartOrderTriggerPrice,
+                "child_sell_order_id" to confirmedChildOrderId,
+                "exit_fill_price" to exit,
+                "filled_quantity" to quantity,
+                "stop_loss_pct" to -com.multify.traderpro.engine.WorkingRangeExitPolicy.HARD_STOP_LOSS_PCT,
+                "broker_inventory_reconciled" to true,
+                "trade_recorded" to true,
+                "net_pnl" to (gross - costs),
+                "child_order_id_verified" to (confirmedChildOrderId != null)
+            ))
+        }
     }
     private suspend fun activeGttsBySymbol(token: String, force: Boolean = false): Map<String, List<SmartOrderPayload>> =
         activeGttReadMutex.withLock {
@@ -11328,9 +11366,13 @@ class TradingRepository @Inject constructor(
                 "symbol" to observed.symbol, "reason" to exit,
                 "fresh_monitored_ltp" to freshLtp,
                 "actual_fill" to observed.entryPrice,
+                "stop_loss_pct" to -com.multify.traderpro.engine.WorkingRangeExitPolicy.HARD_STOP_LOSS_PCT,
                 "stop_price" to com.multify.traderpro.engine.WorkingRangeExitPolicy.stopPrice(observed.entryPrice),
                 "target_price" to observed.targetPrice,
                 "full_quantity" to observed.quantity,
+                "gtt_id" to observed.smartOrderId,
+                "gtt_status_before_exit" to observed.smartOrderStatus,
+                "gtt_trigger_before_exit" to observed.smartOrderTriggerPrice,
                 "trailing_arm_or_ratchet" to false,
                 "broker_fill_not_assumed" to true
             ))
@@ -11350,6 +11392,26 @@ class TradingRepository @Inject constructor(
                     "symbol" to observed.symbol, "threshold" to exit,
                     "position_still_requires_monitoring" to true,
                     "no_realized_profit_assumed" to true
+                ))
+            } else {
+                workingRangeRecommendationStore.markPositionClosed(
+                    observed.symbol, observed.openReferenceId, closed.closedAtMs,
+                    closed.exitPrice, exit
+                )
+                auditLogger.log("WORKING_RANGE_GTT", "CHILD_SELL_RECONCILED", mapOf(
+                    "symbol" to closed.symbol,
+                    "gtt_id_before_sell" to observed.smartOrderId,
+                    "gtt_status_before_sell" to observed.smartOrderStatus,
+                    "gtt_trigger_before_sell" to observed.smartOrderTriggerPrice,
+                    "child_sell_order_id" to closed.closeOrderId,
+                    "child_sell_fill_price" to closed.exitPrice,
+                    "filled_quantity" to closed.quantity,
+                    "stop_loss_pct" to -com.multify.traderpro.engine.WorkingRangeExitPolicy.HARD_STOP_LOSS_PCT,
+                    "broker_trade_recorded" to true,
+                    "gross_pnl" to closed.grossPnl,
+                    "estimated_costs" to closed.estimatedCosts,
+                    "net_pnl" to closed.netPnl,
+                    "broker_confirmed_not_ltp_inferred" to true
                 ))
             }
             return
@@ -14105,6 +14167,7 @@ class TradingRepository @Inject constructor(
         const val ENGINE_UNIVEST_HOLDING = "UNIVEST_HOLDING"
         const val ENGINE_FORECAST_HOLDING = "FORECAST_HOLDING"
         const val ENGINE_FIXED_HOLDING = "FIXED_HOLDING"
+        const val ENGINE_WORKING_RANGE_HOLDING = "WORKING_RANGE_HOLDING"
         const val ENGINE_PORTFOLIO_HOLDING = "PORTFOLIO_HOLDING"
     }
 }
