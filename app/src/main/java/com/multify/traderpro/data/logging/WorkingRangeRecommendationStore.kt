@@ -8,6 +8,7 @@ import com.multify.traderpro.data.network.WorkingRangeRecommendationDto
 import com.multify.traderpro.engine.FixedQuoteMarketabilityPresentationPolicy
 import com.multify.traderpro.engine.FixedStrategyEvaluation
 import com.multify.traderpro.engine.WorkingRangeCandidatePolicy
+import com.multify.traderpro.engine.WorkingRangeEntryBandPolicy
 import java.time.Duration
 import java.time.Instant
 import java.time.LocalDate
@@ -127,6 +128,8 @@ class WorkingRangeRecommendationStore(context: Context) {
             autoBuyQuantity = quantity ?: row.dto.autoBuyQuantity,
             autoBuyFillPrice = fillPrice ?: row.dto.autoBuyFillPrice,
             autoBuyEnabled = true,
+            state = if (state.startsWith("BLOCKED_OUT_OF_RANGE") ||
+                state.startsWith("BLOCKED_STALE")) "OUT_OF_RANGE" else row.dto.state,
             reason = reason ?: row.dto.reason
         )
         persistLocked()
@@ -250,7 +253,7 @@ class WorkingRangeRecommendationStore(context: Context) {
                     quoteClientReceiptAgeMs = marketability.clientReceiptAgeMs,
                     autoBuyEnabled = true,
                     emaAlignmentMode = decision.emaAlignmentMode,
-                    reason = "Working Range v0.2 · first matching scan · confirmation 1/2 · Alpha Auto-Buy permission ON"
+                    reason = "Working Range v0.4 · first in-band scan · confirmation 1/2 · Alpha Auto-Buy permission ON"
                 )
                 val row = StoredRow(date, symbol, first, price, 1, observedAtMs)
                 if (index >= 0) rows[index] = row else rows.add(row)
@@ -271,9 +274,19 @@ class WorkingRangeRecommendationStore(context: Context) {
             val drift = if (existing.firstQualifiedPrice > 0.0)
                 (price / existing.firstQualifiedPrice - 1.0) * 100.0 else Double.POSITIVE_INFINITY
             val gap = observedAtMs - existing.lastPassAtMs
-            if (ageMinutes > WorkingRangeCandidatePolicy.MAX_CANDIDATE_AGE_MINUTES ||
+            if (ageMs > WorkingRangeEntryBandPolicy.MAX_FIRST_QUALIFIED_TO_BUY_MS ||
                 drift > WorkingRangeCandidatePolicy.MAX_DRIFT_FROM_FIRST_QUALIFIED_PCT ||
+                drift < WorkingRangeCandidatePolicy.MIN_DRIFT_FROM_FIRST_QUALIFIED_PCT ||
                 gap < 0L || gap > WorkingRangeCandidatePolicy.MAX_CONFIRMATION_GAP_MS) {
+                val expiryReason = when {
+                    ageMs > WorkingRangeEntryBandPolicy.MAX_FIRST_QUALIFIED_TO_BUY_MS ->
+                        "First qualification to confirmation exceeded 120 seconds"
+                    drift > WorkingRangeCandidatePolicy.MAX_DRIFT_FROM_FIRST_QUALIFIED_PCT ->
+                        "Price moved more than +0.50% above the first qualified entry band"
+                    drift < WorkingRangeCandidatePolicy.MIN_DRIFT_FROM_FIRST_QUALIFIED_PCT ->
+                        "Price retraced more than 0.75% below the first qualified entry band"
+                    else -> "Independent confirmation gap exceeded 120 seconds"
+                }
                 existing.dto = existing.dto.copy(
                     state = "PENDING_EXPIRED",
                     lastObservedAtMs = observedAtMs,
@@ -281,12 +294,19 @@ class WorkingRangeRecommendationStore(context: Context) {
                     candidateAgeMinutes = ageMinutes,
                     driftFromFirstQualifiedPct = drift,
                     marketabilityState = marketabilityState,
-                    reason = when {
-                        ageMinutes > WorkingRangeCandidatePolicy.MAX_CANDIDATE_AGE_MINUTES -> "Candidate age exceeded 36 minutes"
-                        drift > WorkingRangeCandidatePolicy.MAX_DRIFT_FROM_FIRST_QUALIFIED_PCT -> "Price drift exceeded +1.60% from first Working Range observation"
-                        else -> "Confirmation gap exceeded five minutes"
-                    }
+                    reason = expiryReason
                 )
+                rejections.add(StoredRejection(
+                    dateIst = date, symbol = symbol, observedAtMs = observedAtMs, price = price,
+                    reasons = listOf("WORKING_RANGE_ENTRY_BAND_EXPIRED", expiryReason),
+                    rsi = f.rsi14, rvol = f.rvol,
+                    greenVolumeShare = f.greenVolumeShare, volumeAcceleration = f.volumeAcceleration,
+                    ema9 = f.ema9, ema20 = f.ema20, ema50 = f.ema50,
+                    targetRequirementAtr = decision.targetRequirementAtr,
+                    vwapExtensionAtr = decision.vwapExtensionAtr
+                ))
+                while (rejections.size > 600) rejections.removeAt(0)
+                persistRejectionsLocked()
                 persistLocked()
                 return
             }
@@ -321,8 +341,8 @@ class WorkingRangeRecommendationStore(context: Context) {
                 autoBuyEnabled = true,
                 emaAlignmentMode = decision.emaAlignmentMode,
                 reason = if (confirmed)
-                    "WORKING RANGE v0.2 · two consecutive evaluations · Alpha Auto-Buy preflight"
-                else "Working Range v0.2 · confirmation 2/2 pending"
+                    "WORKING RANGE v0.4 · two independent in-band scans · Alpha Auto-Buy preflight"
+                else "Working Range v0.4 · confirmation 2/2 pending"
             )
             persistLocked()
         }
@@ -346,9 +366,10 @@ class WorkingRangeRecommendationStore(context: Context) {
         val mae = min(old.maxAdversePct, move)
         val targetAt = if (old.targetFirstTouchAtMs == 0L && price >= old.targetPrice)
             observedAtMs else old.targetFirstTouchAtMs
-        // Research comparison uses the currently deployed -3% hard-stop level.
-        // This is sampled LTP chronology, not a broker stop or intrabar path.
-        val stopAt = if (old.stopFirstTouchAtMs == 0L && price <= old.entryPrice * 0.97)
+        // Working Range outcome sampling uses its own -1% stop. This is sparse
+        // client-LTP chronology, not a broker stop or intrabar price path.
+        val stopAt = if (old.stopFirstTouchAtMs == 0L &&
+            price <= com.multify.traderpro.engine.WorkingRangeExitPolicy.stopPrice(old.entryPrice))
             observedAtMs else old.stopFirstTouchAtMs
         val outcome = when {
             targetAt > 0L && stopAt == 0L -> "TARGET_HIT_SAMPLED"
@@ -359,17 +380,68 @@ class WorkingRangeRecommendationStore(context: Context) {
             else -> "UNRESOLVED_CENSORED"
         }
         val terminal = targetAt > 0L || stopAt > 0L
+        val ageMs = (observedAtMs - old.firstQualifiedAtMs).coerceAtLeast(0L)
+        val firstDrift = if (row.firstQualifiedPrice > 0.0)
+            (price / row.firstQualifiedPrice - 1.0) * 100.0 else Double.POSITIVE_INFINITY
+        val currentVwapExtension = if (f.atr14 != null && f.atr14 > 0.0 && f.vwap != null)
+            (price - f.vwap) / f.atr14 else null
+        val bandReasons = mutableListOf<String>()
+        if (ageMs > WorkingRangeEntryBandPolicy.MAX_FIRST_QUALIFIED_TO_BUY_MS)
+            bandReasons += "FIRST_QUALIFIED_SIGNAL_STALE"
+        if (firstDrift > WorkingRangeEntryBandPolicy.MAX_UPWARD_DRIFT_FROM_FIRST_QUALIFIED_PCT)
+            bandReasons += "PRICE_ABOVE_PLUS_0_50_PERCENT_ENTRY_BAND"
+        if (firstDrift < -WorkingRangeEntryBandPolicy.MAX_DRAWDOWN_FROM_FIRST_QUALIFIED_PCT)
+            bandReasons += "MOMENTUM_LOST_BELOW_MINUS_0_75_PERCENT_ENTRY_BAND"
+        if (currentVwapExtension == null)
+            bandReasons += "VWAP_EXTENSION_UNAVAILABLE"
+        else if (currentVwapExtension > WorkingRangeEntryBandPolicy.MAX_VWAP_EXTENSION_ATR)
+            bandReasons += "VWAP_EXTENSION_ABOVE_3_50_ATR"
+        if (f.spreadBps == null)
+            bandReasons += "SPREAD_UNVERIFIED"
+        else if (f.spreadBps > WorkingRangeEntryBandPolicy.MAX_SPREAD_BPS)
+            bandReasons += "SPREAD_ABOVE_35_BPS"
+        val entryUnverified = bandReasons.contains("SPREAD_UNVERIFIED") ||
+            bandReasons.contains("VWAP_EXTENSION_UNAVAILABLE")
+        val outOfRange = bandReasons.any {
+            it != "SPREAD_UNVERIFIED" && it != "VWAP_EXTENSION_UNAVAILABLE"
+        }
+        val notYetBought = old.autoBuyState == "NOT_ATTEMPTED"
+        val permanentlyOutOfRange = old.autoBuyState.startsWith("BLOCKED_OUT_OF_RANGE") ||
+            old.autoBuyState.startsWith("BLOCKED_STALE")
+        val nextEntryState = when {
+            stillMatches && bandReasons.isEmpty() -> "IN_RANGE"
+            outOfRange -> "OUT_OF_RANGE"
+            entryUnverified -> "ENTRY_UNVERIFIED"
+            else -> "MOMENTUM_WEAKENING"
+        }
+        if (notYetBought && !terminal &&
+            nextEntryState in setOf("OUT_OF_RANGE", "ENTRY_UNVERIFIED") &&
+            old.state != nextEntryState
+        ) {
+            rejections.add(StoredRejection(
+                dateIst = row.dateIst, symbol = row.symbol, observedAtMs = observedAtMs, price = price,
+                reasons = bandReasons.ifEmpty { reasons },
+                rsi = f.rsi14, rvol = f.rvol,
+                greenVolumeShare = f.greenVolumeShare, volumeAcceleration = f.volumeAcceleration,
+                ema9 = f.ema9, ema20 = f.ema20, ema50 = f.ema50,
+                targetRequirementAtr = old.targetRequirementAtr,
+                vwapExtensionAtr = currentVwapExtension
+            ))
+            while (rejections.size > 600) rejections.removeAt(0)
+            persistRejectionsLocked()
+        }
         row.dto = old.copy(
             state = when {
                 terminal -> outcome
+                permanentlyOutOfRange -> "OUT_OF_RANGE"
+                notYetBought -> nextEntryState
                 stillMatches -> "IN_RANGE"
                 else -> "MOMENTUM_WEAKENING"
             },
             lastObservedAtMs = observedAtMs,
             lastPrice = price,
             candidateAgeMinutes = (observedAtMs - old.firstQualifiedAtMs).coerceAtLeast(0L) / 60_000.0,
-            driftFromFirstQualifiedPct = if (row.firstQualifiedPrice > 0.0)
-                (price / row.firstQualifiedPrice - 1.0) * 100.0 else old.driftFromFirstQualifiedPct,
+            driftFromFirstQualifiedPct = firstDrift,
             rsi = f.rsi14, rvol = f.rvol,
             volumeAcceleration = f.volumeAcceleration,
             greenVolumeShare = f.greenVolumeShare,
@@ -393,7 +465,7 @@ class WorkingRangeRecommendationStore(context: Context) {
 
     fun recent(dateIst: String): List<WorkingRangeRecommendationDto> = synchronized(lock) {
         rows.filter { it.dateIst == dateIst &&
-            it.dto.state !in setOf("PENDING_DROPPED", "PENDING_EXPIRED") }
+            it.dto.state !in setOf("PENDING_DROPPED", "PENDING_EXPIRED", "OUT_OF_RANGE", "ENTRY_UNVERIFIED") }
             .sortedWith(compareByDescending<StoredRow> { it.dto.confirmedAtMs }
                 .thenByDescending { it.dto.firstQualifiedAtMs })
             .map { it.dto }
@@ -429,13 +501,21 @@ class WorkingRangeRecommendationStore(context: Context) {
                 "macd_histogram_slope_positive" to true,
                 "target_requirement_max_atr" to WorkingRangeCandidatePolicy.MAX_TARGET_ATR,
                 "minutes_to_close_min" to WorkingRangeCandidatePolicy.MIN_MINUTES_TO_CLOSE,
-                "vwap_extension_single_factor_veto" to false,
+                "vwap_extension_single_factor_veto" to true,
+                "vwap_extension_max_atr" to WorkingRangeEntryBandPolicy.MAX_VWAP_EXTENSION_ATR,
                 "range52_position_single_factor_veto" to false,
                 "rsi_upper_ceiling" to null,
-                "spread_is_execution_marketability_not_technical_selection" to true
+                "spread_max_bps" to WorkingRangeEntryBandPolicy.MAX_SPREAD_BPS,
+                "spread_is_execution_marketability_not_technical_selection" to false,
+                "missing_fresh_spread_blocks_auto_buy" to true,
+                "min_drift_from_first_qualified_pct" to WorkingRangeCandidatePolicy.MIN_DRIFT_FROM_FIRST_QUALIFIED_PCT,
+                "max_confirmation_gap_ms" to WorkingRangeCandidatePolicy.MAX_CONFIRMATION_GAP_MS,
+                "max_confirmation_to_buy_ms" to WorkingRangeEntryBandPolicy.MAX_CONFIRMATION_TO_BUY_MS
             ),
             "target_pct_unchanged_from_fixed_reference" to WorkingRangeCandidatePolicy.TARGET_PCT,
-            "marketability_is_separate_from_technical_range" to true,
+            "marketability_is_separate_from_technical_range" to false,
+            "fresh_alpha_spread_is_rechecked_before_buy" to true,
+            "entry_band_rejections_are_non_actionable" to true,
             "upper_circuit_or_no_offer_does_not_erase_candidate" to true,
             "auto_buy_enabled" to enabled,
             "auto_buy_requires_new_confirmation_after_activation" to true,

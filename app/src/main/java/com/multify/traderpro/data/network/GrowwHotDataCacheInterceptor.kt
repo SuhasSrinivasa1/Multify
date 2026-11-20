@@ -15,6 +15,9 @@ import java.util.concurrent.TimeUnit
 /**
  * Small RAM-only hot-response cache for repeated Groww market-data reads.
  * It never caches orders/auth/account state. Cache hits occur before the REST rate governor.
+ * 15m history is cached only within the same normalized candle bucket: Fixed consumes
+ * completed candles only (forming 15m bars are explicitly filtered by FixedLocalStrategyEngine),
+ * and a new 15m bucket changes the key and forces a broker refresh. Execution quotes bypass cache.
  */
 internal class GrowwHotDataCacheInterceptor(
     private val account: String = "ALPHA",
@@ -138,7 +141,7 @@ internal class GrowwHotDataCacheInterceptor(
             .header("X-Multify-Hot-Cache", mode)
             .body(entry.body.toResponseBody(entry.mediaType)).build()
 
-    private fun ttlFor(path: String, interval: String?): Long = when {
+    internal fun ttlFor(path: String, interval: String?): Long = when {
         path == "/v1/historical/candles" && interval.equals("5minute", true) -> HISTORICAL_5M_TTL_MS
         path == "/v1/historical/candles" && interval.equals("15minute", true) -> HISTORICAL_15M_TTL_MS
         path == "/v1/live-data/ltp" -> LTP_TTL_MS
@@ -162,7 +165,7 @@ internal class GrowwHotDataCacheInterceptor(
         else -> path + "?" + (url.encodedQuery ?: "")
     }
 
-    private fun normalizeEndBucket(raw: String?, interval: String?): String {
+    internal fun normalizeEndBucket(raw: String?, interval: String?): String {
         if (raw.isNullOrBlank()) return ""
         val parsed = runCatching { LocalDateTime.parse(raw, HIST_FORMAT) }.getOrNull() ?: return raw
         val size = if (interval.equals("5minute", true)) 5 else 15
@@ -173,7 +176,7 @@ internal class GrowwHotDataCacheInterceptor(
     companion object {
         private const val SINGLE_FLIGHT_WAIT_MS = 8_000L
         private const val MAX_ENTRIES = 512
-        private const val HISTORICAL_15M_TTL_MS = 22_000L
+        internal const val HISTORICAL_15M_TTL_MS = 10 * 60_000L
         private const val HISTORICAL_5M_TTL_MS = 15_000L
         private const val LTP_TTL_MS = 1_000L
         private const val QUOTE_TTL_MS = 350L

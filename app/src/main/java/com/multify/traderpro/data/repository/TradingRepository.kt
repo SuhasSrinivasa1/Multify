@@ -1156,7 +1156,8 @@ class TradingRepository @Inject constructor(
             apiFactory.betaGroww.ltp(bearer(token),
                 exchangeSymbols = chunk.joinToString(",") { "NSE_$it" })
                 .requirePayload("Fixed Beta NSE LTP")
-        }
+        },
+        liveEndpoint = com.multify.traderpro.engine.BetaLiveEndpointPacingPolicy.Endpoint.LTP
     )
 
     private suspend fun forecastMarketToken(): String? {
@@ -1170,8 +1171,13 @@ class TradingRepository @Inject constructor(
     private fun forecastUsesBeta(token: String): Boolean = secretStore.hasBetaCredentials() &&
         cachedBetaResearchToken == token && !betaSessionInvalid
 
-    private suspend fun <T> betaMarketRead(token: String, type: BetaResearchGate.Type,
-                                           alphaCall: suspend () -> T, betaCall: suspend () -> T): T {
+    private suspend fun <T> betaMarketRead(
+        token: String,
+        type: BetaResearchGate.Type,
+        alphaCall: suspend () -> T,
+        betaCall: suspend () -> T,
+        liveEndpoint: com.multify.traderpro.engine.BetaLiveEndpointPacingPolicy.Endpoint = com.multify.traderpro.engine.BetaLiveEndpointPacingPolicy.Endpoint.QUOTE
+    ): T {
         val tokenIsBeta = cachedBetaResearchToken == token || secretStore.getBetaAccessToken() == token
         if (tokenIsBeta || secretStore.hasBetaCredentials()) {
             if (!forecastUsesBeta(token)) {
@@ -1185,10 +1191,12 @@ class TradingRepository @Inject constructor(
         }
         val started = SystemClock.elapsedRealtime()
         return try {
-            val result = betaResearchGate.read(type, betaCall)
+            val result = betaResearchGate.read(type, liveEndpoint, betaCall)
             val usage = betaResearchGate.snapshot()
             auditLogger.logAsync("BETA_API", "REQUEST_PROFILE", mapOf(
-                "account" to "BETA", "category" to type.name, "outcome" to "SUCCESS",
+                "account" to "BETA", "category" to type.name,
+                "endpoint_lane" to if (type == BetaResearchGate.Type.LIVE) liveEndpoint.name else "HISTORICAL",
+                "outcome" to "SUCCESS",
                 "elapsed_ms" to (SystemClock.elapsedRealtime() - started).coerceAtLeast(0L),
                 "live_requests" to usage.liveRequests, "historical_requests" to usage.historicalRequests,
                 "live_429" to usage.liveRateLimits, "historical_429" to usage.historicalRateLimits,
@@ -1199,8 +1207,9 @@ class TradingRepository @Inject constructor(
             val code = (t as? HttpException)?.code()
             val usage = betaResearchGate.snapshot()
             auditLogger.logAsync("BETA_API", "REQUEST_PROFILE", mapOf(
-                "account" to "BETA", "category" to type.name, "outcome" to "FAILURE",
-                "http_code" to (code ?: 0),
+                "account" to "BETA", "category" to type.name,
+                "endpoint_lane" to if (type == BetaResearchGate.Type.LIVE) liveEndpoint.name else "HISTORICAL",
+                "outcome" to "FAILURE", "http_code" to (code ?: 0),
                 "origin" to (if (code != null) "BROKER_HTTP_RESPONSE" else if (
                     t is IOException && t.message.orEmpty().startsWith("BETA_")
                 ) "LOCAL_ADMISSION" else "TRANSPORT_OR_PRE_DISPATCH"),
@@ -8066,11 +8075,28 @@ class TradingRepository @Inject constructor(
         val potential = if (initialSettings.workingRangeEnabled &&
             initialSettings.workingRangeActivatedAtMs > 0L) {
             workingRangeRecommendationStore.recent(today).filter { row ->
-                com.multify.traderpro.engine.WorkingRangeAutoBuyPolicy.decide(
+                if (row.state != "IN_RANGE") return@filter false
+                val eligibility = com.multify.traderpro.engine.WorkingRangeAutoBuyPolicy.decide(
                     initialSettings.workingRangeEnabled, initialSettings.safetyHalt,
                     initialSettings.workingRangeActivatedAtMs, row.confirmedAtMs,
-                    row.state, row.autoBuyState, System.currentTimeMillis()
-                ).eligible
+                    row.state, row.autoBuyState, System.currentTimeMillis(),
+                    firstQualifiedAtMs = row.firstQualifiedAtMs
+                )
+                if (!eligibility.eligible) {
+                    auditLogger.logAsync("WORKING_RANGE_AUTO_BUY", "CANDIDATE_NOT_EXECUTABLE",
+                        mapOf("symbol" to row.symbol, "reason" to eligibility.reason,
+                            "first_qualified_at_ms" to row.firstQualifiedAtMs,
+                            "confirmed_at_ms" to row.confirmedAtMs, "no_order_sent" to true))
+                    if (eligibility.reason in setOf(
+                            "FIRST_QUALIFIED_SIGNAL_EXPIRED",
+                            "CONFIRMATION_TO_BUY_EXPIRED_45S"
+                        )
+                    ) workingRangeRecommendationStore.markAutoBuyOutcome(
+                        row.symbol, row.confirmedAtMs, "BLOCKED_STALE_SIGNAL",
+                        reason = eligibility.reason
+                    )
+                }
+                eligibility.eligible
             }
         } else emptyList()
 
@@ -8108,7 +8134,8 @@ class TradingRepository @Inject constructor(
             val live = preferences.settings.first()
             val decision = com.multify.traderpro.engine.WorkingRangeAutoBuyPolicy.decide(
                 live.workingRangeEnabled, live.safetyHalt, live.workingRangeActivatedAtMs,
-                row.confirmedAtMs, row.state, row.autoBuyState, System.currentTimeMillis()
+                row.confirmedAtMs, row.state, row.autoBuyState, System.currentTimeMillis(),
+                firstQualifiedAtMs = row.firstQualifiedAtMs
             )
             if (!decision.eligible) {
                 auditLogger.logAsync("WORKING_RANGE_AUTO_BUY", "CANDIDATE_NOT_EXECUTABLE",
@@ -8168,6 +8195,49 @@ class TradingRepository @Inject constructor(
                         "reported_day_shares" to quote.volume))
                 continue
             }
+            val freshBid = quote.bidPrice?.takeIf { it.isFinite() && it > 0.0 }
+                ?: quote.depth?.buy.orEmpty().mapNotNull { it.price }
+                    .filter { it.isFinite() && it > 0.0 }.maxOrNull()
+            val freshAsk = quote.offerPrice?.takeIf { it.isFinite() && it > 0.0 }
+                ?: quote.depth?.sell.orEmpty().mapNotNull { it.price }
+                    .filter { it.isFinite() && it > 0.0 }.minOrNull()
+            val freshSpreadBps = if (freshBid != null && freshAsk != null &&
+                freshAsk >= freshBid && ltp > 0.0
+            ) ((freshAsk - freshBid) / ltp) * 10_000.0 else null
+            val bandAssessment =
+                com.multify.traderpro.engine.WorkingRangeEntryBandPolicy.assess(
+                    firstQualifiedAtMs = row.firstQualifiedAtMs,
+                    confirmedAtMs = row.confirmedAtMs,
+                    nowMs = quoteReceivedAtMs,
+                    driftAtConfirmationPct = row.driftFromFirstQualifiedPct,
+                    confirmationPrice = row.entryPrice,
+                    freshPrice = ltp,
+                    vwapExtensionAtConfirmationAtr = row.vwapExtensionAtr,
+                    targetRequirementAtr = row.targetRequirementAtr,
+                    targetPct = row.targetPct,
+                    freshSpreadBps = freshSpreadBps
+                )
+            if (!bandAssessment.eligible) {
+                workingRangeRecommendationStore.markAutoBuyOutcome(
+                    row.symbol, row.confirmedAtMs, "BLOCKED_OUT_OF_RANGE",
+                    reason = bandAssessment.reason
+                )
+                auditLogger.logAsync("WORKING_RANGE_AUTO_BUY", "ENTRY_BAND_REJECTED", mapOf(
+                    "symbol" to row.symbol, "reason" to bandAssessment.reason,
+                    "first_qualified_at_ms" to row.firstQualifiedAtMs,
+                    "confirmed_at_ms" to row.confirmedAtMs,
+                    "first_qualified_age_ms" to (quoteReceivedAtMs - row.firstQualifiedAtMs),
+                    "confirmation_age_ms" to (quoteReceivedAtMs - row.confirmedAtMs),
+                    "drift_at_confirmation_pct" to row.driftFromFirstQualifiedPct,
+                    "drift_at_fresh_alpha_quote_pct" to bandAssessment.driftFromFirstQualifiedPct,
+                    "vwap_extension_at_confirmation_atr" to row.vwapExtensionAtr,
+                    "vwap_extension_at_fresh_alpha_quote_atr" to bandAssessment.freshVwapExtensionAtr,
+                    "fresh_alpha_spread_bps" to freshSpreadBps,
+                    "fresh_alpha_ltp" to ltp,
+                    "no_order_sent" to true, "fixed_selection_unchanged" to true
+                ))
+                continue
+            }
             val extensionReject = ExecutionEntryPriceGuardPolicy.rejectionReason(
                 row.entryPrice, ltp, quoteElapsedMs
             )
@@ -8183,6 +8253,30 @@ class TradingRepository @Inject constructor(
                     row.symbol, row.confirmedAtMs, "TARGET_ALREADY_REACHED",
                     reason = "Fresh Alpha quote is already at/above the Working Range target; no chase BUY"
                 )
+                continue
+            }
+            // A second scan or a lower price is not proof that the original
+            // breakout momentum remains intact. This is execution-only; never
+            // mutate Fixed scoring, PRIMARY confirmation or ranked candidates.
+            val momentumReject =
+                com.multify.traderpro.engine.WorkingRangeEntryMomentumPolicy.rejectionReason(
+                    row.entryPrice, ltp, row.confirmedAtMs, quoteReceivedAtMs
+                )
+            if (momentumReject != null) {
+                workingRangeRecommendationStore.markAutoBuyOutcome(
+                    row.symbol, row.confirmedAtMs, "BLOCKED_STALE_OR_MOMENTUM_LOST",
+                    reason = momentumReject
+                )
+                auditLogger.logAsync("WORKING_RANGE_AUTO_BUY", "MOMENTUM_OR_AGE_REJECTED", mapOf(
+                    "symbol" to row.symbol, "reason" to momentumReject,
+                    "confirmed_at_ms" to row.confirmedAtMs,
+                    "confirmation_age_ms" to (quoteReceivedAtMs - row.confirmedAtMs),
+                    "confirmed_entry" to row.entryPrice, "fresh_alpha_ltp" to ltp,
+                    "reference_to_quote_drift_pct" to ((ltp / row.entryPrice) - 1.0) * 100.0,
+                    "alpha_quote_receipt_ms" to quoteReceivedAtMs,
+                    "fresh_independent_confirmation_required" to true,
+                    "no_order_sent" to true, "fixed_model_unchanged" to true
+                ))
                 continue
             }
             val sizing = com.multify.traderpro.engine.BudgetOnlyCncSizing.size(
@@ -8360,9 +8454,9 @@ class TradingRepository @Inject constructor(
                 side = "LONG",
                 quantity = filled,
                 entryPrice = actualFill,
-                stopPrice = HardStopLossPolicy.stopPrice(actualFill),
+                stopPrice = com.multify.traderpro.engine.WorkingRangeExitPolicy.stopPrice(actualFill),
                 targetPrice = actualFill * (1.0 + row.targetPct / 100.0),
-                strategy = "Working Range v0.2 Alpha Auto-Buy · direct marketable LIMIT · hard -3% floor · v7 stepped trail 0.55→0.50 then +0.10%",
+                strategy = "Working Range v0.4 Alpha Auto-Buy · bounded entry band · full target or hard -1% stop only · no stepped trailing",
                 regime = "WORKING_RANGE_LONG",
                 confidence = 1.0,
                 sourceEventId = null,
@@ -8373,7 +8467,7 @@ class TradingRepository @Inject constructor(
                 maxFavourablePrice = actualFill,
                 maxAdversePrice = actualFill,
                 lastEvaluatedAtMs = openedAtMs,
-                trailingArmPct = SteppedTrailingPolicy.ARM_TRIGGER_PCT,
+                trailingArmPct = 0.0,
                 trailingLastRatchetPrice = 0.0,
                 smartOrderMode = HoldingSmartOrderPolicy.MODE_NONE
             ),
@@ -10731,10 +10825,14 @@ class TradingRepository @Inject constructor(
         val id = managedDao.insertPosition(position)
         brokerInventorySnapshot = null
         activeGttSnapshot = null
+        val initialStopPrice = if (com.multify.traderpro.engine.WorkingRangeExitPolicy.owns(
+                position.openReferenceId, position.regime
+            )) com.multify.traderpro.engine.WorkingRangeExitPolicy.stopPrice(position.entryPrice)
+            else HardStopLossPolicy.stopPrice(position.entryPrice)
         auditLogger.log("PROTECTION", "POST_FILL_PROTECTION_STARTED", mapOf(
             "symbol" to position.symbol, "source" to position.engine,
             "quantity" to position.quantity, "entry" to position.entryPrice,
-            "hard_stop" to HardStopLossPolicy.stopPrice(position.entryPrice),
+            "hard_stop" to initialStopPrice,
             "position_id" to id
         ))
         val token = runCatching { ensureToken() }.getOrNull()
@@ -10775,7 +10873,7 @@ class TradingRepository @Inject constructor(
                     }
                 } else {
                     val created = createPositionGtt(
-                        token, current, HardStopLossPolicy.stopPrice(current.entryPrice),
+                        token, current, initialStopPrice,
                         "DOWN", HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT,
                         allowFreshPostFillProof = allowFreshPostFillProof
                     )
@@ -10909,7 +11007,11 @@ class TradingRepository @Inject constructor(
         reason: String
     ): ManagedPositionEntity {
         if (position.side != "LONG" || position.product != "CNC") return position
-        val hardStop = HardStopLossPolicy.stopPrice(position.entryPrice)
+        val isWorkingRange = com.multify.traderpro.engine.WorkingRangeExitPolicy.owns(
+            position.openReferenceId, position.regime)
+        val hardStop = if (isWorkingRange)
+            com.multify.traderpro.engine.WorkingRangeExitPolicy.stopPrice(position.entryPrice)
+        else HardStopLossPolicy.stopPrice(position.entryPrice)
         val existingTrigger = position.smartOrderTriggerPrice
         val existingProtected = HoldingSmartOrderPolicy.isServerProtected(position.smartOrderMode, position.smartOrderId)
         if (existingProtected && position.smartOrderMode == HoldingSmartOrderPolicy.MODE_TRAILING_GTT &&
@@ -10922,20 +11024,28 @@ class TradingRepository @Inject constructor(
         // Upgrade existing broker GTTs to the new -3% floor without cancelling
         // the protective SELL order first. On API failure retain the older
         // server GTT for continued position-monitor retries.
-        if (com.multify.traderpro.engine.HardStopGttTighteningPolicy.shouldModifyExisting(
-                entryPrice = position.entryPrice,
-                smartOrderMode = position.smartOrderMode,
-                smartOrderId = position.smartOrderId,
-                smartOrderStatus = position.smartOrderStatus,
-                brokerTrigger = existingTrigger,
-                priceEpsilon = SMART_ORDER_PRICE_EPSILON
-            )
+        if ((isWorkingRange &&
+                com.multify.traderpro.engine.GttProtectionReadinessPolicy.verified(
+                    position.smartOrderMode, position.smartOrderId, position.smartOrderStatus
+                ) && existingTrigger != null &&
+                existingTrigger + SMART_ORDER_PRICE_EPSILON < hardStop) ||
+            (!isWorkingRange &&
+                com.multify.traderpro.engine.HardStopGttTighteningPolicy.shouldModifyExisting(
+                    entryPrice = position.entryPrice,
+                    smartOrderMode = position.smartOrderMode,
+                    smartOrderId = position.smartOrderId,
+                    smartOrderStatus = position.smartOrderStatus,
+                    brokerTrigger = existingTrigger,
+                    priceEpsilon = SMART_ORDER_PRICE_EPSILON
+                ))
         ) {
             return try {
                 val modified = modifyPositionGtt(
                     token, position, hardStop, "DOWN", position.smartOrderMode
                 )
-                auditLogger.log("PROTECTION", "HARD_STOP_MINUS_3_EXISTING_GTT_UPGRADED", mapOf(
+                auditLogger.log("PROTECTION",
+                    if (isWorkingRange) "WORKING_RANGE_MINUS_1_EXISTING_GTT_UPGRADED"
+                    else "HARD_STOP_MINUS_3_EXISTING_GTT_UPGRADED", mapOf(
                     "symbol" to position.symbol, "position_id" to position.id,
                     "old_trigger" to existingTrigger, "new_trigger" to modified.smartOrderTriggerPrice,
                     "gtt_id" to position.smartOrderId,
@@ -10945,7 +11055,9 @@ class TradingRepository @Inject constructor(
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Throwable) {
-                auditLogger.log("PROTECTION", "HARD_STOP_MINUS_3_GTT_UPGRADE_DEFERRED", mapOf(
+                auditLogger.log("PROTECTION",
+                    if (isWorkingRange) "WORKING_RANGE_MINUS_1_GTT_UPGRADE_DEFERRED"
+                    else "HARD_STOP_MINUS_3_GTT_UPGRADE_DEFERRED", mapOf(
                     "symbol" to position.symbol, "position_id" to position.id,
                     "existing_active_gtt_preserved" to true,
                     "existing_trigger" to existingTrigger, "desired_trigger" to hardStop,
@@ -10982,8 +11094,85 @@ class TradingRepository @Inject constructor(
         }
     }
 
+
+    /**
+     * Working Range has an intentionally separate whole-position exit rule:
+     * the original fill-based target OR a fixed -1% stop, never a stepped trail.
+     * All actual Alpha SELL and GTT child reconciliation remains in the common
+     * safety path; Beta is never authorized to trade.
+     */
+    private suspend fun monitorWorkingRangeHoldingLocked(
+        position: ManagedPositionEntity,
+        token: String,
+        freshLtp: Double,
+        decisionStartedNs: Long
+    ) {
+        val exit = com.multify.traderpro.engine.WorkingRangeExitPolicy.exitReason(
+            position.entryPrice, position.targetPrice, freshLtp
+        )
+        val observed = position.copy(
+            lastPrice = freshLtp,
+            maxFavourablePrice = max(position.maxFavourablePrice, freshLtp),
+            maxAdversePrice = min(position.maxAdversePrice, freshLtp),
+            lastEvaluatedAtMs = System.currentTimeMillis()
+        )
+        managedDao.updatePosition(observed)
+        if (exit != null) {
+            auditLogger.log("WORKING_RANGE_EXIT", "FULL_EXIT_THRESHOLD_SAMPLED", mapOf(
+                "symbol" to observed.symbol, "reason" to exit,
+                "fresh_monitored_ltp" to freshLtp,
+                "actual_fill" to observed.entryPrice,
+                "stop_price" to com.multify.traderpro.engine.WorkingRangeExitPolicy.stopPrice(observed.entryPrice),
+                "target_price" to observed.targetPrice,
+                "full_quantity" to observed.quantity,
+                "trailing_arm_or_ratchet" to false,
+                "broker_fill_not_assumed" to true
+            ))
+            val closed = runCatching {
+                closeLongHolding(token, observed, freshLtp, exit, decisionStartedNs)
+            }.onFailure { cause ->
+                auditLogger.log("SAFETY", "WORKING_RANGE_EXIT_RECONCILIATION_REQUIRED", mapOf(
+                    "symbol" to observed.symbol,
+                    "exit_reason" to exit,
+                    "reason" to (cause.message ?: cause.javaClass.simpleName),
+                    "blind_second_sell" to false,
+                    "existing_gtt_must_be_reconciled" to true
+                ))
+            }.getOrNull()
+            if (closed == null) {
+                auditLogger.log("SAFETY", "WORKING_RANGE_THRESHOLD_EXIT_NOT_YET_BROKER_CONFIRMED", mapOf(
+                    "symbol" to observed.symbol, "threshold" to exit,
+                    "position_still_requires_monitoring" to true,
+                    "no_realized_profit_assumed" to true
+                ))
+            }
+            return
+        }
+        val protected = runCatching {
+            ensureHardStopProtection(token, observed, "WORKING_RANGE_MINUS_1_NO_TRAIL")
+        }.onFailure { cause ->
+            auditLogger.log("SAFETY", "WORKING_RANGE_MINUS_1_PROTECTION_DEFERRED", mapOf(
+                "symbol" to observed.symbol,
+                "reason" to (cause.message ?: cause.javaClass.simpleName),
+                "existing_broker_gtt_not_blindly_cancelled" to true,
+                "new_buys_must_remain_blocked_if_unprotected" to true
+            ))
+        }.getOrDefault(observed)
+        if (!com.multify.traderpro.engine.GttProtectionReadinessPolicy.verified(
+                protected.smartOrderMode, protected.smartOrderId, protected.smartOrderStatus
+            )) reportCriticalUnprotected(protected, protected.id,
+                "WORKING_RANGE_MINUS_1_GTT_NOT_BROKER_VERIFIED")
+    }
+
     private suspend fun monitorLongHoldingLocked(position: ManagedPositionEntity, token: String, ltp: Double) {
-        // Common sell protection for every managed CNC LONG, regardless of source:
+        if (com.multify.traderpro.engine.WorkingRangeExitPolicy.owns(
+                position.openReferenceId, position.regime
+            )) {
+            monitorWorkingRangeHoldingLocked(position, token, ltp, SystemClock.elapsedRealtimeNanos())
+            return
+        }
+        // Original common Fixed/Univest sell protection remains unchanged:
+
         // 1) hard -3% loss floor from the actual holding cost basis;
         // 2) once +0.55% high-water is reached, the existing stepped profitable trail takes over;
         // 3) the active stop only moves upward. There is no averaging-down path.

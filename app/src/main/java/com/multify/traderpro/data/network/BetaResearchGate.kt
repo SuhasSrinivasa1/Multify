@@ -2,6 +2,7 @@ package com.multify.traderpro.data.network
 
 import android.os.SystemClock
 import com.multify.traderpro.data.logging.AuditLogger
+import com.multify.traderpro.engine.BetaLiveEndpointPacingPolicy
 import com.multify.traderpro.engine.DualMinuteAdmissionPolicy
 import com.multify.traderpro.engine.FixedDualAccountPolicy
 import com.multify.traderpro.engine.GrowwRecoveryPolicy
@@ -45,6 +46,8 @@ class BetaResearchGate @Inject constructor(
         val halfOpenProbeInFlight: Boolean = false,
         val rateLimitResponses: Long = 0L,
         val activeGapMs: Long = LtpAdaptivePacingPolicy.START_GAP_MS,
+        val ltpGapMs: Long = LtpAdaptivePacingPolicy.START_GAP_MS,
+        val quoteGapMs: Long = LtpAdaptivePacingPolicy.START_GAP_MS,
         val fixedMinuteBucket: Long = Long.MIN_VALUE,
         val fixedMinuteUsed: Int = 0,
         val fixedMinuteRemaining: Int = FixedDualAccountPolicy.BETA_LIVE_PER_MINUTE,
@@ -56,6 +59,7 @@ class BetaResearchGate @Inject constructor(
         val rateLimitIncidents: ArrayDeque<Long> = ArrayDeque(),
         var cooldownUntil: Long = 0L,
         var lastGrantedAt: Long = 0L,
+        val lastGrantedAtByEndpoint: MutableMap<BetaLiveEndpointPacingPolicy.Endpoint, Long> = mutableMapOf(),
         var probeRequired: Boolean = false,
         var probeInFlight: Boolean = false,
         var calendar: DualMinuteAdmissionPolicy.CalendarState =
@@ -71,7 +75,7 @@ class BetaResearchGate @Inject constructor(
     private val liveMinute = FixedDualAccountPolicy.BETA_LIVE_PER_MINUTE
     private val histSec = 1
     private val histMinute = FixedDualAccountPolicy.BETA_HISTORICAL_PER_MINUTE
-    private var livePace = LtpAdaptivePacingPolicy.State(LtpAdaptivePacingPolicy.START_GAP_MS, SystemClock.elapsedRealtime())
+    private var livePacing = BetaLiveEndpointPacingPolicy.initial(SystemClock.elapsedRealtime())
 
     private val liveRequests = AtomicLong()
     private val historicalRequests = AtomicLong()
@@ -85,9 +89,14 @@ class BetaResearchGate @Inject constructor(
     private val livePermitWaitMs = AtomicLong()
     private val historicalPermitWaitMs = AtomicLong()
 
-    suspend fun <T> read(type: Type, block: suspend () -> T): T =
-        if (type == Type.HISTORICAL) historicalInFlight.withLock { readRateLimited(type, block) }
-        else readRateLimited(type, block)
+    suspend fun <T> read(
+        type: Type,
+        endpoint: BetaLiveEndpointPacingPolicy.Endpoint = BetaLiveEndpointPacingPolicy.Endpoint.QUOTE,
+        block: suspend () -> T
+    ): T =
+        if (type == Type.HISTORICAL) historicalInFlight.withLock {
+            readRateLimited(type, endpoint, block)
+        } else readRateLimited(type, endpoint, block)
 
     private fun updateLiveStatus(now: Long, w: Window) {
         liveStatusCapturedAtElapsedMs = now
@@ -97,7 +106,12 @@ class BetaResearchGate @Inject constructor(
             cooldownRemainingMs = (w.cooldownUntil - now).coerceAtLeast(0L),
             halfOpenProbeInFlight = w.probeInFlight,
             rateLimitResponses = liveRateLimits.get(),
-            activeGapMs = livePace.gapMs,
+            activeGapMs = maxOf(
+                BetaLiveEndpointPacingPolicy.gapMs(livePacing, BetaLiveEndpointPacingPolicy.Endpoint.LTP),
+                BetaLiveEndpointPacingPolicy.gapMs(livePacing, BetaLiveEndpointPacingPolicy.Endpoint.QUOTE)
+            ),
+            ltpGapMs = BetaLiveEndpointPacingPolicy.gapMs(livePacing, BetaLiveEndpointPacingPolicy.Endpoint.LTP),
+            quoteGapMs = BetaLiveEndpointPacingPolicy.gapMs(livePacing, BetaLiveEndpointPacingPolicy.Endpoint.QUOTE),
             fixedMinuteBucket = DualMinuteAdmissionPolicy.minuteId(System.currentTimeMillis()),
             fixedMinuteUsed = DualMinuteAdmissionPolicy.normalize(
                 w.calendar, System.currentTimeMillis()).used,
@@ -107,7 +121,9 @@ class BetaResearchGate @Inject constructor(
         )
     }
 
-    private suspend fun <T> readRateLimited(type: Type, block: suspend () -> T): T {
+    private suspend fun <T> readRateLimited(
+        type: Type, endpoint: BetaLiveEndpointPacingPolicy.Endpoint, block: suspend () -> T
+    ): T {
         var totalWaitMs = 0L
         var waitIterations = 0
         while (true) {
@@ -122,9 +138,12 @@ class BetaResearchGate @Inject constructor(
                 w.calendar = DualMinuteAdmissionPolicy.normalize(w.calendar, wallNow)
                 val fixedMinuteWait = DualMinuteAdmissionPolicy.calendarWaitMs(
                     w.calendar, wallNow, perMinute)
-                val spacingWait = if (w.lastGrantedAt > 0L)
-                    (w.lastGrantedAt + (if (type == Type.LIVE) livePace.gapMs else 1_500L) - now)
-                        .coerceAtLeast(0L) else 0L
+                val endpointLastGrantedAt = if (type == Type.LIVE)
+                    w.lastGrantedAtByEndpoint[endpoint] ?: 0L else w.lastGrantedAt
+                val endpointGapMs = if (type == Type.LIVE)
+                    BetaLiveEndpointPacingPolicy.gapMs(livePacing, endpoint) else 1_500L
+                val spacingWait = if (endpointLastGrantedAt > 0L)
+                    (endpointLastGrantedAt + endpointGapMs - now).coerceAtLeast(0L) else 0L
                 val wait = maxOf(
                     spacingWait,
                     (w.cooldownUntil - now).coerceAtLeast(0L),
@@ -136,7 +155,8 @@ class BetaResearchGate @Inject constructor(
                 if (wait == 0L) {
                     w.second.addLast(now)
                     w.minute.addLast(now)
-                    w.lastGrantedAt = now
+                    if (type == Type.LIVE) w.lastGrantedAtByEndpoint[endpoint] = now
+                    else w.lastGrantedAt = now
                     w.calendar = DualMinuteAdmissionPolicy.reserve(w.calendar, wallNow)
                     if (w.probeRequired) w.probeInFlight = true
                 }
@@ -169,6 +189,9 @@ class BetaResearchGate @Inject constructor(
             auditLogger.logAsync("API_RATE_LIMIT", "BETA_CLIENT_GOVERNOR_WAIT", mapOf(
                 "account" to "BETA", "category" to if (type == Type.LIVE) "LIVE_DATA" else "HISTORICAL",
                 "wait_ms" to totalWaitMs, "wait_iterations" to waitIterations,
+                "endpoint_lane" to if (type == Type.LIVE) endpoint.name else "HISTORICAL",
+                "endpoint_gap_ms" to if (type == Type.LIVE)
+                    BetaLiveEndpointPacingPolicy.gapMs(livePacing, endpoint) else 1_500L,
                 "local_per_second_limit" to if (type == Type.LIVE) liveSec else histSec,
                 "local_per_minute_limit" to if (type == Type.LIVE) liveMinute else histMinute,
                 "wait_is_local_not_broker_429" to true,
@@ -186,7 +209,8 @@ class BetaResearchGate @Inject constructor(
                     w.probeRequired = false
                 }
                 if (type == Type.LIVE) {
-                    livePace = LtpAdaptivePacingPolicy.onSuccess(livePace, SystemClock.elapsedRealtime())
+                    livePacing = BetaLiveEndpointPacingPolicy.onSuccess(
+                        livePacing, endpoint, SystemClock.elapsedRealtime())
                     updateLiveStatus(SystemClock.elapsedRealtime(), w)
                 }
             }
@@ -202,7 +226,7 @@ class BetaResearchGate @Inject constructor(
                 if (failure is HttpException && failure.code() == 429) {
                     if (type == Type.LIVE) {
                         liveRateLimits.incrementAndGet()
-                        livePace = LtpAdaptivePacingPolicy.on429(livePace, now)
+                        livePacing = BetaLiveEndpointPacingPolicy.on429(livePacing, endpoint, now)
                     } else historicalRateLimits.incrementAndGet()
                     while (w.rateLimitIncidents.isNotEmpty() && w.rateLimitIncidents.first() <= now - 3_600_000L)
                         w.rateLimitIncidents.removeFirst()
@@ -233,6 +257,11 @@ class BetaResearchGate @Inject constructor(
                     "http_status" to 429, "retry_after_raw" to retryAfterRaw,
                     "applied_local_cooldown_ms" to appliedCooldownMs,
                     "incident_count_last_hour" to incidentCount,
+                    "endpoint_lane" to endpoint.name,
+                    "active_ltp_gap_ms" to BetaLiveEndpointPacingPolicy.gapMs(
+                        livePacing, BetaLiveEndpointPacingPolicy.Endpoint.LTP),
+                    "active_quote_gap_ms" to BetaLiveEndpointPacingPolicy.gapMs(
+                        livePacing, BetaLiveEndpointPacingPolicy.Endpoint.QUOTE),
                     "category_wire_requests_total" to wire.requests,
                     "category_wire_429_total" to wire.rateLimits,
                     "broker_category_limit_proven" to false,
