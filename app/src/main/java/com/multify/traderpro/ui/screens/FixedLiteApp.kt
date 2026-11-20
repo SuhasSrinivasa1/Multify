@@ -364,7 +364,12 @@ private fun ChipGroup(content: @Composable RowScope.() -> Unit) {
 
 
 @Composable
-internal fun LiteFixedScreen(state: TraderUiState, onScan: () -> Unit, onBuy: (String) -> Unit) {
+internal fun LiteFixedScreen(
+    state: TraderUiState,
+    onScan: () -> Unit,
+    nowMs: Long = System.currentTimeMillis(),
+    onBuy: (String) -> Unit
+) {
     val dashboard = state.dashboard
     val health = dashboard?.fixedHealth ?: EngineHealthDto()
     val recommendations = dashboard?.fixedForecasts.orEmpty()
@@ -378,7 +383,7 @@ internal fun LiteFixedScreen(state: TraderUiState, onScan: () -> Unit, onBuy: (S
     }
     // Device time zones are not NSE time zones. Match the existing IST session calendar.
     val marketOpen = NseEquitySessionCalendar.isFixedScanWindow(
-        Instant.ofEpochMilli(System.currentTimeMillis()).atZone(ZoneId.of("Asia/Kolkata"))
+        Instant.ofEpochMilli(nowMs).atZone(ZoneId.of("Asia/Kolkata"))
     )
     val discoveryLabel = when {
         !state.settings.fixedScannerEnabled -> "PAUSED"
@@ -501,9 +506,11 @@ internal fun LiteFixedScreen(state: TraderUiState, onScan: () -> Unit, onBuy: (S
             }
         } else {
             items(recommendations, key = { "fixed-" + it.symbol + "-" + it.generatedAtMs }) { row ->
-                FixedRecommendationCard(row, onBuy,
+                FixedRecommendationCard(
+                    row, onBuy, nowMs,
                     state.settings.brokerAuthenticated && state.settings.staticIpMatched &&
-                        !state.settings.safetyHalt && dashboard?.halted != true)
+                        !state.settings.safetyHalt && dashboard?.halted != true
+                )
             }
         }
     }
@@ -529,7 +536,9 @@ private fun PositionRow(position: PositionDto) {
 }
 
 @Composable
-private fun FixedRecommendationCard(row: ForecastDto, onBuy: (String) -> Unit, brokerReady: Boolean) {
+private fun FixedRecommendationCard(
+    row: ForecastDto, onBuy: (String) -> Unit, nowMs: Long, brokerReady: Boolean
+) {
     val tierTone = when (row.qualityTier.uppercase(Locale.US)) {
         "PRIMARY" -> LiteTone.POSITIVE
         "SECONDARY" -> LiteTone.INFO
@@ -567,7 +576,7 @@ private fun FixedRecommendationCard(row: ForecastDto, onBuy: (String) -> Unit, b
         Text(row.reason, style = MaterialTheme.typography.bodySmall, maxLines = 3, overflow = TextOverflow.Ellipsis)
         if (row.executionEligible) {
             val allowedNow = FixedBuyAvailabilityPolicy.canBuy(
-                System.currentTimeMillis(), brokerReady, row.status, row.executionEligible
+                nowMs, brokerReady, row.status, row.executionEligible
             )
             OutlinedButton(
                 onClick = { onBuy(row.symbol) },
