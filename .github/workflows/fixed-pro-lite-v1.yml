@@ -1,0 +1,91 @@
+name: Fixed Pro Lite independent APK TEST
+on:
+  push:
+    branches: [fixed-pro-lite-independent-app-v1]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Android SDK 35
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
+      - name: Verify Fixed source invariants and isolated runtime
+        run: |
+          python - <<'PY'
+          import pathlib,subprocess
+          root=pathlib.Path("app/src/main/java/com/multify/traderpro")
+          def txt(p):return p.read_text()
+          base="v9025-working-range-always-visible-us-readonly-research"
+          fixed=[
+            "engine/FixedLocalStrategyEngine.kt",
+            "engine/FixedForecastQualityPolicy.kt",
+            "engine/FixedForecastPublicationPolicy.kt",
+            "engine/FixedMarketDiscoveryPolicy.kt",
+            "engine/FixedFinalContract.kt",
+            "engine/SteppedTrailingPolicy.kt",
+            "engine/HardStopLossPolicy.kt",
+            "engine/WorkingRangeCandidatePolicy.kt",
+            "engine/WorkingRangeEntryMomentumPolicy.kt",
+            "engine/WorkingRangeExitPolicy.kt"
+          ]
+          for path in fixed:
+            rel="app/src/main/java/com/multify/traderpro/"+path
+            old=subprocess.check_output(["git","show",f"origin/{base}:{rel}"])
+            assert pathlib.Path(rel).read_bytes()==old,(path,"changed frozen model")
+          manifest=txt(pathlib.Path("app/src/main/AndroidManifest.xml"))
+          assert "MultifyNotificationListenerService" not in manifest
+          assert "android:label=\"Fixed Pro Lite\"" in manifest
+          service=txt(root/"service/TradingEngineService.kt")
+          assert "startPositionMonitorWorker()" in service
+          assert "monitorManagedPositions()" in service
+          assert "fixedScannerEnabled" in service
+          assert "sampleFixedFiveMinuteShadow" not in service
+          assert "maintainArmHotPath()" not in service
+          assert "requestRebind(" not in service
+          view=txt(root/"ui/screens/FixedLiteApp.kt")
+          assert "LitePage.FIXED" in view and "LitePage.WORKING_RANGE" in view
+          assert "LitePage.AVERAGES" in view and "LitePage.SETTINGS" in view
+          assert "Fixed Auto-Buy" in view and "Working Range Auto-Buy" in view
+          assert "FixedLiteApp()" in txt(root/"MainActivity.kt")
+          assert "com.multify.fixedpro.lite" in txt(pathlib.Path("app/build.gradle.kts"))
+          prefs=txt(root/"data/preferences/AppPreferences.kt")
+          assert 'val fixedScannerEnabled: Boolean = true' in prefs
+          assert 'val fixedAutoBuyEnabled: Boolean = false' in prefs
+          assert 'val workingRangeEnabled: Boolean = false' in prefs
+          print("PASS: frozen Fixed and Working Range policies; only Fixed UI and runtime market research")
+          PY
+      - name: Compile Android and run unit tests
+        run: |
+          gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug
+      - name: Verify package and signer
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk=app/build/outputs/apk/debug/app-debug.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$apk" | tee app/build/outputs/apk/debug/fixed-lite-signature.txt
+          sha256sum "$apk" | tee app/build/outputs/apk/debug/fixed-lite-SHA256SUMS.txt
+          echo "IMPORTANT: Runner debug signing does not guarantee in-place update compatibility."
+      - name: Package APK and source references
+        uses: actions/upload-artifact@v4
+        with:
+          name: Fixed-Pro-Lite-v1-independent-TEST-APK
+          path: |
+            app/build/outputs/apk/debug/app-debug.apk
+            app/build/outputs/apk/debug/fixed-lite-signature.txt
+            app/build/outputs/apk/debug/fixed-lite-SHA256SUMS.txt
+          retention-days: 30
