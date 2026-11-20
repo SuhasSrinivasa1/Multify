@@ -8066,11 +8066,28 @@ class TradingRepository @Inject constructor(
         val potential = if (initialSettings.workingRangeEnabled &&
             initialSettings.workingRangeActivatedAtMs > 0L) {
             workingRangeRecommendationStore.recent(today).filter { row ->
-                com.multify.traderpro.engine.WorkingRangeAutoBuyPolicy.decide(
+                if (row.state != "IN_RANGE") return@filter false
+                val eligibility = com.multify.traderpro.engine.WorkingRangeAutoBuyPolicy.decide(
                     initialSettings.workingRangeEnabled, initialSettings.safetyHalt,
                     initialSettings.workingRangeActivatedAtMs, row.confirmedAtMs,
-                    row.state, row.autoBuyState, System.currentTimeMillis()
-                ).eligible
+                    row.state, row.autoBuyState, System.currentTimeMillis(),
+                    firstQualifiedAtMs = row.firstQualifiedAtMs
+                )
+                if (!eligibility.eligible) {
+                    auditLogger.logAsync("WORKING_RANGE_AUTO_BUY", "CANDIDATE_NOT_EXECUTABLE",
+                        mapOf("symbol" to row.symbol, "reason" to eligibility.reason,
+                            "first_qualified_at_ms" to row.firstQualifiedAtMs,
+                            "confirmed_at_ms" to row.confirmedAtMs, "no_order_sent" to true))
+                    if (eligibility.reason in setOf(
+                            "FIRST_QUALIFIED_SIGNAL_EXPIRED",
+                            "CONFIRMATION_TO_BUY_EXPIRED_30S"
+                        )
+                    ) workingRangeRecommendationStore.markAutoBuyOutcome(
+                        row.symbol, row.confirmedAtMs, "BLOCKED_STALE_SIGNAL",
+                        reason = eligibility.reason
+                    )
+                }
+                eligibility.eligible
             }
         } else emptyList()
 
@@ -8108,7 +8125,8 @@ class TradingRepository @Inject constructor(
             val live = preferences.settings.first()
             val decision = com.multify.traderpro.engine.WorkingRangeAutoBuyPolicy.decide(
                 live.workingRangeEnabled, live.safetyHalt, live.workingRangeActivatedAtMs,
-                row.confirmedAtMs, row.state, row.autoBuyState, System.currentTimeMillis()
+                row.confirmedAtMs, row.state, row.autoBuyState, System.currentTimeMillis(),
+                firstQualifiedAtMs = row.firstQualifiedAtMs
             )
             if (!decision.eligible) {
                 auditLogger.logAsync("WORKING_RANGE_AUTO_BUY", "CANDIDATE_NOT_EXECUTABLE",
@@ -8166,6 +8184,49 @@ class TradingRepository @Inject constructor(
                 auditLogger.logAsync("WORKING_RANGE_AUTO_BUY", "ENTRY_MICRO_LIQUIDITY_REJECTED",
                     mapOf("symbol" to row.symbol, "reason" to thinLiquidityReject,
                         "reported_day_shares" to quote.volume))
+                continue
+            }
+            val freshBid = quote.bidPrice?.takeIf { it.isFinite() && it > 0.0 }
+                ?: quote.depth?.buy.orEmpty().mapNotNull { it.price }
+                    .filter { it.isFinite() && it > 0.0 }.maxOrNull()
+            val freshAsk = quote.offerPrice?.takeIf { it.isFinite() && it > 0.0 }
+                ?: quote.depth?.sell.orEmpty().mapNotNull { it.price }
+                    .filter { it.isFinite() && it > 0.0 }.minOrNull()
+            val freshSpreadBps = if (freshBid != null && freshAsk != null &&
+                freshAsk >= freshBid && ltp > 0.0
+            ) ((freshAsk - freshBid) / ltp) * 10_000.0 else null
+            val bandAssessment =
+                com.multify.traderpro.engine.WorkingRangeEntryBandPolicy.assess(
+                    firstQualifiedAtMs = row.firstQualifiedAtMs,
+                    confirmedAtMs = row.confirmedAtMs,
+                    nowMs = quoteReceivedAtMs,
+                    driftAtConfirmationPct = row.driftFromFirstQualifiedPct,
+                    confirmationPrice = row.entryPrice,
+                    freshPrice = ltp,
+                    vwapExtensionAtConfirmationAtr = row.vwapExtensionAtr,
+                    targetRequirementAtr = row.targetRequirementAtr,
+                    targetPct = row.targetPct,
+                    freshSpreadBps = freshSpreadBps
+                )
+            if (!bandAssessment.eligible) {
+                workingRangeRecommendationStore.markAutoBuyOutcome(
+                    row.symbol, row.confirmedAtMs, "BLOCKED_OUT_OF_RANGE",
+                    reason = bandAssessment.reason
+                )
+                auditLogger.logAsync("WORKING_RANGE_AUTO_BUY", "ENTRY_BAND_REJECTED", mapOf(
+                    "symbol" to row.symbol, "reason" to bandAssessment.reason,
+                    "first_qualified_at_ms" to row.firstQualifiedAtMs,
+                    "confirmed_at_ms" to row.confirmedAtMs,
+                    "first_qualified_age_ms" to (quoteReceivedAtMs - row.firstQualifiedAtMs),
+                    "confirmation_age_ms" to (quoteReceivedAtMs - row.confirmedAtMs),
+                    "drift_at_confirmation_pct" to row.driftFromFirstQualifiedPct,
+                    "drift_at_fresh_alpha_quote_pct" to bandAssessment.driftFromFirstQualifiedPct,
+                    "vwap_extension_at_confirmation_atr" to row.vwapExtensionAtr,
+                    "vwap_extension_at_fresh_alpha_quote_atr" to bandAssessment.freshVwapExtensionAtr,
+                    "fresh_alpha_spread_bps" to freshSpreadBps,
+                    "fresh_alpha_ltp" to ltp,
+                    "no_order_sent" to true, "fixed_selection_unchanged" to true
+                ))
                 continue
             }
             val extensionReject = ExecutionEntryPriceGuardPolicy.rejectionReason(
