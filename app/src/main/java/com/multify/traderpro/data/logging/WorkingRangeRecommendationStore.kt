@@ -109,11 +109,13 @@ class WorkingRangeRecommendationStore(context: Context) {
     private val lock = Any()
     private val droppedQueueItems = AtomicLong(0L)
     @Volatile private var lastFlushedDroppedCount = 0L
+    @Volatile private var lastQueueDropAtMs = prefs.getLong(KEY_QUEUE_DROP_AT_MS, 0L)
+    @Volatile private var lastDropHandledAtMs = prefs.getLong(KEY_DROP_HANDLED_AT_MS, 0L)
     private val queue = ThreadPoolExecutor(
         1, 1, 0L, TimeUnit.MILLISECONDS,
         ArrayBlockingQueue(256),
         { r -> Thread(r, "WorkingRangeEvidence").apply { isDaemon = true; priority = Thread.MIN_PRIORITY } },
-        { _, _ -> droppedQueueItems.incrementAndGet() }
+        { _, _ -> recordQueueDrop() }
     )
     private val rowType = object : TypeToken<MutableList<StoredRow>>() {}.type
     private val rejectionType = object : TypeToken<MutableList<StoredRejection>>() {}.type
@@ -150,9 +152,44 @@ class WorkingRangeRecommendationStore(context: Context) {
             true
         }.getOrDefault(false)
         val droppedNow = droppedQueueItems.get()
-        val noNewDropsSincePreviousFlush = droppedNow == lastFlushedDroppedCount
+        val newDropCount = droppedNow > lastFlushedDroppedCount
+        val unhandledDrop = lastQueueDropAtMs > lastDropHandledAtMs
+        if (unhandledDrop) {
+            synchronized(lock) {
+                val dropAt = lastQueueDropAtMs
+                rows.forEach { row ->
+                    val firstQualificationPredatesGap = row.dto.firstQualifiedAtMs > 0L &&
+                        row.dto.firstQualifiedAtMs <= dropAt
+                    if (row.dto.state == "PENDING_CONFIRMATION" && firstQualificationPredatesGap) {
+                        row.dto = row.dto.copy(
+                            state = "PENDING_DROPPED",
+                            autoBuyState = "BLOCKED_EVIDENCE_GAP",
+                            reason = "A dropped scan observation invalidated this confirmation chain; a fresh first qualification is required"
+                        )
+                    } else if (row.dto.confirmedAtMs > 0L && firstQualificationPredatesGap &&
+                        row.dto.autoBuyState == "NOT_ATTEMPTED") {
+                        row.dto = row.dto.copy(
+                            autoBuyState = "BLOCKED_EVIDENCE_GAP",
+                            reason = "A dropped scan observation invalidated this prior confirmation; no BUY permitted"
+                        )
+                    }
+                }
+                persistLocked()
+                lastDropHandledAtMs = dropAt
+                prefs.edit().putLong(KEY_DROP_HANDLED_AT_MS, dropAt).apply()
+            }
+        }
         lastFlushedDroppedCount = droppedNow
-        return completed && noNewDropsSincePreviousFlush
+        return completed && !newDropCount && !unhandledDrop
+    }
+
+    private fun recordQueueDrop() {
+        droppedQueueItems.incrementAndGet()
+        val at = System.currentTimeMillis()
+        synchronized(lock) {
+            lastQueueDropAtMs = at
+            prefs.edit().putLong(KEY_QUEUE_DROP_AT_MS, at).apply()
+        }
     }
 
     /** Durable one-shot intent, keyed by the confirmed symbol/event timestamp. */
@@ -251,9 +288,9 @@ class WorkingRangeRecommendationStore(context: Context) {
             queue.execute {
                 runCatching {
                     observeOnWorker(normalized, snapshot, quote, quoteCapturedAtMs, scanStartedAtMs)
-                }.onFailure { droppedQueueItems.incrementAndGet() }
+                }.onFailure { recordQueueDrop() }
             }
-        }.onFailure { droppedQueueItems.incrementAndGet() }
+        }.onFailure { recordQueueDrop() }
     }
 
     private fun observeOnWorker(
@@ -761,6 +798,8 @@ class WorkingRangeRecommendationStore(context: Context) {
                 "legacy_pilot_rows_never_order_eligible" to true,
                 "auto_buy_intent_write_is_synchronous_disk_commit" to true,
                 "deferred_queue_observations" to droppedQueueItems.get(),
+                "evidence_queue_drop_at_ms" to lastQueueDropAtMs,
+                "evidence_queue_drop_handled_at_ms" to lastDropHandledAtMs,
                 "rows" to rows.map { mapOf(
                     "date_ist" to it.dateIst,
                     "symbol" to it.symbol,
@@ -804,6 +843,8 @@ class WorkingRangeRecommendationStore(context: Context) {
         private const val KEY_REJECTIONS = "rejections_json"
         private const val KEY_SAMPLES = "opening_samples_json"
         private const val KEY_REENTRIES = "reentries_json"
+        private const val KEY_QUEUE_DROP_AT_MS = "evidence_queue_drop_at_ms"
+        private const val KEY_DROP_HANDLED_AT_MS = "evidence_queue_drop_handled_at_ms"
         private const val MAX_SAMPLES_PER_SYMBOL = 32
         private const val MAX_TOTAL_SAMPLES = 8_000
     }
