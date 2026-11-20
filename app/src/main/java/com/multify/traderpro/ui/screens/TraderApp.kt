@@ -1171,8 +1171,12 @@ private fun WorkingRangeTable(
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically) {
                             Text(row.symbol, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                            Text(if (row.autoBuyState == "BUY_EXECUTED") "WORKING RANGE · BUY EXECUTED"
-                                else "WORKING RANGE · ALPHA AUTO-BUY", style = MaterialTheme.typography.labelSmall,
+                            Text(
+                                when {
+                                    row.autoBuyState == "BUY_EXECUTED" -> "WORKING RANGE · BUY EXECUTED"
+                                    row.autoBuyEnabled -> "WORKING RANGE · ALPHA AUTO-BUY"
+                                    else -> "WORKING RANGE · PRIOR RESEARCH"
+                                }, style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.tertiary, fontWeight = FontWeight.Bold)
                         }
                         if (row.autoBuyState != "NOT_ATTEMPTED") {
