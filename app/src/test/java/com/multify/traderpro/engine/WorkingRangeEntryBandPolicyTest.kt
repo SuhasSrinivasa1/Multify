@@ -47,9 +47,9 @@ class WorkingRangeEntryBandPolicyTest {
         assertEquals("WORKING_RANGE_MOMENTUM_LOST_BELOW_ENTRY_BAND", r.reason)
     }
 
-    @Test fun confirmationOlderThanThirtySecondsIsRejected() {
+    @Test fun confirmationOlderThanFortyFiveSecondsIsRejected() {
         val r = assess(firstAge = 70_000L, confirmAge = 46_000L)
-        assertEquals("WORKING_RANGE_CONFIRMATION_TO_BUY_OVER_30S", r.reason)
+        assertEquals("WORKING_RANGE_CONFIRMATION_TO_BUY_OVER_45S", r.reason)
     }
 
     @Test fun excessiveVwapExtensionIsRejected() {
