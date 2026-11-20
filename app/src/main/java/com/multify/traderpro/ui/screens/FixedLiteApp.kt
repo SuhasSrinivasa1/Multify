@@ -425,7 +425,7 @@ internal fun LiteFixedScreen(state: TraderUiState, onScan: () -> Unit, onBuy: (S
                     if (dashboard?.halted == true || state.settings.safetyHalt) LiteTone.NEGATIVE else LiteTone.POSITIVE
                 )
                 if (positions.isEmpty()) {
-                    Text("No app-owned open holdings in this installation.", style = MaterialTheme.typography.bodyMedium)
+                    Text("No holdings are registered in this installation. It does not import old-app holdings; reconcile Groww before enabling Auto-Buy.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                 } else {
                     positions.forEachIndexed { index, position ->
                         PositionRow(position)
@@ -705,7 +705,7 @@ internal fun LiteSettingsScreen(
         GttProtectionReadinessPolicy.verified(it.smartOrderMode, it.smartOrderId, it.smartOrderStatus)
     }
     val alphaReady = state.settings.brokerAuthenticated && state.settings.staticIpMatched
-    val canEnableAutoBuy = alphaReady && state.dashboard != null && !state.settings.safetyHalt && state.dashboard?.halted != true && allProtected
+    val canEnableAutoBuy = alphaReady && state.dashboard != null && state.settings.legacyPortfolioReconciled && !state.settings.safetyHalt && state.dashboard?.halted != true && allProtected
 
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).testTag("settings-screen")
@@ -739,9 +739,26 @@ internal fun LiteSettingsScreen(
                 enabled = state.settings.workingRangeEnabled || canEnableAutoBuy,
                 contentDescription = "Working Range Auto-Buy"
             )
+            Row(
+                Modifier.fillMaxWidth().heightIn(min = 64.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Checkbox(
+                    checked = state.settings.legacyPortfolioReconciled,
+                    onCheckedChange = vm::setLegacyPortfolioReconciled
+                )
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text("Previous-app holdings reconciled", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "This package has a separate database. Check Groww and verify or close every position from the old app before confirming.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
             if (!canEnableAutoBuy) {
                 Text(
-                    "Auto-Buy enable requires authenticated Alpha, matching static IP, no safety halt and verified protection for every app-owned holding.",
+                    "Auto-Buy remains locked until Alpha authentication, static-IP match, portfolio reconciliation, a loaded position snapshot, no safety halt and verified GTT protection are all present.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error
                 )
