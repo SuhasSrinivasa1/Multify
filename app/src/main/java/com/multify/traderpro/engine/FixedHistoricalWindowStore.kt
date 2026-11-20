@@ -161,7 +161,10 @@ class FixedHistoricalWindowStore {
 
     companion object {
         private val INDIA = ZoneId.of("Asia/Kolkata")
-        private const val MAX_STOCKS = 128
+        // Capacity only: accommodate rotating candidates without changing TTL,
+        // per-account isolation, fresh broker delta, strict timestamp overlap,
+        // or any frozen Fixed 15m input semantics.
+        private const val MAX_STOCKS = 256
         // A rotating symbol may not be revisited for several 150-second scan cycles.
         // Reuse only as the historical prefix: every evaluation still gets a fresh
         // broker delta, and >=2 overlapping candle timestamps must validate.
