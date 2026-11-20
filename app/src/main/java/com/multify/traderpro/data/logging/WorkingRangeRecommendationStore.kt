@@ -41,7 +41,7 @@ class WorkingRangeRecommendationStore(context: Context) {
     )
 
     private val prefs = context.applicationContext.getSharedPreferences(
-        "working_range_recommendations_v9021", Context.MODE_PRIVATE
+        "working_range_recommendations_v9020", Context.MODE_PRIVATE
     )
     private val gson = Gson()
     private val lock = Any()
@@ -391,7 +391,8 @@ class WorkingRangeRecommendationStore(context: Context) {
             "enabled_setting_is_separate_from_fixed" to true,
             "working_range_on_authorizes_new_alpha_auto_buys" to true,
             "source" to "existing_fixed_15m_evaluations_and_existing_quotes",
-            "extra_broker_requests" to 0,
+            "extra_broker_requests_for_candidate_discovery" to 0,
+            "execution_network_calls" to "Only after new confirmation: fresh Alpha quote, broker inventory/cash/pending-order preflight, order acknowledgement and GTT protection",
             "consecutive_confirmations_required" to WorkingRangeCandidatePolicy.REQUIRED_CONSECUTIVE_OBSERVATIONS,
             "candidate_age_max_minutes" to WorkingRangeCandidatePolicy.MAX_CANDIDATE_AGE_MINUTES,
             "drift_max_pct_from_first_qualified_observation" to WorkingRangeCandidatePolicy.MAX_DRIFT_FROM_FIRST_QUALIFIED_PCT,
