@@ -687,26 +687,6 @@ private fun ForecastScreen(
             )
         }
         item {
-            SectionTitle("Opening NSE momentum watch · research only",
-                "Starts from 09:15 IST using successive existing full-market price scans. First observation is a baseline; an independent next scan is needed for momentum. No additional API calls, no BUY approval, and no change to Fixed's completed 15m candle requirement.")
-        }
-        if (dashboard?.fixedPulseResearch.isNullOrEmpty()) {
-            item {
-                Text("Waiting for two completed, valid NSE discovery scans; official Fixed may need the first completed current-session 15m candle (around 09:30 IST).",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-        } else {
-            dashboard!!.fixedPulseResearch.take(8).forEach { pulse ->
-                item {
-                    Text(pulse.symbol + "  ·  sampled +" +
-                        String.format(Locale.US, "%.2f%%", pulse.pulsePct) +
-                        "  ·  research observation only; not an executable recommendation",
-                        style = MaterialTheme.typography.bodyMedium)
-                }
-            }
-        }
-        item {
             Card(
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha=.18f)),
                 shape = RoundedCornerShape(20.dp)
@@ -969,6 +949,26 @@ private fun FixedScreen(
                 "Fixed LONG recommendations",
                 "Frozen v7.4.1 recommendation intelligence. Live market data changes; the model, reference cases, parameters and embedded calibration snapshot do not."
             )
+        }
+        item {
+            SectionTitle("Opening NSE momentum watch · research only",
+                "Starts from 09:15 IST using successive existing full-market price scans. First observation is a baseline; an independent next scan is needed for momentum. No additional API calls, no BUY approval, and no change to Fixed's completed 15m candle requirement.")
+        }
+        if (dashboard?.fixedPulseResearch.isNullOrEmpty()) {
+            item {
+                Text("Waiting for two completed, valid NSE discovery scans; official Fixed may need the first completed current-session 15m candle (around 09:30 IST).",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        } else {
+            dashboard!!.fixedPulseResearch.take(8).forEach { pulse ->
+                item {
+                    Text(pulse.symbol + "  ·  sampled +" +
+                        String.format(Locale.US, "%.2f%%", pulse.pulsePct) +
+                        "  ·  research observation only; not an executable recommendation",
+                        style = MaterialTheme.typography.bodyMedium)
+                }
+            }
         }
         item {
             Card(
