@@ -39,6 +39,12 @@ class WorkingRangeAutoBuyPolicyTest {
             decide(execution = "BUY_EXECUTED").reason)
     }
 
+    @Test fun retryableQuoteOrMarketabilityBlockMayRetryButReservedIntentMayNot() {
+        assertTrue(decide(execution = "RETRYABLE_BLOCKED").eligible)
+        assertEquals("EVENT_ALREADY_RESERVED_OR_CONSUMED",
+            decide(execution = "BLOCKED_PREORDER").reason)
+    }
+
     @Test fun staleConfirmationCannotTriggerDelayedAutoBuy() {
         assertEquals("CONFIRMATION_EXPIRED",
             decide(activated = 500L, confirmed = 1_000L, now = 1_000L + WorkingRangeAutoBuyPolicy.MAX_CONFIRMATION_AGE_MS + 1L).reason)
