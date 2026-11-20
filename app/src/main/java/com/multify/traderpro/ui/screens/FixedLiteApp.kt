@@ -420,9 +420,16 @@ internal fun LiteFixedScreen(state: TraderUiState, onScan: () -> Unit, onBuy: (S
         item(key = "fixed-protection") {
             LiteCard {
                 SectionTitle("Position protection", "Broker GTT status · independent of scanner")
+                val serviceHealth = dashboard?.health?.foregroundService ?: "UNKNOWN"
+                val serviceTone = when {
+                    dashboard?.halted == true || state.settings.safetyHalt -> LiteTone.NEGATIVE
+                    serviceHealth.contains("RUNNING", true) || serviceHealth.contains("ACTIVE", true) || serviceHealth.contains("HEALTHY", true) -> LiteTone.POSITIVE
+                    else -> LiteTone.WARNING
+                }
                 StatusPill(
-                    if (dashboard?.halted == true || state.settings.safetyHalt) "SAFETY HALT · NEW BUYS BLOCKED" else "PROTECTION MONITOR INDEPENDENT",
-                    if (dashboard?.halted == true || state.settings.safetyHalt) LiteTone.NEGATIVE else LiteTone.POSITIVE
+                    if (dashboard?.halted == true || state.settings.safetyHalt) "SAFETY HALT · NEW BUYS BLOCKED"
+                    else "SERVICE " + prettyState(serviceHealth),
+                    serviceTone
                 )
                 if (positions.isEmpty()) {
                     Text("No holdings are registered in this installation. It does not import old-app holdings; reconcile Groww before enabling Auto-Buy.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
