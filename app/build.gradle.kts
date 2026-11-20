@@ -27,11 +27,11 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.multify.traderpro.vivoy73final"
+        applicationId = "com.multify.fixedpro.lite"
         minSdk = 26
         targetSdk = 35
-        versionCode = 9025
-        versionName = "9.0.25-working-range-always-on-research"
+        versionCode = 10001
+        versionName = "1.0.0-fixed-lite-test"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
     }
