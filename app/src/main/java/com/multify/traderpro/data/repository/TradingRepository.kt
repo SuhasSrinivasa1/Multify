@@ -8719,11 +8719,19 @@ class TradingRepository @Inject constructor(
         val qty = filled.filledQuantity?.takeIf { it > 0 }
             ?: error("Manual short broker fill quantity unverified")
         val fill = filled.averageFillPrice?.takeIf { it.isFinite() && it > 0.0 }
-            ?: price
+            ?: runCatching {
+                apiFactory.groww.orderStatus(bearer(token), filled.growwOrderId)
+                    .requirePayload("Verify actual Manual short SELL fill price")
+                    .averageFillPrice?.takeIf { it.isFinite() && it > 0.0 }
+            }.getOrNull()
+            ?: run {
+                preferences.setSafetyHalt(true)
+                error("Manual MIS SELL filled but actual entry cost is unverified. Reconcile Alpha immediately; new buys halted.")
+            }
         val opened = intent.copy(
             state = "ENTRY_FILLED_UNPROTECTED", quantity = qty, entryPrice = fill,
             lowestPrice = fill,
-            stopTrigger = ManualShortIntradayPolicy.stopForLowWater(fill, fill),
+            stopTrigger = roundSmartOrderPrice(ManualShortIntradayPolicy.stopForLowWater(fill, fill)),
             entryOrderId = filled.growwOrderId
         )
         saveManualShort(opened)
@@ -8782,7 +8790,7 @@ class TradingRepository @Inject constructor(
                 row = row.copy(
                     state = "ENTRY_FILLED_UNPROTECTED", entryOrderId = ack.growwOrderId,
                     quantity = qty, entryPrice = fill, lowestPrice = fill,
-                    stopTrigger = ManualShortIntradayPolicy.stopForLowWater(fill, fill)
+                    stopTrigger = roundSmartOrderPrice(ManualShortIntradayPolicy.stopForLowWater(fill, fill))
                 )
                 saveManualShort(row)
             }
@@ -8848,7 +8856,10 @@ class TradingRepository @Inject constructor(
             val ltp = quote.lastPrice?.takeIf { it.isFinite() && it > 0.0 }
                 ?: error("Missing fresh Alpha quote for MIS short")
             val low = if (row.lowestPrice > 0.0) minOf(row.lowestPrice, ltp) else ltp
-            val desired = ManualShortIntradayPolicy.tighterStop(row.stopTrigger, row.entryPrice, low)
+            val rawDesired = ManualShortIntradayPolicy.tighterStop(row.stopTrigger, row.entryPrice, low)
+            // Use the same safe NSE tick rounding already applied to CNC GTT
+            // stops; never raise an existing MIS protective BUY stop.
+            val desired = minOf(row.stopTrigger, roundSmartOrderPrice(rawDesired))
             if (desired + 0.000001 < row.stopTrigger) {
                 val modified = apiFactory.groww.modifyOrder(
                     bearer(token), OrderModifyRequest(
