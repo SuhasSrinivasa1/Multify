@@ -10590,8 +10590,8 @@ class TradingRepository @Inject constructor(
                     if (repaired) continue
                 }
                 val gttStatus = position.smartOrderStatus.orEmpty().uppercase(Locale.US)
-                // When Groww confirms zero shares and the old local GTT is already
-                // terminal/cancelled, quarantine the orphan row. Do NOT poll the same
+                // When the latest successful broker inventory reports zero shares and the
+                // old local GTT is already terminal, quarantine the orphan row. Do NOT poll the same
                 // terminal order on every heartbeat or infer a sale from LTP.
                 // The verified historic-replay repair above remains allowed. All
                 // other cases need human or exact broker-order reconciliation.
