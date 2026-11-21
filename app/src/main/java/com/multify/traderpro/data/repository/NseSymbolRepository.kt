@@ -51,6 +51,7 @@ class NseSymbolRepository @Inject constructor(
         .build()
 
     @Volatile private var cachedSymbols: Set<String>? = null
+    @Volatile private var cachedInstruments: List<NseInstrumentMasterParser.ListedEquity>? = null
 
     data class Status(
         val count: Int,
@@ -81,15 +82,49 @@ class NseSymbolRepository @Inject constructor(
 
     fun symbols(): List<String> = symbolSet().toList()
 
+    /** Fast, wholly local autocomplete: never fetch a quote while the user types. */
+    fun instruments(): List<NseInstrumentMasterParser.ListedEquity> {
+        cachedInstruments?.let { return it }
+        val packed = prefs.getString(KEY_INSTRUMENTS, "").orEmpty()
+        val loaded = if (packed.isBlank()) symbols().map {
+            NseInstrumentMasterParser.ListedEquity(it, it)
+        } else packed.split('|').mapNotNull { row ->
+            val divider = row.indexOf('\t')
+            if (divider < 1) return@mapNotNull null
+            val symbol = NseInstrumentMasterParser.validSymbol(row.substring(0, divider))
+                ?: return@mapNotNull null
+            NseInstrumentMasterParser.ListedEquity(symbol, row.substring(divider + 1).ifBlank { symbol })
+        }
+        cachedInstruments = loaded
+        return loaded
+    }
+
+    fun search(query: String): List<NseInstrumentMasterParser.ListedEquity> {
+        val q = query.trim().uppercase(Locale.US)
+        if (q.isBlank()) return emptyList()
+        return instruments().asSequence().filter {
+            it.symbol.contains(q, ignoreCase = true) || it.companyName.contains(q, ignoreCase = true)
+        }.sortedWith(compareBy<NseInstrumentMasterParser.ListedEquity> {
+            if (it.symbol.startsWith(q, ignoreCase = true)) 0
+            else if (it.companyName.startsWith(q, ignoreCase = true)) 1
+            else 2
+        }.thenBy { it.companyName }).toList()
+    }
+
+    fun hasFullInstrumentMaster(): Boolean =
+        status().count > MIN_SYMBOL_COUNT && !isStale() &&
+            instruments().size > MIN_SYMBOL_COUNT
+
     fun isKnown(symbol: String): Boolean {
         val symbols = symbolSet()
         if (symbols.isEmpty()) return true
         return symbol.trim().uppercase(Locale.US) in symbols
     }
 
-    fun isStale(maxAgeMs: Long = 25L * 24 * 60 * 60 * 1000): Boolean {
+    fun isStale(maxAgeMs: Long = 7L * 24 * 60 * 60 * 1000): Boolean {
         val updated = prefs.getLong(KEY_UPDATED, 0L)
-        return updated == 0L || System.currentTimeMillis() - updated > maxAgeMs
+        return updated == 0L || System.currentTimeMillis() - updated > maxAgeMs ||
+            prefs.getString(KEY_INSTRUMENTS, "").isNullOrBlank()
     }
 
     private fun request(url: String, csv: Boolean): Request {
@@ -105,7 +140,7 @@ class NseSymbolRepository @Inject constructor(
         return builder.build()
     }
 
-    private fun nseSymbols(): List<String> {
+    private fun nseSymbols(): List<NseInstrumentMasterParser.ListedEquity> {
         // Warm the in-memory cookie jar before reaching the separate NSE archive host.
         client.newCall(request(NSE_HOME_URL, csv = false)).execute().use { response ->
             check(response.isSuccessful) { "NSE homepage HTTP ${response.code}" }
@@ -113,15 +148,15 @@ class NseSymbolRepository @Inject constructor(
         return client.newCall(request(EQUITY_URL, csv = true)).execute().use { response ->
             check(response.isSuccessful) { "NSE equity CSV HTTP ${response.code}" }
             val stream = response.body?.charStream() ?: error("NSE equity CSV response empty")
-            NseInstrumentMasterParser.parseNse(stream)
+            NseInstrumentMasterParser.parseNseInstruments(stream)
         }
     }
 
-    private fun growwSymbols(): List<String> =
+    private fun growwSymbols(): List<NseInstrumentMasterParser.ListedEquity> =
         client.newCall(request(GROWW_INSTRUMENT_URL, csv = true)).execute().use { response ->
             check(response.isSuccessful) { "Groww instrument CSV HTTP ${response.code}" }
             val stream = response.body?.charStream() ?: error("Groww instrument CSV response empty")
-            NseInstrumentMasterParser.parseGroww(stream)
+            NseInstrumentMasterParser.parseGrowwInstruments(stream)
         }
 
     /** Download once per scheduled sync, with bounded official fallback, no 403 retry storm. */
@@ -132,7 +167,7 @@ class NseSymbolRepository @Inject constructor(
         var nseFailure = ""
         try {
             val primary = runCatching { nseSymbols() }
-            val symbols: List<String>
+            val symbols: List<NseInstrumentMasterParser.ListedEquity>
             val source: String
             if (primary.isSuccess && primary.getOrThrow().size > MIN_SYMBOL_COUNT) {
                 symbols = primary.getOrThrow()
@@ -148,7 +183,8 @@ class NseSymbolRepository @Inject constructor(
             }
             val now = System.currentTimeMillis()
             check(prefs.edit()
-                .putString(KEY_SYMBOLS, symbols.joinToString("|"))
+                .putString(KEY_SYMBOLS, symbols.joinToString("|") { it.symbol })
+                .putString(KEY_INSTRUMENTS, symbols.joinToString("|") { "${it.symbol}\t${it.companyName}" })
                 .putInt(KEY_COUNT, symbols.size)
                 .putLong(KEY_UPDATED, now)
                 .putString(KEY_SOURCE, source)
@@ -156,7 +192,8 @@ class NseSymbolRepository @Inject constructor(
                 .putString(KEY_NSE_ERROR, nseFailure)
                 .putLong(KEY_ATTEMPT, attemptedAt)
                 .commit()) { "Unable to persist validated symbol master; previous snapshot preserved" }
-            cachedSymbols = symbols.toSet()
+            cachedSymbols = symbols.map { it.symbol }.toSet()
+            cachedInstruments = symbols
             return status()
         } catch (error: Exception) {
             // Retain last-known-good data and timestamp. Do not accept partial universes.
@@ -174,6 +211,7 @@ class NseSymbolRepository @Inject constructor(
         const val MIN_SYMBOL_COUNT = 500
         const val MAX_SYMBOL_COUNT = 10_000
         private const val KEY_SYMBOLS = "symbols"
+        private const val KEY_INSTRUMENTS = "instruments_with_company_names_v9028"
         private const val KEY_COUNT = "count"
         private const val KEY_UPDATED = "updated_at"
         private const val KEY_SOURCE = "source"
