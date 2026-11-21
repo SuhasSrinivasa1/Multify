@@ -114,7 +114,7 @@ jobs:
           assert "SELL SHORT" in ui and "manual-buy-alpha" in ui
           build=Path("app/build.gradle.kts").read_text()
           assert "versionCode = 9032" in build
-          assert 'applicationIdSuffix = ".mondaytest"' in build
+          assert 'applicationIdSuffix = ".v9032test"' in build
           manifest=Path("app/src/main/AndroidManifest.xml").read_text()
           assert 'android:label="Suhas Shree Trader Pro"' in manifest
           debug=Path("app/src/debug/AndroidManifest.xml").read_text()
@@ -159,7 +159,7 @@ jobs:
           apk=app/build/outputs/apk/debug/app-debug.apk
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$apk" | tee signer-v9032.txt
           "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$apk" > package-v9032.txt
-          grep -F "name='com.multify.traderpro.vivoy73final.mondaytest'" package-v9032.txt >/dev/null || {
+          grep -F "name='com.multify.traderpro.vivoy73final.v9032test'" package-v9032.txt >/dev/null || {
             echo "Refusing to package test build with installed production application ID"; exit 1;
           }
           grep -F "Suhas Shree Trader Pro TEST" package-v9032.txt >/dev/null || {
