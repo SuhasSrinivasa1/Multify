@@ -15,7 +15,7 @@ object FixedBuyAvailabilityPolicy {
     /** UI mirrors the independent authoritative Fixed entry cutoff. Existing
      * portfolio SELL/GTT monitoring keeps the full regular market session. */
     fun fixedNewEntryWindow(atMs: Long): Boolean =
-        NseEquitySessionCalendar.isFixedNewEntryWindow(Instant.ofEpochMilli(atMs).atZone(india))
+        MisIntradayLongPolicy.mayEnter(Instant.ofEpochMilli(atMs).atZone(india))
 
     fun canBuy(atMs: Long, brokerReady: Boolean, status: String, executionEligible: Boolean): Boolean =
         fixedNewEntryWindow(atMs) && brokerReady && status == "ACTIVE" && executionEligible
