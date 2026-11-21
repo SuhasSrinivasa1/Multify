@@ -9,6 +9,8 @@ jobs:
   verify-and-build:
     runs-on: ubuntu-latest
     timeout-minutes: 65
+    env:
+      MULTIFY_KEYSTORE_PASSWORD: ${{ secrets.MULTIFY_KEYSTORE_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -23,6 +25,19 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
+      - name: Restore stable signing identity when configured
+        shell: bash
+        env:
+          MULTIFY_KEYSTORE_BASE64: ${{ secrets.MULTIFY_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${MULTIFY_KEYSTORE_BASE64:-}" && -n "${MULTIFY_KEYSTORE_PASSWORD:-}" ]]; then
+            printf '%s' "$MULTIFY_KEYSTORE_BASE64" | base64 --decode > app/multify-v4-stable.jks
+            chmod 600 app/multify-v4-stable.jks
+            echo "STABLE_KEYSTORED: certificate will be verified after APK assembly"
+          else
+            echo "UNSTABLE_DEBUG_SIGNER: secrets unavailable; artifact is NOT an in-place update"
+          fi
       - name: Android SDK
         run: |
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
@@ -112,6 +127,14 @@ jobs:
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$apk" | tee signer-v9031.txt
           "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$apk" | head -n 4 | tee package-v9031.txt
           sha256sum "$apk" | tee SHA256-v9031.txt
+          cert=$(grep -i 'Signer #1 certificate SHA-256 digest' signer-v9031.txt | head -n 1 | sed 's/.*: //' | tr -d ':' | tr '[:upper:]' '[:lower:]')
+          expected="3f72d5c24e676c712d9e7e9feaa829960bfca9cdffc9ea4da6738372824e8755"
+          if [[ -f app/multify-v4-stable.jks ]]; then
+            [[ "$cert" == "$expected" ]] || { echo "Unexpected stable signing certificate"; exit 1; }
+            echo "VERIFIED_STABLE_SIGNER_IN_PLACE_CAPABLE" | tee signer-channel-v9031.txt
+          else
+            echo "EPHEMERAL_DEBUG_CERT_DO_NOT_OVERWRITE_INSTALLED_APP" | tee signer-channel-v9031.txt
+          fi
           stat -c "APK size (bytes): %s" "$apk" | tee size-v9031.txt
           echo "WARNING: CI debug signer may not match installed APK; never uninstall with live holdings or unexported state."
       - name: Upload installable test APK and evidence
@@ -122,6 +145,7 @@ jobs:
           path: |
             app/build/outputs/apk/debug/app-debug.apk
             signer-v9031.txt
+            signer-channel-v9031.txt
             package-v9031.txt
             SHA256-v9031.txt
             size-v9031.txt
