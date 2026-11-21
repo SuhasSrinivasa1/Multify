@@ -1,0 +1,132 @@
+name: Multify v9.0.31 Safe Reconciliation Monday TEST
+on:
+  push:
+    branches: [v9031-safe-reconciliation-api-test-20261121]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify-and-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 65
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Android SDK
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
+      - name: Frozen policy parity and surgical repository change audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+          baseline="686f9c960f3ff1f95b99a06ae4a615c5c11991e4"
+          root=Path("app/src/main/java/com/multify/traderpro")
+          locked=[
+              "engine/FixedFinalContract.kt",
+              "engine/FixedLocalStrategyEngine.kt",
+              "engine/FixedMarketDiscoveryPolicy.kt",
+              "engine/FixedForecastPublicationPolicy.kt",
+              "engine/FixedForecastQualityPolicy.kt",
+              "engine/FixedEntryActionabilityPolicy.kt",
+              "engine/FixedMultifyFactorFamilies.kt",
+              "engine/SteppedTrailingPolicy.kt",
+              "engine/HardStopLossPolicy.kt",
+              "engine/WorkingRangeCandidatePolicy.kt",
+              "engine/WorkingRangeEntryMomentumPolicy.kt",
+              "engine/WorkingRangeAutoBuyPolicy.kt",
+              "engine/WorkingRangeExitPolicy.kt",
+              "data/network/BetaReadOnlyInterceptor.kt",
+              "data/network/GrowwApiFactory.kt",
+              "data/network/GrowwRateLimitInterceptor.kt",
+              "data/network/GrowwHistoricalThrottlePolicy.kt",
+              "data/network/BetaResearchGate.kt",
+              "engine/FixedResearchCapacityPolicy.kt",
+              "engine/FixedResearchLtpPacingPolicy.kt",
+              "engine/FixedDualAccountPolicy.kt",
+              "engine/FixedSingleWorkerStartGate.kt",
+              "engine/MarketDataPriorityAdmissionPolicy.kt",
+          ]
+          def original(path):
+              return subprocess.check_output(["git","show",f"{baseline}:{path}"])
+          for rel in locked:
+              p=root/rel
+              assert p.read_bytes()==original(p.as_posix()), "LOCK_CHANGED: "+rel
+
+          # No changes to any order placement, target calculation or BUY rule.
+          p=root/"data/repository/TradingRepository.kt"
+          source=p.read_text()
+          start=source.index("                // When the latest successful broker inventory")
+          end=source.index("                // Broker child fills must be reconciled",start)
+          assert source.count("BROKER_FLAT_TERMINAL_GTT_QUARANTINED")==1
+          assert "BrokerFlatTerminalGttQuarantinePolicy.shouldQuarantine" in source[start:end]
+          assert "blockedSymbols += symbol" in source[start:end]
+          assert "continue" in source[start:end]
+          assert source[:start]+source[end:]==original(p.as_posix()).decode(), "ORDER_PATH_OR_REPOSITORY_UNEXPECTEDLY_CHANGED"
+          assert "versionCode = 9031" in Path("app/build.gradle.kts").read_text()
+          assert "fixedAutoBuyEnabled: Boolean = false" in (root/"data/preferences/AppPreferences.kt").read_text()
+          print(f"PASS: {len(locked)} frozen policies untouched; repository change only broker-flat terminal-GTT quarantine")
+          PY
+      - name: Backend regression tests
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check -r backend/requirements.txt
+          python -m pytest -q backend/tests | tee backend-tests-v9031.txt
+      - name: Android tests and TEST APK
+        run: |
+          set -euo pipefail
+          gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest
+          python - <<'PY'
+          import glob,xml.etree.ElementTree as ET,pathlib
+          test_files=glob.glob("app/build/test-results/testDebugUnitTest/TEST-*.xml")
+          rows=[ET.parse(p).getroot() for p in test_files]
+          total=sum(int(x.attrib.get("tests",0)) for x in rows)
+          failures=sum(int(x.attrib.get("failures",0))+int(x.attrib.get("errors",0)) for x in rows)
+          tests=set()
+          for p in test_files:
+              try: tests.add(ET.parse(p).getroot().attrib.get("name",""))
+              except Exception: pass
+          assert any("BrokerFlatTerminalGttQuarantinePolicyTest" in x for x in tests), "New safety tests not executed"
+          assert total>=100 and failures==0, (total,failures)
+          pathlib.Path("android-tests-v9031.txt").write_text(f"{total} Android tests; {failures} failures\n")
+          print(total, "Android tests passed")
+          PY
+      - name: Package, certificate and integrity verification
+        run: |
+          set -euo pipefail
+          apk=app/build/outputs/apk/debug/app-debug.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$apk" | tee signer-v9031.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$apk" | head -n 4 | tee package-v9031.txt
+          sha256sum "$apk" | tee SHA256-v9031.txt
+          stat -c "APK size (bytes): %s" "$apk" | tee size-v9031.txt
+          echo "WARNING: CI debug signer may not match installed APK; never uninstall with live holdings or unexported state."
+      - name: Upload installable test APK and evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Multify-v9.0.31-Safe-Reconciliation-Monday-TEST-APK
+          path: |
+            app/build/outputs/apk/debug/app-debug.apk
+            signer-v9031.txt
+            package-v9031.txt
+            SHA256-v9031.txt
+            size-v9031.txt
+            android-tests-v9031.txt
+            backend-tests-v9031.txt
+            app/build/test-results/testDebugUnitTest/
+          if-no-files-found: warn
+          retention-days: 30
