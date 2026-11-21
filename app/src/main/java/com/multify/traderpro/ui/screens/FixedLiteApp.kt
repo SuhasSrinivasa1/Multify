@@ -55,6 +55,7 @@ import java.time.Instant
 import java.time.ZoneId
 import com.multify.traderpro.engine.HardStopLossPolicy
 import com.multify.traderpro.engine.SteppedTrailingPolicy
+import com.multify.traderpro.engine.ManualShortIntradayPolicy
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -96,7 +97,7 @@ fun FixedLiteApp(viewModel: TraderViewModel = hiltViewModel()) {
                                 when (page) {
                                     LitePage.FIXED -> "15-minute Fixed strategy"
                                     LitePage.WORKING_RANGE -> "Working Range pilot"
-                                    LitePage.MANUAL -> "Search and buy NSE shares"
+                                    LitePage.MANUAL -> "Manual NSE BUY / SELL"
                                     LitePage.AVERAGES -> "Observed Fixed outcomes"
                                     LitePage.SETTINGS -> "Accounts and controls"
                                 },
@@ -134,7 +135,7 @@ fun FixedLiteApp(viewModel: TraderViewModel = hiltViewModel()) {
                     state, viewModel,
                     onEnableRequested = { confirmEnable = it },
                     onResetRequested = { confirmHaltReset = true },
-                    onExport = { export.launch("FixedMomentum-v9028-manual-diagnostics.zip") }
+                    onExport = { export.launch("FixedMomentum-v9029-manual-buy-sell-diagnostics.zip") }
                 )
             }
         }
@@ -652,6 +653,10 @@ private fun FixedRecommendationCard(
 internal fun LiteManualScreen(state: TraderUiState, viewModel: TraderViewModel) {
     var query by rememberSaveable { mutableStateOf("") }
     var selected by rememberSaveable { mutableStateOf<String?>(null) }
+    var manualSide by rememberSaveable { mutableStateOf("BUY") }
+    var actionsExpanded by remember { mutableStateOf(false) }
+    var shortConfirmSymbol by remember { mutableStateOf<String?>(null) }
+    val shortState = viewModel.manualShortStatus()
     val master = viewModel.manualMasterStatus()
     val ready = viewModel.manualMasterReady()
     // All matches are read from a locally indexed weekly NSE master. Typing
@@ -660,17 +665,33 @@ internal fun LiteManualScreen(state: TraderUiState, viewModel: TraderViewModel) 
     val activeSelection = selected?.let { id -> matches.firstOrNull { it.symbol == id } }
     val authenticated = state.settings.brokerAuthenticated &&
         state.settings.staticIpMatched && state.settings.brokerDdpiEnabled
-    val marketOpen = NseEquitySessionCalendar.isFixedNewEntryWindow(
-        java.time.ZonedDateTime.now(ZoneId.of("Asia/Kolkata"))
-    )
+    val istNow = java.time.ZonedDateTime.now(ZoneId.of("Asia/Kolkata"))
+    val marketOpen = NseEquitySessionCalendar.isFixedNewEntryWindow(istNow)
+    val shortWindow = ManualShortIntradayPolicy.mayOpen(istNow)
     Column(
         Modifier.fillMaxSize().testTag("manual-screen").padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         LiteCard {
-            SectionTitle("Manual", "NSE CASH · your own stock selection")
-            Text("Search a company or ticker, choose the exact NSE listing, then tap BUY. No separate budget: the Alpha per-order amount in Settings is used automatically.",
+            SectionTitle("Manual", "Alpha · NSE CASH · operator-directed trades")
+            Text("Manual BUY = delivery holding (CNC); Manual SELL = new intraday short (MIS position). Both use the existing Alpha per-order budget; no extra budget setting.",
                 style = MaterialTheme.typography.bodySmall)
+            Box {
+                OutlinedButton(
+                    onClick = { actionsExpanded = true },
+                    modifier = Modifier.fillMaxWidth().testTag("manual-action-dropdown")
+                ) { Text(if (manualSide == "BUY") "Manual BUY · CNC holdings ▾" else "Manual SELL · MIS short position ▾") }
+                DropdownMenu(expanded = actionsExpanded, onDismissRequest = { actionsExpanded = false }) {
+                    DropdownMenuItem(
+                        text = { Text("Manual BUY · CNC holdings") },
+                        onClick = { manualSide = "BUY"; selected = null; actionsExpanded = false }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Manual SELL · MIS short position") },
+                        onClick = { manualSide = "SELL"; selected = null; actionsExpanded = false }
+                    )
+                }
+            }
             OutlinedTextField(
                 value = query,
                 onValueChange = { query = it; selected = null },
@@ -701,31 +722,59 @@ internal fun LiteManualScreen(state: TraderUiState, viewModel: TraderViewModel) 
                     style = MaterialTheme.typography.labelSmall)
             }
         }
+        if (shortState != null && shortState.unresolved()) {
+            LiteCard {
+                SectionTitle("Alpha intraday short · " + shortState.symbol, shortState.state)
+                Text("MIS SHORT " + shortState.quantity + " shares · entry " +
+                    rupees(shortState.entryPrice) + " · BUY stop " + rupees(shortState.stopTrigger),
+                    style = MaterialTheme.typography.bodySmall)
+                Text("Broker stop order " + shortState.protectionOrderId.ifBlank { "NOT VERIFIED" } +
+                    " · cover is a BUY, not a holdings SELL.", style = MaterialTheme.typography.bodySmall)
+                if (!shortState.brokerStopVerified()) {
+                    Text("UNPROTECTED / UNRESOLVED · Safety halt applies. Open Groww Positions and Orders to reconcile immediately.",
+                        color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        }
         if (selected != null && activeSelection != null) {
             LiteCard {
                 Text("Selected: " + activeSelection.companyName,
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold)
-                Text(activeSelection.symbol + " · NSE CASH · Alpha CNC LONG",
+                Text(activeSelection.symbol + if (manualSide == "BUY")
+                    " · NSE CASH · Alpha CNC LONG" else " · NSE CASH · Alpha MIS SHORT",
                     style = MaterialTheme.typography.bodySmall)
-                Text("Applies the existing Fixed exit: -1% initial GTT; +0.55% arm, +0.50% protected gain, then +0.10% steps. No Working Range full-target sell.",
+                Text(if (manualSide == "BUY")
+                    "Fixed exit unchanged: -1% initial broker GTT, trail arms at +0.55%, protects +0.50%, and ratchets +0.10%."
+                else
+                    "Reversed Fixed exit: +1% initial broker BUY SL-M, arms after -0.55% share move, then locks +0.50% short gain and lowers the BUY stop in +0.10% steps. Intraday only; controlled square-off from 14:55 IST.",
                     style = MaterialTheme.typography.bodySmall)
-                Text("REAL BUY on one tap. Subject to cash, market hours, fresh Alpha quote, liquidity, duplicate-order and GTT safeguards.",
+                Text(if (manualSide == "BUY")
+                    "Real CNC BUY uses Alpha cash, position and GTT checks."
+                else
+                    "Real MIS short SELL opens a negative Alpha intraday position, not a delivery holding. Requires fresh broker checks, a pending BUY stop and intraday square-off.",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Button(
                     onClick = {
                         val symbol = activeSelection.symbol
                         selected = null
-                        viewModel.executeManualNse(symbol)
+                        if (manualSide == "BUY") viewModel.executeManualNse(symbol)
+                        else shortConfirmSymbol = symbol
                     },
-                    enabled = ready && authenticated && marketOpen &&
-                        !state.settings.safetyHalt && state.dashboard?.halted != true,
+                    enabled = ready && authenticated &&
+                        (if (manualSide == "BUY") marketOpen else shortWindow) &&
+                        !state.settings.safetyHalt && state.dashboard?.halted != true &&
+                        shortState?.unresolved() != true,
                     modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp)
-                        .testTag("manual-buy-alpha")
-                ) { Text("BUY " + activeSelection.symbol + " · Alpha") }
-                if (!marketOpen || !authenticated) {
-                    Text("BUY requires the NSE entry window and authenticated, static-IP-verified Alpha with DDPI.",
+                        .testTag(if (manualSide == "BUY") "manual-buy-alpha" else "manual-sell-alpha")
+                ) {
+                    Text((if (manualSide == "BUY") "BUY " else "SELL SHORT ") +
+                        activeSelection.symbol + " · Alpha")
+                }
+                if (!(if (manualSide == "BUY") marketOpen else shortWindow) || !authenticated) {
+                    Text("Requires authenticated Alpha, verified static IP/DDPI and NSE entry hours" +
+                        (if (manualSide == "SELL") " (short entries until 14:30 IST)." else "."),
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.error)
                 }
@@ -766,6 +815,27 @@ internal fun LiteManualScreen(state: TraderUiState, viewModel: TraderViewModel) 
                 }
             }
         }
+    }
+    shortConfirmSymbol?.let { symbol ->
+        AlertDialog(
+            onDismissRequest = { shortConfirmSymbol = null },
+            icon = { Icon(Icons.Default.WarningAmber, contentDescription = null) },
+            title = { Text("Open REAL Alpha MIS SHORT?") },
+            text = { Text("SELL " + symbol + " opens a NEW INTRADAY SHORT. " +
+                "It does not sell your CNC holdings. Your existing Alpha per-order budget applies. " +
+                "A broker BUY stop starts 1% above the fill and trails downward on favourable moves. " +
+                "The app attempts to BUY-to-cover by 14:55 IST; execution and stop fills are not guaranteed. " +
+                "If a protective order cannot be verified, new trades halt and you must inspect Groww immediately.") },
+            confirmButton = {
+                Button(onClick = {
+                    shortConfirmSymbol = null
+                    viewModel.executeManualShort(symbol)
+                }, modifier = Modifier.testTag("confirm-manual-short")) { Text("Confirm MIS SHORT") }
+            },
+            dismissButton = {
+                TextButton(onClick = { shortConfirmSymbol = null }) { Text("Cancel") }
+            }
+        )
     }
 }
 
