@@ -300,6 +300,7 @@ class TradingRepository @Inject constructor(
         appContext.getSharedPreferences("manual_mis_short_orders_v9029", Context.MODE_PRIVATE)
     }
     private val manualShortMutex = Mutex()
+    @Volatile private var manualShortLastBrokerCheckAtMs = 0L
     private fun manualShortState(): ManualShortPosition? {
         val raw = manualShortPrefs.getString("current", null) ?: return null
         return runCatching {
@@ -8751,6 +8752,14 @@ class TradingRepository @Inject constructor(
     suspend fun monitorManualShortIntraday(): Int = manualShortMutex.withLock {
         var row = manualShortState() ?: return@withLock 0
         if (!row.unresolved()) return@withLock 0
+        // Independent Alpha NON_TRADING pacing: avoid duplicating status and
+        // position reads on every 1-second CNC monitor wake. Force close never
+        // waits behind this read-only interval.
+        val checkAt = System.currentTimeMillis()
+        if (!ManualShortIntradayPolicy.mustSquareOff(ZonedDateTime.now(INDIA)) &&
+            checkAt - manualShortLastBrokerCheckAtMs in 0L..4_999L
+        ) return@withLock 1
+        manualShortLastBrokerCheckAtMs = checkAt
         val token = ensureToken() ?: run {
             preferences.setSafetyHalt(true)
             return@withLock 1
