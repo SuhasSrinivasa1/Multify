@@ -8674,56 +8674,101 @@ class TradingRepository @Inject constructor(
     private suspend fun squareOffMisLongLocked(token: String, position: ManagedPositionEntity, reason: String) {
         val policy = com.multify.traderpro.engine.MisIntradayLongPolicy
         val ref = pendingMisExitReference(position)
-        val currentIntent = misIntradayExitPrefs.getString(ref, null)
-        if (currentIntent != null) {
-            // A prior broker SELL may have executed. No second SELL is legal
-            // without independent reconciliation of its exact reference.
-            val status = apiFactory.groww.orderStatusByReference(
-                bearer(token), referenceId = ref
-            ).requirePayload("Reconcile existing MIS long exit order")
-            val qty = misLongBrokerNet(token, position.symbol)
-            if (qty == 0 && (status.orderStatus.equals("EXECUTED", true) ||
-                (status.filledQuantity ?: 0) > 0)) {
-                closeMisLongRecord(position, "MIS_LONG_EXIT_BY_REFERENCE_BROKER_FLAT")
-                return
+        var intent = misIntradayExitPrefs.getString(ref, null)
+        if (intent == null) {
+            // Reserve the decision BEFORE cancelling the existing broker stop.
+            // On app death, PREPARE is recoverable by consulting the stop ID.
+            require(position.smartOrderMode == policy.STOP_VERIFIED) {
+                "Cannot start MIS SELL exit without a verified protective stop"
             }
-            error("MIS long EXIT PENDING; broker reference ${ref}; no second SELL permitted")
+            check(misIntradayExitPrefs.edit().putString(
+                ref, "PREPARE|${position.symbol}|${System.currentTimeMillis()}|${reason}"
+            ).commit()) { "Cannot durably reserve MIS stop cancellation; no broker action" }
+            intent = "PREPARE"
+            managedDao.updatePosition(position.copy(
+                smartOrderMode = policy.EXIT_PENDING,
+                smartOrderDirection = ref,
+                smartOrderStatus = "EXIT_PREPARE_STOP_CANCEL"
+            ))
         }
-        require(position.smartOrderMode == policy.STOP_VERIFIED) {
-            "MIS long has no verified protective stop to safely cancel before SELL"
-        }
-        val stopId = position.smartOrderId ?: error("MIS long broker stop ID missing")
-        apiFactory.groww.cancelOrder(bearer(token), OrderCancelRequest(growwOrderId = stopId))
-            .requirePayload("Cancel MIS SELL stop before planned SELL exit")
-        val verifiedCancel = apiFactory.groww.orderStatus(bearer(token), stopId)
-            .requirePayload("Verify MIS protective stop cancellation")
-        require(verifiedCancel.orderStatus.equals("CANCELLED", true)) {
-            "MIS long SELL stop cancellation unverified; no additional SELL"
-        }
-        val remaining = misLongBrokerNet(token, position.symbol)
-        if (remaining == 0) {
-            closeMisLongRecord(position, "MIS_POSITION_ALREADY_FLAT_AFTER_STOP_CANCEL")
+        if (intent.startsWith("CLOSED|")) {
+            require(misLongBrokerNet(token, position.symbol) == 0) {
+                "Broker MIS position not flat despite local completed exit intent"
+            }
+            closeMisLongRecord(position, "RECOVERED_CLOSED_EXIT_INTENT")
             return
         }
-        require(remaining == position.quantity) {
-            "MIS long broker shares mismatch: broker ${remaining}, app ${position.quantity}"
+        if (intent.startsWith("SELL_POST_PENDING|")) {
+            // This reference could already have been POSTed, including when
+            // Groww's HTTP reply was lost. NEVER post a second SELL.
+            val order = apiFactory.groww.orderStatusByReference(
+                bearer(token), referenceId = ref
+            ).requirePayload("Resolve prior MIS SELL exit by exact reference")
+            val net = misLongBrokerNet(token, position.symbol)
+            if (net == 0 && (order.orderStatus.equals("EXECUTED", true) ||
+                (order.filledQuantity ?: 0) > 0)) {
+                check(misIntradayExitPrefs.edit().putString(
+                    ref, "CLOSED|${position.symbol}|${order.growwOrderId}"
+                ).commit()) { "MIS close broker-flat intent could not be committed" }
+                closeMisLongRecord(position, "RECOVERED_MIS_SELL_EXIT_BROKER_FLAT")
+                return
+            }
+            error("MIS long exit SELL ${ref} unresolved: broker_qty=$net, status=${order.orderStatus}")
         }
-        // A crash or broker timeout after this commit always triggers exact
-        // reference reconciliation, not a duplicate direct SELL.
+        require(intent.startsWith("PREPARE|") || intent == "PREPARE") {
+            "Unknown MIS exit lifecycle for ${position.symbol}: ${intent.take(25)}"
+        }
+        val stopId = position.smartOrderId ?: error("MIS long stop ID missing during cancellation")
+        var stop = apiFactory.groww.orderStatus(
+            bearer(token), stopId
+        ).requirePayload("Check MIS SELL stop before cancel")
+        if (policy.pendingBrokerStop(stop.orderStatus)) {
+            // This is a cancellation of an ID that we already own, never a
+            // second SELL. An HTTP failure leaves PREPARE for reconciliation.
+            apiFactory.groww.cancelOrder(
+                bearer(token), OrderCancelRequest(growwOrderId = stopId)
+            ).requirePayload("Cancel MIS long pending SELL stop")
+            stop = apiFactory.groww.orderStatus(
+                bearer(token), stopId
+            ).requirePayload("Verify MIS SELL stop cancellation")
+        }
+        val net = misLongBrokerNet(token, position.symbol)
+        if (net == 0) {
+            require(
+                stop.orderStatus.equals("CANCELLED", true) ||
+                    stop.orderStatus.equals("EXECUTED", true) ||
+                    stop.orderStatus.equals("COMPLETED", true)
+            ) { "MIS flat but SELL stop status still ambiguous: ${stop.orderStatus}" }
+            check(misIntradayExitPrefs.edit().putString(
+                ref, "CLOSED|${position.symbol}|${stop.growwOrderId}"
+            ).commit()) { "Could not commit broker-flat MIS exit" }
+            closeMisLongRecord(position, "BROKER_FLAT_AFTER_MIS_SELL_STOP")
+            return
+        }
+        require(stop.orderStatus.equals("CANCELLED", true)) {
+            "MIS long stop ${stop.orderStatus}: do not send duplicate SELL"
+        }
+        require(net == position.quantity) {
+            "MIS long broker quantity differs from tracked app quantity: $net vs ${position.quantity}"
+        }
+        // CRITICAL: persist the FIRST-and-only direct SELL intent before POST.
+        // If interrupted here, any follow-up must query by broker reference,
+        // never assume the network call was absent.
         check(misIntradayExitPrefs.edit().putString(
-            ref, "PENDING|${position.symbol}|${System.currentTimeMillis()}|${reason}"
-        ).commit()) { "Could not durably reserve MIS long exit reference; SELL forbidden" }
+            ref, "SELL_POST_PENDING|${position.symbol}|${System.currentTimeMillis()}|${reason}"
+        ).commit()) { "Cannot reserve MIS direct SELL order; no POST allowed" }
         managedDao.updatePosition(position.copy(
             smartOrderMode = policy.EXIT_PENDING,
-            smartOrderDirection = ref,
-            smartOrderStatus = "COVER_PENDING"
+            smartOrderDirection = ref, smartOrderStatus = "SELL_POST_PENDING"
         ))
-        val result = submitMarketOrder(
-            token, position.symbol, "SELL", remaining, "MIS", ref
-        )
-        if (misLongBrokerNet(token, position.symbol) == 0) {
-            closeMisLongRecord(position, "MIS_EXIT_FILLED_${reason}")
-        } else error("MIS long SELL acknowledged but broker still non-flat; reconcile by reference")
+        val sell = submitMarketOrder(token, position.symbol, "SELL", net, "MIS", ref)
+        require(misLongBrokerNet(token, position.symbol) == 0) {
+            "MIS exit ${sell.growwOrderId} acknowledged but broker net position not yet flat"
+        }
+        check(misIntradayExitPrefs.edit().putString(
+            ref, "CLOSED|${position.symbol}|${sell.growwOrderId}"
+        ).commit()) { "Broker flat but MIS close ledger persistence failed" }
+        closeMisLongRecord(position, "MIS_INTRADAY_EXIT_${reason}")
     }
 
     /**
