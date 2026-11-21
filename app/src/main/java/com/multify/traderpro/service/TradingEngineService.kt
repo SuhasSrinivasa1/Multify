@@ -540,7 +540,11 @@ class TradingEngineService : Service() {
                         positionProfileWindowStartedAtMs = passStartedAtMs
                         positionProfileUsageBaseline = GrowwApiUsageLedger.snapshot()
                     }
-                    val result = runCatching { repository.monitorManagedPositions() }
+                    // MIS short protection is independent of frozen CNC LONG GTT/SELL
+                    // monitoring. It runs first and remains active with scanners OFF.
+                    val result = runCatching {
+                        repository.monitorManualShortIntraday() + repository.monitorManagedPositions()
+                    }
                     val passElapsedMs = (System.currentTimeMillis() - passStartedAtMs).coerceAtLeast(0L)
                     positionProfilePasses++
                     positionProfileElapsedMs += passElapsedMs

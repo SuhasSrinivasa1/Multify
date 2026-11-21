@@ -53,6 +53,9 @@ import com.multify.traderpro.data.network.HistoricalPayload
 import com.multify.traderpro.data.network.LearningStatsDto
 import com.multify.traderpro.data.network.OrderCancelRequest
 import com.multify.traderpro.data.network.OrderCreateRequest
+import com.multify.traderpro.data.network.OrderModifyRequest
+import com.multify.traderpro.engine.ManualShortPosition
+import com.multify.traderpro.engine.ManualShortIntradayPolicy
 import com.multify.traderpro.data.network.OrderPayload
 import com.multify.traderpro.data.network.GrowwOrderBookRow
 import com.multify.traderpro.data.network.PositionDto
@@ -293,6 +296,32 @@ class TradingRepository @Inject constructor(
     private val manualBuyIntentPrefs by lazy {
         appContext.getSharedPreferences("manual_nse_buy_intents_v9028", Context.MODE_PRIVATE)
     }
+    private val manualShortPrefs by lazy {
+        appContext.getSharedPreferences("manual_mis_short_orders_v9029", Context.MODE_PRIVATE)
+    }
+    private val manualShortMutex = Mutex()
+    @Volatile private var manualShortLastBrokerCheckAtMs = 0L
+    private fun manualShortState(): ManualShortPosition? {
+        val raw = manualShortPrefs.getString("current", null) ?: return null
+        return runCatching {
+            require(raw.isNotBlank()) { "Blank short ledger" }
+            researchGson.fromJson(raw, ManualShortPosition::class.java).also { row ->
+                require(row != null && row.symbol.isNotBlank() && row.reference.isNotBlank()) {
+                    "Incomplete broker short ledger"
+                }
+            }
+        }.getOrElse { cause ->
+            error("MANUAL_SHORT_LEDGER_UNREADABLE: reconcile Alpha; all new BUY/SELL blocked (${cause.javaClass.simpleName})")
+        }
+    }
+    private fun saveManualShort(state: ManualShortPosition) {
+        check(manualShortPrefs.edit()
+            .putString("current", researchGson.toJson(state)).commit()) {
+            "MANUAL_SHORT_DURABLE_LEDGER_WRITE_FAILED: reconcile Groww before more trading"
+        }
+    }
+    fun manualShortStatus(): ManualShortPosition? = manualShortState()
+
 
     private val _fixedDeliveryEvents = MutableSharedFlow<Long>(extraBufferCapacity = 8)
     val fixedDeliveryEvents: SharedFlow<Long> = _fixedDeliveryEvents.asSharedFlow()
@@ -8501,6 +8530,412 @@ class TradingRepository @Inject constructor(
      * It shares Alpha's verified fill, cash/inventory admission and broker-GTT
      * lifecycle with Fixed, and inherits the same non-Working-Range trailing exit.
      */
+    private fun manualShortPendingStop(status: String?): Boolean =
+        status?.uppercase(Locale.US) in setOf("OPEN", "NEW", "PENDING", "TRIGGER_PENDING", "TRIGGER PENDING", "VALIDATION_PENDING")
+
+    private suspend fun manualMisBrokerQty(token: String, symbol: String): Int {
+        val positions = apiFactory.groww.positions(bearer(token))
+            .requirePayload("Alpha MIS positions for $symbol").positions
+        return positions.filter { it.product.equals("MIS", true) &&
+            BrokerInventorySymbolPolicy.normalize(it.tradingSymbol)?.equals(symbol, true) == true
+        }.sumOf { it.quantity }
+    }
+
+    private suspend fun manualShortOrderByReference(token: String, reference: String): OrderPayload =
+        apiFactory.groww.orderStatusByReference(
+            bearer(token), referenceId = reference
+        ).requirePayload("Manual MIS order reference $reference")
+
+    /**
+     * Protect a broker-confirmed MIS short using an exchange/broker pending
+     * BUY SL-M order (NOT a CNC SELL GTT). This is the intraday counterpart to
+     * Fixed's hard-floor stop. Never treat locally computed stops as protection.
+     */
+    private suspend fun protectManualShort(token: String, original: ManualShortPosition): ManualShortPosition {
+        var row = original
+        if (row.protectionReference.isBlank()) {
+            val ref = stableRef("MPS", row.reference + "|BUY_STOP")
+            row = row.copy(state = "STOP_PENDING", protectionReference = ref)
+            saveManualShort(row) // durable BEFORE the broker POST
+            auditLogger.log("MANUAL_SHORT", "BROKER_SL_M_INTENT_RESERVED", mapOf(
+                "symbol" to row.symbol, "reference" to ref, "trigger" to row.stopTrigger,
+                "buy_to_cover" to true, "no_duplicate_post" to true
+            ))
+            val ack = runCatching {
+                apiFactory.groww.placeOrder(
+                    bearer(token),
+                    OrderCreateRequest(
+                        tradingSymbol = row.symbol, quantity = row.quantity,
+                        transactionType = "BUY", product = "MIS", orderType = "SL_M",
+                        triggerPrice = row.stopTrigger, price = 0.0, orderReferenceId = ref
+                    )
+                ).requirePayload("Manual MIS protective BUY SL-M")
+            }.getOrElse { failure ->
+                // Ambiguous create response: the durable reference remains PENDING.
+                // Do not blindly create another stop or BUY-to-cover.
+                auditLogger.log("SAFETY", "MANUAL_SHORT_SL_M_CREATE_UNCERTAIN", mapOf(
+                    "symbol" to row.symbol, "reference" to ref,
+                    "reason" to (failure.message ?: failure.javaClass.simpleName),
+                    "no_duplicate_order" to true
+                ))
+                throw failure
+            }
+            val id = com.multify.traderpro.engine.BrokerOrderAcknowledgementPolicy
+                .usableId(ack.growwOrderId)
+                ?: com.multify.traderpro.engine.BrokerOrderAcknowledgementPolicy
+                    .usableId(runCatching {
+                        manualShortOrderByReference(token, ref).growwOrderId
+                    }.getOrNull())
+                ?: error("Manual short protective SL-M acknowledgement uncertain; reconcile broker reference $ref")
+            row = row.copy(protectionOrderId = id)
+            saveManualShort(row)
+        }
+        val verified = apiFactory.groww.orderStatus(
+            bearer(token), row.protectionOrderId
+        ).requirePayload("Verify manual short pending BUY stop")
+        require(manualShortPendingStop(verified.orderStatus)) {
+            "Manual MIS protective BUY stop not pending: ${verified.orderStatus}"
+        }
+        val stable = row.copy(state = "PROTECTED", note = "BROKER_BUY_SL_M_PENDING")
+        saveManualShort(stable)
+        auditLogger.log("MANUAL_SHORT", "BROKER_BUY_SL_M_VERIFIED", mapOf(
+            "symbol" to stable.symbol, "stop_order_id" to stable.protectionOrderId,
+            "trigger" to stable.stopTrigger, "status" to verified.orderStatus,
+            "source" to "ALPHA_ORDER_STATUS"
+        ))
+        return stable
+    }
+
+    /**
+     * Manual SELL is an NEW NSE MIS short, not a sale of CNC holdings.
+     * No Fixed score or PRIMARY confirmation is synthesized.
+     */
+    suspend fun executeManualShort(symbolInput: String): String = appOwnedBuyMutex.withLock {
+        manualShortMutex.withLock {
+        val symbol = symbolInput.trim().uppercase(Locale.US)
+        require(nseSymbols.hasFullInstrumentMaster() && nseSymbols.isKnown(symbol)) {
+            "Manual SELL requires a current exact NSE CASH stock master entry"
+        }
+        require(ManualShortIntradayPolicy.mayOpen(ZonedDateTime.now(INDIA)) &&
+            marketSession() == "OPEN") {
+            "Manual intraday short entries stop at 14:30 IST"
+        }
+        val settings = preferences.settings.first()
+        preIndependentExecutionGuard(settings)
+        require(manualShortState()?.unresolved() != true) {
+            "Existing Manual MIS short or unresolved short order requires reconciliation"
+        }
+        require(manualBuyIntentPrefs.all.values.none {
+            it is String && (it.startsWith("PENDING|") || it.startsWith("BROKER_ACK|"))
+        }) { "Existing Manual BUY order intent requires reconciliation" }
+        val token = ensureToken() ?: error("Authenticate Alpha before Manual SELL")
+        val existing = managedDao.openPositions().filter(::appOwned)
+        require(existing.none { it.symbol.equals(symbol, true) }) {
+            "Manual short cannot offset an app-owned long holding"
+        }
+        require(existing.all {
+            com.multify.traderpro.engine.GttProtectionReadinessPolicy.verified(
+                it.smartOrderMode, it.smartOrderId, it.smartOrderStatus
+            )
+        }) { "Manual short blocked: unprotected app-owned CNC holding" }
+        val inventory = brokerInventory(token, force = true)
+        require((inventory.holdings[symbol]?.quantity ?: 0) == 0 &&
+            (inventory.positions[symbol]?.quantity ?: 0) == 0 &&
+            manualMisBrokerQty(token, symbol) == 0) {
+            "Manual short rejected: broker already has $symbol exposure"
+        }
+        require(workingRangeRecommendationStore.pendingAutoBuyIntents().isEmpty()) {
+            "Unresolved Working Range order prevents manual MIS short"
+        }
+        val currentOrders = apiFactory.groww.orderList(bearer(token), page = 0)
+            .requirePayload("Pre-short Alpha orders").orderList
+        require(currentOrders.none {
+            it.tradingSymbol.equals(symbol, true) &&
+                it.orderStatus.uppercase(Locale.US) !in
+                setOf("EXECUTED", "COMPLETED", "REJECTED", "CANCELLED", "FAILED")
+        }) { "Manual short blocked: unresolved broker order for $symbol" }
+        val quote = apiFactory.groww.quote(
+            bearer(token), tradingSymbol = symbol,
+            trafficPriority = MarketDataPriorityAdmissionPolicy.PROTECTION
+        ).requirePayload("Fresh Alpha quote before MIS short $symbol")
+        val quoteReceiptAtMs = System.currentTimeMillis()
+        val price = quote.lastPrice?.takeIf { it.isFinite() && it > 0.0 }
+            ?: error("Manual short requires a valid fresh Alpha price")
+        require(ExecutionQuoteLiquidityPolicy.rejectionReason(quote) == null &&
+            FixedExecutionThinLiquidityPolicy.rejectionReason(quote) == null) {
+            "Manual short blocked: live market book/liquidity not verified"
+        }
+        // A short close needs real sellers offering shares to cover; avoid an
+        // upper-circuit lock that could strand a short with unbounded slippage.
+        val ceiling = quote.upperCircuitLimit?.takeIf { it.isFinite() && it > 0.0 }
+        require(ceiling != null && price < ceiling * 0.985) {
+            "Manual short blocked: upper-circuit headroom is unverified or too small"
+        }
+        val sizing = com.multify.traderpro.engine.BudgetOnlyCncSizing.size(
+            settings.holdingBudgetRupees.toDouble(), price
+        )
+        val margin = apiFactory.groww.margins(bearer(token))
+            .requirePayload("Fresh Alpha cash for manual short")
+        val cash = com.multify.traderpro.engine.BrokerEntryCapitalPolicy.brokerCncCash(
+            margin.clearCash, margin.equity?.cncBalanceAvailable ?: 0.0
+        )
+        val capital = com.multify.traderpro.engine.BrokerEntryCapitalPolicy.decide(
+            sizing.quantity, price, settings.holdingBudgetRupees.toDouble(),
+            settings.maxTotalCapitalRupees.toDouble(),
+            settings.maxConcurrentHoldings, existing.size,
+            existing.sumOf { it.quantity.toDouble() * it.entryPrice }, cash
+        )
+        require(capital.allowedQuantity > 0) {
+            "Manual short blocked: ${capital.reason} (uses Alpha existing per-order budget)"
+        }
+        require(ManualShortIntradayPolicy.mayOpen(ZonedDateTime.now(INDIA)) &&
+            marketSession() == "OPEN") {
+            "Manual short entry cutoff reached during preflight"
+        }
+        require(System.currentTimeMillis() - quoteReceiptAtMs in
+            0L..CircuitAwareBuyPolicy.MAX_QUOTE_AGE_MS) {
+            "Manual short Alpha entry quote expired during cash/order checks; no order sent"
+        }
+        val ref = stableRef("MSS", "${ZonedDateTime.now(INDIA).toLocalDate()}|$symbol|MANUAL_MIS_SHORT")
+        val intent = ManualShortPosition(
+            symbol = symbol, reference = ref,
+            openedAtMs = System.currentTimeMillis(),
+            quantity = capital.allowedQuantity, entryPrice = 0.0,
+            lowestPrice = 0.0, stopTrigger = 0.0,
+            state = "ENTRY_PENDING"
+        )
+        saveManualShort(intent) // once, BEFORE actual Alpha SELL
+        val filled = try {
+            submitMarketOrder(token, symbol, "SELL", capital.allowedQuantity, "MIS", ref)
+        } catch (e: Throwable) {
+            preferences.setSafetyHalt(true)
+            auditLogger.log("SAFETY", "MANUAL_SHORT_SELL_ACK_UNRESOLVED", mapOf(
+                "symbol" to symbol, "reference" to ref,
+                "reason" to (e.message ?: e.javaClass.simpleName),
+                "new_buys_halted" to true, "no_blind_resubmission" to true
+            ))
+            throw e
+        }
+        val qty = filled.filledQuantity?.takeIf { it > 0 }
+            ?: error("Manual short broker fill quantity unverified")
+        val fill = filled.averageFillPrice?.takeIf { it.isFinite() && it > 0.0 }
+            ?: runCatching {
+                apiFactory.groww.orderStatus(bearer(token), filled.growwOrderId)
+                    .requirePayload("Verify actual Manual short SELL fill price")
+                    .averageFillPrice?.takeIf { it.isFinite() && it > 0.0 }
+            }.getOrNull()
+            ?: run {
+                preferences.setSafetyHalt(true)
+                error("Manual MIS SELL filled but actual entry cost is unverified. Reconcile Alpha immediately; new buys halted.")
+            }
+        val opened = intent.copy(
+            state = "ENTRY_FILLED_UNPROTECTED", quantity = qty, entryPrice = fill,
+            lowestPrice = fill,
+            stopTrigger = roundSmartOrderPrice(ManualShortIntradayPolicy.stopForLowWater(fill, fill)),
+            entryOrderId = filled.growwOrderId
+        )
+        saveManualShort(opened)
+        val secured = runCatching { protectManualShort(token, opened) }
+            .onFailure {
+                preferences.setSafetyHalt(true)
+                auditLogger.log("SAFETY", "UNPROTECTED_MANUAL_MIS_SHORT", mapOf(
+                    "symbol" to symbol, "quantity" to qty,
+                    "reason" to (it.message ?: it.javaClass.simpleName),
+                    "no_new_auto_or_manual_buys" to true,
+                    "groww_manual_action_required" to true
+                ))
+            }.getOrNull()
+        if (secured == null) {
+            return@withLock "MIS SHORT $symbol filled but BUY stop NOT VERIFIED. SAFETY HALT; inspect Groww positions/orders NOW."
+        }
+        "Manual SELL $symbol · Alpha MIS SHORT $qty shares at ₹${fmt(fill)} · broker BUY SL-M stop ₹${fmt(secured.stopTrigger)} VERIFIED"
+        }
+    }
+
+    /**
+     * Independent MIS-short monitor. Never feeds a SHORT into CNC long GTT/SELL
+     * handlers. Restores pending entry/stop/cover references after process death.
+     * API failures never authorize another POST.
+     */
+    suspend fun monitorManualShortIntraday(): Int = manualShortMutex.withLock {
+        var row = manualShortState() ?: return@withLock 0
+        if (!row.unresolved()) return@withLock 0
+        // Independent Alpha NON_TRADING pacing: avoid duplicating status and
+        // position reads on every 1-second CNC monitor wake. Force close never
+        // waits behind this read-only interval.
+        val checkAt = System.currentTimeMillis()
+        if (!ManualShortIntradayPolicy.mustSquareOff(ZonedDateTime.now(INDIA)) &&
+            checkAt - manualShortLastBrokerCheckAtMs in 0L..4_999L
+        ) return@withLock 1
+        manualShortLastBrokerCheckAtMs = checkAt
+        val token = ensureToken() ?: run {
+            preferences.setSafetyHalt(true)
+            return@withLock 1
+        }
+        try {
+            if (row.state == "ENTRY_PENDING") {
+                val ack = manualShortOrderByReference(token, row.reference)
+                if (ack.orderStatus.uppercase(Locale.US) in setOf("CANCELLED", "REJECTED", "FAILED") &&
+                    (ack.filledQuantity ?: 0) == 0) {
+                    saveManualShort(row.copy(state = "CANCELLED_NO_FILL"))
+                    return@withLock 0
+                }
+                require(ack.orderStatus.equals("EXECUTED", true) ||
+                    (ack.filledQuantity ?: 0) > 0) {
+                    "Unresolved Manual short entry acknowledgement"
+                }
+                val qty = ack.filledQuantity?.takeIf { it > 0 } ?: row.quantity
+                val fill = ack.averageFillPrice?.takeIf { it.isFinite() && it > 0.0 }
+                    ?: error("Manual short fill price unknown; protection cannot be sized")
+                row = row.copy(
+                    state = "ENTRY_FILLED_UNPROTECTED", entryOrderId = ack.growwOrderId,
+                    quantity = qty, entryPrice = fill, lowestPrice = fill,
+                    stopTrigger = roundSmartOrderPrice(ManualShortIntradayPolicy.stopForLowWater(fill, fill))
+                )
+                saveManualShort(row)
+            }
+            if (row.state == "ENTRY_FILLED_UNPROTECTED" || row.state == "STOP_PENDING") {
+                if (row.state == "STOP_PENDING" && row.protectionOrderId.isBlank()) {
+                    val status = manualShortOrderByReference(token, row.protectionReference)
+                    val id = com.multify.traderpro.engine.BrokerOrderAcknowledgementPolicy
+                        .usableId(status.growwOrderId)
+                        ?: error("Manual short protective order unknown; reconcile in Groww")
+                    row = row.copy(protectionOrderId = id)
+                    saveManualShort(row)
+                }
+                row = protectManualShort(token, row)
+            }
+            if (row.state == "COVER_PENDING") {
+                val close = manualShortOrderByReference(token, row.coverReference)
+                if ((close.filledQuantity ?: 0) > 0 || close.orderStatus.equals("EXECUTED", true)) {
+                    val net = manualMisBrokerQty(token, row.symbol)
+                    if (net == 0) {
+                        saveManualShort(row.copy(state = "CLOSED", coverOrderId = close.growwOrderId,
+                            note = "COVER_CONFIRMED_BROKER_FLAT"))
+                        return@withLock 0
+                    }
+                }
+                error("Manual short BUY-to-cover not fully reconciled")
+            }
+            if (row.state != "PROTECTED") return@withLock 1
+            val net = manualMisBrokerQty(token, row.symbol)
+            if (net == 0) {
+                val stop = apiFactory.groww.orderStatus(bearer(token), row.protectionOrderId)
+                    .requirePayload("Check orphaned manual MIS stop")
+                if (manualShortPendingStop(stop.orderStatus)) {
+                    apiFactory.groww.cancelOrder(
+                        bearer(token), OrderCancelRequest(growwOrderId = row.protectionOrderId)
+                    ).requirePayload("Cancel orphaned manual short BUY stop")
+                    val cancelled = apiFactory.groww.orderStatus(bearer(token), row.protectionOrderId)
+                        .requirePayload("Verify orphaned MIS stop cancelled")
+                    require(cancelled.orderStatus.equals("CANCELLED", true)) {
+                        "MIS position flat but protective BUY stop still unverified"
+                    }
+                }
+                saveManualShort(row.copy(state = "CLOSED", note = "BROKER_MIS_POSITION_FLAT"))
+                return@withLock 0
+            }
+            require(net == -row.quantity) {
+                "Manual short net quantity mismatch: broker=$net expected=-${row.quantity}"
+            }
+            val stopOrder = apiFactory.groww.orderStatus(bearer(token), row.protectionOrderId)
+                .requirePayload("Manual short pending SL-M")
+            require(manualShortPendingStop(stopOrder.orderStatus)) {
+                "Manual short protection not pending: ${stopOrder.orderStatus}"
+            }
+            if (ManualShortIntradayPolicy.mustSquareOff(ZonedDateTime.now(INDIA))) {
+                coverManualShortLocked(token, row, "MANDATORY_1455_IST_SQUARE_OFF")
+                return@withLock if (manualShortState()?.unresolved() == true) 1 else 0
+            }
+            // Bound quote requests to the protection-cadence; never touch Beta.
+            if (System.currentTimeMillis() - row.lastObservedAtMs < 5_000L) return@withLock 1
+            val quote = apiFactory.groww.quote(
+                bearer(token), tradingSymbol = row.symbol,
+                trafficPriority = MarketDataPriorityAdmissionPolicy.PROTECTION
+            ).requirePayload("Manual MIS short trailing Alpha quote")
+            val ltp = quote.lastPrice?.takeIf { it.isFinite() && it > 0.0 }
+                ?: error("Missing fresh Alpha quote for MIS short")
+            val low = if (row.lowestPrice > 0.0) minOf(row.lowestPrice, ltp) else ltp
+            val rawDesired = ManualShortIntradayPolicy.tighterStop(row.stopTrigger, row.entryPrice, low)
+            // Use the same safe NSE tick rounding already applied to CNC GTT
+            // stops; never raise an existing MIS protective BUY stop.
+            val desired = minOf(row.stopTrigger, roundSmartOrderPrice(rawDesired))
+            if (desired + 0.000001 < row.stopTrigger) {
+                val modified = apiFactory.groww.modifyOrder(
+                    bearer(token), OrderModifyRequest(
+                        quantity = row.quantity, triggerPrice = desired,
+                        orderType = "SL_M", growwOrderId = row.protectionOrderId
+                    )
+                ).requirePayload("Tighten Manual MIS BUY stop")
+                val id = com.multify.traderpro.engine.BrokerOrderAcknowledgementPolicy
+                    .usableId(modified.growwOrderId)
+                require(id == row.protectionOrderId) {
+                    "Manual MIS stop modification did not confirm same broker order"
+                }
+                val reread = apiFactory.groww.orderStatus(bearer(token), row.protectionOrderId)
+                    .requirePayload("Verify tightened MIS short stop")
+                require(manualShortPendingStop(reread.orderStatus)) {
+                    "Manual short stop modified but no longer pending: ${reread.orderStatus}"
+                }
+                row = row.copy(stopTrigger = desired)
+                auditLogger.log("MANUAL_SHORT", "REVERSE_TRAIL_TIGHTENED", mapOf(
+                    "symbol" to row.symbol, "stop_price" to desired, "low_water" to low,
+                    "same_broker_stop_id" to row.protectionOrderId,
+                    "never_loosen" to true
+                ))
+            }
+            row = row.copy(lowestPrice = low, lastObservedAtMs = System.currentTimeMillis())
+            saveManualShort(row)
+            1
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (e: Throwable) {
+            preferences.setSafetyHalt(true)
+            auditLogger.log("SAFETY", "MANUAL_SHORT_RECONCILIATION_REQUIRED", mapOf(
+                "symbol" to row.symbol, "state" to row.state,
+                "reason" to (e.message ?: e.javaClass.simpleName),
+                "may_be_open_and_unprotected" to true,
+                "no_blind_buy_to_cover_or_short_reentry" to true
+            ))
+            1
+        }
+    }
+
+    private suspend fun coverManualShortLocked(token: String, original: ManualShortPosition, reason: String) {
+        var row = original
+        require(row.state == "PROTECTED") { "Cannot square off unresolved Manual MIS short" }
+        require(manualMisBrokerQty(token, row.symbol) == -row.quantity) {
+            "Cannot BUY to cover until exact negative MIS position is verified"
+        }
+        apiFactory.groww.cancelOrder(
+            bearer(token), OrderCancelRequest(growwOrderId = row.protectionOrderId)
+        ).requirePayload("Cancel pending MIS short stop before square off")
+        val cancelled = apiFactory.groww.orderStatus(bearer(token), row.protectionOrderId)
+            .requirePayload("Verify MIS stop cancelled before BUY cover")
+        require(cancelled.orderStatus.equals("CANCELLED", true)) {
+            "Cannot BUY to cover: stop cancellation unconfirmed"
+        }
+        if (manualMisBrokerQty(token, row.symbol) == 0) {
+            saveManualShort(row.copy(state = "CLOSED", note = "BROKER_FLAT_AFTER_STOP_CANCEL"))
+            return
+        }
+        val coverRef = stableRef("MSC", row.reference + "|BUY_COVER")
+        row = row.copy(state = "COVER_PENDING", coverReference = coverRef, note = reason)
+        saveManualShort(row) // no blind duplicate BUY-to-cover
+        val cover = submitMarketOrder(token, row.symbol, "BUY", row.quantity, "MIS", coverRef)
+        if (manualMisBrokerQty(token, row.symbol) == 0) {
+            saveManualShort(row.copy(state = "CLOSED", coverOrderId = cover.growwOrderId,
+                note = "INTRADAY_SHORT_BUY_COVER_CONFIRMED"))
+            auditLogger.log("MANUAL_SHORT", "BROKER_MIS_SHORT_CLOSED", mapOf(
+                "symbol" to row.symbol, "reason" to reason,
+                "cover_order_id" to cover.growwOrderId,
+                "realized_pnl_not_assumed_without_fill_prices" to true
+            ))
+        } else {
+            error("Manual short cover submitted but broker net position not flat")
+        }
+    }
+
     suspend fun executeManualNse(symbolInput: String): String {
         val symbol = symbolInput.trim().uppercase(Locale.US)
         require(nseSymbols.hasFullInstrumentMaster() && nseSymbols.isKnown(symbol)) {
@@ -13673,6 +14108,9 @@ class TradingRepository @Inject constructor(
         // CNC entries (including Fixed/Univest), not just another WRM order.
         // Exclude this order's own *durably committed* reference, which is
         // deliberately RESERVED before it reaches this shared gateway.
+        require(manualShortState()?.unresolved() != true) {
+            "All new CNC BUYs blocked: Manual MIS short is open or broker reconciliation is unresolved"
+        }
         val unresolvedRangeOrders = workingRangeRecommendationStore.pendingAutoBuyIntents()
             .filter { it.autoBuyReference != reference }
         require(unresolvedRangeOrders.isEmpty()) {

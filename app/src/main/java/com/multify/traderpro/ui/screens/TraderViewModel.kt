@@ -338,6 +338,24 @@ class TraderViewModel @Inject constructor(
     }
 
     /** One explicit operator tap, never an Auto-Buy or synthetic Fixed signal. */
+    fun manualShortStatus(): com.multify.traderpro.engine.ManualShortPosition? =
+        repository.manualShortStatus()
+
+    fun executeManualShort(symbol: String) {
+        viewModelScope.launch {
+            remote.value = remote.value.copy(loading = true, error = null, message = null)
+            runCatching { repository.executeManualShort(symbol) }
+                .onSuccess { result ->
+                    remote.value = remote.value.copy(loading = false, message = result, error = null)
+                    refresh(silent = true)
+                }
+                .onFailure {
+                    remote.value = remote.value.copy(loading = false, error = it.userMessage())
+                    refresh(silent = true)
+                }
+        }
+    }
+
     fun executeManualNse(symbol: String) {
         viewModelScope.launch {
             remote.value = remote.value.copy(loading = true, error = null, message = null)
