@@ -71,6 +71,10 @@ jobs:
           master=(root/"data/repository/NseSymbolRepository.kt").read_text()
           assert "7L * 24 * 60 * 60 * 1000" in master
           assert "parseNseInstruments" in (root/"engine/NseInstrumentMasterParser.kt").read_text()
+          app_start=(root/"MultifyApp.kt").read_text()
+          assert 'wm.cancelUniqueWork("nse-symbol-master-monthly-v9015")' in app_start
+          assert 'wm.enqueueUniquePeriodicWork(\n            "nse-symbol-master-weekly-v9028"' in app_start
+          assert "PeriodicWorkRequestBuilder<NseSymbolSyncWorker>(7, TimeUnit.DAYS)" in app_start
           build=Path("app/build.gradle.kts").read_text()
           assert "versionCode = 9028" in build
           print(f"PASS frozen policy bytes: {len(locked)}; manual NSE + weekly sync + Alpha protections added")
