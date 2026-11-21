@@ -657,6 +657,9 @@ internal fun LiteManualScreen(state: TraderUiState, viewModel: TraderViewModel) 
     var actionsExpanded by remember { mutableStateOf(false) }
     var shortConfirmSymbol by remember { mutableStateOf<String?>(null) }
     val shortState = viewModel.manualShortStatus()
+    val manualLongs = state.dashboard?.positions.orEmpty().filter {
+        it.engine == "MANUAL_HOLDING" && it.product.equals("MIS", true)
+    }
     val master = viewModel.manualMasterStatus()
     val ready = viewModel.manualMasterReady()
     // All matches are read from a locally indexed weekly NSE master. Typing
@@ -720,6 +723,19 @@ internal fun LiteManualScreen(state: TraderUiState, viewModel: TraderViewModel) 
                 Text("Last sync: " + master.lastError,
                     color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.labelSmall)
+            }
+        }
+        if (manualLongs.isNotEmpty()) {
+            LiteCard {
+                SectionTitle("Alpha intraday long positions", "${manualLongs.size} open · MIS")
+                manualLongs.forEach { row ->
+                    Text("${row.symbol} · ${row.quantity} shares · entry ${rupees(row.averagePrice)}",
+                        style = MaterialTheme.typography.bodySmall)
+                    Text("SELL SL-M ${rupees(row.smartOrderTriggerPrice ?: row.stopPrice ?: 0.0)} · ${row.smartOrderStatus ?: "STATUS UNKNOWN"} · order ${row.smartOrderId ?: "NOT VERIFIED"}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (row.smartOrderMode == "MIS_LONG_SL_M" && !row.smartOrderId.isNullOrBlank())
+                            MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error)
+                }
             }
         }
         if (shortState != null && shortState.unresolved()) {
