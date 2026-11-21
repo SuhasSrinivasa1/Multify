@@ -9070,7 +9070,16 @@ class TradingRepository @Inject constructor(
         }
         require(existing.all {
             appPositionProtected(it)
-        }) { "Manual short blocked: unprotected app-owned CNC holding" }
+        }) { "Manual short blocked: any app-owned long without verified broker protection" }
+        existing.filter { it.product == "MIS" }.forEach { position ->
+            val id = position.smartOrderId ?: error("MIS long stop ID absent")
+            val brokerStop = apiFactory.groww.orderStatus(
+                bearer(token), id
+            ).requirePayload("Check broker MIS long stop before opening short")
+            require(com.multify.traderpro.engine.MisIntradayLongPolicy.pendingBrokerStop(
+                brokerStop.orderStatus
+            )) { "Short entry forbidden: MIS long stop for ${position.symbol} is unprotected" }
+        }
         val inventory = brokerInventory(token, force = true)
         require((inventory.holdings[symbol]?.quantity ?: 0) == 0 &&
             (inventory.positions[symbol]?.quantity ?: 0) == 0 &&
@@ -14612,6 +14621,19 @@ class TradingRepository @Inject constructor(
         }
         require(unprotected.isEmpty()) {
             "New MIS BUY blocked: app-owned long lacks verified broker-side protection"
+        }
+        // Local state is not perpetual proof. Check each app-owned MIS SELL SL-M
+        // in Alpha's actual order book before allowing a new position.
+        allOwnedOpen.filter { it.product == "MIS" }.forEach { position ->
+            val stopId = position.smartOrderId ?: error("MIS stop ID missing")
+            val verifiedStop = apiFactory.groww.orderStatus(
+                bearer(token), stopId
+            ).requirePayload("Recheck MIS long broker protection before BUY")
+            require(com.multify.traderpro.engine.MisIntradayLongPolicy.pendingBrokerStop(
+                verifiedStop.orderStatus
+            )) {
+                "New MIS BUY blocked: broker SELL stop for ${position.symbol} no longer pending"
+            }
         }
         // Reuse the quote fetched on the signal path. If broker inventory checks made
         // it stale, refresh only this one symbol once, never the full NSE universe.
