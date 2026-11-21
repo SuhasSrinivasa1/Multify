@@ -11736,6 +11736,7 @@ class TradingRepository @Inject constructor(
         allowFreshPostFillProof: Boolean = false,
         deferProtectionRetryToMonitor: Boolean = false
     ): Long {
+        if (position.product == "MIS") return registerMisLongAndProtect(position)
         val lifecycleMutex = positionLifecycleMutexes.computeIfAbsent(position.symbol.uppercase(Locale.US)) { Mutex() }
         return lifecycleMutex.withLock {
         val id = managedDao.insertPosition(position)
@@ -14355,7 +14356,6 @@ class TradingRepository @Inject constructor(
         require(tradingRecoveryReady) { "Broker recovery is still reconciling holdings and sell protection" }
         require(settings.brokerAuthenticated) { "Groww is not authenticated" }
         require(settings.staticIpMatched) { "Static IP verification failed" }
-        require(settings.brokerDdpiEnabled) { "DDPI is required for CNC holdings" }
         require(!settings.safetyHalt) { "Safety halt is active" }
         require(marketSession() == "OPEN") { "NSE regular market session is not open" }
     }
@@ -14429,7 +14429,6 @@ class TradingRepository @Inject constructor(
     private fun preFixedAutoBuyExecutionGuard(settings: AppSettings) {
         require(settings.brokerAuthenticated) { "Groww is not authenticated" }
         require(settings.staticIpMatched) { "Static IP verification failed" }
-        require(settings.brokerDdpiEnabled) { "DDPI is required for CNC holdings" }
         require(!settings.safetyHalt) { "Safety halt is active" }
         require(marketSession() == "OPEN") { "NSE regular market session is not open" }
     }
@@ -14445,6 +14444,25 @@ class TradingRepository @Inject constructor(
         allowOtherSymbolProtectionRecovery: Boolean = false,
         recommendationId: Long? = null
     ): OrderPayload = appOwnedBuyMutex.withLock {
+        require(com.multify.traderpro.engine.MisIntradayLongPolicy.mayEnter(ZonedDateTime.now(INDIA))) {
+            "New Alpha MIS entries end at 14:30 IST to allow reliable square-off"
+        }
+        // Fail closed on unresolved crash-era MIS entries before dispatching
+        // any new broker order. Only a tracked, BROKER-protected row clears it.
+        for ((ref, value) in misIntradayEntryPrefs.all) {
+            if (ref == reference) {
+                error("MIS order reference already attempted: $ref; never blindly resubmit")
+            }
+            if (value !is String || value.startsWith("PROTECTED|")) continue
+            val registered = managedDao.openPositions().firstOrNull {
+                it.openReferenceId == ref && it.product == "MIS" && appOwned(it)
+            }
+            if (registered != null && appPositionProtected(registered)) {
+                require(misIntradayEntryPrefs.edit().putString(
+                    ref, "PROTECTED|${registered.symbol}|${registered.smartOrderId}"
+                ).commit()) { "MIS recovered entry intent cannot be cleared" }
+            } else error("Unresolved broker MIS entry intent $ref; reconcile Alpha first")
+        }
         if (recommendationId != null && isFixedRecommendationExecutionConsumed(recommendationId)) {
             auditLogger.log("FIXED_AUTO_BUY", "RECOMMENDATION_EVENT_ALREADY_CONSUMED", mapOf(
                 "recommendation_id" to recommendationId,
@@ -14479,9 +14497,7 @@ class TradingRepository @Inject constructor(
                 it.openReferenceId == pendingRef && appOwned(it)
             }
             val protected = recovered != null &&
-                com.multify.traderpro.engine.GttProtectionReadinessPolicy.verified(
-                    recovered.smartOrderMode, recovered.smartOrderId, recovered.smartOrderStatus
-                )
+                appPositionProtected(recovered)
             if (protected) {
                 check(manualBuyIntentPrefs.edit().putString(pendingRef, "PROTECTED|"+recovered!!.symbol).commit()) {
                     "Manual protection-intent ledger write failed"
@@ -14494,13 +14510,14 @@ class TradingRepository @Inject constructor(
         val broker = brokerInventory(token, force = true)
         val demat = broker.holdings[key]?.quantity ?: 0
         val cnc = broker.positions[key]?.quantity ?: 0
-        require(demat <= 0 && cnc <= 0 && managedDao.openPositions().none { it.symbol.equals(symbol, true) }) {
+        val mis = manualMisBrokerQty(token, key)
+        require(demat <= 0 && cnc <= 0 && mis == 0 &&
+            managedDao.openPositions().none { it.symbol.equals(symbol, true) }) {
             "BUY blocked: $symbol already exists in Groww/app holdings; ownership must stay separate"
         }
         val allOwnedOpen = managedDao.openPositions().filter(::appOwned)
         val unprotected = allOwnedOpen.filterNot {
-            com.multify.traderpro.engine.GttProtectionReadinessPolicy.verified(
-                it.smartOrderMode, it.smartOrderId, it.smartOrderStatus)
+            appPositionProtected(it)
         }
         if (unprotected.isNotEmpty()) {
             auditLogger.log("SAFETY",
@@ -14512,8 +14529,8 @@ class TradingRepository @Inject constructor(
                     "new_symbol_ownership_check_passed" to true,
                     "buy_allowed" to allowOtherSymbolProtectionRecovery))
         }
-        require(allowOtherSymbolProtectionRecovery || unprotected.isEmpty()) {
-            "New BUY blocked: app-owned holding lacks verified broker GTT"
+        require(unprotected.isEmpty()) {
+            "New MIS BUY blocked: app-owned long lacks verified broker-side protection"
         }
         // Reuse the quote fetched on the signal path. If broker inventory checks made
         // it stale, refresh only this one symbol once, never the full NSE universe.
@@ -14559,7 +14576,8 @@ class TradingRepository @Inject constructor(
         val recentBrokerOrders = apiFactory.groww.orderList(bearer(token), page = 0)
             .requirePayload("Alpha pending orders before BUY ${symbol}").orderList
         val unresolvedBrokerCncBuys = recentBrokerOrders.filter { row ->
-            row.transactionType.equals("BUY", true) && row.product.equals("CNC", true) &&
+            row.transactionType.equals("BUY", true) &&
+                row.product.uppercase(Locale.US) in setOf("CNC", "MIS") &&
                 row.orderStatus.orEmpty().uppercase(Locale.US) !in
                     setOf("EXECUTED", "COMPLETED", "REJECTED", "CANCELLED", "FAILED")
         }
@@ -14589,6 +14607,9 @@ class TradingRepository @Inject constructor(
                     .isFixedNewEntryWindow(ZonedDateTime.now(INDIA))) {
                 "BUY blocked: Working Range Auto-Buy disabled or session entry window ended during broker preflight"
             }
+        }
+        require(com.multify.traderpro.engine.MisIntradayLongPolicy.mayEnter(ZonedDateTime.now(INDIA))) {
+            "MIS BUY rejected: 14:30 IST intraday entry cutoff passed during preflight"
         }
         require(System.currentTimeMillis() - freshAt in
             0L..CircuitAwareBuyPolicy.MAX_QUOTE_AGE_MS) {
@@ -14623,8 +14644,42 @@ class TradingRepository @Inject constructor(
                 "blind_resubmission" to false
             ))
         }
-        val order = submitMarketOrder(token, symbol, "BUY", capitalVerdict.allowedQuantity, "CNC", reference,
-            notificationStartedNs, buyLimitPrice = price.limitPrice)
+        check(misIntradayEntryPrefs.edit().putString(
+            reference, "PENDING|$symbol|${System.currentTimeMillis()}"
+        ).commit()) { "MIS entry intent could not be durably reserved; no BUY sent" }
+        val rawOrder = try {
+            submitMarketOrder(
+                token, symbol, "BUY", capitalVerdict.allowedQuantity, "MIS", reference,
+                notificationStartedNs, buyLimitPrice = price.limitPrice
+            )
+        } catch (failure: Throwable) {
+            preferences.setSafetyHalt(true)
+            auditLogger.log("SAFETY", "MIS_BUY_ACK_UNRESOLVED", mapOf(
+                "symbol" to symbol, "reference" to reference,
+                "reason" to (failure.message ?: failure.javaClass.simpleName),
+                "no_blind_resubmission" to true
+            ))
+            throw failure
+        }
+        // Unlike a CNC delivery position, a short-lived MIS stop must use
+        // the ACTUAL broker cost basis; do not calculate protection from LTP.
+        val order = if (rawOrder.averageFillPrice?.takeIf { it.isFinite() && it > 0.0 } != null)
+            rawOrder else {
+                val byId = runCatching {
+                    apiFactory.groww.orderStatus(bearer(token), rawOrder.growwOrderId)
+                        .requirePayload("Verify MIS BUY actual fill price")
+                }.getOrNull()
+                val actual = byId?.averageFillPrice?.takeIf { it.isFinite() && it > 0.0 }
+                if (actual == null) {
+                    preferences.setSafetyHalt(true)
+                    error("MIS BUY broker confirmed but fill PRICE unknown: $symbol $reference. " +
+                        "Open Groww positions and protect manually; further orders halted.")
+                }
+                rawOrder.copy(averageFillPrice = actual)
+            }
+        check(misIntradayEntryPrefs.edit().putString(
+            reference, "BROKER_ACK|$symbol|${order.growwOrderId}"
+        ).commit()) { "MIS BUY filled but durable ACK persistence failed; reconcile Alpha" }
         if (reference.startsWith("MNH")) {
             check(manualBuyIntentPrefs.edit().putString(
                 reference, "BROKER_ACK|$symbol|${order.growwOrderId}"
