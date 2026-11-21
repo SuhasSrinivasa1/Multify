@@ -93,6 +93,8 @@ jobs:
           assert "continue" in source[start:end]
           assert source[:start]+source[end:]==original(p.as_posix()).decode(), "ORDER_PATH_OR_REPOSITORY_UNEXPECTEDLY_CHANGED"
           assert "versionCode = 9031" in Path("app/build.gradle.kts").read_text()
+          assert 'applicationIdSuffix = ".mondaytest"' in Path("app/build.gradle.kts").read_text()
+          assert 'android:label="Multify Monday TEST"' in Path("app/src/debug/AndroidManifest.xml").read_text()
           assert "fixedAutoBuyEnabled: Boolean = false" in (root/"data/preferences/AppPreferences.kt").read_text()
           print(f"PASS: {len(locked)} frozen policies untouched; repository change only broker-flat terminal-GTT quarantine")
           PY
@@ -126,14 +128,17 @@ jobs:
           apk=app/build/outputs/apk/debug/app-debug.apk
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$apk" | tee signer-v9031.txt
           "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$apk" | head -n 4 | tee package-v9031.txt
+          grep -F "name='com.multify.traderpro.vivoy73final.mondaytest'" package-v9031.txt >/dev/null || {
+            echo "Refusing to package test build with installed production application ID"; exit 1;
+          }
           sha256sum "$apk" | tee SHA256-v9031.txt
           cert=$(grep -i 'Signer #1 certificate SHA-256 digest' signer-v9031.txt | head -n 1 | sed 's/.*: //' | tr -d ':' | tr '[:upper:]' '[:lower:]')
           expected="3f72d5c24e676c712d9e7e9feaa829960bfca9cdffc9ea4da6738372824e8755"
           if [[ -f app/multify-v4-stable.jks ]]; then
             [[ "$cert" == "$expected" ]] || { echo "Unexpected stable signing certificate"; exit 1; }
-            echo "VERIFIED_STABLE_SIGNER_IN_PLACE_CAPABLE" | tee signer-channel-v9031.txt
+            echo "VERIFIED_STABLE_SIGNER_SEPARATE_TEST_APP_ID" | tee signer-channel-v9031.txt
           else
-            echo "EPHEMERAL_DEBUG_CERT_DO_NOT_OVERWRITE_INSTALLED_APP" | tee signer-channel-v9031.txt
+            echo "EPHEMERAL_DEBUG_CERT_SEPARATE_TEST_APP_ID" | tee signer-channel-v9031.txt
           fi
           stat -c "APK size (bytes): %s" "$apk" | tee size-v9031.txt
           echo "WARNING: CI debug signer may not match installed APK; never uninstall with live holdings or unexported state."
