@@ -35,7 +35,7 @@ class NseInstrumentMasterParserTest {
         assertEquals(4, parsed.size)
         assertEquals("Tata Consultancy Services Limited",
             parsed.first { it.symbol == "TCS" }.companyName)
-        assertEquals(listOf("TATASTEEL", "TATAPOWER", "TCS"),
+        assertEquals(listOf("TATAPOWER", "TATASTEEL", "TCS"),
             parsed.filter { it.companyName.contains("Tata", ignoreCase = true) }
                 .map { it.symbol }.sorted())
     }
