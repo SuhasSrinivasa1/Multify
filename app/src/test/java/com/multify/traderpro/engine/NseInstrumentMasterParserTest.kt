@@ -26,11 +26,11 @@ class NseInstrumentMasterParserTest {
     }
 
     @Test fun manualNseSearchUsesActualCompanyNamesNotJustSymbolPrefixes() {
-        val csv = "SYMBOL,NAME OF COMPANY,SERIES\\n" +
-            "TCS,Tata Consultancy Services Limited,EQ\\n" +
-            "TATASTEEL,Tata Steel Limited,EQ\\n" +
-            "TATAPOWER,Tata Power Company Limited,EQ\\n" +
-            "TITAN,Titan Company Limited,EQ\\n"
+        val csv = "SYMBOL,NAME OF COMPANY,SERIES\n" +
+            "TCS,Tata Consultancy Services Limited,EQ\n" +
+            "TATASTEEL,Tata Steel Limited,EQ\n" +
+            "TATAPOWER,Tata Power Company Limited,EQ\n" +
+            "TITAN,Titan Company Limited,EQ\n"
         val parsed = NseInstrumentMasterParser.parseNseInstruments(StringReader(csv))
         assertEquals(4, parsed.size)
         assertEquals("Tata Consultancy Services Limited",
@@ -41,9 +41,9 @@ class NseInstrumentMasterParserTest {
     }
 
     @Test fun growwFallbackPreservesItsCompanyNameColumn() {
-        val csv = "exchange,segment,trading_symbol,series,instrument_type,name\\n" +
-            "NSE,CASH,TITAN,EQ,EQ,Titan Company Limited\\n" +
-            "BSE,CASH,OTHER,EQ,EQ,Other Company\\n"
+        val csv = "exchange,segment,trading_symbol,series,instrument_type,name\n" +
+            "NSE,CASH,TITAN,EQ,EQ,Titan Company Limited\n" +
+            "BSE,CASH,OTHER,EQ,EQ,Other Company\n"
         assertEquals(
             listOf(NseInstrumentMasterParser.ListedEquity("TITAN", "Titan Company Limited")),
             NseInstrumentMasterParser.parseGrowwInstruments(StringReader(csv))
