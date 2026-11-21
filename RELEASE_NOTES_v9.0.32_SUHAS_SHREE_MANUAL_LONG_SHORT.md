@@ -33,7 +33,7 @@
 ## Monday TEST installation
 
 - Application label: **Suhas Shree Trader Pro TEST**
-- Application ID: `com.multify.traderpro.vivoy73final.mondaytest`
+- Application ID: `com.multify.traderpro.vivoy73final.v9032test`
 - Separate debug package/database. It does not import or manage positions created by the existing installed app.
 - Auto-Buy switches remain OFF by default.
 - Keep the existing app responsible for existing live positions and GTTs while shadow-testing this app. Do not uninstall the existing app to install this TEST variant.
