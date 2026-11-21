@@ -8601,6 +8601,7 @@ class TradingRepository @Inject constructor(
      * No Fixed score or PRIMARY confirmation is synthesized.
      */
     suspend fun executeManualShort(symbolInput: String): String = appOwnedBuyMutex.withLock {
+        manualShortMutex.withLock {
         val symbol = symbolInput.trim().uppercase(Locale.US)
         require(nseSymbols.hasFullInstrumentMaster() && nseSymbols.isKnown(symbol)) {
             "Manual SELL requires a current exact NSE CASH stock master entry"
@@ -8644,6 +8645,7 @@ class TradingRepository @Inject constructor(
             bearer(token), tradingSymbol = symbol,
             trafficPriority = MarketDataPriorityAdmissionPolicy.PROTECTION
         ).requirePayload("Fresh Alpha quote before MIS short $symbol")
+        val quoteReceiptAtMs = System.currentTimeMillis()
         val price = quote.lastPrice?.takeIf { it.isFinite() && it > 0.0 }
             ?: error("Manual short requires a valid fresh Alpha price")
         require(ExecutionQuoteLiquidityPolicy.rejectionReason(quote) == null &&
@@ -8676,6 +8678,10 @@ class TradingRepository @Inject constructor(
         require(ManualShortIntradayPolicy.mayOpen(ZonedDateTime.now(INDIA)) &&
             marketSession() == "OPEN") {
             "Manual short entry cutoff reached during preflight"
+        }
+        require(System.currentTimeMillis() - quoteReceiptAtMs in
+            0L..CircuitAwareBuyPolicy.MAX_QUOTE_AGE_MS) {
+            "Manual short Alpha entry quote expired during cash/order checks; no order sent"
         }
         val ref = stableRef("MSS", "${ZonedDateTime.now(INDIA).toLocalDate()}|$symbol|MANUAL_MIS_SHORT")
         val intent = ManualShortPosition(
@@ -8722,6 +8728,7 @@ class TradingRepository @Inject constructor(
             return@withLock "MIS SHORT $symbol filled but BUY stop NOT VERIFIED. SAFETY HALT; inspect Groww positions/orders NOW."
         }
         "Manual SELL $symbol · Alpha MIS SHORT $qty shares at ₹${fmt(fill)} · broker BUY SL-M stop ₹${fmt(secured.stopTrigger)} VERIFIED"
+        }
     }
 
     /**
