@@ -103,7 +103,9 @@ class NseSymbolRepository @Inject constructor(
         val q = query.trim().uppercase(Locale.US)
         if (q.isBlank()) return emptyList()
         return instruments().asSequence().filter {
-            it.symbol.contains(q, ignoreCase = true) || it.companyName.contains(q, ignoreCase = true)
+            it.symbol.contains(q, ignoreCase = true) ||
+                it.companyName.contains(q, ignoreCase = true) ||
+                ((q == "TATA" || q == "TATA GROUP") && it.symbol in TATA_GROUP_ALIASES)
         }.sortedWith(compareBy<NseInstrumentMasterParser.ListedEquity> {
             if (it.symbol.startsWith(q, ignoreCase = true)) 0
             else if (it.companyName.startsWith(q, ignoreCase = true)) 1
@@ -205,6 +207,19 @@ class NseSymbolRepository @Inject constructor(
     }
 
     companion object {
+        // Corporate-family aliases make searches such as "Tata" include listed
+        // NSE affiliates whose legal names omit "Tata" (Titan, Trent, Voltas,
+        // Indian Hotels, Rallis, etc.). Intersect with the live NSE master;
+        // aliases are display-only and never authorize an unlisted BUY.
+        // Membership is curated from Tata's public company/stock-data pages;
+        // names/tickers still refresh weekly from official instrument files.
+        private val TATA_GROUP_ALIASES = setOf(
+            "TCS", "TATAMOTORS", "TMPV", "TMLCV", "TATASTEEL", "TATAPOWER",
+            "TATACHEM", "TATACOMM", "TATACONSUM", "TATAELXSI", "TATATECH",
+            "TATAINVEST", "TATACAP", "TTML", "TITAN", "TRENT", "VOLTAS",
+            "INDHOTEL", "RALLIS", "TEJASNET", "NELCO", "TRF", "ASAL",
+            "ARTSONENG", "TAYO", "TATACOFFEE", "TATAMETALI"
+        )
         const val EQUITY_URL = "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
         const val NSE_HOME_URL = "https://www.nseindia.com/"
         const val GROWW_INSTRUMENT_URL = "https://growwapi-assets.groww.in/instruments/instrument.csv"
