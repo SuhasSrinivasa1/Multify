@@ -59,7 +59,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-internal enum class LitePage { FIXED, WORKING_RANGE, AVERAGES, SETTINGS }
+internal enum class LitePage { FIXED, WORKING_RANGE, MANUAL, AVERAGES, SETTINGS }
 private enum class LiteTone { POSITIVE, WARNING, NEGATIVE, INFO, NEUTRAL }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -96,6 +96,7 @@ fun FixedLiteApp(viewModel: TraderViewModel = hiltViewModel()) {
                                 when (page) {
                                     LitePage.FIXED -> "15-minute Fixed strategy"
                                     LitePage.WORKING_RANGE -> "Working Range pilot"
+                                    LitePage.MANUAL -> "Search and buy NSE shares"
                                     LitePage.AVERAGES -> "Observed Fixed outcomes"
                                     LitePage.SETTINGS -> "Accounts and controls"
                                 },
@@ -127,12 +128,13 @@ fun FixedLiteApp(viewModel: TraderViewModel = hiltViewModel()) {
             when (page) {
                 LitePage.FIXED -> LiteFixedScreen(state, viewModel::generateFixed) { confirmBuy = it }
                 LitePage.WORKING_RANGE -> LiteRangeScreen(state)
+                LitePage.MANUAL -> LiteManualScreen(state, viewModel)
                 LitePage.AVERAGES -> LiteAveragesScreen(state)
                 LitePage.SETTINGS -> LiteSettingsScreen(
                     state, viewModel,
                     onEnableRequested = { confirmEnable = it },
                     onResetRequested = { confirmHaltReset = true },
-                    onExport = { export.launch("FixedMomentum-v9027-diagnostics.zip") }
+                    onExport = { export.launch("FixedMomentum-v9028-manual-diagnostics.zip") }
                 )
             }
         }
@@ -209,6 +211,12 @@ internal fun LiteBottomBar(page: LitePage, onNavigate: (LitePage) -> Unit) {
             onClick = { onNavigate(LitePage.WORKING_RANGE) },
             icon = { Icon(Icons.Default.Timeline, contentDescription = null) },
             label = { Text("Working Range") }
+        )
+        NavigationBarItem(
+            selected = page == LitePage.MANUAL,
+            onClick = { onNavigate(LitePage.MANUAL) },
+            icon = { Icon(Icons.Default.TrendingUp, contentDescription = null) },
+            label = { Text("Manual") }
         )
     }
 }
@@ -636,6 +644,127 @@ private fun FixedRecommendationCard(
             ) { Text(if (allowedNow) "Manual BUY · Alpha" else "BUY unavailable · verify market / Alpha") }
         } else {
             Text("No manual order permission for this observation.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+@Composable
+internal fun LiteManualScreen(state: TraderUiState, viewModel: TraderViewModel) {
+    var query by rememberSaveable { mutableStateOf("") }
+    var selected by rememberSaveable { mutableStateOf<String?>(null) }
+    val master = viewModel.manualMasterStatus()
+    val ready = viewModel.manualMasterReady()
+    // All matches are read from a locally indexed weekly NSE master. Typing
+    // never submits a Groww quote or another network request.
+    val matches = if (ready) viewModel.manualStockMatches(query) else emptyList()
+    val activeSelection = selected?.let { id -> matches.firstOrNull { it.symbol == id } }
+    val authenticated = state.settings.brokerAuthenticated &&
+        state.settings.staticIpMatched && state.settings.brokerDdpiEnabled
+    val marketOpen = NseEquitySessionCalendar.isFixedNewEntryWindow(
+        java.time.ZonedDateTime.now(ZoneId.of("Asia/Kolkata"))
+    )
+    Column(
+        Modifier.fillMaxSize().testTag("manual-screen").padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        LiteCard {
+            SectionTitle("Manual", "NSE CASH · your own stock selection")
+            Text("Search a company or ticker, choose the exact NSE listing, then tap BUY. No separate budget: the Alpha per-order amount in Settings is used automatically.",
+                style = MaterialTheme.typography.bodySmall)
+            OutlinedTextField(
+                value = query,
+                onValueChange = { query = it; selected = null },
+                label = { Text("Search NSE stock or company (e.g. Tata)") },
+                placeholder = { Text("Type company name or symbol") },
+                modifier = Modifier.fillMaxWidth().testTag("manual-stock-search"),
+                singleLine = true
+            )
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween) {
+                Column(Modifier.weight(1f)) {
+                    Text("${master.count} NSE symbols · ${master.source.ifBlank { "Not synced" }}",
+                        style = MaterialTheme.typography.labelSmall)
+                    Text(
+                        if (ready) "Local list ready · weekly refresh"
+                        else "List missing or older than 7 days · sync required",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (ready) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error
+                    )
+                }
+                TextButton(onClick = viewModel::syncManualNseStocks) {
+                    Text("Sync now")
+                }
+            }
+            if (master.lastError.isNotBlank()) {
+                Text("Last sync: " + master.lastError,
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.labelSmall)
+            }
+        }
+        if (selected != null && activeSelection != null) {
+            LiteCard {
+                Text("Selected: " + activeSelection.companyName,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold)
+                Text(activeSelection.symbol + " · NSE CASH · Alpha CNC LONG",
+                    style = MaterialTheme.typography.bodySmall)
+                Text("Applies the existing Fixed exit: -1% initial GTT; +0.55% arm, +0.50% protected gain, then +0.10% steps. No Working Range full-target sell.",
+                    style = MaterialTheme.typography.bodySmall)
+                Text("REAL BUY on one tap. Subject to cash, market hours, fresh Alpha quote, liquidity, duplicate-order and GTT safeguards.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Button(
+                    onClick = {
+                        val symbol = activeSelection.symbol
+                        selected = null
+                        viewModel.executeManualNse(symbol)
+                    },
+                    enabled = ready && authenticated && marketOpen &&
+                        !state.settings.safetyHalt && state.dashboard?.halted != true,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp)
+                        .testTag("manual-buy-alpha")
+                ) { Text("BUY " + activeSelection.symbol + " · Alpha") }
+                if (!marketOpen || !authenticated) {
+                    Text("BUY requires the NSE entry window and authenticated, static-IP-verified Alpha with DDPI.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error)
+                }
+            }
+        }
+        if (query.isBlank()) {
+            Text("Enter a company name to see all locally indexed NSE matches.",
+                style = MaterialTheme.typography.bodyMedium)
+        } else if (!ready) {
+            Text("NSE master is unavailable. Sync before choosing a stock; no order is permitted from an incomplete list.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error)
+        } else if (matches.isEmpty()) {
+            Text("No matching NSE CASH equity in the weekly list.",
+                style = MaterialTheme.typography.bodySmall)
+        } else {
+            Text("${matches.size} matching NSE listing(s) · select one",
+                style = MaterialTheme.typography.labelMedium)
+            LazyColumn(modifier = Modifier.fillMaxWidth().weight(1f).testTag("manual-match-list")) {
+                items(matches, key = { it.symbol }) { stock ->
+                    Surface(
+                        onClick = { selected = stock.symbol },
+                        shape = RoundedCornerShape(10.dp),
+                        color = if (selected == stock.symbol)
+                            MaterialTheme.colorScheme.secondaryContainer
+                        else MaterialTheme.colorScheme.surface,
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
+                    ) {
+                        ListItem(
+                            headlineContent = {
+                                Text(stock.companyName, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            },
+                            supportingContent = { Text(stock.symbol + " · NSE") },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                }
+            }
         }
     }
 }

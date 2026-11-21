@@ -55,11 +55,13 @@ class MultifyApp : Application(), Configuration.Provider {
         TradingSessionStartScheduler.scheduleNext(this)
         // v9.0.14 ran initial and periodic workers together, doubling NSE 403s.
         // Retire both legacy jobs. One unique one-off performs recovery now;
-        // a monthly periodic maintenance job first runs 30 days later.
+        // a weekly periodic maintenance job runs after seven days.
         wm.cancelUniqueWork("nse-symbol-master-initial")
         wm.cancelUniqueWork("nse-symbol-master-monthly")
+        wm.cancelUniqueWork("nse-symbol-master-monthly-v9015")
+        wm.cancelUniqueWork("nse-symbol-master-sync-v9015")
         wm.enqueueUniqueWork(
-            "nse-symbol-master-sync-v9015",
+            "nse-symbol-master-sync-v9028",
             ExistingWorkPolicy.KEEP,
             OneTimeWorkRequestBuilder<NseSymbolSyncWorker>()
                 .setConstraints(network)
@@ -69,10 +71,10 @@ class MultifyApp : Application(), Configuration.Provider {
         // Cancel previously scheduled Forecast news jobs, including pending runs.
         wm.cancelUniqueWork("forecast-news-fallback-15m")
         wm.enqueueUniquePeriodicWork(
-            "nse-symbol-master-monthly-v9015",
+            "nse-symbol-master-weekly-v9028",
             ExistingPeriodicWorkPolicy.KEEP,
-            PeriodicWorkRequestBuilder<NseSymbolSyncWorker>(30, TimeUnit.DAYS)
-                .setInitialDelay(30, TimeUnit.DAYS)
+            PeriodicWorkRequestBuilder<NseSymbolSyncWorker>(7, TimeUnit.DAYS)
+                .setInitialDelay(7, TimeUnit.DAYS)
                 .setConstraints(network)
                 .build()
         )

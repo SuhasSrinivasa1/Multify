@@ -1,0 +1,120 @@
+name: Multify v9.0.28 Manual NSE Alpha acceptance APK
+on:
+  push:
+    branches: [v9028-manual-nse-alpha-fixed-trail]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify-and-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Android SDK
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
+      - name: Frozen strategy, Alpha/Beta and Working Range policy parity
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+          baseline="686f9c960f3ff1f95b99a06ae4a615c5c11991e4"
+          root=Path("app/src/main/java/com/multify/traderpro")
+          locked=[
+            "engine/FixedFinalContract.kt", "engine/FixedLocalStrategyEngine.kt",
+            "engine/FixedMarketDiscoveryPolicy.kt", "engine/FixedForecastPublicationPolicy.kt",
+            "engine/FixedForecastQualityPolicy.kt", "engine/FixedEntryActionabilityPolicy.kt",
+            "engine/FixedMultifyFactorFamilies.kt", "engine/SteppedTrailingPolicy.kt",
+            "engine/HardStopLossPolicy.kt", "engine/WorkingRangeCandidatePolicy.kt",
+            "engine/WorkingRangeEntryMomentumPolicy.kt",
+            "engine/WorkingRangeAutoBuyPolicy.kt", "engine/WorkingRangeExitPolicy.kt",
+            "data/network/BetaReadOnlyInterceptor.kt",
+            "data/network/GrowwApiFactory.kt",
+            "data/network/GrowwRateLimitInterceptor.kt",
+            "data/network/GrowwHistoricalThrottlePolicy.kt",
+            "data/network/BetaResearchGate.kt",
+            "engine/FixedResearchCapacityPolicy.kt",
+            "engine/FixedResearchLtpPacingPolicy.kt",
+            "engine/FixedDualAccountPolicy.kt",
+            "engine/FixedSingleWorkerStartGate.kt",
+            "engine/MarketDataPriorityAdmissionPolicy.kt",
+          ]
+          for p in locked:
+            full=root/p
+            original=subprocess.check_output(["git","show",f"{baseline}:{full.as_posix()}"])
+            assert full.read_bytes()==original, f"LOCK_VIOLATION:{p}"
+          source=(root/"data/repository/TradingRepository.kt").read_text()
+          assert "suspend fun executeManualNse(" in source
+          assert "ENGINE_MANUAL_HOLDING" in source
+          assert 'reference.startsWith("MNH")' in source
+          assert "registerBoughtPositionAndProtect(" in source
+          assert "manualBuyIntentPrefs" in source
+          ui=(root/"ui/screens/FixedLiteApp.kt").read_text()
+          for value in ['LitePage.FIXED','LitePage.WORKING_RANGE','LitePage.MANUAL','manual-stock-search','manual-buy-alpha']:
+            assert value in ui,value
+          master=(root/"data/repository/NseSymbolRepository.kt").read_text()
+          assert "7L * 24 * 60 * 60 * 1000" in master
+          assert "parseNseInstruments" in (root/"engine/NseInstrumentMasterParser.kt").read_text()
+          app_start=(root/"MultifyApp.kt").read_text()
+          assert 'wm.cancelUniqueWork("nse-symbol-master-monthly-v9015")' in app_start
+          assert 'wm.enqueueUniquePeriodicWork(\n            "nse-symbol-master-weekly-v9028"' in app_start
+          assert "PeriodicWorkRequestBuilder<NseSymbolSyncWorker>(7, TimeUnit.DAYS)" in app_start
+          build=Path("app/build.gradle.kts").read_text()
+          assert "versionCode = 9028" in build
+          print(f"PASS frozen policy bytes: {len(locked)}; manual NSE + weekly sync + Alpha protections added")
+          PY
+      - name: Backend regression fixtures
+        run: |
+          python -m pip install --disable-pip-version-check -r backend/requirements.txt
+          python -m pytest -q backend/tests | tee backend-tests-v9028.txt
+      - name: Android unit tests, Compose tests compilation and APK assembly
+        run: |
+          gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest
+          python - <<'PY'
+          import glob,xml.etree.ElementTree as ET,pathlib
+          rows=[ET.parse(p).getroot() for p in glob.glob("app/build/test-results/testDebugUnitTest/TEST-*.xml")]
+          count=sum(int(r.attrib.get("tests",0)) for r in rows)
+          fails=sum(int(r.attrib.get("failures",0))+int(r.attrib.get("errors",0)) for r in rows)
+          assert count>=100 and fails==0,(count,fails)
+          pathlib.Path("android-tests-v9028.txt").write_text(f"{count} tests, {fails} failed\\n")
+          print(count, "Android tests passed")
+          PY
+      - name: Verify APK and debug certificate
+        run: |
+          set -euo pipefail
+          cd app/build/outputs/apk/debug
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs app-debug.apk > signer-v9028.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging app-debug.apk | head -n 4 > package-v9028.txt
+          sha256sum app-debug.apk > SHA256-v9028.txt
+          cat SHA256-v9028.txt package-v9028.txt
+      - name: Upload installable TEST APK and evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Multify-v9.0.28-Manual-NSE-Alpha-TEST
+          path: |
+            app/build/outputs/apk/debug/app-debug.apk
+            app/build/outputs/apk/debug/signer-v9028.txt
+            app/build/outputs/apk/debug/package-v9028.txt
+            app/build/outputs/apk/debug/SHA256-v9028.txt
+            app/build/test-results/testDebugUnitTest/
+            android-tests-v9028.txt
+            backend-tests-v9028.txt
+          if-no-files-found: warn
+          retention-days: 30

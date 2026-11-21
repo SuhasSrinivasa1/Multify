@@ -8,6 +8,10 @@ import com.multify.traderpro.data.network.DashboardDto
 import com.multify.traderpro.data.preferences.AppSettings
 import com.multify.traderpro.data.preferences.AppPreferences
 import com.multify.traderpro.data.repository.TradingRepository
+import com.multify.traderpro.data.repository.NseSymbolRepository
+import com.multify.traderpro.engine.NseInstrumentMasterParser
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -35,7 +39,8 @@ data class TraderUiState(
 @HiltViewModel
 class TraderViewModel @Inject constructor(
     private val repository: TradingRepository,
-    private val preferences: AppPreferences
+    private val preferences: AppPreferences,
+    private val nseSymbols: NseSymbolRepository
 ) : ViewModel() {
     private val remote = MutableStateFlow(RemoteState())
 
@@ -305,6 +310,43 @@ class TraderViewModel @Inject constructor(
                 )
                 refresh(silent = true)
             }.onFailure { remote.value = remote.value.copy(loading = false, error = it.userMessage()) }
+        }
+    }
+
+    fun manualStockMatches(query: String): List<NseInstrumentMasterParser.ListedEquity> =
+        nseSymbols.search(query)
+
+    fun manualMasterStatus(): NseSymbolRepository.Status = nseSymbols.status()
+
+    fun manualMasterReady(): Boolean = nseSymbols.hasFullInstrumentMaster()
+
+    fun syncManualNseStocks() {
+        viewModelScope.launch {
+            remote.value = remote.value.copy(loading = true, error = null, message = null)
+            runCatching { withContext(Dispatchers.IO) { nseSymbols.refresh() } }
+                .onSuccess { result ->
+                    remote.value = remote.value.copy(
+                        loading = false,
+                        message = "NSE stock list synced · ${result.count} listed symbols · ${result.source}",
+                        error = null
+                    )
+                }
+                .onFailure {
+                    remote.value = remote.value.copy(loading = false, error = it.userMessage())
+                }
+        }
+    }
+
+    /** One explicit operator tap, never an Auto-Buy or synthetic Fixed signal. */
+    fun executeManualNse(symbol: String) {
+        viewModelScope.launch {
+            remote.value = remote.value.copy(loading = true, error = null, message = null)
+            runCatching { repository.executeManualNse(symbol) }
+                .onSuccess { result ->
+                    remote.value = remote.value.copy(loading = false, message = result, error = null)
+                    refresh(silent = true)
+                }
+                .onFailure { remote.value = remote.value.copy(loading = false, error = it.userMessage()) }
         }
     }
 
