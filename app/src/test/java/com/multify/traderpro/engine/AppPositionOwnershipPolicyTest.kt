@@ -15,7 +15,10 @@ class AppPositionOwnershipPolicyTest {
         assertTrue(allowed("FIXED_HOLDING", "FXH1234567890abcd"))
         assertTrue(allowed("FIXED_HOLDING", "FXM1234567890abcd"))
         assertTrue(allowed("FIXED_HOLDING", "WRM1234567890abcd"))
-        assertTrue(allowed("MANUAL_HOLDING", "MNH1234567890abcd"))
+        assertTrue(AppPositionOwnershipPolicy.appOpened(
+            "MANUAL_HOLDING", "LONG", "MIS", "GROWW-ORDER-1",
+            "MNH1234567890abcd", "Manual MIS", 10
+        ))
         assertFalse(allowed("MANUAL_HOLDING", "FXH1234567890abcd"))
         assertFalse(allowed("FIXED_HOLDING", "MNH1234567890abcd"))
         assertFalse(allowed("PORTFOLIO_HOLDING", "PFH1234567890abcd"))
