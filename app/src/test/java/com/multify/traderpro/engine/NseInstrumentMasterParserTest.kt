@@ -25,6 +25,31 @@ class NseInstrumentMasterParserTest {
             NseInstrumentMasterParser.parseGroww(StringReader(csv)))
     }
 
+    @Test fun manualNseSearchUsesActualCompanyNamesNotJustSymbolPrefixes() {
+        val csv = "SYMBOL,NAME OF COMPANY,SERIES\\n" +
+            "TCS,Tata Consultancy Services Limited,EQ\\n" +
+            "TATASTEEL,Tata Steel Limited,EQ\\n" +
+            "TATAPOWER,Tata Power Company Limited,EQ\\n" +
+            "TITAN,Titan Company Limited,EQ\\n"
+        val parsed = NseInstrumentMasterParser.parseNseInstruments(StringReader(csv))
+        assertEquals(4, parsed.size)
+        assertEquals("Tata Consultancy Services Limited",
+            parsed.first { it.symbol == "TCS" }.companyName)
+        assertEquals(listOf("TATASTEEL", "TATAPOWER", "TCS"),
+            parsed.filter { it.companyName.contains("Tata", ignoreCase = true) }
+                .map { it.symbol }.sorted())
+    }
+
+    @Test fun growwFallbackPreservesItsCompanyNameColumn() {
+        val csv = "exchange,segment,trading_symbol,series,instrument_type,name\\n" +
+            "NSE,CASH,TITAN,EQ,EQ,Titan Company Limited\\n" +
+            "BSE,CASH,OTHER,EQ,EQ,Other Company\\n"
+        assertEquals(
+            listOf(NseInstrumentMasterParser.ListedEquity("TITAN", "Titan Company Limited")),
+            NseInstrumentMasterParser.parseGrowwInstruments(StringReader(csv))
+        )
+    }
+
     @Test fun missingHeadersFailClosed() {
         assertThrows(IllegalArgumentException::class.java) {
             NseInstrumentMasterParser.parseGroww(StringReader("<html>Forbidden</html>\n"))
