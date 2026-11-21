@@ -101,6 +101,12 @@ interface GrowwApi {
         @Body request: OrderCancelRequest
     ): ApiEnvelope<OrderPayload>
 
+    @POST("v1/order/modify")
+    suspend fun modifyOrder(
+        @Header("Authorization") authorization: String,
+        @Body request: OrderModifyRequest
+    ): ApiEnvelope<OrderPayload>
+
     @POST("v1/order-advance/create")
     suspend fun createGtt(
         @Header("Authorization") authorization: String,
