@@ -8865,6 +8865,10 @@ class TradingRepository @Inject constructor(
                         closeMisLongRecord(row, "BROKER_MIS_POSITION_FLAT")
                         return@withLock
                     }
+                    require(Instant.ofEpochMilli(row.openedAtMs).atZone(INDIA).toLocalDate() ==
+                        ZonedDateTime.now(INDIA).toLocalDate()) {
+                        "CRITICAL: MIS LONG still open on a later trading day; verify broker product conversion and close manually. No stale-session SELL."
+                    }
                     require(net == row.quantity) {
                         "MIS LONG quantity mismatch: broker ${net}, app ${row.quantity}"
                     }
@@ -9263,6 +9267,10 @@ class TradingRepository @Inject constructor(
                 }
                 saveManualShort(row.copy(state = "CLOSED", note = "BROKER_MIS_POSITION_FLAT"))
                 return@withLock 0
+            }
+            require(Instant.ofEpochMilli(row.openedAtMs).atZone(INDIA).toLocalDate() ==
+                ZonedDateTime.now(INDIA).toLocalDate()) {
+                "CRITICAL: MIS SHORT persists from an earlier session; reconcile Groww immediately. No blind overnight cover."
             }
             require(net == -row.quantity) {
                 "Manual short net quantity mismatch: broker=$net expected=-${row.quantity}"
