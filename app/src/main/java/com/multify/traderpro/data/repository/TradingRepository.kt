@@ -288,6 +288,11 @@ class TradingRepository @Inject constructor(
     private val fixedRecommendationExecutionPrefs by lazy {
         appContext.getSharedPreferences("fixed_recommendation_execution_v9013", Context.MODE_PRIVATE)
     }
+    // Persist a Manual order intent before its first broker POST. An ambiguous
+    // response must never be replayed by a second tap or process restart.
+    private val manualBuyIntentPrefs by lazy {
+        appContext.getSharedPreferences("manual_nse_buy_intents_v9028", Context.MODE_PRIVATE)
+    }
 
     private val _fixedDeliveryEvents = MutableSharedFlow<Long>(extraBufferCapacity = 8)
     val fixedDeliveryEvents: SharedFlow<Long> = _fixedDeliveryEvents.asSharedFlow()
@@ -8490,6 +8495,99 @@ class TradingRepository @Inject constructor(
         brokerInventorySnapshot = null
     }
 
+    /**
+     * Explicit operator-directed NSE CASH BUY. This does NOT synthesize a Fixed
+     * PRIMARY recommendation and never changes the 40-factor strategy.
+     * It shares Alpha's verified fill, cash/inventory admission and broker-GTT
+     * lifecycle with Fixed, and inherits the same non-Working-Range trailing exit.
+     */
+    suspend fun executeManualNse(symbolInput: String): String {
+        val symbol = symbolInput.trim().uppercase(Locale.US)
+        require(nseSymbols.hasFullInstrumentMaster() && nseSymbols.isKnown(symbol)) {
+            "Manual BUY requires a successful weekly NSE instrument sync and an exact listed stock selection"
+        }
+        require(com.multify.traderpro.engine.NseEquitySessionCalendar.isFixedNewEntryWindow(
+            ZonedDateTime.now(INDIA)) && marketSession() == "OPEN") {
+            "Manual BUY unavailable outside the NSE new-entry window"
+        }
+        val settings = preferences.settings.first()
+        preIndependentExecutionGuard(settings)
+        val token = ensureToken() ?: error("Authenticate Groww Alpha first")
+        val quoteStarted = System.currentTimeMillis()
+        val quote = apiFactory.groww.quote(
+            bearer(token), tradingSymbol = symbol,
+            trafficPriority = MarketDataPriorityAdmissionPolicy.PROTECTION
+        ).requirePayload("Manual NSE fresh Alpha quote $symbol")
+        val quoteReceived = System.currentTimeMillis()
+        preferences.recordMarketData()
+        val ltp = quote.lastPrice?.takeIf { it.isFinite() && it > 0.0 }
+            ?: error("No valid fresh Alpha price for $symbol")
+        val liquidity = ExecutionQuoteLiquidityPolicy.rejectionReason(quote)
+        require(liquidity == null) { "Manual BUY blocked: unverifiable Alpha bid/ask ($liquidity)" }
+        val thin = FixedExecutionThinLiquidityPolicy.rejectionReason(quote)
+        require(thin == null) { "Manual BUY blocked: thin NSE liquidity ($thin)" }
+        val sizing = com.multify.traderpro.engine.BudgetOnlyCncSizing.size(
+            settings.holdingBudgetRupees.toDouble(), ltp
+        )
+        require(sizing.quantity > 0) { "Configured Alpha per-order budget cannot fund one share" }
+        val today = ZonedDateTime.now(INDIA).toLocalDate()
+        val reference = stableRef("MNH", "$today|$symbol|MANUAL_NSE_V9028")
+        require(com.multify.traderpro.engine.NseEquitySessionCalendar.isFixedNewEntryWindow(
+            ZonedDateTime.now(INDIA)) && marketSession() == "OPEN") {
+            "Manual BUY blocked: NSE entry cutoff reached during quote retrieval"
+        }
+        // placeCncBuy serializes ALL account BUYs, rechecks broker cash,
+        // portfolio limits and pending orders, and persists this MNH intent
+        // immediately before the one allowed Alpha network order submission.
+        val order = placeCncBuy(
+            token, symbol, sizing.quantity, reference,
+            entryQuote = quote, quoteReceivedAtMs = quoteReceived
+        )
+        val filled = order.filledQuantity?.takeIf { it > 0 }
+            ?: error("Manual broker fill unverified: reconcile $symbol before any further BUY")
+        val actualFill = order.averageFillPrice?.takeIf { it.isFinite() && it > 0.0 } ?: ltp
+        val targetPct = com.multify.traderpro.engine.FixedFinalContract.CANONICAL_MULTIFY_MFE_AVG_PCT
+        val nowMs = System.currentTimeMillis()
+        registerBoughtPositionAndProtect(
+            ManagedPositionEntity(
+                engine = ENGINE_MANUAL_HOLDING, symbol = symbol, product = "CNC",
+                side = "LONG", quantity = filled, entryPrice = actualFill,
+                stopPrice = HardStopLossPolicy.stopPrice(actualFill),
+                targetPrice = actualFill * (1.0 + targetPct / 100.0),
+                strategy = "MANUAL NSE operator entry · Fixed sell/GTT policy · live Alpha quote ₹${fmt(ltp)} · hard -1% floor · +0.55% arm → +0.50% protected and +0.10% steps",
+                regime = "MANUAL_FIXED_LONG", confidence = 1.0,
+                sourceEventId = null, openOrderId = order.growwOrderId,
+                openReferenceId = reference, openedAtMs = nowMs,
+                lastPrice = actualFill, maxFavourablePrice = actualFill,
+                maxAdversePrice = actualFill, lastEvaluatedAtMs = nowMs,
+                trailingArmPct = SteppedTrailingPolicy.ARM_TRIGGER_PCT,
+                trailingLastRatchetPrice = 0.0,
+                smartOrderMode = HoldingSmartOrderPolicy.MODE_NONE
+            )
+        )
+        brokerInventorySnapshot = null
+        val local = managedDao.openPosition(ENGINE_MANUAL_HOLDING, symbol)
+        val verified = local != null &&
+            com.multify.traderpro.engine.GttProtectionReadinessPolicy.verified(
+                local.smartOrderMode, local.smartOrderId, local.smartOrderStatus
+            )
+        if (verified) {
+            check(manualBuyIntentPrefs.edit().putString(reference, "PROTECTED|$symbol").commit()) {
+                "Broker BUY executed; Manual protection ledger save failed — reconcile in Groww"
+            }
+        }
+        auditLogger.log("MANUAL_NSE", "BROKER_BUY_CONFIRMED", mapOf(
+            "symbol" to symbol, "reference" to reference,
+            "order_id" to order.growwOrderId, "quantity" to filled,
+            "fill_price" to actualFill, "alpha_budget_rupees" to settings.holdingBudgetRupees,
+            "gtt_verified" to verified, "beta_orders" to 0,
+            "fixed_selection_modified" to false
+        ))
+        return if (verified)
+            "Manual $symbol · Alpha BUY filled $filled shares at ₹${fmt(actualFill)} · GTT verified"
+        else "Manual $symbol BUY filled $filled shares · UNPROTECTED: verify Groww GTT before any further BUY"
+    }
+
     suspend fun executeFixed(symbol: String): String {
         val now = ZonedDateTime.now(INDIA)
         require(com.multify.traderpro.engine.NseEquitySessionCalendar.isFixedNewEntryWindow(now) && marketSession() == "OPEN") { "Fixed BUY is unavailable outside the NSE entry window" }
@@ -13580,6 +13678,27 @@ class TradingRepository @Inject constructor(
         require(unresolvedRangeOrders.isEmpty()) {
             "New BUY blocked: ${unresolvedRangeOrders.size} unresolved Working Range broker order intent(s)"
         }
+        // Unresolved Manual orders can represent live shares without verified
+        // broker-side protection. Never open another position until reconciled.
+        val manualUnresolved = manualBuyIntentPrefs.all.filter { (_, v) ->
+            v is String && (v.startsWith("PENDING|") || v.startsWith("BROKER_ACK|"))
+        }
+        for ((pendingRef, _) in manualUnresolved) {
+            val recovered = managedDao.openPositions().firstOrNull {
+                it.openReferenceId == pendingRef && appOwned(it)
+            }
+            val protected = recovered != null &&
+                com.multify.traderpro.engine.GttProtectionReadinessPolicy.verified(
+                    recovered.smartOrderMode, recovered.smartOrderId, recovered.smartOrderStatus
+                )
+            if (protected) {
+                check(manualBuyIntentPrefs.edit().putString(pendingRef, "PROTECTED|"+recovered!!.symbol).commit()) {
+                    "Manual protection-intent ledger write failed"
+                }
+            } else {
+                error("Unresolved Manual BUY/GTT intent $pendingRef: reconcile Alpha order and protection first")
+            }
+        }
         val key = symbol.uppercase(Locale.US)
         val broker = brokerInventory(token, force = true)
         val demat = broker.holdings[key]?.quantity ?: 0
@@ -13665,6 +13784,11 @@ class TradingRepository @Inject constructor(
                     .isFixedNewEntryWindow(ZonedDateTime.now(INDIA))) {
                 "BUY blocked: Fixed/Univest auto-buy disabled or session entry window ended during broker preflight"
             }
+        } else if (reference.startsWith("MNH")) {
+            require(com.multify.traderpro.engine.NseEquitySessionCalendar
+                .isFixedNewEntryWindow(ZonedDateTime.now(INDIA)) && marketSession() == "OPEN") {
+                "Manual Alpha BUY blocked: NSE entry window ended during broker preflight"
+            }
         } else if (reference.startsWith("WRM")) {
             val switchAtDispatch = preferences.settings.first()
             require(switchAtDispatch.workingRangeEnabled &&
@@ -13696,8 +13820,25 @@ class TradingRepository @Inject constructor(
                 "crash_replay_allowed" to false
             ))
         }
+        if (reference.startsWith("MNH")) {
+            require(!manualBuyIntentPrefs.contains(reference)) {
+                "Manual BUY already attempted for $symbol today; reconcile in Groww, do not duplicate"
+            }
+            require(manualBuyIntentPrefs.edit().putString(
+                reference, "PENDING|$symbol|${System.currentTimeMillis()}"
+            ).commit()) { "Unable to durably reserve Manual BUY order intent" }
+            auditLogger.log("MANUAL_NSE", "ORDER_INTENT_RESERVED", mapOf(
+                "symbol" to symbol, "reference" to reference,
+                "blind_resubmission" to false
+            ))
+        }
         val order = submitMarketOrder(token, symbol, "BUY", capitalVerdict.allowedQuantity, "CNC", reference,
             notificationStartedNs, buyLimitPrice = price.limitPrice)
+        if (reference.startsWith("MNH")) {
+            check(manualBuyIntentPrefs.edit().putString(
+                reference, "BROKER_ACK|$symbol|${order.growwOrderId}"
+            ).commit()) { "Alpha order confirmed but Manual ledger unverified; reconcile broker position" }
+        }
         if (recommendationId != null) {
             val filled = order.filledQuantity?.takeIf { it > 0 } ?: capitalVerdict.allowedQuantity
             val fillPrice = order.averageFillPrice?.takeIf { it.isFinite() && it > 0.0 } ?: price.lastPrice
@@ -13938,6 +14079,7 @@ class TradingRepository @Inject constructor(
         const val ENGINE_UNIVEST_HOLDING = "UNIVEST_HOLDING"
         const val ENGINE_FORECAST_HOLDING = "FORECAST_HOLDING"
         const val ENGINE_FIXED_HOLDING = "FIXED_HOLDING"
+        const val ENGINE_MANUAL_HOLDING = "MANUAL_HOLDING"
         const val ENGINE_PORTFOLIO_HOLDING = "PORTFOLIO_HOLDING"
     }
 }
