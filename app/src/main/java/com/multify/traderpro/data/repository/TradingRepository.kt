@@ -300,10 +300,19 @@ class TradingRepository @Inject constructor(
         appContext.getSharedPreferences("manual_mis_short_orders_v9029", Context.MODE_PRIVATE)
     }
     private val manualShortMutex = Mutex()
-    private fun manualShortState(): ManualShortPosition? =
-        manualShortPrefs.getString("current", null)?.let {
-            runCatching { researchGson.fromJson(it, ManualShortPosition::class.java) }.getOrNull()
+    private fun manualShortState(): ManualShortPosition? {
+        val raw = manualShortPrefs.getString("current", null) ?: return null
+        return runCatching {
+            require(raw.isNotBlank()) { "Blank short ledger" }
+            researchGson.fromJson(raw, ManualShortPosition::class.java).also { row ->
+                require(row != null && row.symbol.isNotBlank() && row.reference.isNotBlank()) {
+                    "Incomplete broker short ledger"
+                }
+            }
+        }.getOrElse { cause ->
+            error("MANUAL_SHORT_LEDGER_UNREADABLE: reconcile Alpha; all new BUY/SELL blocked (${cause.javaClass.simpleName})")
         }
+    }
     private fun saveManualShort(state: ManualShortPosition) {
         check(manualShortPrefs.edit()
             .putString("current", researchGson.toJson(state)).commit()) {
@@ -8633,6 +8642,9 @@ class TradingRepository @Inject constructor(
             (inventory.positions[symbol]?.quantity ?: 0) == 0 &&
             manualMisBrokerQty(token, symbol) == 0) {
             "Manual short rejected: broker already has $symbol exposure"
+        }
+        require(workingRangeRecommendationStore.pendingAutoBuyIntents().isEmpty()) {
+            "Unresolved Working Range order prevents manual MIS short"
         }
         val currentOrders = apiFactory.groww.orderList(bearer(token), page = 0)
             .requirePayload("Pre-short Alpha orders").orderList
