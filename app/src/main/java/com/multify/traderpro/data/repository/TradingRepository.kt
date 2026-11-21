@@ -8734,9 +8734,40 @@ class TradingRepository @Inject constructor(
         val rows = managedDao.openPositions().filter {
             it.product == "MIS" && it.side == "LONG" && appOwned(it)
         }
+        val now = System.currentTimeMillis()
+        val orphanIntents = misIntradayEntryPrefs.all.mapNotNull { (ref, status) ->
+            if (status !is String || status.startsWith("PROTECTED|")) null
+            else if (rows.any { it.openReferenceId == ref && appPositionProtected(it) }) null
+            else ref to status
+        }
+        if (orphanIntents.isNotEmpty()) {
+            preferences.setSafetyHalt(true)
+            val notice = lastPortfolioConflictAuditAtMs["MIS_ORPHAN_ENTRY_NOTICE"] ?: 0L
+            if (now - notice >= 60_000L) {
+                lastPortfolioConflictAuditAtMs["MIS_ORPHAN_ENTRY_NOTICE"] = now
+                auditLogger.log("SAFETY", "MIS_FILLED_OR_UNKNOWN_WITHOUT_TRACKED_STOP", mapOf(
+                    "references" to orphanIntents.map { it.first },
+                    "states" to orphanIntents.map { it.second },
+                    "broker_position_may_be_unprotected" to true,
+                    "all_entries_halted" to true,
+                    "reconcile_alpha_mis_order_and_stop" to true
+                ))
+                runCatching {
+                    val nm = appContext.getSystemService(NotificationManager::class.java)
+                    val channel = "multify_mis_entry_orphan"
+                    nm.createNotificationChannel(NotificationChannel(
+                        channel, "MIS unprotected entry alerts", NotificationManager.IMPORTANCE_HIGH
+                    ))
+                    nm.notify(650_030, NotificationCompat.Builder(appContext, channel)
+                        .setSmallIcon(R.drawable.ic_stat_trader)
+                        .setContentTitle("ACTION REQUIRED: MIS entry needs reconciliation")
+                        .setContentText("An Alpha MIS BUY may have filled without a verified SELL stop. Inspect Groww Orders and Positions immediately.")
+                        .setPriority(NotificationCompat.PRIORITY_HIGH).setAutoCancel(true).build())
+                }
+            }
+        }
         if (rows.isEmpty()) return 0
         val policy = com.multify.traderpro.engine.MisIntradayLongPolicy
-        val now = System.currentTimeMillis()
         val squareOff = policy.mustExit(ZonedDateTime.now(INDIA))
         if (!squareOff && now - lastMisLongMonitorAtMs in 0L..4_999L) return rows.size
         lastMisLongMonitorAtMs = now
@@ -8825,7 +8856,15 @@ class TradingRepository @Inject constructor(
                         row.stopPrice ?: HardStopLossPolicy.stopPrice(row.entryPrice),
                         row.entryPrice, high, isWR
                     )
-                    val desired = max(row.stopPrice ?: 0.0, roundSmartOrderPrice(desiredRaw))
+                    // Preserve Fixed's EXISTING additional net-gain protection
+                    // overlay. Its delivery-cost estimate is conservative for MIS,
+                    // never a license to loosen the broker stop.
+                    val desiredWithNetFloor = if (!isWR &&
+                        SteppedTrailingPolicy.stopGainPctForHighWater(row.entryPrice, high) != null
+                    ) NetGainTrailingPolicy.additionalNetGainProtection(
+                        row.entryPrice, row.quantity, high, desiredRaw
+                    ) else desiredRaw
+                    val desired = max(row.stopPrice ?: 0.0, roundSmartOrderPrice(desiredWithNetFloor))
                     if (desired > (row.stopPrice ?: 0.0) + 0.000001) {
                         val ack = apiFactory.groww.modifyOrder(
                             bearer(token), OrderModifyRequest(
