@@ -97,7 +97,7 @@ fun FixedLiteApp(viewModel: TraderViewModel = hiltViewModel()) {
                                 when (page) {
                                     LitePage.FIXED -> "15-minute Fixed strategy"
                                     LitePage.WORKING_RANGE -> "Working Range pilot"
-                                    LitePage.MANUAL -> "Manual NSE BUY / SELL"
+                                    LitePage.MANUAL -> "Intraday MIS BUY / SELL"
                                     LitePage.AVERAGES -> "Observed Fixed outcomes"
                                     LitePage.SETTINGS -> "Accounts and controls"
                                 },
@@ -135,7 +135,7 @@ fun FixedLiteApp(viewModel: TraderViewModel = hiltViewModel()) {
                     state, viewModel,
                     onEnableRequested = { confirmEnable = it },
                     onResetRequested = { confirmHaltReset = true },
-                    onExport = { export.launch("FixedMomentum-v9029-manual-buy-sell-diagnostics.zip") }
+                    onExport = { export.launch("FixedMomentum-v9030-all-mis-diagnostics.zip") }
                 )
             }
         }
@@ -509,7 +509,7 @@ internal fun LiteFixedScreen(
 
         item(key = "fixed-protection") {
             LiteCard {
-                SectionTitle("Position protection", "Broker GTT status · independent of scanner")
+                SectionTitle("Position protection", "Legacy CNC GTT + new MIS SELL stops · independent of scanner")
                 StatusPill(
                     if (dashboard?.halted == true || state.settings.safetyHalt) "SAFETY HALT · NEW BUYS BLOCKED" else "PROTECTION MONITOR INDEPENDENT",
                     if (dashboard?.halted == true || state.settings.safetyHalt) LiteTone.NEGATIVE else LiteTone.POSITIVE
@@ -664,9 +664,9 @@ internal fun LiteManualScreen(state: TraderUiState, viewModel: TraderViewModel) 
     val matches = if (ready) viewModel.manualStockMatches(query) else emptyList()
     val activeSelection = selected?.let { id -> matches.firstOrNull { it.symbol == id } }
     val authenticated = state.settings.brokerAuthenticated &&
-        state.settings.staticIpMatched && state.settings.brokerDdpiEnabled
+        state.settings.staticIpMatched
     val istNow = java.time.ZonedDateTime.now(ZoneId.of("Asia/Kolkata"))
-    val marketOpen = NseEquitySessionCalendar.isFixedNewEntryWindow(istNow)
+    val marketOpen = com.multify.traderpro.engine.MisIntradayLongPolicy.mayEnter(istNow)
     val shortWindow = ManualShortIntradayPolicy.mayOpen(istNow)
     Column(
         Modifier.fillMaxSize().testTag("manual-screen").padding(12.dp),
@@ -674,16 +674,16 @@ internal fun LiteManualScreen(state: TraderUiState, viewModel: TraderViewModel) 
     ) {
         LiteCard {
             SectionTitle("Manual", "Alpha · NSE CASH · operator-directed trades")
-            Text("Manual BUY = delivery holding (CNC); Manual SELL = new intraday short (MIS position). Both use the existing Alpha per-order budget; no extra budget setting.",
+            Text("All new trades use Alpha MIS intraday positions: BUY opens a long; SELL opens a short. Both use the same existing Alpha budget; no delivery holdings are created.",
                 style = MaterialTheme.typography.bodySmall)
             Box {
                 OutlinedButton(
                     onClick = { actionsExpanded = true },
                     modifier = Modifier.fillMaxWidth().testTag("manual-action-dropdown")
-                ) { Text(if (manualSide == "BUY") "Manual BUY · CNC holdings ▾" else "Manual SELL · MIS short position ▾") }
+                ) { Text(if (manualSide == "BUY") "Manual BUY · MIS long ▾" else "Manual SELL · MIS short ▾") }
                 DropdownMenu(expanded = actionsExpanded, onDismissRequest = { actionsExpanded = false }) {
                     DropdownMenuItem(
-                        text = { Text("Manual BUY · CNC holdings") },
+                        text = { Text("Manual BUY · MIS long position") },
                         onClick = { manualSide = "BUY"; selected = null; actionsExpanded = false }
                     )
                     DropdownMenuItem(
@@ -742,15 +742,15 @@ internal fun LiteManualScreen(state: TraderUiState, viewModel: TraderViewModel) 
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold)
                 Text(activeSelection.symbol + if (manualSide == "BUY")
-                    " · NSE CASH · Alpha CNC LONG" else " · NSE CASH · Alpha MIS SHORT",
+                    " · NSE CASH · Alpha MIS LONG" else " · NSE CASH · Alpha MIS SHORT",
                     style = MaterialTheme.typography.bodySmall)
                 Text(if (manualSide == "BUY")
-                    "Fixed exit unchanged: -1% initial broker GTT, trail arms at +0.55%, protects +0.50%, and ratchets +0.10%."
+                    "Fixed exit thresholds unchanged: -1% initial broker SELL SL-M, trail arms at +0.55%, protects +0.50%, and ratchets +0.10%. All MIS positions exit intraday."
                 else
                     "Reversed Fixed exit: +1% initial broker BUY SL-M, arms after -0.55% share move, then locks +0.50% short gain and lowers the BUY stop in +0.10% steps. Intraday only; controlled square-off from 14:55 IST.",
                     style = MaterialTheme.typography.bodySmall)
                 Text(if (manualSide == "BUY")
-                    "Real CNC BUY uses Alpha cash, position and GTT checks."
+                    "Real MIS BUY uses Alpha funds, position, pending SELL stop and intraday square-off checks."
                 else
                     "Real MIS short SELL opens a negative Alpha intraday position, not a delivery holding. Requires fresh broker checks, a pending BUY stop and intraday square-off.",
                     style = MaterialTheme.typography.labelSmall,
@@ -773,8 +773,8 @@ internal fun LiteManualScreen(state: TraderUiState, viewModel: TraderViewModel) 
                         activeSelection.symbol + " · Alpha")
                 }
                 if (!(if (manualSide == "BUY") marketOpen else shortWindow) || !authenticated) {
-                    Text("Requires authenticated Alpha, verified static IP/DDPI and NSE entry hours" +
-                        (if (manualSide == "SELL") " (short entries until 14:30 IST)." else "."),
+                    Text("Requires authenticated Alpha, verified static IP and NSE MIS entry hours" +
+                        (" (all MIS entries until 14:30 IST)."),
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.error)
                 }
@@ -1021,7 +1021,9 @@ internal fun LiteSettingsScreen(
 
     val positions = state.dashboard?.positions.orEmpty().filter { it.quantity > 0 }
     val allProtected = positions.all {
-        GttProtectionReadinessPolicy.verified(it.smartOrderMode, it.smartOrderId, it.smartOrderStatus)
+        if (it.product == "MIS") com.multify.traderpro.engine.MisIntradayLongPolicy.verified(
+            it.smartOrderMode, it.smartOrderId, it.smartOrderStatus
+        ) else GttProtectionReadinessPolicy.verified(it.smartOrderMode, it.smartOrderId, it.smartOrderStatus)
     }
     val alphaReady = state.settings.brokerAuthenticated && state.settings.staticIpMatched
     val canEnableAutoBuy = alphaReady && state.dashboard != null && !state.settings.safetyHalt && state.dashboard?.halted != true && allProtected
@@ -1035,7 +1037,7 @@ internal fun LiteSettingsScreen(
             SectionTitle("Engine controls", "Discovery and order permission are separate")
             SwitchRow(
                 "Fixed + Working Range scanner",
-                "OFF pauses both research scans. Open-position SELL and GTT monitoring continues.",
+                "OFF pauses research scans only. CNC GTT and MIS intraday stop/square-off monitoring continue.",
                 state.settings.fixedScannerEnabled,
                 vm::setFixedScannerEnabled,
                 contentDescription = "Fixed market scanner"
