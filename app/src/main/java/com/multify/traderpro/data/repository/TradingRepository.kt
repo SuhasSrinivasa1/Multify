@@ -9136,10 +9136,11 @@ class TradingRepository @Inject constructor(
             0L..CircuitAwareBuyPolicy.MAX_QUOTE_AGE_MS) {
             "Manual short Alpha entry quote expired during cash/order checks; no order sent"
         }
-        val ref = stableRef("MSS", "${ZonedDateTime.now(INDIA).toLocalDate()}|$symbol|MANUAL_MIS_SHORT")
+        val openedAtMs = System.currentTimeMillis()
+        val ref = stableRef("MSS", "${ZonedDateTime.now(INDIA).toLocalDate()}|$symbol|MANUAL_MIS_SHORT|$openedAtMs")
         val intent = ManualShortPosition(
             symbol = symbol, reference = ref,
-            openedAtMs = System.currentTimeMillis(),
+            openedAtMs = openedAtMs,
             quantity = capital.allowedQuantity, entryPrice = 0.0,
             lowestPrice = 0.0, stopTrigger = 0.0,
             state = "ENTRY_PENDING"
