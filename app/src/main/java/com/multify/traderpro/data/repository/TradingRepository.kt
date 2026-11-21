@@ -9061,6 +9061,9 @@ class TradingRepository @Inject constructor(
         require(manualBuyIntentPrefs.all.values.none {
             it is String && (it.startsWith("PENDING|") || it.startsWith("BROKER_ACK|"))
         }) { "Existing Manual BUY order intent requires reconciliation" }
+        require(misIntradayEntryPrefs.all.values.none {
+            it is String && (it.startsWith("PENDING|") || it.startsWith("BROKER_ACK|"))
+        }) { "Existing MIS long entry/protection intent requires reconciliation" }
         val token = ensureToken() ?: error("Authenticate Alpha before Manual SELL")
         val existing = managedDao.openPositions().filter(::appOwned)
         require(existing.none { it.symbol.equals(symbol, true) }) {
@@ -14615,6 +14618,19 @@ class TradingRepository @Inject constructor(
                 ).commit()) { "Manual BUY protection ledger could not be recovered" }
             } else error("Unresolved Manual BUY/protection intent $pendingRef; reconcile Alpha first")
         }
+        val unresolvedMisEntries = misIntradayEntryPrefs.all.filter { (_, value) ->
+            value is String && (value.startsWith("PENDING|") || value.startsWith("BROKER_ACK|"))
+        }
+        for ((pendingRef, _) in unresolvedMisEntries) {
+            val tracked = managedDao.openPositions().firstOrNull {
+                it.openReferenceId == pendingRef && appOwned(it) && it.product.equals("MIS", true)
+            }
+            if (tracked != null && appPositionProtected(tracked)) {
+                check(misIntradayEntryPrefs.edit().putString(
+                    pendingRef, "PROTECTED|${tracked.symbol}|${tracked.smartOrderId}"
+                ).commit()) { "MIS entry protection ledger could not be recovered" }
+            } else error("Unresolved MIS entry/protection intent $pendingRef; reconcile Alpha first")
+        }
         if (recommendationId != null && isFixedRecommendationExecutionConsumed(recommendationId)) {
             auditLogger.log("FIXED_AUTO_BUY", "RECOMMENDATION_EVENT_ALREADY_CONSUMED", mapOf(
                 "recommendation_id" to recommendationId,
@@ -14647,16 +14663,17 @@ class TradingRepository @Inject constructor(
         }
         val allOwnedOpen = managedDao.openPositions().filter(::appOwned)
         val unprotected = allOwnedOpen.filterNot(::appPositionProtected)
-        if (manualMisEntry) {
-            allOwnedOpen.filter { it.product.equals("MIS", true) }.forEach { position ->
-                val stopId = position.smartOrderId ?: error("Existing MIS long broker stop ID missing")
-                val verifiedStop = apiFactory.groww.orderStatus(
-                    bearer(token), stopId
-                ).requirePayload("Recheck existing MIS long protection before Manual BUY")
-                require(com.multify.traderpro.engine.MisIntradayLongPolicy.pendingBrokerStop(
-                    verifiedStop.orderStatus
-                )) { "Manual MIS BUY blocked: existing MIS SELL stop for ${position.symbol} is not pending" }
-            }
+        // If a manual MIS long exists, recheck its broker SELL SL-M before ANY
+        // further Alpha entry (CNC auto or manual). A locally cached pending state
+        // is not perpetual proof of broker protection.
+        allOwnedOpen.filter { it.product.equals("MIS", true) }.forEach { position ->
+            val stopId = position.smartOrderId ?: error("Existing MIS long broker stop ID missing")
+            val verifiedStop = apiFactory.groww.orderStatus(
+                bearer(token), stopId
+            ).requirePayload("Recheck existing MIS long protection before new entry")
+            require(com.multify.traderpro.engine.MisIntradayLongPolicy.pendingBrokerStop(
+                verifiedStop.orderStatus
+            )) { "New Alpha entry blocked: existing MIS SELL stop for ${position.symbol} is not pending" }
         }
         if (unprotected.isNotEmpty()) {
             auditLogger.log("SAFETY",
