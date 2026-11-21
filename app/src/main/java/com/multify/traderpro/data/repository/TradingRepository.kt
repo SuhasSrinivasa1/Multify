@@ -10590,6 +10590,36 @@ class TradingRepository @Inject constructor(
                     if (repaired) continue
                 }
                 val gttStatus = position.smartOrderStatus.orEmpty().uppercase(Locale.US)
+                // When the latest successful broker inventory reports zero shares and the
+                // old local GTT is already terminal, quarantine the orphan row. Do NOT poll the same
+                // terminal order on every heartbeat or infer a sale from LTP.
+                // The verified historic-replay repair above remains allowed. All
+                // other cases need human or exact broker-order reconciliation.
+                if (com.multify.traderpro.engine.BrokerFlatTerminalGttQuarantinePolicy.shouldQuarantine(
+                        brokerQuantity = brokerQty,
+                        localQuantity = position.quantity,
+                        smartOrderId = position.smartOrderId,
+                        smartOrderStatus = gttStatus,
+                        activeGttIdsForSymbol = activeGtts[symbol].orEmpty()
+                            .map { it.smartOrderId }.toSet()
+                    )
+                ) {
+                    blockedSymbols += symbol
+                    val key = "TERMINAL_GTT_FLAT_QUARANTINE:${position.id}"
+                    val last = lastPortfolioConflictAuditAtMs[key] ?: 0L
+                    if (now - last >= 60_000L) {
+                        lastPortfolioConflictAuditAtMs[key] = now
+                        auditLogger.log("SAFETY", "BROKER_FLAT_TERMINAL_GTT_QUARANTINED", mapOf(
+                            "symbol" to symbol, "position_id" to position.id,
+                            "broker_quantity" to brokerQty, "local_quantity" to position.quantity,
+                            "gtt_id" to position.smartOrderId, "gtt_status" to gttStatus,
+                            "local_position_deleted" to false, "realized_pnl_invented" to false,
+                            "new_buy_allowed" to false, "new_sell_allowed" to false,
+                            "exact_broker_order_reconciliation_required" to true
+                        ))
+                    }
+                    continue
+                }
                 // Broker child fills must be reconciled before ordinary ownership checks:
                 // a successful GTT SELL legitimately reduces the broker's share count to zero.
                 // No direct SELL may fire while a GTT child could still be pending.
