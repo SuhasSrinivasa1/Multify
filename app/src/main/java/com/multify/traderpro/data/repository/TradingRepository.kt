@@ -53,6 +53,9 @@ import com.multify.traderpro.data.network.HistoricalPayload
 import com.multify.traderpro.data.network.LearningStatsDto
 import com.multify.traderpro.data.network.OrderCancelRequest
 import com.multify.traderpro.data.network.OrderCreateRequest
+import com.multify.traderpro.data.network.OrderModifyRequest
+import com.multify.traderpro.engine.ManualShortPosition
+import com.multify.traderpro.engine.ManualShortIntradayPolicy
 import com.multify.traderpro.data.network.OrderPayload
 import com.multify.traderpro.data.network.GrowwOrderBookRow
 import com.multify.traderpro.data.network.PositionDto
@@ -288,6 +291,38 @@ class TradingRepository @Inject constructor(
     private val fixedRecommendationExecutionPrefs by lazy {
         appContext.getSharedPreferences("fixed_recommendation_execution_v9013", Context.MODE_PRIVATE)
     }
+
+    // Persist a Manual order intent before its first broker POST. An ambiguous
+    // response must never be replayed by a second tap or process restart.
+    private val manualBuyIntentPrefs by lazy {
+        appContext.getSharedPreferences("manual_nse_buy_intents_v9028", Context.MODE_PRIVATE)
+    }
+    private val manualShortPrefs by lazy {
+        appContext.getSharedPreferences("manual_mis_short_orders_v9029", Context.MODE_PRIVATE)
+    }
+    private val manualShortMutex = Mutex()
+    @Volatile private var manualShortLastBrokerCheckAtMs = 0L
+    private fun manualShortState(): ManualShortPosition? {
+        val raw = manualShortPrefs.getString("current", null) ?: return null
+        return runCatching {
+            require(raw.isNotBlank()) { "Blank short ledger" }
+            researchGson.fromJson(raw, ManualShortPosition::class.java).also { row ->
+                require(row != null && row.symbol.isNotBlank() && row.reference.isNotBlank()) {
+                    "Incomplete broker short ledger"
+                }
+            }
+        }.getOrElse { cause ->
+            error("MANUAL_SHORT_LEDGER_UNREADABLE: reconcile Alpha; all new BUY/SELL blocked (${cause.javaClass.simpleName})")
+        }
+    }
+    private fun saveManualShort(state: ManualShortPosition) {
+        check(manualShortPrefs.edit()
+            .putString("current", researchGson.toJson(state)).commit()) {
+            "MANUAL_SHORT_DURABLE_LEDGER_WRITE_FAILED: reconcile Groww before more trading"
+        }
+    }
+    fun manualShortStatus(): ManualShortPosition? = manualShortState()
+
 
     private val _fixedDeliveryEvents = MutableSharedFlow<Long>(extraBufferCapacity = 8)
     val fixedDeliveryEvents: SharedFlow<Long> = _fixedDeliveryEvents.asSharedFlow()
@@ -8490,6 +8525,951 @@ class TradingRepository @Inject constructor(
         brokerInventorySnapshot = null
     }
 
+    /**
+     * Explicit operator-directed NSE CASH BUY. This does NOT synthesize a Fixed
+     * PRIMARY recommendation and never changes the 40-factor strategy.
+     * It shares Alpha's verified fill, cash/inventory admission and broker-GTT
+     * lifecycle with Fixed, and inherits the same non-Working-Range trailing exit.
+     */
+    private val misIntradayExitPrefs by lazy {
+        appContext.getSharedPreferences("mis_long_exit_intents_v9030", Context.MODE_PRIVATE)
+    }
+    private val misIntradayEntryPrefs by lazy {
+        appContext.getSharedPreferences("mis_long_entry_intents_v9030", Context.MODE_PRIVATE)
+    }
+    @Volatile private var lastMisLongMonitorAtMs = 0L
+
+    private fun pendingMisStopReference(position: ManagedPositionEntity): String =
+        stableRef("MLS", position.openReferenceId + "|MIS_SELL_STOP")
+
+    private fun pendingMisExitReference(position: ManagedPositionEntity): String =
+        stableRef("MLE", position.openReferenceId + "|MIS_SELL_EXIT")
+
+    private suspend fun protectMisLongLocked(token: String, position: ManagedPositionEntity): ManagedPositionEntity {
+        require(position.product == "MIS" && position.side == "LONG")
+        val policy = com.multify.traderpro.engine.MisIntradayLongPolicy
+        var row = position
+        if (row.smartOrderId.isNullOrBlank()) {
+            val stopRef = pendingMisStopReference(row)
+            if (row.smartOrderMode != policy.STOP_PENDING) {
+                require(row.smartOrderMode == HoldingSmartOrderPolicy.MODE_NONE) {
+                    "MIS stop unknown lifecycle ${row.smartOrderMode}: must reconcile"
+                }
+                row = row.copy(
+                    smartOrderMode = policy.STOP_PENDING,
+                    smartOrderDirection = stopRef,
+                    smartOrderStatus = "BROKER_ACK_UNRESOLVED",
+                    smartOrderTriggerPrice = roundSmartOrderPrice(row.stopPrice ?: error("Missing MIS stop"))
+                )
+                managedDao.updatePosition(row) // durable BEFORE Alpha SELL SL-M POST
+                auditLogger.log("MIS_LONG", "SELL_STOP_INTENT_PERSISTED", mapOf(
+                    "symbol" to row.symbol, "reference" to stopRef,
+                    "trigger" to row.smartOrderTriggerPrice,
+                    "no_blind_duplicate_stop" to true
+                ))
+                val ack = apiFactory.groww.placeOrder(
+                    bearer(token),
+                    OrderCreateRequest(
+                        tradingSymbol = row.symbol, quantity = row.quantity,
+                        transactionType = "SELL", product = "MIS",
+                        orderType = "SL_M", triggerPrice = row.smartOrderTriggerPrice!!,
+                        orderReferenceId = stopRef
+                    )
+                ).requirePayload("Create Alpha MIS long protective SELL SL-M")
+                val id = com.multify.traderpro.engine.BrokerOrderAcknowledgementPolicy.usableId(ack.growwOrderId)
+                    ?: runCatching {
+                        com.multify.traderpro.engine.BrokerOrderAcknowledgementPolicy.usableId(
+                            apiFactory.groww.orderStatusByReference(bearer(token), referenceId = stopRef)
+                                .requirePayload("Recover MIS long SELL stop").growwOrderId
+                        )
+                    }.getOrNull()
+                    ?: error("MIS SELL stop acknowledged without broker order ID; reconcile ${stopRef}")
+                row = row.copy(smartOrderId = id)
+                managedDao.updatePosition(row)
+            } else {
+                // Previous create may have reached Groww. Query its durable
+                // reference; NEVER repeat the POST on recovery.
+                val recovered = apiFactory.groww.orderStatusByReference(
+                    bearer(token), referenceId = stopRef
+                ).requirePayload("Recover existing MIS long stop by reference")
+                val id = com.multify.traderpro.engine.BrokerOrderAcknowledgementPolicy.usableId(
+                    recovered.growwOrderId
+                ) ?: error("Pending MIS SELL stop broker ID unresolved: ${stopRef}")
+                row = row.copy(smartOrderId = id)
+                managedDao.updatePosition(row)
+            }
+        }
+        val current = apiFactory.groww.orderStatus(
+            bearer(token), row.smartOrderId!!
+        ).requirePayload("Verify Alpha MIS long SELL stop pending")
+        require(policy.pendingBrokerStop(current.orderStatus)) {
+            "MIS long broker SELL stop not pending: ${current.orderStatus}"
+        }
+        row = row.copy(
+            smartOrderMode = policy.STOP_VERIFIED, smartOrderStatus = current.orderStatus,
+            stopPrice = row.smartOrderTriggerPrice ?: row.stopPrice,
+            smartOrderUpdatedAtMs = System.currentTimeMillis()
+        )
+        managedDao.updatePosition(row)
+        val intent = misIntradayEntryPrefs.getString(row.openReferenceId, null)
+        if (intent?.startsWith("BROKER_ACK|") == true) {
+            check(misIntradayEntryPrefs.edit().putString(
+                row.openReferenceId, "PROTECTED|${row.symbol}|${row.smartOrderId}"
+            ).commit()) { "MIS long protection acknowledged but entry intent remains unresolved" }
+        }
+        auditLogger.log("MIS_LONG", "BROKER_SELL_SL_M_VERIFIED", mapOf(
+            "symbol" to row.symbol, "order_id" to row.smartOrderId,
+            "stop" to row.stopPrice, "broker_status" to current.orderStatus,
+            "side" to "LONG", "product" to "MIS"
+        ))
+        return row
+    }
+
+    /** New-order MIS protection only. Legacy CNC holds never enter this lifecycle. */
+    private suspend fun registerMisLongAndProtect(position: ManagedPositionEntity): Long {
+        require(position.product == "MIS" && position.side == "LONG")
+        val mutex = positionLifecycleMutexes.computeIfAbsent(position.symbol.uppercase(Locale.US)) { Mutex() }
+        return mutex.withLock {
+            val id = managedDao.insertPosition(position)
+            brokerInventorySnapshot = null
+            val token = runCatching { ensureToken() }.getOrNull()
+            val result = runCatching {
+                require(token != null) { "Alpha authentication unavailable after MIS BUY fill" }
+                protectMisLongLocked(token, position.copy(id = id))
+            }
+            result.onFailure { failure ->
+                preferences.setSafetyHalt(true)
+                reportCriticalUnprotected(position, id,
+                    "MIS_BUY_FILLED_SELL_SL_M_NOT_VERIFIED: " +
+                    (failure.message ?: failure.javaClass.simpleName))
+                auditLogger.log("SAFETY", "MIS_LONG_UNPROTECTED_CRITICAL", mapOf(
+                    "symbol" to position.symbol, "id" to id,
+                    "reason" to (failure.message ?: failure.javaClass.simpleName),
+                    "no_duplicate_stop_post" to true, "new_entries_halted" to true
+                ))
+            }
+            id
+        }
+    }
+
+    private suspend fun misLongBrokerNet(token: String, symbol: String): Int =
+        manualMisBrokerQty(token, symbol)
+
+    private suspend fun closeMisLongRecord(position: ManagedPositionEntity, reason: String) {
+        require(position.product == "MIS")
+        managedDao.updatePosition(position.copy(
+            status = "CLOSED", smartOrderMode = HoldingSmartOrderPolicy.MODE_NONE,
+            smartOrderId = null, smartOrderStatus = "BROKER_FLAT_VERIFIED",
+            lastEvaluatedAtMs = System.currentTimeMillis()
+        ))
+        auditLogger.log("MIS_LONG", "BROKER_NET_FLAT_CONFIRMED", mapOf(
+            "symbol" to position.symbol, "engine" to position.engine,
+            "reason" to reason, "side" to "LONG",
+            "realized_net_pnl_unavailable_without_broker_fill_and_fees" to true
+        ))
+    }
+
+    private suspend fun squareOffMisLongLocked(token: String, position: ManagedPositionEntity, reason: String) {
+        val policy = com.multify.traderpro.engine.MisIntradayLongPolicy
+        val ref = pendingMisExitReference(position)
+        var intent = misIntradayExitPrefs.getString(ref, null)
+        if (intent == null) {
+            // Reserve the decision BEFORE cancelling the existing broker stop.
+            // On app death, PREPARE is recoverable by consulting the stop ID.
+            require(position.smartOrderMode == policy.STOP_VERIFIED) {
+                "Cannot start MIS SELL exit without a verified protective stop"
+            }
+            check(misIntradayExitPrefs.edit().putString(
+                ref, "PREPARE|${position.symbol}|${System.currentTimeMillis()}|${reason}"
+            ).commit()) { "Cannot durably reserve MIS stop cancellation; no broker action" }
+            intent = "PREPARE"
+            managedDao.updatePosition(position.copy(
+                smartOrderMode = policy.EXIT_PENDING,
+                smartOrderDirection = ref,
+                smartOrderStatus = "EXIT_PREPARE_STOP_CANCEL"
+            ))
+        }
+        if (intent.startsWith("CLOSED|")) {
+            require(misLongBrokerNet(token, position.symbol) == 0) {
+                "Broker MIS position not flat despite local completed exit intent"
+            }
+            closeMisLongRecord(position, "RECOVERED_CLOSED_EXIT_INTENT")
+            return
+        }
+        if (intent.startsWith("SELL_POST_PENDING|")) {
+            // This reference could already have been POSTed, including when
+            // Groww's HTTP reply was lost. NEVER post a second SELL.
+            val order = apiFactory.groww.orderStatusByReference(
+                bearer(token), referenceId = ref
+            ).requirePayload("Resolve prior MIS SELL exit by exact reference")
+            val net = misLongBrokerNet(token, position.symbol)
+            if (net == 0 && (order.orderStatus.equals("EXECUTED", true) ||
+                (order.filledQuantity ?: 0) > 0)) {
+                check(misIntradayExitPrefs.edit().putString(
+                    ref, "CLOSED|${position.symbol}|${order.growwOrderId}"
+                ).commit()) { "MIS close broker-flat intent could not be committed" }
+                closeMisLongRecord(position, "RECOVERED_MIS_SELL_EXIT_BROKER_FLAT")
+                return
+            }
+            error("MIS long exit SELL ${ref} unresolved: broker_qty=$net, status=${order.orderStatus}")
+        }
+        require(intent.startsWith("PREPARE|") || intent == "PREPARE") {
+            "Unknown MIS exit lifecycle for ${position.symbol}: ${intent.take(25)}"
+        }
+        val stopId = position.smartOrderId ?: error("MIS long stop ID missing during cancellation")
+        var stop = apiFactory.groww.orderStatus(
+            bearer(token), stopId
+        ).requirePayload("Check MIS SELL stop before cancel")
+        if (policy.pendingBrokerStop(stop.orderStatus)) {
+            // This is a cancellation of an ID that we already own, never a
+            // second SELL. An HTTP failure leaves PREPARE for reconciliation.
+            apiFactory.groww.cancelOrder(
+                bearer(token), OrderCancelRequest(growwOrderId = stopId)
+            ).requirePayload("Cancel MIS long pending SELL stop")
+            stop = apiFactory.groww.orderStatus(
+                bearer(token), stopId
+            ).requirePayload("Verify MIS SELL stop cancellation")
+        }
+        val net = misLongBrokerNet(token, position.symbol)
+        if (net == 0) {
+            require(
+                stop.orderStatus.equals("CANCELLED", true) ||
+                    stop.orderStatus.equals("EXECUTED", true) ||
+                    stop.orderStatus.equals("COMPLETED", true)
+            ) { "MIS flat but SELL stop status still ambiguous: ${stop.orderStatus}" }
+            check(misIntradayExitPrefs.edit().putString(
+                ref, "CLOSED|${position.symbol}|${stop.growwOrderId}"
+            ).commit()) { "Could not commit broker-flat MIS exit" }
+            closeMisLongRecord(position, "BROKER_FLAT_AFTER_MIS_SELL_STOP")
+            return
+        }
+        require(stop.orderStatus.equals("CANCELLED", true)) {
+            "MIS long stop ${stop.orderStatus}: do not send duplicate SELL"
+        }
+        require(net == position.quantity) {
+            "MIS long broker quantity differs from tracked app quantity: $net vs ${position.quantity}"
+        }
+        // CRITICAL: persist the FIRST-and-only direct SELL intent before POST.
+        // If interrupted here, any follow-up must query by broker reference,
+        // never assume the network call was absent.
+        check(misIntradayExitPrefs.edit().putString(
+            ref, "SELL_POST_PENDING|${position.symbol}|${System.currentTimeMillis()}|${reason}"
+        ).commit()) { "Cannot reserve MIS direct SELL order; no POST allowed" }
+        managedDao.updatePosition(position.copy(
+            smartOrderMode = policy.EXIT_PENDING,
+            smartOrderDirection = ref, smartOrderStatus = "SELL_POST_PENDING"
+        ))
+        val sell = submitMarketOrder(token, position.symbol, "SELL", net, "MIS", ref)
+        require(misLongBrokerNet(token, position.symbol) == 0) {
+            "MIS exit ${sell.growwOrderId} acknowledged but broker net position not yet flat"
+        }
+        check(misIntradayExitPrefs.edit().putString(
+            ref, "CLOSED|${position.symbol}|${sell.growwOrderId}"
+        ).commit()) { "Broker flat but MIS close ledger persistence failed" }
+        closeMisLongRecord(position, "MIS_INTRADAY_EXIT_${reason}")
+    }
+
+    /**
+     * One independent monitor for new Alpha MIS LONGs. All CNC GTT mechanics
+     * remain in monitorManagedPositions and must NOT inspect these rows.
+     */
+    suspend fun monitorMisLongPositions(): Int {
+        val rows = managedDao.openPositions().filter {
+            it.product == "MIS" && it.side == "LONG" && appOwned(it)
+        }
+        val now = System.currentTimeMillis()
+        val orphanIntents = misIntradayEntryPrefs.all.mapNotNull { (ref, status) ->
+            if (status !is String || status.startsWith("PROTECTED|")) null
+            else if (rows.any { it.openReferenceId == ref && appPositionProtected(it) }) null
+            else ref to status
+        }
+        if (orphanIntents.isNotEmpty()) {
+            preferences.setSafetyHalt(true)
+            val notice = lastPortfolioConflictAuditAtMs["MIS_ORPHAN_ENTRY_NOTICE"] ?: 0L
+            if (now - notice >= 60_000L) {
+                lastPortfolioConflictAuditAtMs["MIS_ORPHAN_ENTRY_NOTICE"] = now
+                auditLogger.log("SAFETY", "MIS_FILLED_OR_UNKNOWN_WITHOUT_TRACKED_STOP", mapOf(
+                    "references" to orphanIntents.map { it.first },
+                    "states" to orphanIntents.map { it.second },
+                    "broker_position_may_be_unprotected" to true,
+                    "all_entries_halted" to true,
+                    "reconcile_alpha_mis_order_and_stop" to true
+                ))
+                runCatching {
+                    val nm = appContext.getSystemService(NotificationManager::class.java)
+                    val channel = "multify_mis_entry_orphan"
+                    nm.createNotificationChannel(NotificationChannel(
+                        channel, "MIS unprotected entry alerts", NotificationManager.IMPORTANCE_HIGH
+                    ))
+                    nm.notify(650_030, NotificationCompat.Builder(appContext, channel)
+                        .setSmallIcon(R.drawable.ic_stat_trader)
+                        .setContentTitle("ACTION REQUIRED: MIS entry needs reconciliation")
+                        .setContentText("An Alpha MIS BUY may have filled without a verified SELL stop. Inspect Groww Orders and Positions immediately.")
+                        .setPriority(NotificationCompat.PRIORITY_HIGH).setAutoCancel(true).build())
+                }
+            }
+        }
+        if (rows.isEmpty()) return 0
+        val policy = com.multify.traderpro.engine.MisIntradayLongPolicy
+        val squareOff = policy.mustExit(ZonedDateTime.now(INDIA))
+        if (!squareOff && now - lastMisLongMonitorAtMs in 0L..4_999L) return rows.size
+        lastMisLongMonitorAtMs = now
+        val token = ensureToken()
+        if (token == null) {
+            preferences.setSafetyHalt(true)
+            auditLogger.log("SAFETY", "MIS_LONG_AUTH_UNAVAILABLE", mapOf(
+                "positions" to rows.map { it.symbol }, "new_buys_halted" to true
+            ))
+            return rows.size
+        }
+        for (observed in rows) {
+            val mutex = positionLifecycleMutexes.computeIfAbsent(observed.symbol.uppercase(Locale.US)) { Mutex() }
+            mutex.withLock {
+                var row = managedDao.openPositionById(observed.id) ?: return@withLock
+                try {
+                    if (row.smartOrderMode == policy.EXIT_PENDING ||
+                        misIntradayExitPrefs.contains(pendingMisExitReference(row))) {
+                        squareOffMisLongLocked(token, row, "PRIOR_EXIT_RECONCILIATION")
+                        return@withLock
+                    }
+                    if (!appPositionProtected(row)) {
+                        row = protectMisLongLocked(token, row)
+                    }
+                    val net = misLongBrokerNet(token, row.symbol)
+                    if (net == 0) {
+                        if (System.currentTimeMillis() - row.openedAtMs <
+                            AppPositionOwnershipPolicy.POST_FILL_INVENTORY_LAG_WINDOW_MS &&
+                            !squareOff) {
+                            // Groww position inventory can lag an actual BUY fill.
+                            return@withLock
+                        }
+                        // Verify that an unfilled stop cannot later SELL and
+                        // accidentally create a short after the MIS position closes.
+                        val id = row.smartOrderId ?: error("MIS broker stop order ID missing")
+                        val status = apiFactory.groww.orderStatus(
+                            bearer(token), id
+                        ).requirePayload("Check MIS long orphaned SELL stop")
+                        if (policy.pendingBrokerStop(status.orderStatus)) {
+                            apiFactory.groww.cancelOrder(
+                                bearer(token), OrderCancelRequest(growwOrderId = id)
+                            ).requirePayload("Cancel MIS orphaned SELL stop")
+                            val cancelled = apiFactory.groww.orderStatus(
+                                bearer(token), id
+                            ).requirePayload("Verify MIS orphan stop cancelled")
+                            require(cancelled.orderStatus.equals("CANCELLED", true)) {
+                                "Broker MIS position flat but protective SELL order cancellation unverified"
+                            }
+                        }
+                        closeMisLongRecord(row, "BROKER_MIS_POSITION_FLAT")
+                        return@withLock
+                    }
+                    require(Instant.ofEpochMilli(row.openedAtMs).atZone(INDIA).toLocalDate() ==
+                        ZonedDateTime.now(INDIA).toLocalDate()) {
+                        "CRITICAL: MIS LONG still open on a later trading day; verify broker product conversion and close manually. No stale-session SELL."
+                    }
+                    require(net == row.quantity) {
+                        "MIS LONG quantity mismatch: broker ${net}, app ${row.quantity}"
+                    }
+                    val stopId = row.smartOrderId ?: error("MIS long stop ID missing")
+                    val state = apiFactory.groww.orderStatus(
+                        bearer(token), stopId
+                    ).requirePayload("MIS long protective SL-M status")
+                    require(policy.pendingBrokerStop(state.orderStatus)) {
+                        "MIS LONG broker protective SELL stop not pending: ${state.orderStatus}"
+                    }
+                    row = row.copy(smartOrderStatus = state.orderStatus)
+                    managedDao.updatePosition(row)
+                    if (squareOff) {
+                        squareOffMisLongLocked(token, row, "MANDATORY_1455_IST")
+                        return@withLock
+                    }
+                    val quote = apiFactory.groww.quote(
+                        bearer(token), tradingSymbol = row.symbol,
+                        trafficPriority = MarketDataPriorityAdmissionPolicy.PROTECTION
+                    ).requirePayload("Fresh MIS long trailing Alpha quote")
+                    val ltp = quote.lastPrice?.takeIf { it.isFinite() && it > 0.0 }
+                        ?: error("MIS long cannot trail on missing Alpha quote")
+                    val high = max(row.maxFavourablePrice, ltp)
+                    val isWR = com.multify.traderpro.engine.WorkingRangeExitPolicy.owns(
+                        row.openReferenceId, row.regime
+                    )
+                    if (isWR && com.multify.traderpro.engine.WorkingRangeExitPolicy.exitReason(
+                            row.entryPrice, row.targetPrice, ltp
+                        ) == com.multify.traderpro.engine.WorkingRangeExitPolicy.TARGET_REASON) {
+                        squareOffMisLongLocked(token, row, "WORKING_RANGE_TARGET_FULL_EXIT")
+                        return@withLock
+                    }
+                    val desiredRaw = policy.tighterStop(
+                        row.stopPrice ?: HardStopLossPolicy.stopPrice(row.entryPrice),
+                        row.entryPrice, high, isWR
+                    )
+                    // Preserve Fixed's EXISTING additional net-gain protection
+                    // overlay. Its delivery-cost estimate is conservative for MIS,
+                    // never a license to loosen the broker stop.
+                    val desiredWithNetFloor = if (!isWR &&
+                        SteppedTrailingPolicy.stopGainPctForHighWater(row.entryPrice, high) != null
+                    ) NetGainTrailingPolicy.additionalNetGainProtection(
+                        row.entryPrice, row.quantity, high, desiredRaw
+                    ) else desiredRaw
+                    val desired = max(row.stopPrice ?: 0.0, roundSmartOrderPrice(desiredWithNetFloor))
+                    if (desired > (row.stopPrice ?: 0.0) + 0.000001) {
+                        val ack = apiFactory.groww.modifyOrder(
+                            bearer(token), OrderModifyRequest(
+                                quantity = row.quantity, triggerPrice = desired,
+                                orderType = "SL_M", growwOrderId = stopId
+                            )
+                        ).requirePayload("Raise MIS long protective SELL stop")
+                        require(
+                            com.multify.traderpro.engine.BrokerOrderAcknowledgementPolicy
+                                .usableId(ack.growwOrderId) == stopId
+                        ) { "MIS long stop modification broker ID mismatch" }
+                        val check = apiFactory.groww.orderStatus(
+                            bearer(token), stopId
+                        ).requirePayload("Verify raised MIS long SELL stop")
+                        require(policy.pendingBrokerStop(check.orderStatus)) {
+                            "Modified MIS SELL stop no longer broker pending"
+                        }
+                        row = row.copy(
+                            stopPrice = desired, smartOrderTriggerPrice = desired,
+                            smartOrderStatus = check.orderStatus,
+                            smartOrderUpdatedAtMs = System.currentTimeMillis()
+                        )
+                        auditLogger.log("MIS_LONG", "UPWARD_STOP_RATCHET_BROKER_ACK", mapOf(
+                            "symbol" to row.symbol, "new_stop" to desired,
+                            "high_water" to high, "order_id" to stopId,
+                            "working_range_no_trail" to isWR
+                        ))
+                    }
+                    managedDao.updatePosition(row.copy(
+                        lastPrice = ltp, maxFavourablePrice = high,
+                        maxAdversePrice = min(row.maxAdversePrice, ltp),
+                        lastEvaluatedAtMs = System.currentTimeMillis()
+                    ))
+                } catch (cancel: CancellationException) {
+                    throw cancel
+                } catch (failure: Throwable) {
+                    preferences.setSafetyHalt(true)
+                    auditLogger.log("SAFETY", "MIS_LONG_RECONCILIATION_REQUIRED", mapOf(
+                        "symbol" to row.symbol, "position_id" to row.id,
+                        "state" to row.smartOrderMode,
+                        "reason" to (failure.message ?: failure.javaClass.simpleName),
+                        "no_blind_order_resubmission" to true,
+                        "new_buy_blocked" to true,
+                        "broker_exit_or_protection_requires_verification" to true
+                    ))
+                }
+            }
+        }
+        return rows.size
+    }
+
+    private fun manualShortPendingStop(status: String?): Boolean =
+        status?.uppercase(Locale.US) in setOf("OPEN", "NEW", "PENDING", "TRIGGER_PENDING", "TRIGGER PENDING", "VALIDATION_PENDING")
+
+    private suspend fun manualMisBrokerQty(token: String, symbol: String): Int {
+        val positions = apiFactory.groww.positions(bearer(token))
+            .requirePayload("Alpha MIS positions for $symbol").positions
+        return positions.filter { it.product.equals("MIS", true) &&
+            BrokerInventorySymbolPolicy.normalize(it.tradingSymbol)?.equals(symbol, true) == true
+        }.sumOf { it.quantity }
+    }
+
+    private suspend fun manualShortOrderByReference(token: String, reference: String): OrderPayload =
+        apiFactory.groww.orderStatusByReference(
+            bearer(token), referenceId = reference
+        ).requirePayload("Manual MIS order reference $reference")
+
+    /**
+     * Protect a broker-confirmed MIS short using an exchange/broker pending
+     * BUY SL-M order (NOT a CNC SELL GTT). This is the intraday counterpart to
+     * Fixed's hard-floor stop. Never treat locally computed stops as protection.
+     */
+    private suspend fun protectManualShort(token: String, original: ManualShortPosition): ManualShortPosition {
+        var row = original
+        if (row.protectionReference.isBlank()) {
+            val ref = stableRef("MPS", row.reference + "|BUY_STOP")
+            row = row.copy(state = "STOP_PENDING", protectionReference = ref)
+            saveManualShort(row) // durable BEFORE the broker POST
+            auditLogger.log("MANUAL_SHORT", "BROKER_SL_M_INTENT_RESERVED", mapOf(
+                "symbol" to row.symbol, "reference" to ref, "trigger" to row.stopTrigger,
+                "buy_to_cover" to true, "no_duplicate_post" to true
+            ))
+            val ack = runCatching {
+                apiFactory.groww.placeOrder(
+                    bearer(token),
+                    OrderCreateRequest(
+                        tradingSymbol = row.symbol, quantity = row.quantity,
+                        transactionType = "BUY", product = "MIS", orderType = "SL_M",
+                        triggerPrice = row.stopTrigger, price = 0.0, orderReferenceId = ref
+                    )
+                ).requirePayload("Manual MIS protective BUY SL-M")
+            }.getOrElse { failure ->
+                // Ambiguous create response: the durable reference remains PENDING.
+                // Do not blindly create another stop or BUY-to-cover.
+                auditLogger.log("SAFETY", "MANUAL_SHORT_SL_M_CREATE_UNCERTAIN", mapOf(
+                    "symbol" to row.symbol, "reference" to ref,
+                    "reason" to (failure.message ?: failure.javaClass.simpleName),
+                    "no_duplicate_order" to true
+                ))
+                throw failure
+            }
+            val id = com.multify.traderpro.engine.BrokerOrderAcknowledgementPolicy
+                .usableId(ack.growwOrderId)
+                ?: com.multify.traderpro.engine.BrokerOrderAcknowledgementPolicy
+                    .usableId(runCatching {
+                        manualShortOrderByReference(token, ref).growwOrderId
+                    }.getOrNull())
+                ?: error("Manual short protective SL-M acknowledgement uncertain; reconcile broker reference $ref")
+            row = row.copy(protectionOrderId = id)
+            saveManualShort(row)
+        }
+        val verified = apiFactory.groww.orderStatus(
+            bearer(token), row.protectionOrderId
+        ).requirePayload("Verify manual short pending BUY stop")
+        require(manualShortPendingStop(verified.orderStatus)) {
+            "Manual MIS protective BUY stop not pending: ${verified.orderStatus}"
+        }
+        val stable = row.copy(state = "PROTECTED", note = "BROKER_BUY_SL_M_PENDING")
+        saveManualShort(stable)
+        auditLogger.log("MANUAL_SHORT", "BROKER_BUY_SL_M_VERIFIED", mapOf(
+            "symbol" to stable.symbol, "stop_order_id" to stable.protectionOrderId,
+            "trigger" to stable.stopTrigger, "status" to verified.orderStatus,
+            "source" to "ALPHA_ORDER_STATUS"
+        ))
+        return stable
+    }
+
+    /**
+     * Manual SELL is an NEW NSE MIS short, not a sale of CNC holdings.
+     * No Fixed score or PRIMARY confirmation is synthesized.
+     */
+    suspend fun executeManualShort(symbolInput: String): String = appOwnedBuyMutex.withLock {
+        manualShortMutex.withLock {
+        val symbol = symbolInput.trim().uppercase(Locale.US)
+        require(nseSymbols.hasFullInstrumentMaster() && nseSymbols.isKnown(symbol)) {
+            "Manual SELL requires a current exact NSE CASH stock master entry"
+        }
+        require(ManualShortIntradayPolicy.mayOpen(ZonedDateTime.now(INDIA)) &&
+            marketSession() == "OPEN") {
+            "Manual intraday short entries stop at 14:30 IST"
+        }
+        val settings = preferences.settings.first()
+        preManualMisExecutionGuard(settings)
+        require(manualShortState()?.unresolved() != true) {
+            "Existing Manual MIS short or unresolved short order requires reconciliation"
+        }
+        require(manualBuyIntentPrefs.all.values.none {
+            it is String && (it.startsWith("PENDING|") || it.startsWith("BROKER_ACK|"))
+        }) { "Existing Manual BUY order intent requires reconciliation" }
+        require(misIntradayEntryPrefs.all.values.none {
+            it is String && (it.startsWith("PENDING|") || it.startsWith("BROKER_ACK|"))
+        }) { "Existing MIS long entry/protection intent requires reconciliation" }
+        val token = ensureToken() ?: error("Authenticate Alpha before Manual SELL")
+        val existing = managedDao.openPositions().filter(::appOwned)
+        require(existing.none { it.symbol.equals(symbol, true) }) {
+            "Manual short cannot offset an app-owned long holding"
+        }
+        require(existing.all {
+            appPositionProtected(it)
+        }) { "Manual short blocked: any app-owned long without verified broker protection" }
+        existing.filter { it.product == "MIS" }.forEach { position ->
+            val id = position.smartOrderId ?: error("MIS long stop ID absent")
+            val brokerStop = apiFactory.groww.orderStatus(
+                bearer(token), id
+            ).requirePayload("Check broker MIS long stop before opening short")
+            require(com.multify.traderpro.engine.MisIntradayLongPolicy.pendingBrokerStop(
+                brokerStop.orderStatus
+            )) { "Short entry forbidden: MIS long stop for ${position.symbol} is unprotected" }
+        }
+        val inventory = brokerInventory(token, force = true)
+        require((inventory.holdings[symbol]?.quantity ?: 0) == 0 &&
+            (inventory.positions[symbol]?.quantity ?: 0) == 0 &&
+            manualMisBrokerQty(token, symbol) == 0) {
+            "Manual short rejected: broker already has $symbol exposure"
+        }
+        require(workingRangeRecommendationStore.pendingAutoBuyIntents().isEmpty()) {
+            "Unresolved Working Range order prevents manual MIS short"
+        }
+        val currentOrders = apiFactory.groww.orderList(bearer(token), page = 0)
+            .requirePayload("Pre-short Alpha orders").orderList
+        require(currentOrders.none {
+            it.tradingSymbol.equals(symbol, true) &&
+                it.orderStatus.uppercase(Locale.US) !in
+                setOf("EXECUTED", "COMPLETED", "REJECTED", "CANCELLED", "FAILED")
+        }) { "Manual short blocked: unresolved broker order for $symbol" }
+        val quote = apiFactory.groww.quote(
+            bearer(token), tradingSymbol = symbol,
+            trafficPriority = MarketDataPriorityAdmissionPolicy.PROTECTION
+        ).requirePayload("Fresh Alpha quote before MIS short $symbol")
+        val quoteReceiptAtMs = System.currentTimeMillis()
+        val price = quote.lastPrice?.takeIf { it.isFinite() && it > 0.0 }
+            ?: error("Manual short requires a valid fresh Alpha price")
+        require(ExecutionQuoteLiquidityPolicy.rejectionReason(quote) == null &&
+            FixedExecutionThinLiquidityPolicy.rejectionReason(quote) == null) {
+            "Manual short blocked: live market book/liquidity not verified"
+        }
+        // A short close needs real sellers offering shares to cover; avoid an
+        // upper-circuit lock that could strand a short with unbounded slippage.
+        val ceiling = quote.upperCircuitLimit?.takeIf { it.isFinite() && it > 0.0 }
+        require(ceiling != null && price < ceiling * 0.985) {
+            "Manual short blocked: upper-circuit headroom is unverified or too small"
+        }
+        val sizing = com.multify.traderpro.engine.BudgetOnlyCncSizing.size(
+            settings.holdingBudgetRupees.toDouble(), price
+        )
+        val margin = apiFactory.groww.margins(bearer(token))
+            .requirePayload("Fresh Alpha cash for manual short")
+        val cash = com.multify.traderpro.engine.BrokerEntryCapitalPolicy.brokerCncCash(
+            margin.clearCash, margin.equity?.cncBalanceAvailable ?: 0.0
+        )
+        val capital = com.multify.traderpro.engine.BrokerEntryCapitalPolicy.decide(
+            sizing.quantity, price, settings.holdingBudgetRupees.toDouble(),
+            settings.maxTotalCapitalRupees.toDouble(),
+            settings.maxConcurrentHoldings, existing.size,
+            existing.sumOf { it.quantity.toDouble() * it.entryPrice }, cash
+        )
+        require(capital.allowedQuantity > 0) {
+            "Manual short blocked: ${capital.reason} (uses Alpha existing per-order budget)"
+        }
+        require(ManualShortIntradayPolicy.mayOpen(ZonedDateTime.now(INDIA)) &&
+            marketSession() == "OPEN") {
+            "Manual short entry cutoff reached during preflight"
+        }
+        require(System.currentTimeMillis() - quoteReceiptAtMs in
+            0L..CircuitAwareBuyPolicy.MAX_QUOTE_AGE_MS) {
+            "Manual short Alpha entry quote expired during cash/order checks; no order sent"
+        }
+        val openedAtMs = System.currentTimeMillis()
+        val ref = stableRef("MSS", "${ZonedDateTime.now(INDIA).toLocalDate()}|$symbol|MANUAL_MIS_SHORT|$openedAtMs")
+        val intent = ManualShortPosition(
+            symbol = symbol, reference = ref,
+            openedAtMs = openedAtMs,
+            quantity = capital.allowedQuantity, entryPrice = 0.0,
+            lowestPrice = 0.0, stopTrigger = 0.0,
+            state = "ENTRY_PENDING"
+        )
+        saveManualShort(intent) // once, BEFORE actual Alpha SELL
+        val filled = try {
+            submitMarketOrder(token, symbol, "SELL", capital.allowedQuantity, "MIS", ref)
+        } catch (e: Throwable) {
+            preferences.setSafetyHalt(true)
+            auditLogger.log("SAFETY", "MANUAL_SHORT_SELL_ACK_UNRESOLVED", mapOf(
+                "symbol" to symbol, "reference" to ref,
+                "reason" to (e.message ?: e.javaClass.simpleName),
+                "new_buys_halted" to true, "no_blind_resubmission" to true
+            ))
+            throw e
+        }
+        val qty = filled.filledQuantity?.takeIf { it > 0 }
+            ?: error("Manual short broker fill quantity unverified")
+        val fill = filled.averageFillPrice?.takeIf { it.isFinite() && it > 0.0 }
+            ?: runCatching {
+                apiFactory.groww.orderStatus(bearer(token), filled.growwOrderId)
+                    .requirePayload("Verify actual Manual short SELL fill price")
+                    .averageFillPrice?.takeIf { it.isFinite() && it > 0.0 }
+            }.getOrNull()
+            ?: run {
+                preferences.setSafetyHalt(true)
+                error("Manual MIS SELL filled but actual entry cost is unverified. Reconcile Alpha immediately; new buys halted.")
+            }
+        val opened = intent.copy(
+            state = "ENTRY_FILLED_UNPROTECTED", quantity = qty, entryPrice = fill,
+            lowestPrice = fill,
+            stopTrigger = roundSmartOrderPrice(ManualShortIntradayPolicy.stopForLowWater(fill, fill)),
+            entryOrderId = filled.growwOrderId
+        )
+        saveManualShort(opened)
+        val secured = runCatching { protectManualShort(token, opened) }
+            .onFailure {
+                preferences.setSafetyHalt(true)
+                auditLogger.log("SAFETY", "UNPROTECTED_MANUAL_MIS_SHORT", mapOf(
+                    "symbol" to symbol, "quantity" to qty,
+                    "reason" to (it.message ?: it.javaClass.simpleName),
+                    "no_new_auto_or_manual_buys" to true,
+                    "groww_manual_action_required" to true
+                ))
+            }.getOrNull()
+        if (secured == null) {
+            return@withLock "MIS SHORT $symbol filled but BUY stop NOT VERIFIED. SAFETY HALT; inspect Groww positions/orders NOW."
+        }
+        "Manual SELL $symbol · Alpha MIS SHORT $qty shares at ₹${fmt(fill)} · broker BUY SL-M stop ₹${fmt(secured.stopTrigger)} VERIFIED"
+        }
+    }
+
+    /**
+     * Independent MIS-short monitor. Never feeds a SHORT into CNC long GTT/SELL
+     * handlers. Restores pending entry/stop/cover references after process death.
+     * API failures never authorize another POST.
+     */
+    suspend fun monitorManualShortIntraday(): Int = manualShortMutex.withLock {
+        var row = manualShortState() ?: return@withLock 0
+        if (!row.unresolved()) return@withLock 0
+        // Independent Alpha NON_TRADING pacing: avoid duplicating status and
+        // position reads on every 1-second CNC monitor wake. Force close never
+        // waits behind this read-only interval.
+        val checkAt = System.currentTimeMillis()
+        if (!ManualShortIntradayPolicy.mustSquareOff(ZonedDateTime.now(INDIA)) &&
+            checkAt - manualShortLastBrokerCheckAtMs in 0L..4_999L
+        ) return@withLock 1
+        manualShortLastBrokerCheckAtMs = checkAt
+        val token = ensureToken() ?: run {
+            preferences.setSafetyHalt(true)
+            return@withLock 1
+        }
+        try {
+            if (row.state == "ENTRY_PENDING") {
+                val ack = manualShortOrderByReference(token, row.reference)
+                if (ack.orderStatus.uppercase(Locale.US) in setOf("CANCELLED", "REJECTED", "FAILED") &&
+                    (ack.filledQuantity ?: 0) == 0) {
+                    saveManualShort(row.copy(state = "CANCELLED_NO_FILL"))
+                    return@withLock 0
+                }
+                require(ack.orderStatus.equals("EXECUTED", true) ||
+                    (ack.filledQuantity ?: 0) > 0) {
+                    "Unresolved Manual short entry acknowledgement"
+                }
+                val qty = ack.filledQuantity?.takeIf { it > 0 } ?: row.quantity
+                val fill = ack.averageFillPrice?.takeIf { it.isFinite() && it > 0.0 }
+                    ?: error("Manual short fill price unknown; protection cannot be sized")
+                row = row.copy(
+                    state = "ENTRY_FILLED_UNPROTECTED", entryOrderId = ack.growwOrderId,
+                    quantity = qty, entryPrice = fill, lowestPrice = fill,
+                    stopTrigger = roundSmartOrderPrice(ManualShortIntradayPolicy.stopForLowWater(fill, fill))
+                )
+                saveManualShort(row)
+            }
+            if (row.state == "ENTRY_FILLED_UNPROTECTED" || row.state == "STOP_PENDING") {
+                if (row.state == "STOP_PENDING" && row.protectionOrderId.isBlank()) {
+                    val status = manualShortOrderByReference(token, row.protectionReference)
+                    val id = com.multify.traderpro.engine.BrokerOrderAcknowledgementPolicy
+                        .usableId(status.growwOrderId)
+                        ?: error("Manual short protective order unknown; reconcile in Groww")
+                    row = row.copy(protectionOrderId = id)
+                    saveManualShort(row)
+                }
+                row = protectManualShort(token, row)
+            }
+            if (row.state == "COVER_PENDING") {
+                val close = manualShortOrderByReference(token, row.coverReference)
+                if ((close.filledQuantity ?: 0) > 0 || close.orderStatus.equals("EXECUTED", true)) {
+                    val net = manualMisBrokerQty(token, row.symbol)
+                    if (net == 0) {
+                        saveManualShort(row.copy(state = "CLOSED", coverOrderId = close.growwOrderId,
+                            note = "COVER_CONFIRMED_BROKER_FLAT"))
+                        return@withLock 0
+                    }
+                }
+                error("Manual short BUY-to-cover not fully reconciled")
+            }
+            if (row.state != "PROTECTED") return@withLock 1
+            val net = manualMisBrokerQty(token, row.symbol)
+            if (net == 0) {
+                val stop = apiFactory.groww.orderStatus(bearer(token), row.protectionOrderId)
+                    .requirePayload("Check orphaned manual MIS stop")
+                if (manualShortPendingStop(stop.orderStatus)) {
+                    apiFactory.groww.cancelOrder(
+                        bearer(token), OrderCancelRequest(growwOrderId = row.protectionOrderId)
+                    ).requirePayload("Cancel orphaned manual short BUY stop")
+                    val cancelled = apiFactory.groww.orderStatus(bearer(token), row.protectionOrderId)
+                        .requirePayload("Verify orphaned MIS stop cancelled")
+                    require(cancelled.orderStatus.equals("CANCELLED", true)) {
+                        "MIS position flat but protective BUY stop still unverified"
+                    }
+                }
+                saveManualShort(row.copy(state = "CLOSED", note = "BROKER_MIS_POSITION_FLAT"))
+                return@withLock 0
+            }
+            require(Instant.ofEpochMilli(row.openedAtMs).atZone(INDIA).toLocalDate() ==
+                ZonedDateTime.now(INDIA).toLocalDate()) {
+                "CRITICAL: MIS SHORT persists from an earlier session; reconcile Groww immediately. No blind overnight cover."
+            }
+            require(net == -row.quantity) {
+                "Manual short net quantity mismatch: broker=$net expected=-${row.quantity}"
+            }
+            val stopOrder = apiFactory.groww.orderStatus(bearer(token), row.protectionOrderId)
+                .requirePayload("Manual short pending SL-M")
+            require(manualShortPendingStop(stopOrder.orderStatus)) {
+                "Manual short protection not pending: ${stopOrder.orderStatus}"
+            }
+            if (ManualShortIntradayPolicy.mustSquareOff(ZonedDateTime.now(INDIA))) {
+                coverManualShortLocked(token, row, "MANDATORY_1455_IST_SQUARE_OFF")
+                return@withLock if (manualShortState()?.unresolved() == true) 1 else 0
+            }
+            // Bound quote requests to the protection-cadence; never touch Beta.
+            if (System.currentTimeMillis() - row.lastObservedAtMs < 5_000L) return@withLock 1
+            val quote = apiFactory.groww.quote(
+                bearer(token), tradingSymbol = row.symbol,
+                trafficPriority = MarketDataPriorityAdmissionPolicy.PROTECTION
+            ).requirePayload("Manual MIS short trailing Alpha quote")
+            val ltp = quote.lastPrice?.takeIf { it.isFinite() && it > 0.0 }
+                ?: error("Missing fresh Alpha quote for MIS short")
+            val low = if (row.lowestPrice > 0.0) minOf(row.lowestPrice, ltp) else ltp
+            val rawDesired = ManualShortIntradayPolicy.tighterStop(row.stopTrigger, row.entryPrice, low)
+            // Use the same safe NSE tick rounding already applied to CNC GTT
+            // stops; never raise an existing MIS protective BUY stop.
+            val desired = minOf(row.stopTrigger, roundSmartOrderPrice(rawDesired))
+            if (desired + 0.000001 < row.stopTrigger) {
+                val modified = apiFactory.groww.modifyOrder(
+                    bearer(token), OrderModifyRequest(
+                        quantity = row.quantity, triggerPrice = desired,
+                        orderType = "SL_M", growwOrderId = row.protectionOrderId
+                    )
+                ).requirePayload("Tighten Manual MIS BUY stop")
+                val id = com.multify.traderpro.engine.BrokerOrderAcknowledgementPolicy
+                    .usableId(modified.growwOrderId)
+                require(id == row.protectionOrderId) {
+                    "Manual MIS stop modification did not confirm same broker order"
+                }
+                val reread = apiFactory.groww.orderStatus(bearer(token), row.protectionOrderId)
+                    .requirePayload("Verify tightened MIS short stop")
+                require(manualShortPendingStop(reread.orderStatus)) {
+                    "Manual short stop modified but no longer pending: ${reread.orderStatus}"
+                }
+                row = row.copy(stopTrigger = desired)
+                auditLogger.log("MANUAL_SHORT", "REVERSE_TRAIL_TIGHTENED", mapOf(
+                    "symbol" to row.symbol, "stop_price" to desired, "low_water" to low,
+                    "same_broker_stop_id" to row.protectionOrderId,
+                    "never_loosen" to true
+                ))
+            }
+            row = row.copy(lowestPrice = low, lastObservedAtMs = System.currentTimeMillis())
+            saveManualShort(row)
+            1
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (e: Throwable) {
+            preferences.setSafetyHalt(true)
+            auditLogger.log("SAFETY", "MANUAL_SHORT_RECONCILIATION_REQUIRED", mapOf(
+                "symbol" to row.symbol, "state" to row.state,
+                "reason" to (e.message ?: e.javaClass.simpleName),
+                "may_be_open_and_unprotected" to true,
+                "no_blind_buy_to_cover_or_short_reentry" to true
+            ))
+            1
+        }
+    }
+
+    private suspend fun coverManualShortLocked(token: String, original: ManualShortPosition, reason: String) {
+        var row = original
+        require(row.state == "PROTECTED") { "Cannot square off unresolved Manual MIS short" }
+        require(manualMisBrokerQty(token, row.symbol) == -row.quantity) {
+            "Cannot BUY to cover until exact negative MIS position is verified"
+        }
+        apiFactory.groww.cancelOrder(
+            bearer(token), OrderCancelRequest(growwOrderId = row.protectionOrderId)
+        ).requirePayload("Cancel pending MIS short stop before square off")
+        val cancelled = apiFactory.groww.orderStatus(bearer(token), row.protectionOrderId)
+            .requirePayload("Verify MIS stop cancelled before BUY cover")
+        require(cancelled.orderStatus.equals("CANCELLED", true)) {
+            "Cannot BUY to cover: stop cancellation unconfirmed"
+        }
+        if (manualMisBrokerQty(token, row.symbol) == 0) {
+            saveManualShort(row.copy(state = "CLOSED", note = "BROKER_FLAT_AFTER_STOP_CANCEL"))
+            return
+        }
+        val coverRef = stableRef("MSC", row.reference + "|BUY_COVER")
+        row = row.copy(state = "COVER_PENDING", coverReference = coverRef, note = reason)
+        saveManualShort(row) // no blind duplicate BUY-to-cover
+        val cover = submitMarketOrder(token, row.symbol, "BUY", row.quantity, "MIS", coverRef)
+        if (manualMisBrokerQty(token, row.symbol) == 0) {
+            saveManualShort(row.copy(state = "CLOSED", coverOrderId = cover.growwOrderId,
+                note = "INTRADAY_SHORT_BUY_COVER_CONFIRMED"))
+            auditLogger.log("MANUAL_SHORT", "BROKER_MIS_SHORT_CLOSED", mapOf(
+                "symbol" to row.symbol, "reason" to reason,
+                "cover_order_id" to cover.growwOrderId,
+                "realized_pnl_not_assumed_without_fill_prices" to true
+            ))
+        } else {
+            error("Manual short cover submitted but broker net position not flat")
+        }
+    }
+
+    suspend fun executeManualNse(symbolInput: String): String {
+        val symbol = symbolInput.trim().uppercase(Locale.US)
+        require(nseSymbols.hasFullInstrumentMaster() && nseSymbols.isKnown(symbol)) {
+            "Manual BUY requires a successful weekly NSE instrument sync and an exact listed stock selection"
+        }
+        require(com.multify.traderpro.engine.MisIntradayLongPolicy.mayEnter(
+            ZonedDateTime.now(INDIA)) && marketSession() == "OPEN") {
+            "Manual BUY unavailable outside the NSE new-entry window"
+        }
+        val settings = preferences.settings.first()
+        preManualMisExecutionGuard(settings)
+        val token = ensureToken() ?: error("Authenticate Groww Alpha first")
+        val quoteStarted = System.currentTimeMillis()
+        val quote = apiFactory.groww.quote(
+            bearer(token), tradingSymbol = symbol,
+            trafficPriority = MarketDataPriorityAdmissionPolicy.PROTECTION
+        ).requirePayload("Manual NSE fresh Alpha quote $symbol")
+        val quoteReceived = System.currentTimeMillis()
+        preferences.recordMarketData()
+        val ltp = quote.lastPrice?.takeIf { it.isFinite() && it > 0.0 }
+            ?: error("No valid fresh Alpha price for $symbol")
+        val liquidity = ExecutionQuoteLiquidityPolicy.rejectionReason(quote)
+        require(liquidity == null) { "Manual BUY blocked: unverifiable Alpha bid/ask ($liquidity)" }
+        val thin = FixedExecutionThinLiquidityPolicy.rejectionReason(quote)
+        require(thin == null) { "Manual BUY blocked: thin NSE liquidity ($thin)" }
+        val sizing = com.multify.traderpro.engine.BudgetOnlyCncSizing.size(
+            settings.holdingBudgetRupees.toDouble(), ltp
+        )
+        require(sizing.quantity > 0) { "Configured Alpha per-order budget cannot fund one share" }
+        val today = ZonedDateTime.now(INDIA).toLocalDate()
+        val reference = stableRef("MNH", "$today|$symbol|MANUAL_NSE_V9028")
+        require(com.multify.traderpro.engine.MisIntradayLongPolicy.mayEnter(
+            ZonedDateTime.now(INDIA)) && marketSession() == "OPEN") {
+            "Manual BUY blocked: NSE entry cutoff reached during quote retrieval"
+        }
+        // placeCncBuy serializes ALL account BUYs, rechecks broker cash,
+        // portfolio limits and pending orders, and persists this MNH intent
+        // immediately before the one allowed Alpha network order submission.
+        val order = placeCncBuy(
+            token, symbol, sizing.quantity, reference,
+            entryQuote = quote, quoteReceivedAtMs = quoteReceived,
+            orderProduct = "MIS"
+        )
+        val filled = order.filledQuantity?.takeIf { it > 0 }
+            ?: error("Manual broker fill unverified: reconcile $symbol before any further BUY")
+        val actualFill = order.averageFillPrice?.takeIf { it.isFinite() && it > 0.0 } ?: ltp
+        val targetPct = com.multify.traderpro.engine.FixedFinalContract.CANONICAL_MULTIFY_MFE_AVG_PCT
+        val nowMs = System.currentTimeMillis()
+        registerBoughtPositionAndProtect(
+            ManagedPositionEntity(
+                engine = ENGINE_MANUAL_HOLDING, symbol = symbol, product = "MIS",
+                side = "LONG", quantity = filled, entryPrice = actualFill,
+                stopPrice = HardStopLossPolicy.stopPrice(actualFill),
+                targetPrice = actualFill * (1.0 + targetPct / 100.0),
+                strategy = "MANUAL NSE operator entry · Fixed long trailing policy · MIS broker SELL SL-M · live Alpha quote ₹${fmt(ltp)} · hard -1% floor · +0.55% arm → +0.50% protected and +0.10% steps",
+                regime = "MANUAL_FIXED_LONG", confidence = 1.0,
+                sourceEventId = null, openOrderId = order.growwOrderId,
+                openReferenceId = reference, openedAtMs = nowMs,
+                lastPrice = actualFill, maxFavourablePrice = actualFill,
+                maxAdversePrice = actualFill, lastEvaluatedAtMs = nowMs,
+                trailingArmPct = SteppedTrailingPolicy.ARM_TRIGGER_PCT,
+                trailingLastRatchetPrice = 0.0,
+                smartOrderMode = HoldingSmartOrderPolicy.MODE_NONE
+            )
+        )
+        brokerInventorySnapshot = null
+        val local = managedDao.openPosition(ENGINE_MANUAL_HOLDING, symbol)
+        val verified = local != null &&
+            appPositionProtected(local)
+        if (verified) {
+            check(manualBuyIntentPrefs.edit().putString(reference, "PROTECTED|$symbol").commit()) {
+                "Broker BUY executed; Manual protection ledger save failed — reconcile in Groww"
+            }
+        }
+        auditLogger.log("MANUAL_NSE", "BROKER_BUY_CONFIRMED", mapOf(
+            "symbol" to symbol, "reference" to reference,
+            "order_id" to order.growwOrderId, "quantity" to filled,
+            "fill_price" to actualFill, "alpha_budget_rupees" to settings.holdingBudgetRupees,
+            "gtt_verified" to verified, "beta_orders" to 0,
+            "fixed_selection_modified" to false
+        ))
+        return if (verified)
+            "Manual $symbol · Alpha MIS LONG BUY $filled shares at ₹${fmt(actualFill)} · broker SELL SL-M verified"
+        else "Manual MIS BUY filled $filled shares · UNPROTECTED: verify Groww SELL SL-M NOW; further trading halted"
+    }
+
     suspend fun executeFixed(symbol: String): String {
         val now = ZonedDateTime.now(INDIA)
         require(com.multify.traderpro.engine.NseEquitySessionCalendar.isFixedNewEntryWindow(now) && marketSession() == "OPEN") { "Fixed BUY is unavailable outside the NSE entry window" }
@@ -10333,6 +11313,15 @@ class TradingRepository @Inject constructor(
         ) + extra)
     }
 
+    private fun appPositionProtected(row: ManagedPositionEntity): Boolean =
+        if (row.product.equals("MIS", true)) {
+            com.multify.traderpro.engine.MisIntradayLongPolicy.verified(
+                row.smartOrderMode, row.smartOrderId, row.smartOrderStatus
+            )
+        } else com.multify.traderpro.engine.GttProtectionReadinessPolicy.verified(
+            row.smartOrderMode, row.smartOrderId, row.smartOrderStatus
+        )
+
     private fun appOwned(position: ManagedPositionEntity): Boolean = AppPositionOwnershipPolicy.appOpened(
         engine = position.engine, side = position.side, product = position.product,
         openingOrderId = position.openOrderId, openingReference = position.openReferenceId,
@@ -10426,7 +11415,7 @@ class TradingRepository @Inject constructor(
         val token = ensureToken() ?: return portfolioMonitorCount()
         val marketOpen = marketSession() == "OPEN"
         val now = System.currentTimeMillis()
-        val managedOpen = managedDao.openPositions().any(::appOwned)
+        val managedOpen = managedDao.openPositions().filter { it.product == "CNC" }.any(::appOwned)
         // Refresh this immediately so quote admission reserves SELL capacity
         // before the first portfolio market-data request of each monitoring pass.
         MarketDataPriorityAdmissionPolicy.updateManagedHoldings(if (managedOpen) 1 else 0)
@@ -10438,7 +11427,7 @@ class TradingRepository @Inject constructor(
                 lastPortfolioConflictAuditAtMs[cooldownAuditKey] = now
                 auditLogger.logAsync("PORTFOLIO_MONITOR", "NON_TRADING_COOLDOWN_DEFERRED", mapOf(
                     "retry_after_ms" to (nonTradingCooldownUntil - now).coerceAtLeast(0L),
-                    "tracked_positions" to managedDao.openPositions().count(::appOwned),
+                    "tracked_positions" to managedDao.openPositions().filter { it.product == "CNC" }.count(::appOwned),
                     "broker_requests_suppressed" to true,
                     "existing_server_gtt_left_untouched" to true,
                     "no_direct_sell_submitted" to true,
@@ -10456,7 +11445,7 @@ class TradingRepository @Inject constructor(
         // A verified empty portfolio needs a slow inventory heartbeat, not fresh holdings,
         // positions and GTT calls every five seconds. Never apply this to any tracked
         // position, pending BUY/GTT, unknown broker state or order in flight.
-        val noTrackedPositions = !managedOpen && managedDao.openPositions().isEmpty()
+        val noTrackedPositions = !managedOpen && managedDao.openPositions().filter { it.product == "CNC" }.isEmpty()
         val pendingEntry = fixedAutoBuyOrderStore.all().any { !ForecastAutoBuyPolicy.isTerminal(it.status) } ||
             forecastAutoBuyOrderStore.all().any { !ForecastAutoBuyPolicy.isTerminal(it.status) }
         // An external/manual holding or GTT must never become app-owned exposure.
@@ -10511,7 +11500,7 @@ class TradingRepository @Inject constructor(
         val activeGttsResult = runCatching { activeGttsBySymbol(token) }
         if (activeGttsResult.isSuccess) {
             val activeGtts = activeGttsResult.getOrThrow()
-            val open = managedDao.openPositions()
+            val open = managedDao.openPositions().filter { it.product == "CNC" }
             for (observedPosition in open) {
                 var position = observedPosition
                 val symbol = position.symbol.uppercase(Locale.US)
@@ -10677,10 +11666,10 @@ class TradingRepository @Inject constructor(
             ))
             // If broker GTT discovery is unavailable, do not create/modify sell orders for an
             // unprotected local row: an externally created GTT might already cover the same shares.
-            managedDao.openPositions().forEach { blockedSymbols += it.symbol.uppercase(Locale.US) }
+            managedDao.openPositions().filter { it.product == "CNC" }.forEach { blockedSymbols += it.symbol.uppercase(Locale.US) }
         }
 
-        val open = managedDao.openPositions()
+        val open = managedDao.openPositions().filter { it.product == "CNC" }
         open.filter(::appOwned).filterNot {
             com.multify.traderpro.engine.GttProtectionReadinessPolicy.verified(
                 it.smartOrderMode, it.smartOrderId, it.smartOrderStatus)
@@ -10761,7 +11750,7 @@ class TradingRepository @Inject constructor(
                     ))
                 }
             }
-            val overnightRows = managedDao.openPositions().filter(::appOwned)
+            val overnightRows = managedDao.openPositions().filter { it.product == "CNC" }.filter(::appOwned)
             val overnightVerified = overnightRows.count {
                 com.multify.traderpro.engine.GttProtectionReadinessPolicy.verified(
                     it.smartOrderMode, it.smartOrderId, it.smartOrderStatus)
@@ -10880,6 +11869,7 @@ class TradingRepository @Inject constructor(
         allowFreshPostFillProof: Boolean = false,
         deferProtectionRetryToMonitor: Boolean = false
     ): Long {
+        if (position.product.equals("MIS", true)) return registerMisLongAndProtect(position)
         val lifecycleMutex = positionLifecycleMutexes.computeIfAbsent(position.symbol.uppercase(Locale.US)) { Mutex() }
         return lifecycleMutex.withLock {
         val id = managedDao.insertPosition(position)
@@ -13504,6 +14494,15 @@ class TradingRepository @Inject constructor(
         require(marketSession() == "OPEN") { "NSE regular market session is not open" }
     }
 
+    /** Manual MIS does not require CNC DDPI, but still requires full Alpha recovery and session readiness. */
+    private fun preManualMisExecutionGuard(settings: AppSettings) {
+        require(tradingRecoveryReady) { "Broker recovery is still reconciling holdings and sell protection" }
+        require(settings.brokerAuthenticated) { "Groww is not authenticated" }
+        require(settings.staticIpMatched) { "Static IP verification failed" }
+        require(!settings.safetyHalt) { "Safety halt is active" }
+        require(marketSession() == "OPEN") { "NSE regular market session is not open" }
+    }
+
     /**
      * Fixed Auto Buy is independent of asynchronous portfolio recovery. Every new symbol
      * still passes its own fresh broker-inventory/duplicate check, account readiness,
@@ -13587,8 +14586,51 @@ class TradingRepository @Inject constructor(
         entryQuote: QuotePayload,
         quoteReceivedAtMs: Long,
         allowOtherSymbolProtectionRecovery: Boolean = false,
-        recommendationId: Long? = null
+        recommendationId: Long? = null,
+        orderProduct: String = "CNC"
     ): OrderPayload = appOwnedBuyMutex.withLock {
+        val manualMisEntry = reference.startsWith("MNH") && orderProduct.equals("MIS", true)
+        require(orderProduct.equals("CNC", true) || manualMisEntry) {
+            "Only explicitly selected Manual NSE entries may use MIS product"
+        }
+        if (manualMisEntry) {
+            require(com.multify.traderpro.engine.MisIntradayLongPolicy.mayEnter(ZonedDateTime.now(INDIA))) {
+                "Manual MIS long entries end at 14:30 IST"
+            }
+            require(!manualBuyIntentPrefs.contains(reference) && !misIntradayEntryPrefs.contains(reference)) {
+                "Manual MIS BUY reference already attempted; reconcile Groww, never resubmit"
+            }
+        }
+        require(manualShortState()?.unresolved() != true) {
+            "New Alpha BUY blocked: an operator-directed MIS short is open or unresolved"
+        }
+        // Recover durable manual-entry ledgers before permitting another order.
+        val unresolvedManualBuyIntents = manualBuyIntentPrefs.all.filter { (_, value) ->
+            value is String && (value.startsWith("PENDING|") || value.startsWith("BROKER_ACK|"))
+        }
+        for ((pendingRef, _) in unresolvedManualBuyIntents) {
+            val tracked = managedDao.openPositions().firstOrNull {
+                it.openReferenceId == pendingRef && appOwned(it)
+            }
+            if (tracked != null && appPositionProtected(tracked)) {
+                check(manualBuyIntentPrefs.edit().putString(
+                    pendingRef, "PROTECTED|${tracked.symbol}|${tracked.smartOrderId}"
+                ).commit()) { "Manual BUY protection ledger could not be recovered" }
+            } else error("Unresolved Manual BUY/protection intent $pendingRef; reconcile Alpha first")
+        }
+        val unresolvedMisEntries = misIntradayEntryPrefs.all.filter { (_, value) ->
+            value is String && (value.startsWith("PENDING|") || value.startsWith("BROKER_ACK|"))
+        }
+        for ((pendingRef, _) in unresolvedMisEntries) {
+            val tracked = managedDao.openPositions().firstOrNull {
+                it.openReferenceId == pendingRef && appOwned(it) && it.product.equals("MIS", true)
+            }
+            if (tracked != null && appPositionProtected(tracked)) {
+                check(misIntradayEntryPrefs.edit().putString(
+                    pendingRef, "PROTECTED|${tracked.symbol}|${tracked.smartOrderId}"
+                ).commit()) { "MIS entry protection ledger could not be recovered" }
+            } else error("Unresolved MIS entry/protection intent $pendingRef; reconcile Alpha first")
+        }
         if (recommendationId != null && isFixedRecommendationExecutionConsumed(recommendationId)) {
             auditLogger.log("FIXED_AUTO_BUY", "RECOMMENDATION_EVENT_ALREADY_CONSUMED", mapOf(
                 "recommendation_id" to recommendationId,
@@ -13614,13 +14656,24 @@ class TradingRepository @Inject constructor(
         val broker = brokerInventory(token, force = true)
         val demat = broker.holdings[key]?.quantity ?: 0
         val cnc = broker.positions[key]?.quantity ?: 0
-        require(demat <= 0 && cnc <= 0 && managedDao.openPositions().none { it.symbol.equals(symbol, true) }) {
+        val mis = if (manualMisEntry) manualMisBrokerQty(token, key) else 0
+        require(demat <= 0 && cnc <= 0 && mis == 0 &&
+            managedDao.openPositions().none { it.symbol.equals(symbol, true) }) {
             "BUY blocked: $symbol already exists in Groww/app holdings; ownership must stay separate"
         }
         val allOwnedOpen = managedDao.openPositions().filter(::appOwned)
-        val unprotected = allOwnedOpen.filterNot {
-            com.multify.traderpro.engine.GttProtectionReadinessPolicy.verified(
-                it.smartOrderMode, it.smartOrderId, it.smartOrderStatus)
+        val unprotected = allOwnedOpen.filterNot(::appPositionProtected)
+        // If a manual MIS long exists, recheck its broker SELL SL-M before ANY
+        // further Alpha entry (CNC auto or manual). A locally cached pending state
+        // is not perpetual proof of broker protection.
+        allOwnedOpen.filter { it.product.equals("MIS", true) }.forEach { position ->
+            val stopId = position.smartOrderId ?: error("Existing MIS long broker stop ID missing")
+            val verifiedStop = apiFactory.groww.orderStatus(
+                bearer(token), stopId
+            ).requirePayload("Recheck existing MIS long protection before new entry")
+            require(com.multify.traderpro.engine.MisIntradayLongPolicy.pendingBrokerStop(
+                verifiedStop.orderStatus
+            )) { "New Alpha entry blocked: existing MIS SELL stop for ${position.symbol} is not pending" }
         }
         if (unprotected.isNotEmpty()) {
             auditLogger.log("SAFETY",
@@ -13632,8 +14685,9 @@ class TradingRepository @Inject constructor(
                     "new_symbol_ownership_check_passed" to true,
                     "buy_allowed" to allowOtherSymbolProtectionRecovery))
         }
-        require(allowOtherSymbolProtectionRecovery || unprotected.isEmpty()) {
-            "New BUY blocked: app-owned holding lacks verified broker GTT"
+        require(if (manualMisEntry) unprotected.isEmpty()
+            else allowOtherSymbolProtectionRecovery || unprotected.isEmpty()) {
+            "New BUY blocked: app-owned holding lacks verified broker protection"
         }
         // Reuse the quote fetched on the signal path. If broker inventory checks made
         // it stale, refresh only this one symbol once, never the full NSE universe.
@@ -13678,14 +14732,19 @@ class TradingRepository @Inject constructor(
         // An unresolved order from any engine must be reconciled, not doubled.
         val recentBrokerOrders = apiFactory.groww.orderList(bearer(token), page = 0)
             .requirePayload("Alpha pending orders before BUY ${symbol}").orderList
+        val pendingProducts = if (manualMisEntry) setOf("CNC", "MIS") else setOf("CNC")
         val unresolvedBrokerCncBuys = recentBrokerOrders.filter { row ->
-            row.transactionType.equals("BUY", true) && row.product.equals("CNC", true) &&
+            row.transactionType.equals("BUY", true) &&
+                row.product.uppercase(Locale.US) in pendingProducts &&
                 row.orderStatus.orEmpty().uppercase(Locale.US) !in
                     setOf("EXECUTED", "COMPLETED", "REJECTED", "CANCELLED", "FAILED")
         }
         require(unresolvedBrokerCncBuys.isEmpty()) {
-            "BUY blocked: ${unresolvedBrokerCncBuys.size} pending broker CNC BUY order(s) require reconciliation"
+            "BUY blocked: ${unresolvedBrokerCncBuys.size} pending broker CNC/MIS BUY order(s) require reconciliation"
         }
+        if (manualMisEntry) require(
+            com.multify.traderpro.engine.MisIntradayLongPolicy.mayEnter(ZonedDateTime.now(INDIA))
+        ) { "Manual MIS BUY blocked: 14:30 IST entry cutoff passed during preflight" }
         // Do not place an auto-buy after its user toggle/session or execution quote
         // became invalid while Alpha cash and the broker order book were checked.
         if (reference.startsWith("FXM") || reference.startsWith("UVH")) {
@@ -13726,8 +14785,48 @@ class TradingRepository @Inject constructor(
                 "crash_replay_allowed" to false
             ))
         }
-        val order = submitMarketOrder(token, symbol, "BUY", capitalVerdict.allowedQuantity, "CNC", reference,
-            notificationStartedNs, buyLimitPrice = price.limitPrice)
+        if (manualMisEntry) {
+            check(manualBuyIntentPrefs.edit().putString(
+                reference, "PENDING|$symbol|${System.currentTimeMillis()}"
+            ).commit()) { "Manual MIS BUY intent could not be durably reserved; no broker POST" }
+            check(misIntradayEntryPrefs.edit().putString(
+                reference, "PENDING|$symbol|${System.currentTimeMillis()}"
+            ).commit()) { "MIS BUY intent could not be durably reserved; no broker POST" }
+        }
+        val rawOrder = try {
+            submitMarketOrder(token, symbol, "BUY", capitalVerdict.allowedQuantity, orderProduct, reference,
+                notificationStartedNs, buyLimitPrice = price.limitPrice)
+        } catch (failure: Throwable) {
+            if (manualMisEntry) {
+                preferences.setSafetyHalt(true)
+                auditLogger.log("SAFETY", "MANUAL_MIS_BUY_ACK_UNRESOLVED", mapOf(
+                    "symbol" to symbol, "reference" to reference,
+                    "reason" to (failure.message ?: failure.javaClass.simpleName),
+                    "no_blind_resubmission" to true, "new_entries_halted" to true
+                ))
+            }
+            throw failure
+        }
+        val order = if (manualMisEntry) {
+            val fill = rawOrder.averageFillPrice?.takeIf { it.isFinite() && it > 0.0 }
+                ?: runCatching {
+                    apiFactory.groww.orderStatus(bearer(token), rawOrder.growwOrderId)
+                        .requirePayload("Verify Manual MIS BUY actual fill price")
+                        .averageFillPrice?.takeIf { it.isFinite() && it > 0.0 }
+                }.getOrNull()
+                ?: run {
+                    preferences.setSafetyHalt(true)
+                    error("Manual MIS BUY acknowledged but actual fill price is unknown; reconcile Alpha immediately")
+                }
+            val resolved = rawOrder.copy(averageFillPrice = fill)
+            check(manualBuyIntentPrefs.edit().putString(
+                reference, "BROKER_ACK|$symbol|${resolved.growwOrderId}"
+            ).commit()) { "Manual MIS BUY acknowledged but manual ledger ACK persistence failed" }
+            check(misIntradayEntryPrefs.edit().putString(
+                reference, "BROKER_ACK|$symbol|${resolved.growwOrderId}"
+            ).commit()) { "Manual MIS BUY acknowledged but MIS entry ledger ACK persistence failed" }
+            resolved
+        } else rawOrder
         if (recommendationId != null) {
             val filled = order.filledQuantity?.takeIf { it > 0 } ?: capitalVerdict.allowedQuantity
             val fillPrice = order.averageFillPrice?.takeIf { it.isFinite() && it > 0.0 } ?: price.lastPrice
@@ -13968,6 +15067,7 @@ class TradingRepository @Inject constructor(
         const val ENGINE_UNIVEST_HOLDING = "UNIVEST_HOLDING"
         const val ENGINE_FORECAST_HOLDING = "FORECAST_HOLDING"
         const val ENGINE_FIXED_HOLDING = "FIXED_HOLDING"
+        const val ENGINE_MANUAL_HOLDING = "MANUAL_HOLDING"
         const val ENGINE_PORTFOLIO_HOLDING = "PORTFOLIO_HOLDING"
     }
 }

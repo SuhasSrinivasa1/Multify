@@ -23,7 +23,8 @@ object AppPositionOwnershipPolicy {
         "MULTIFY_HOLDING" to setOf("MLH"),
         "UNIVEST_HOLDING" to setOf("UVH"),
         "FORECAST_HOLDING" to setOf("FLH"),
-        "FIXED_HOLDING" to setOf("FXH", "FXM", "WRM")
+        "FIXED_HOLDING" to setOf("FXH", "FXM", "WRM"),
+        "MANUAL_HOLDING" to setOf("MNH")
     )
 
     fun appOpened(
@@ -36,7 +37,8 @@ object AppPositionOwnershipPolicy {
         quantity: Int
     ): Boolean {
         val prefixes = enginePrefixes[engine] ?: return false
-        if (side != "LONG" || product != "CNC" || quantity <= 0) return false
+        val validProduct = if (engine == "MANUAL_HOLDING") product == "MIS" else product == "CNC"
+        if (side != "LONG" || !validProduct || quantity <= 0) return false
         if (openingOrderId.isBlank() || openingOrderId.equals("EXTERNAL_GROWW_HOLDING", true)) return false
         if (strategy.contains("aggregated Groww portfolio", true) ||
             strategy.contains("OWNERSHIP_UNVERIFIED", true)) return false

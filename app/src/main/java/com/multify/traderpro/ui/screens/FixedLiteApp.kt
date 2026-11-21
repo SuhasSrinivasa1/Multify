@@ -55,11 +55,12 @@ import java.time.Instant
 import java.time.ZoneId
 import com.multify.traderpro.engine.HardStopLossPolicy
 import com.multify.traderpro.engine.SteppedTrailingPolicy
+import com.multify.traderpro.engine.ManualShortIntradayPolicy
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-internal enum class LitePage { FIXED, WORKING_RANGE, AVERAGES, SETTINGS }
+internal enum class LitePage { FIXED, WORKING_RANGE, MANUAL, AVERAGES, SETTINGS }
 private enum class LiteTone { POSITIVE, WARNING, NEGATIVE, INFO, NEUTRAL }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -91,11 +92,12 @@ fun FixedLiteApp(viewModel: TraderViewModel = hiltViewModel()) {
                 CenterAlignedTopAppBar(
                     title = {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text("Fixed Momentum Pro", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                            Text("Suhas Shree Trader Pro", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                             Text(
                                 when (page) {
                                     LitePage.FIXED -> "15-minute Fixed strategy"
                                     LitePage.WORKING_RANGE -> "Working Range pilot"
+                                    LitePage.MANUAL -> "Intraday MIS BUY / SELL"
                                     LitePage.AVERAGES -> "Observed Fixed outcomes"
                                     LitePage.SETTINGS -> "Accounts and controls"
                                 },
@@ -127,12 +129,13 @@ fun FixedLiteApp(viewModel: TraderViewModel = hiltViewModel()) {
             when (page) {
                 LitePage.FIXED -> LiteFixedScreen(state, viewModel::generateFixed) { confirmBuy = it }
                 LitePage.WORKING_RANGE -> LiteRangeScreen(state)
+                LitePage.MANUAL -> LiteManualScreen(state, viewModel)
                 LitePage.AVERAGES -> LiteAveragesScreen(state)
                 LitePage.SETTINGS -> LiteSettingsScreen(
                     state, viewModel,
                     onEnableRequested = { confirmEnable = it },
                     onResetRequested = { confirmHaltReset = true },
-                    onExport = { export.launch("FixedMomentum-v9027-diagnostics.zip") }
+                    onExport = { export.launch("SuhasShree-v9032-diagnostics.zip") }
                 )
             }
         }
@@ -209,6 +212,12 @@ internal fun LiteBottomBar(page: LitePage, onNavigate: (LitePage) -> Unit) {
             onClick = { onNavigate(LitePage.WORKING_RANGE) },
             icon = { Icon(Icons.Default.Timeline, contentDescription = null) },
             label = { Text("Working Range") }
+        )
+        NavigationBarItem(
+            selected = page == LitePage.MANUAL,
+            onClick = { onNavigate(LitePage.MANUAL) },
+            icon = { Icon(Icons.Default.TrendingUp, contentDescription = null) },
+            label = { Text("Manual") }
         )
     }
 }
@@ -639,6 +648,213 @@ private fun FixedRecommendationCard(
         }
     }
 }
+
+@Composable
+internal fun LiteManualScreen(state: TraderUiState, viewModel: TraderViewModel) {
+    var query by rememberSaveable { mutableStateOf("") }
+    var selected by rememberSaveable { mutableStateOf<String?>(null) }
+    var manualSide by rememberSaveable { mutableStateOf("BUY") }
+    var actionsExpanded by remember { mutableStateOf(false) }
+    var shortConfirmSymbol by remember { mutableStateOf<String?>(null) }
+    val shortState = viewModel.manualShortStatus()
+    val manualLongs = state.dashboard?.positions.orEmpty().filter {
+        it.engine == "MANUAL_HOLDING" && it.product.equals("MIS", true)
+    }
+    val master = viewModel.manualMasterStatus()
+    val ready = viewModel.manualMasterReady()
+    // All matches are read from a locally indexed weekly NSE master. Typing
+    // never submits a Groww quote or another network request.
+    val matches = if (ready) viewModel.manualStockMatches(query) else emptyList()
+    val activeSelection = selected?.let { id -> matches.firstOrNull { it.symbol == id } }
+    val authenticated = state.settings.brokerAuthenticated &&
+        state.settings.staticIpMatched
+    val istNow = java.time.ZonedDateTime.now(ZoneId.of("Asia/Kolkata"))
+    val marketOpen = com.multify.traderpro.engine.MisIntradayLongPolicy.mayEnter(istNow)
+    val shortWindow = ManualShortIntradayPolicy.mayOpen(istNow)
+    Column(
+        Modifier.fillMaxSize().testTag("manual-screen").padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        LiteCard {
+            SectionTitle("Manual", "Alpha · NSE CASH · operator-directed trades")
+            Text("All new trades use Alpha MIS intraday positions: BUY opens a long; SELL opens a short. Both use the same existing Alpha budget; no delivery holdings are created.",
+                style = MaterialTheme.typography.bodySmall)
+            Box {
+                OutlinedButton(
+                    onClick = { actionsExpanded = true },
+                    modifier = Modifier.fillMaxWidth().testTag("manual-action-dropdown")
+                ) { Text(if (manualSide == "BUY") "Manual BUY · MIS long ▾" else "Manual SELL · MIS short ▾") }
+                DropdownMenu(expanded = actionsExpanded, onDismissRequest = { actionsExpanded = false }) {
+                    DropdownMenuItem(
+                        text = { Text("Manual BUY · MIS long position") },
+                        onClick = { manualSide = "BUY"; selected = null; actionsExpanded = false }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Manual SELL · MIS short position") },
+                        onClick = { manualSide = "SELL"; selected = null; actionsExpanded = false }
+                    )
+                }
+            }
+            OutlinedTextField(
+                value = query,
+                onValueChange = { query = it; selected = null },
+                label = { Text("Search NSE stock or company (e.g. Tata)") },
+                placeholder = { Text("Type company name or symbol") },
+                modifier = Modifier.fillMaxWidth().testTag("manual-stock-search"),
+                singleLine = true
+            )
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween) {
+                Column(Modifier.weight(1f)) {
+                    Text("${master.count} NSE symbols · ${master.source.ifBlank { "Not synced" }}",
+                        style = MaterialTheme.typography.labelSmall)
+                    Text(
+                        if (ready) "Local list ready · validated NSE master"
+                        else "List missing or older than 7 days · sync required",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (ready) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error
+                    )
+                }
+                TextButton(onClick = viewModel::syncManualNseStocks) {
+                    Text("Sync now")
+                }
+            }
+            if (master.lastError.isNotBlank()) {
+                Text("Last sync: " + master.lastError,
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.labelSmall)
+            }
+        }
+        if (manualLongs.isNotEmpty()) {
+            LiteCard {
+                SectionTitle("Alpha intraday long positions", "${manualLongs.size} open · MIS")
+                manualLongs.forEach { row ->
+                    Text("${row.symbol} · ${row.quantity} shares · entry ${rupees(row.averagePrice)}",
+                        style = MaterialTheme.typography.bodySmall)
+                    Text("SELL SL-M ${rupees(row.smartOrderTriggerPrice ?: row.stopPrice ?: 0.0)} · ${row.smartOrderStatus ?: "STATUS UNKNOWN"} · order ${row.smartOrderId ?: "NOT VERIFIED"}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (row.smartOrderMode == "MIS_LONG_SL_M" && !row.smartOrderId.isNullOrBlank())
+                            MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error)
+                }
+            }
+        }
+        if (shortState != null && shortState.unresolved()) {
+            LiteCard {
+                SectionTitle("Alpha intraday short · " + shortState.symbol, shortState.state)
+                Text("MIS SHORT " + shortState.quantity + " shares · entry " +
+                    rupees(shortState.entryPrice) + " · BUY stop " + rupees(shortState.stopTrigger),
+                    style = MaterialTheme.typography.bodySmall)
+                Text("Broker stop order " + shortState.protectionOrderId.ifBlank { "NOT VERIFIED" } +
+                    " · cover is a BUY, not a holdings SELL.", style = MaterialTheme.typography.bodySmall)
+                if (!shortState.brokerStopVerified()) {
+                    Text("UNPROTECTED / UNRESOLVED · Safety halt applies. Open Groww Positions and Orders to reconcile immediately.",
+                        color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        }
+        if (selected != null && activeSelection != null) {
+            LiteCard {
+                Text("Selected: " + activeSelection.companyName,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold)
+                Text(activeSelection.symbol + if (manualSide == "BUY")
+                    " · NSE CASH · Alpha MIS LONG" else " · NSE CASH · Alpha MIS SHORT",
+                    style = MaterialTheme.typography.bodySmall)
+                Text(if (manualSide == "BUY")
+                    "Fixed exit thresholds unchanged: -1% initial broker SELL SL-M, trail arms at +0.55%, protects +0.50%, and ratchets +0.10%. All MIS positions exit intraday."
+                else
+                    "Reversed Fixed exit: +1% initial broker BUY SL-M, arms after -0.55% share move, then locks +0.50% short gain and lowers the BUY stop in +0.10% steps. Intraday only; controlled square-off from 14:55 IST.",
+                    style = MaterialTheme.typography.bodySmall)
+                Text(if (manualSide == "BUY")
+                    "Real MIS BUY uses Alpha funds, position, pending SELL stop and intraday square-off checks."
+                else
+                    "Real MIS short SELL opens a negative Alpha intraday position, not a delivery holding. Requires fresh broker checks, a pending BUY stop and intraday square-off.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Button(
+                    onClick = {
+                        val symbol = activeSelection.symbol
+                        selected = null
+                        if (manualSide == "BUY") viewModel.executeManualNse(symbol)
+                        else shortConfirmSymbol = symbol
+                    },
+                    enabled = ready && authenticated &&
+                        (if (manualSide == "BUY") marketOpen else shortWindow) &&
+                        !state.settings.safetyHalt && state.dashboard?.halted != true &&
+                        shortState?.unresolved() != true,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp)
+                        .testTag(if (manualSide == "BUY") "manual-buy-alpha" else "manual-sell-alpha")
+                ) {
+                    Text((if (manualSide == "BUY") "BUY " else "SELL SHORT ") +
+                        activeSelection.symbol + " · Alpha")
+                }
+                if (!(if (manualSide == "BUY") marketOpen else shortWindow) || !authenticated) {
+                    Text("Requires authenticated Alpha, verified static IP and NSE MIS entry hours" +
+                        (" (all MIS entries until 14:30 IST)."),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error)
+                }
+            }
+        }
+        if (query.isBlank()) {
+            Text("Enter a company name to see all locally indexed NSE matches.",
+                style = MaterialTheme.typography.bodyMedium)
+        } else if (!ready) {
+            Text("NSE master is unavailable. Sync before choosing a stock; no order is permitted from an incomplete list.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error)
+        } else if (matches.isEmpty()) {
+            Text("No matching NSE CASH equity in the weekly list.",
+                style = MaterialTheme.typography.bodySmall)
+        } else {
+            Text("${matches.size} matching NSE listing(s) · select one",
+                style = MaterialTheme.typography.labelMedium)
+            LazyColumn(modifier = Modifier.fillMaxWidth().weight(1f).testTag("manual-match-list")) {
+                items(matches, key = { it.symbol }) { stock ->
+                    Surface(
+                        onClick = { selected = stock.symbol },
+                        shape = RoundedCornerShape(10.dp),
+                        color = if (selected == stock.symbol)
+                            MaterialTheme.colorScheme.secondaryContainer
+                        else MaterialTheme.colorScheme.surface,
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
+                    ) {
+                        ListItem(
+                            headlineContent = {
+                                Text(stock.companyName, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            },
+                            supportingContent = { Text(stock.symbol + " · NSE") },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                }
+            }
+        }
+    }
+    shortConfirmSymbol?.let { symbol ->
+        AlertDialog(
+            onDismissRequest = { shortConfirmSymbol = null },
+            icon = { Icon(Icons.Default.WarningAmber, contentDescription = null) },
+            title = { Text("Open REAL Alpha MIS SHORT?") },
+            text = { Text("SELL " + symbol + " opens a NEW INTRADAY SHORT. " +
+                "It does not sell your CNC holdings. Your existing Alpha per-order budget applies. " +
+                "A broker BUY stop starts 1% above the fill and trails downward on favourable moves. " +
+                "The app attempts to BUY-to-cover by 14:55 IST; execution and stop fills are not guaranteed. " +
+                "If a protective order cannot be verified, new trades halt and you must inspect Groww immediately.") },
+            confirmButton = {
+                Button(onClick = {
+                    shortConfirmSymbol = null
+                    viewModel.executeManualShort(symbol)
+                }, modifier = Modifier.testTag("confirm-manual-short")) { Text("Confirm MIS SHORT") }
+            },
+            dismissButton = {
+                TextButton(onClick = { shortConfirmSymbol = null }) { Text("Cancel") }
+            }
+        )
+    }
+}
+
 
 @Composable
 internal fun LiteRangeScreen(state: TraderUiState) {
