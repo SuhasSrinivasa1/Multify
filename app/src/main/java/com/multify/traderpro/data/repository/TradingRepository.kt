@@ -2336,7 +2336,7 @@ class TradingRepository @Inject constructor(
         }
         val signalAt = ZonedDateTime.now(INDIA)
         if (com.multify.traderpro.engine.NseEquitySessionCalendar.isSpecialMuhurat2026(signalAt) &&
-            !com.multify.traderpro.engine.NseEquitySessionCalendar.isFixedNewEntryWindow(signalAt)) {
+            !com.multify.traderpro.engine.MisIntradayLongPolicy.mayEnter(signalAt)) {
             dao.updateForwarding(eventId, "ANALYZED", "MUHURAT_ENTRY_WINDOW_CLOSED",
                 "Special-session BUY safely blocked outside 14:20–15:00 IST; Multify recommendation still recorded.", null)
             auditLogger.logAsync("EXECUTION", "MUHURAT_MULTIFY_BUY_BLOCKED", mapOf(
@@ -6253,7 +6253,7 @@ class TradingRepository @Inject constructor(
             ))
             return blocked
         }
-        if (!com.multify.traderpro.engine.NseEquitySessionCalendar.isFixedNewEntryWindow(ZonedDateTime.now(INDIA))) {
+        if (!com.multify.traderpro.engine.MisIntradayLongPolicy.mayEnter(ZonedDateTime.now(INDIA))) {
             auditLogger.logAsync("UNIVEST_AUTO_BUY", "ENTRY_NOT_EXECUTED", mapOf(
                 "symbol" to symbol, "reason" to "OUTSIDE_NEW_ENTRY_WINDOW"))
             return "OUTSIDE_NEW_ENTRY_WINDOW"
@@ -8172,7 +8172,7 @@ class TradingRepository @Inject constructor(
         if (!settings.workingRangeEnabled || settings.workingRangeActivatedAtMs <= 0L ||
             settings.safetyHalt || potential.isEmpty()) return 0
         val now = ZonedDateTime.now(INDIA)
-        if (!com.multify.traderpro.engine.NseEquitySessionCalendar.isFixedNewEntryWindow(now) ||
+        if (!com.multify.traderpro.engine.MisIntradayLongPolicy.mayEnter(now) ||
             marketSession() != "OPEN") return 0
 
         val cooldown = buyApiCooldownOrNull(
@@ -8199,7 +8199,7 @@ class TradingRepository @Inject constructor(
                         "confirmed_at_ms" to row.confirmedAtMs))
                 continue
             }
-            if (!com.multify.traderpro.engine.NseEquitySessionCalendar.isFixedNewEntryWindow(
+            if (!com.multify.traderpro.engine.MisIntradayLongPolicy.mayEnter(
                     ZonedDateTime.now(INDIA)) || marketSession() != "OPEN") break
             if (row.entryPrice <= 0.0 || row.targetPrice <= 0.0 ||
                 row.targetFirstTouchAtMs > 0L) {
@@ -9286,7 +9286,7 @@ class TradingRepository @Inject constructor(
         require(nseSymbols.hasFullInstrumentMaster() && nseSymbols.isKnown(symbol)) {
             "Manual BUY requires a successful weekly NSE instrument sync and an exact listed stock selection"
         }
-        require(com.multify.traderpro.engine.NseEquitySessionCalendar.isFixedNewEntryWindow(
+        require(com.multify.traderpro.engine.MisIntradayLongPolicy.mayEnter(
             ZonedDateTime.now(INDIA)) && marketSession() == "OPEN") {
             "Manual BUY unavailable outside the NSE new-entry window"
         }
@@ -9312,7 +9312,7 @@ class TradingRepository @Inject constructor(
         require(sizing.quantity > 0) { "Configured Alpha per-order budget cannot fund one share" }
         val today = ZonedDateTime.now(INDIA).toLocalDate()
         val reference = stableRef("MNH", "$today|$symbol|MANUAL_NSE_V9028")
-        require(com.multify.traderpro.engine.NseEquitySessionCalendar.isFixedNewEntryWindow(
+        require(com.multify.traderpro.engine.MisIntradayLongPolicy.mayEnter(
             ZonedDateTime.now(INDIA)) && marketSession() == "OPEN") {
             "Manual BUY blocked: NSE entry cutoff reached during quote retrieval"
         }
@@ -9368,7 +9368,7 @@ class TradingRepository @Inject constructor(
 
     suspend fun executeFixed(symbol: String): String {
         val now = ZonedDateTime.now(INDIA)
-        require(com.multify.traderpro.engine.NseEquitySessionCalendar.isFixedNewEntryWindow(now) && marketSession() == "OPEN") { "Fixed BUY is unavailable outside the NSE entry window" }
+        require(com.multify.traderpro.engine.MisIntradayLongPolicy.mayEnter(now) && marketSession() == "OPEN") { "Fixed BUY is unavailable outside the NSE entry window" }
         val settings = preferences.settings.first()
         preIndependentExecutionGuard(settings)
         val token = ensureToken() ?: error("Authenticate Groww first")
@@ -9466,7 +9466,7 @@ class TradingRepository @Inject constructor(
         val sizing = com.multify.traderpro.engine.BudgetOnlyCncSizing.size(settings.holdingBudgetRupees.toDouble(), ltp)
         require(sizing.quantity > 0) { "Fixed BUY skipped: budget cannot fund one buffered share of ${row.symbol}" }
 
-        require(com.multify.traderpro.engine.NseEquitySessionCalendar.isFixedNewEntryWindow(ZonedDateTime.now(INDIA)) && marketSession() == "OPEN") {
+        require(com.multify.traderpro.engine.MisIntradayLongPolicy.mayEnter(ZonedDateTime.now(INDIA)) && marketSession() == "OPEN") {
             "Fixed BUY disabled: NSE special-session/regular entry cutoff reached"
         }
         require(fixedRecommendationStore.recommendations(today).firstOrNull { it.id == row.id }?.status == "ACTIVE") {
@@ -9524,7 +9524,7 @@ class TradingRepository @Inject constructor(
     private suspend fun autoBuyFixedRecommendationsLocked(): Int {
         ensureFixedEngineSnapshot()
         val now = ZonedDateTime.now(INDIA)
-        if (!com.multify.traderpro.engine.NseEquitySessionCalendar.isFixedNewEntryWindow(now) || marketSession() != "OPEN") return 0
+        if (!com.multify.traderpro.engine.MisIntradayLongPolicy.mayEnter(now) || marketSession() != "OPEN") return 0
         val settings = preferences.settings.first()
         if (!settings.fixedAutoBuyEnabled || settings.safetyHalt) return 0
         // Old installations can contain ON=true without the new activation timestamp.
@@ -9827,7 +9827,7 @@ class TradingRepository @Inject constructor(
 
             val executionSettings = preferences.settings.first()
             if (!executionSettings.fixedAutoBuyEnabled || executionSettings.safetyHalt ||
-                !com.multify.traderpro.engine.NseEquitySessionCalendar.isFixedNewEntryWindow(ZonedDateTime.now(INDIA)) ||
+                !com.multify.traderpro.engine.MisIntradayLongPolicy.mayEnter(ZonedDateTime.now(INDIA)) ||
                 marketSession() != "OPEN") break
             // Recheck immediately before the order: toggling OFF/ON while quotes load
             // must never make a previously published call newly executable.
@@ -14577,8 +14577,8 @@ class TradingRepository @Inject constructor(
         if (reference.startsWith("FXM") || reference.startsWith("UVH")) {
             val switchAtDispatch = preferences.settings.first()
             require(switchAtDispatch.fixedAutoBuyEnabled && !switchAtDispatch.safetyHalt &&
-                com.multify.traderpro.engine.NseEquitySessionCalendar
-                    .isFixedNewEntryWindow(ZonedDateTime.now(INDIA))) {
+                com.multify.traderpro.engine.MisIntradayLongPolicy
+                    .mayEnter(ZonedDateTime.now(INDIA))) {
                 "BUY blocked: Fixed/Univest auto-buy disabled or session entry window ended during broker preflight"
             }
         } else if (reference.startsWith("MNH")) {
@@ -14591,8 +14591,8 @@ class TradingRepository @Inject constructor(
             require(switchAtDispatch.workingRangeEnabled &&
                 switchAtDispatch.workingRangeActivatedAtMs > 0L &&
                 !switchAtDispatch.safetyHalt &&
-                com.multify.traderpro.engine.NseEquitySessionCalendar
-                    .isFixedNewEntryWindow(ZonedDateTime.now(INDIA))) {
+                com.multify.traderpro.engine.MisIntradayLongPolicy
+                    .mayEnter(ZonedDateTime.now(INDIA))) {
                 "BUY blocked: Working Range Auto-Buy disabled or session entry window ended during broker preflight"
             }
         }
