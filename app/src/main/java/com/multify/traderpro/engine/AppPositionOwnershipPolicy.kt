@@ -23,7 +23,8 @@ object AppPositionOwnershipPolicy {
         "MULTIFY_HOLDING" to setOf("MLH"),
         "UNIVEST_HOLDING" to setOf("UVH"),
         "FORECAST_HOLDING" to setOf("FLH"),
-        "FIXED_HOLDING" to setOf("FXH", "FXM", "WRM")
+        "FIXED_HOLDING" to setOf("FXH", "FXM", "WRM"),
+        "MANUAL_HOLDING" to setOf("MNH")
     )
 
     fun appOpened(
