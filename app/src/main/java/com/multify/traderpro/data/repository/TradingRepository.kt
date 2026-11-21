@@ -9438,7 +9438,7 @@ class TradingRepository @Inject constructor(
                 side = "LONG", quantity = filled, entryPrice = actualFill,
                 stopPrice = HardStopLossPolicy.stopPrice(actualFill),
                 targetPrice = actualFill * (1.0 + targetPct / 100.0),
-                strategy = "MANUAL NSE operator entry · Fixed sell/GTT policy · live Alpha quote ₹${fmt(ltp)} · hard -1% floor · +0.55% arm → +0.50% protected and +0.10% steps",
+                strategy = "MANUAL NSE operator entry · Fixed long trailing policy · MIS broker SELL SL-M · live Alpha quote ₹${fmt(ltp)} · hard -1% floor · +0.55% arm → +0.50% protected and +0.10% steps",
                 regime = "MANUAL_FIXED_LONG", confidence = 1.0,
                 sourceEventId = null, openOrderId = order.growwOrderId,
                 openReferenceId = reference, openedAtMs = nowMs,
