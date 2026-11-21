@@ -9362,8 +9362,8 @@ class TradingRepository @Inject constructor(
             "fixed_selection_modified" to false
         ))
         return if (verified)
-            "Manual $symbol · Alpha BUY filled $filled shares at ₹${fmt(actualFill)} · GTT verified"
-        else "Manual $symbol BUY filled $filled shares · UNPROTECTED: verify Groww GTT before any further BUY"
+            "Manual $symbol · Alpha MIS LONG BUY $filled shares at ₹${fmt(actualFill)} · broker SELL SL-M verified"
+        else "Manual MIS BUY filled $filled shares · UNPROTECTED: verify Groww SELL SL-M NOW; further trading halted"
     }
 
     suspend fun executeFixed(symbol: String): String {
@@ -11876,6 +11876,7 @@ class TradingRepository @Inject constructor(
 
     private fun reportCriticalUnprotected(position: ManagedPositionEntity, id: Long, reason: String) {
         tradingRecoveryReady = false
+        val stopType = if (position.product == "MIS") "MIS SELL SL-M" else "CNC SELL GTT"
         auditLogger.log("SAFETY", "UNPROTECTED_CONFIRMED_BUY_CRITICAL", mapOf(
             "symbol" to position.symbol, "engine" to position.engine,
             "position_id" to id, "quantity" to position.quantity,
@@ -11891,12 +11892,12 @@ class TradingRepository @Inject constructor(
             ))
             val alert = NotificationCompat.Builder(appContext, channelId)
                 .setSmallIcon(R.drawable.ic_stat_trader)
-                .setContentTitle("ACTION NEEDED: ${position.symbol} SELL stop unverified")
-                .setContentText("BUY filled but broker GTT is not verified. Review Groww directly.")
+                .setContentTitle("ACTION NEEDED: ${position.symbol} $stopType unverified")
+                .setContentText("BUY filled but broker $stopType is unverified. Review Groww Orders and Positions.")
                 .setStyle(NotificationCompat.BigTextStyle().bigText(
-                    "A ${position.engine} BUY was confirmed, but its protective SELL GTT could not be verified. " +
-                    "Do not rely on an in-app stop. Check Groww's holdings and active GTT orders. " +
-                    "All new auto BUYs are blocked while this holding lacks verified broker protection."))
+                    "A ${position.engine} BUY was confirmed, but its protective $stopType could not be verified. " +
+                    "Do not rely on an in-app stop. Check Groww's intraday positions and order book for MIS, or CNC holdings/GTT for legacy. " +
+                    "All new auto BUYs are blocked while this position lacks verified broker protection."))
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
                 .setAutoCancel(true)
                 .build()
@@ -13286,7 +13287,7 @@ class TradingRepository @Inject constructor(
                 reportedFilledQuantity = status.filledQuantity,
                 terminalStatus = status.orderStatus
             ) ?: error("BROKER_FILLED_QUANTITY_UNVERIFIED: $symbol order $id; manual reconciliation required")
-            if (product == "CNC" && transaction in setOf("BUY", "SELL") && !reference.startsWith("LGC")) {
+            if (product in setOf("CNC", "MIS") && transaction in setOf("BUY", "SELL") && !reference.startsWith("LGC")) {
                 managedDao.insertExecutionSample(
                     ExecutionSampleEntity(
                         transactionType = transaction,
