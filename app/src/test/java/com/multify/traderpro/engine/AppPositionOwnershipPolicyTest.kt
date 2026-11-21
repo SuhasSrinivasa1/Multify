@@ -26,6 +26,21 @@ class AppPositionOwnershipPolicyTest {
         assertFalse(AppPositionOwnershipPolicy.appOpened("FIXED_HOLDING", "LONG", "CNC", "EXTERNAL_GROWW_HOLDING", "FXH1234567890abcd", "", 10))
     }
 
+    @Test fun knownAppMisLongIsOwnedButExternalMisNeverIs() {
+        assertTrue(AppPositionOwnershipPolicy.appOpened(
+            "FIXED_HOLDING", "LONG", "MIS", "BROKER-ORDER-123", "FXM1234567890abcd", "Fixed MIS", 10
+        ))
+        assertTrue(AppPositionOwnershipPolicy.appOpened(
+            "MANUAL_HOLDING", "LONG", "MIS", "BROKER-ORDER-456", "MNH1234567890abcd", "Manual MIS", 8
+        ))
+        assertFalse(AppPositionOwnershipPolicy.appOpened(
+            "FIXED_HOLDING", "SHORT", "MIS", "BROKER-ORDER-123", "FXM1234567890abcd", "", 10
+        ))
+        assertFalse(AppPositionOwnershipPolicy.appOpened(
+            "FIXED_HOLDING", "LONG", "MIS", "", "FXM1234567890abcd", "", 10
+        ))
+    }
+
     @Test fun mixedOrReducedBrokerHoldingsAreAlwaysBlocked() {
         assertTrue(AppPositionOwnershipPolicy.exclusiveBrokerQuantity(10, 10, 0))
         assertTrue(AppPositionOwnershipPolicy.exclusiveBrokerQuantity(10, 0, 10))

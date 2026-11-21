@@ -543,7 +543,7 @@ class TradingEngineService : Service() {
                     // MIS short protection is independent of frozen CNC LONG GTT/SELL
                     // monitoring. It runs first and remains active with scanners OFF.
                     val result = runCatching {
-                        repository.monitorManualShortIntraday() + repository.monitorManagedPositions()
+                        repository.monitorManualShortIntraday() + repository.monitorMisLongPositions() + repository.monitorManagedPositions()
                     }
                     val passElapsedMs = (System.currentTimeMillis() - passStartedAtMs).coerceAtLeast(0L)
                     positionProfilePasses++
