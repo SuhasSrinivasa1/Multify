@@ -11420,7 +11420,7 @@ class TradingRepository @Inject constructor(
         val token = ensureToken() ?: return portfolioMonitorCount()
         val marketOpen = marketSession() == "OPEN"
         val now = System.currentTimeMillis()
-        val managedOpen = managedDao.openPositions().any(::appOwned)
+        val managedOpen = managedDao.openPositions().filter { it.product == "CNC" }.any(::appOwned)
         // Refresh this immediately so quote admission reserves SELL capacity
         // before the first portfolio market-data request of each monitoring pass.
         MarketDataPriorityAdmissionPolicy.updateManagedHoldings(if (managedOpen) 1 else 0)
@@ -11432,7 +11432,7 @@ class TradingRepository @Inject constructor(
                 lastPortfolioConflictAuditAtMs[cooldownAuditKey] = now
                 auditLogger.logAsync("PORTFOLIO_MONITOR", "NON_TRADING_COOLDOWN_DEFERRED", mapOf(
                     "retry_after_ms" to (nonTradingCooldownUntil - now).coerceAtLeast(0L),
-                    "tracked_positions" to managedDao.openPositions().count(::appOwned),
+                    "tracked_positions" to managedDao.openPositions().filter { it.product == "CNC" }.count(::appOwned),
                     "broker_requests_suppressed" to true,
                     "existing_server_gtt_left_untouched" to true,
                     "no_direct_sell_submitted" to true,
@@ -11450,7 +11450,7 @@ class TradingRepository @Inject constructor(
         // A verified empty portfolio needs a slow inventory heartbeat, not fresh holdings,
         // positions and GTT calls every five seconds. Never apply this to any tracked
         // position, pending BUY/GTT, unknown broker state or order in flight.
-        val noTrackedPositions = !managedOpen && managedDao.openPositions().isEmpty()
+        val noTrackedPositions = !managedOpen && managedDao.openPositions().filter { it.product == "CNC" }.isEmpty()
         val pendingEntry = fixedAutoBuyOrderStore.all().any { !ForecastAutoBuyPolicy.isTerminal(it.status) } ||
             forecastAutoBuyOrderStore.all().any { !ForecastAutoBuyPolicy.isTerminal(it.status) }
         // An external/manual holding or GTT must never become app-owned exposure.
@@ -11505,7 +11505,7 @@ class TradingRepository @Inject constructor(
         val activeGttsResult = runCatching { activeGttsBySymbol(token) }
         if (activeGttsResult.isSuccess) {
             val activeGtts = activeGttsResult.getOrThrow()
-            val open = managedDao.openPositions()
+            val open = managedDao.openPositions().filter { it.product == "CNC" }
             for (observedPosition in open) {
                 var position = observedPosition
                 val symbol = position.symbol.uppercase(Locale.US)
@@ -11671,10 +11671,10 @@ class TradingRepository @Inject constructor(
             ))
             // If broker GTT discovery is unavailable, do not create/modify sell orders for an
             // unprotected local row: an externally created GTT might already cover the same shares.
-            managedDao.openPositions().forEach { blockedSymbols += it.symbol.uppercase(Locale.US) }
+            managedDao.openPositions().filter { it.product == "CNC" }.forEach { blockedSymbols += it.symbol.uppercase(Locale.US) }
         }
 
-        val open = managedDao.openPositions()
+        val open = managedDao.openPositions().filter { it.product == "CNC" }
         open.filter(::appOwned).filterNot {
             com.multify.traderpro.engine.GttProtectionReadinessPolicy.verified(
                 it.smartOrderMode, it.smartOrderId, it.smartOrderStatus)
@@ -11755,7 +11755,7 @@ class TradingRepository @Inject constructor(
                     ))
                 }
             }
-            val overnightRows = managedDao.openPositions().filter(::appOwned)
+            val overnightRows = managedDao.openPositions().filter { it.product == "CNC" }.filter(::appOwned)
             val overnightVerified = overnightRows.count {
                 com.multify.traderpro.engine.GttProtectionReadinessPolicy.verified(
                     it.smartOrderMode, it.smartOrderId, it.smartOrderStatus)
@@ -11874,6 +11874,7 @@ class TradingRepository @Inject constructor(
         allowFreshPostFillProof: Boolean = false,
         deferProtectionRetryToMonitor: Boolean = false
     ): Long {
+        if (position.product.equals("MIS", true)) return registerMisLongAndProtect(position)
         val lifecycleMutex = positionLifecycleMutexes.computeIfAbsent(position.symbol.uppercase(Locale.US)) { Mutex() }
         return lifecycleMutex.withLock {
         val id = managedDao.insertPosition(position)
