@@ -1278,7 +1278,6 @@ class TradingRepository @Inject constructor(
                 !tradingRecoveryReady -> "BROKER_RECOVERY_PENDING"
                 !s.brokerAuthenticated -> "AUTH_REQUIRED"
                 !s.staticIpMatched -> "STATIC_IP_MISMATCH"
-                !s.brokerDdpiEnabled -> "DDPI_REQUIRED"
                 s.safetyHalt -> "SAFETY_HALT_ACTIVE"
                 recoveryGate.requiresReconnect() -> "BROKER_RECONNECT_REQUIRED"
                 else -> null
@@ -2156,7 +2155,7 @@ class TradingRepository @Inject constructor(
                 asOf = ZonedDateTime.now(INDIA).format(DateTimeFormatter.ISO_OFFSET_DATE_TIME),
                 broker = BrokerStatusDto(
                     configured = hasBrokerCredentials(), connected = true,
-                    detail = "CNC holdings only · DDPI ${if (settings.brokerDdpiEnabled) "enabled" else "required"} · wallet checked in Groww · NSE master ${symbolStatus.count}"
+                    detail = "New BUYs use MIS intraday · existing CNC holdings retain GTT · NSE master ${symbolStatus.count}"
                 ),
                 risk = RiskStatusDto(
                     maxExposure = settings.holdingBudgetRupees.toDouble(),
@@ -2246,7 +2245,7 @@ class TradingRepository @Inject constructor(
                 val ready = runCatching { prepareArmHotPath(force = true) }.getOrDefault(false)
                 dao.updateForwarding(
                     eventId, "ANALYZED", "PRE_ALERT_READY",
-                    if (ready) "Groww token, connection and CNC buying power warmed for the next Multify call."
+                    if (ready) "Groww Alpha connection and intraday MIS entry guards ready."
                     else "Signal captured; authenticate Groww before ARM.",
                     null
                 )
@@ -7691,7 +7690,7 @@ class TradingRepository @Inject constructor(
             "initial_protected_gain_pct" to SteppedTrailingPolicy.INITIAL_STOP_GAIN_PCT,
             "trail_step_pct" to SteppedTrailingPolicy.STEP_PCT
         ))
-        return "BUY ${row.symbol} opened as CNC holding · qty $filled @ ₹${fmt(entry)} · forecast target +${fmt(row.targetPct)}% · fixed trailing arms at +0.55% and protects +0.50%"
+        return "BUY ${row.symbol} opened as MIS intraday LONG · qty $filled @ ₹${fmt(entry)} · forecast target +${fmt(row.targetPct)}% · fixed trailing arms at +0.55% and protects +0.50%"
     }
 
     /**
@@ -8354,7 +8353,7 @@ class TradingRepository @Inject constructor(
                 workingRangeRecommendationStore.markAutoBuyOutcome(
                     row.symbol, row.confirmedAtMs, "BUY_EXECUTED",
                     orderId = order.growwOrderId, quantity = filled, fillPrice = actualFill,
-                    reason = "Working Range Alpha CNC BUY filled · broker GTT protection workflow started"
+                    reason = "Working Range Alpha MIS BUY filled · broker SL-M protection workflow started"
                 )
                 auditLogger.logAsync("WORKING_RANGE_AUTO_BUY", "ENTRY_MARKETABLE_LIMIT_FILLED",
                     mapOf("symbol" to row.symbol, "order_id" to order.growwOrderId,
@@ -13413,7 +13412,7 @@ class TradingRepository @Inject constructor(
                 smartOrderDirection = p.smartOrderDirection,
                 smartOrderStatus = p.smartOrderStatus,
                 strategy = p.strategy,
-                product = "CNC"
+                product = p.product
             )
         }
         val recent = managedDao.tradesSince(startOfIndiaDayMs())
@@ -13470,7 +13469,7 @@ class TradingRepository @Inject constructor(
                 smartOrderDirection = p.smartOrderDirection,
                 smartOrderStatus = p.smartOrderStatus,
                 strategy = p.strategy,
-                product = "CNC"
+                product = p.product
             )
         }
         val recent = managedDao.tradesSince(startOfIndiaDayMs())
@@ -14337,7 +14336,6 @@ class TradingRepository @Inject constructor(
         require(settings.armEffective) { "ARM is OFF" }
         require(settings.brokerAuthenticated) { "Groww is not authenticated" }
         require(settings.staticIpMatched) { "Static IP verification failed" }
-        require(settings.brokerDdpiEnabled) { "DDPI is required for CNC holdings" }
         require(!settings.safetyHalt) { "Safety halt is active" }
         require(marketSession() == "OPEN") { "NSE regular market session is not open" }
     }
