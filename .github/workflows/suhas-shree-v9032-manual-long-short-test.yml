@@ -158,7 +158,7 @@ jobs:
           set -euo pipefail
           apk=app/build/outputs/apk/debug/app-debug.apk
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$apk" | tee signer-v9032.txt
-          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$apk" | head -n 4 | tee package-v9032.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$apk" > package-v9032.txt
           grep -F "name='com.multify.traderpro.vivoy73final.mondaytest'" package-v9032.txt >/dev/null || {
             echo "Refusing to package test build with installed production application ID"; exit 1;
           }
