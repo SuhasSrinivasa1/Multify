@@ -709,7 +709,7 @@ internal fun LiteManualScreen(state: TraderUiState, viewModel: TraderViewModel) 
                     Text("${master.count} NSE symbols · ${master.source.ifBlank { "Not synced" }}",
                         style = MaterialTheme.typography.labelSmall)
                     Text(
-                        if (ready) "Local list ready · weekly refresh"
+                        if (ready) "Local list ready · validated NSE master"
                         else "List missing or older than 7 days · sync required",
                         style = MaterialTheme.typography.labelSmall,
                         color = if (ready) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error
