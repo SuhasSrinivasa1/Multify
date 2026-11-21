@@ -37,7 +37,7 @@ object AppPositionOwnershipPolicy {
         quantity: Int
     ): Boolean {
         val prefixes = enginePrefixes[engine] ?: return false
-        if (side != "LONG" || product != "CNC" || quantity <= 0) return false
+        if (side != "LONG" || product !in setOf("CNC", "MIS") || quantity <= 0) return false
         if (openingOrderId.isBlank() || openingOrderId.equals("EXTERNAL_GROWW_HOLDING", true)) return false
         if (strategy.contains("aggregated Groww portfolio", true) ||
             strategy.contains("OWNERSHIP_UNVERIFIED", true)) return false
