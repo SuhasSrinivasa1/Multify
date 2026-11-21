@@ -140,6 +140,15 @@ data class OrderCreateRequest(
     @SerializedName("order_reference_id") val orderReferenceId: String
 )
 
+data class OrderModifyRequest(
+    val quantity: Int,
+    val price: Double = 0.0,
+    @SerializedName("trigger_price") val triggerPrice: Double,
+    @SerializedName("order_type") val orderType: String = "SL_M",
+    val segment: String = "CASH",
+    @SerializedName("groww_order_id") val growwOrderId: String
+)
+
 data class OrderPayload(
     @SerializedName("groww_order_id") val growwOrderId: String = "",
     @SerializedName("order_status") val orderStatus: String = "",
