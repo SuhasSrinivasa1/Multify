@@ -8539,15 +8539,6 @@ class TradingRepository @Inject constructor(
     }
     @Volatile private var lastMisLongMonitorAtMs = 0L
 
-    private fun appPositionProtected(row: ManagedPositionEntity): Boolean =
-        if (row.product.equals("MIS", true)) {
-            com.multify.traderpro.engine.MisIntradayLongPolicy.verified(
-                row.smartOrderMode, row.smartOrderId, row.smartOrderStatus
-            )
-        } else com.multify.traderpro.engine.GttProtectionReadinessPolicy.verified(
-            row.smartOrderMode, row.smartOrderId, row.smartOrderStatus
-        )
-
     private fun pendingMisStopReference(position: ManagedPositionEntity): String =
         stableRef("MLS", position.openReferenceId + "|MIS_SELL_STOP")
 
