@@ -118,7 +118,7 @@ class FixedLiteUiTest {
         compose.onNodeWithText("UNRESOLVED · SPARSE CLIENT LTP SAMPLES").assertIsDisplayed()
     }
 
-    @Test fun bottomNavigationExposesOnlyTheTwoPrimaryDestinations() {
+    @Test fun bottomNavigationExposesFixedWorkingRangeAndManual() {
         var selected = LitePage.FIXED
         compose.setContent {
             MultifyTraderTheme(darkTheme = false) {
@@ -127,7 +127,10 @@ class FixedLiteUiTest {
         }
         compose.onNodeWithText("Fixed").assertIsDisplayed()
         compose.onNodeWithText("Working Range").assertIsDisplayed()
+        compose.onNodeWithText("Manual").assertIsDisplayed()
         compose.onNodeWithText("Working Range").performClick()
         compose.runOnIdle { assertEquals(LitePage.WORKING_RANGE, selected) }
+        compose.onNodeWithText("Manual").performClick()
+        compose.runOnIdle { assertEquals(LitePage.MANUAL, selected) }
     }
 }
