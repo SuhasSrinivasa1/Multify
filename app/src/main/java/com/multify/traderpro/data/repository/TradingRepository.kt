@@ -53,6 +53,9 @@ import com.multify.traderpro.data.network.HistoricalPayload
 import com.multify.traderpro.data.network.LearningStatsDto
 import com.multify.traderpro.data.network.OrderCancelRequest
 import com.multify.traderpro.data.network.OrderCreateRequest
+import com.multify.traderpro.data.network.OrderModifyRequest
+import com.multify.traderpro.engine.ManualShortPosition
+import com.multify.traderpro.engine.ManualShortIntradayPolicy
 import com.multify.traderpro.data.network.OrderPayload
 import com.multify.traderpro.data.network.GrowwOrderBookRow
 import com.multify.traderpro.data.network.PositionDto
@@ -288,6 +291,38 @@ class TradingRepository @Inject constructor(
     private val fixedRecommendationExecutionPrefs by lazy {
         appContext.getSharedPreferences("fixed_recommendation_execution_v9013", Context.MODE_PRIVATE)
     }
+
+    // Persist a Manual order intent before its first broker POST. An ambiguous
+    // response must never be replayed by a second tap or process restart.
+    private val manualBuyIntentPrefs by lazy {
+        appContext.getSharedPreferences("manual_nse_buy_intents_v9028", Context.MODE_PRIVATE)
+    }
+    private val manualShortPrefs by lazy {
+        appContext.getSharedPreferences("manual_mis_short_orders_v9029", Context.MODE_PRIVATE)
+    }
+    private val manualShortMutex = Mutex()
+    @Volatile private var manualShortLastBrokerCheckAtMs = 0L
+    private fun manualShortState(): ManualShortPosition? {
+        val raw = manualShortPrefs.getString("current", null) ?: return null
+        return runCatching {
+            require(raw.isNotBlank()) { "Blank short ledger" }
+            researchGson.fromJson(raw, ManualShortPosition::class.java).also { row ->
+                require(row != null && row.symbol.isNotBlank() && row.reference.isNotBlank()) {
+                    "Incomplete broker short ledger"
+                }
+            }
+        }.getOrElse { cause ->
+            error("MANUAL_SHORT_LEDGER_UNREADABLE: reconcile Alpha; all new BUY/SELL blocked (${cause.javaClass.simpleName})")
+        }
+    }
+    private fun saveManualShort(state: ManualShortPosition) {
+        check(manualShortPrefs.edit()
+            .putString("current", researchGson.toJson(state)).commit()) {
+            "MANUAL_SHORT_DURABLE_LEDGER_WRITE_FAILED: reconcile Groww before more trading"
+        }
+    }
+    fun manualShortStatus(): ManualShortPosition? = manualShortState()
+
 
     private val _fixedDeliveryEvents = MutableSharedFlow<Long>(extraBufferCapacity = 8)
     val fixedDeliveryEvents: SharedFlow<Long> = _fixedDeliveryEvents.asSharedFlow()
