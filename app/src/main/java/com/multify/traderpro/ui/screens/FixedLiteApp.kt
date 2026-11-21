@@ -146,7 +146,7 @@ fun FixedLiteApp(viewModel: TraderViewModel = hiltViewModel()) {
             onDismissRequest = { confirmBuy = null },
             icon = { Icon(Icons.Default.WarningAmber, contentDescription = null) },
             title = { Text("Confirm manual Alpha BUY") },
-            text = { Text("Submit a guarded CNC market BUY for " + symbol + "? Fresh Alpha quote, funds, duplicate-order and execution checks still apply.") },
+            text = { Text("Submit a guarded MIS intraday BUY for " + symbol + "? Fresh Alpha quote, funds, duplicate-order and execution checks still apply.") },
             confirmButton = {
                 Button(onClick = {
                     confirmBuy = null
@@ -164,7 +164,7 @@ fun FixedLiteApp(viewModel: TraderViewModel = hiltViewModel()) {
             title = { Text("Enable " + source + " Auto-Buy?") },
             text = {
                 Text(
-                    "This permits new eligible signals to submit REAL Alpha CNC BUY orders. Old signals are not revived. Current inherited Fixed hard stop is -" +
+                    "This permits new eligible signals to submit REAL Alpha MIS intraday BUY orders. Old signals are not revived. Current inherited Fixed hard stop is -" +
                         HardStopLossPolicy.MAX_LOSS_PCT + "% from fill; trail arms at +" +
                         SteppedTrailingPolicy.ARM_TRIGGER_PCT + "% and initially protects +" +
                         SteppedTrailingPolicy.INITIAL_STOP_GAIN_PCT + "%."
@@ -503,7 +503,7 @@ internal fun LiteFixedScreen(
         item(key = "fixed-metrics") {
             MetricPair(
                 { MetricTile("Recommendations", recommendations.size.toString(), "Published today", tone = if (recommendations.isNotEmpty()) LiteTone.INFO else LiteTone.NEUTRAL) },
-                { MetricTile("Open holdings", positions.size.toString(), "App-owned CNC positions", tone = if (positions.isEmpty()) LiteTone.NEUTRAL else LiteTone.INFO) }
+                { MetricTile("Open longs", positions.size.toString(), "App-owned MIS or legacy CNC", tone = if (positions.isEmpty()) LiteTone.NEUTRAL else LiteTone.INFO) }
             )
         }
 
@@ -578,11 +578,16 @@ internal fun LiteFixedScreen(
 
 @Composable
 private fun PositionRow(position: PositionDto) {
-    val protected = GttProtectionReadinessPolicy.verified(position.smartOrderMode, position.smartOrderId, position.smartOrderStatus)
+    val protected = if (position.product == "MIS")
+        com.multify.traderpro.engine.MisIntradayLongPolicy.verified(
+            position.smartOrderMode, position.smartOrderId, position.smartOrderStatus
+        ) else GttProtectionReadinessPolicy.verified(
+            position.smartOrderMode, position.smartOrderId, position.smartOrderStatus
+        )
     Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Text(position.symbol, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
-            StatusPill(if (protected) "GTT VERIFIED" else "CHECK GTT", if (protected) LiteTone.POSITIVE else LiteTone.NEGATIVE)
+            StatusPill(if (protected) (if (position.product == "MIS") "MIS SL-M VERIFIED" else "GTT VERIFIED") else "CHECK BROKER STOP", if (protected) LiteTone.POSITIVE else LiteTone.NEGATIVE)
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Text(position.quantity.toString() + " shares · avg " + rupees(position.averagePrice), style = MaterialTheme.typography.bodySmall)
@@ -1045,7 +1050,7 @@ internal fun LiteSettingsScreen(
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             SwitchRow(
                 "Fixed Auto-Buy",
-                "New PRIMARY recommendations only · Alpha CNC",
+                "New PRIMARY recommendations only · Alpha MIS intraday",
                 state.settings.fixedAutoBuyEnabled,
                 { if (it) onEnableRequested("Fixed") else vm.setFixedAutoBuy(false) },
                 enabled = state.settings.fixedAutoBuyEnabled || canEnableAutoBuy,
