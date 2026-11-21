@@ -73,6 +73,12 @@ interface GrowwApi {
         @Body request: OrderCreateRequest
     ): ApiEnvelope<OrderPayload>
 
+    @POST("v1/order/modify")
+    suspend fun modifyOrder(
+        @Header("Authorization") authorization: String,
+        @Body request: OrderModifyRequest
+    ): ApiEnvelope<OrderPayload>
+
     @GET("v1/order/list")
     suspend fun orderList(
         @Header("Authorization") authorization: String,
