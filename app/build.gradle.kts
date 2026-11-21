@@ -38,6 +38,9 @@ android {
 
     buildTypes {
         debug {
+            // Side-by-side Monday TEST: never overwrite the existing trading package
+            // when CI uses an ephemeral debug signing identity.
+            applicationIdSuffix = ".mondaytest"
             if (stableSigningReady) signingConfig = signingConfigs.getByName("stableDebug")
             versionNameSuffix = "-debug"
             isMinifyEnabled = false
