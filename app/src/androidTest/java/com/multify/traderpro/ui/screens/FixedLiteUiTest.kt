@@ -1,5 +1,6 @@
 package com.multify.traderpro.ui.screens
 
+import androidx.compose.ui.test.assertDoesNotExist
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
@@ -15,6 +16,9 @@ import com.multify.traderpro.data.network.ForecastDto
 import com.multify.traderpro.data.network.WorkingRangeRecommendationDto
 import com.multify.traderpro.ui.theme.MultifyTraderTheme
 import com.multify.traderpro.data.preferences.AppSettings
+import com.multify.traderpro.data.repository.EquityLowObservation
+import com.multify.traderpro.data.repository.EquityResearchSnapshot
+import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.ZoneId
 import org.junit.Assert.assertEquals
@@ -133,4 +137,69 @@ class FixedLiteUiTest {
         compose.onNodeWithText("Manual").performClick()
         compose.runOnIdle { assertEquals(LitePage.MANUAL, selected) }
     }
+    @Test fun lowScreenerShowsOnlyLargeAndMidCapsInBothLookbacks() {
+        val date = LocalDate.of(2026, 11, 20)
+        fun row(symbol: String, category: String, rank: Int?) = EquityLowObservation(
+            symbol = symbol,
+            close = 100.0,
+            periodLow = 99.0,
+            distancePct = 1.01,
+            tradingDays = 55,
+            latestDate = date,
+            periodLowDate = date.minusDays(1),
+            oneMonthLow = 99.0,
+            oneMonthDistancePct = 1.01,
+            lookbackMonths = 3,
+            marketCapCategory = category,
+            marketCapRank = rank
+        )
+        val snapshot = EquityResearchSnapshot(
+            threeMonthLowRows = listOf(
+                row("LARGE3", "LARGE_CAP", 10),
+                row("MID3", "MID_CAP", 150),
+                row("SMALL3", "SMALL_CAP", 300),
+                row("UNKNOWN3", "UNCLASSIFIED", null)
+            ),
+            sixMonthLowRows = listOf(
+                row("LARGE6", "LARGE_CAP", 20),
+                row("MID6", "MID_CAP", 200),
+                row("SMALL6", "SMALL_CAP", 400),
+                row("UNKNOWN6", "UNCLASSIFIED", null)
+            ),
+            threeMonthCompletedDays = 60,
+            completedDays = 120,
+            threeMonthFirstDay = "2026-08-20",
+            firstDay = "2026-05-01",
+            latestDay = "2026-11-20",
+            threeMonthHistoryComplete = true,
+            sixMonthHistoryComplete = true,
+            marketCapClassificationPeriod = "Jan–Jun 2026",
+            marketCapClassificationCount = 350
+        )
+        compose.setContent {
+            MultifyTraderTheme(darkTheme = false) {
+                SixMonthLowResearchScreen(
+                    TraderUiState(equityResearch = snapshot),
+                    onScan = {}
+                )
+            }
+        }
+
+        compose.onNodeWithTag("six-month-low-screen")
+            .performScrollToNode(hasText("At/below or up to 10% above previous 3M low · 2 of 2"))
+        compose.onNodeWithText("LARGE3").assertIsDisplayed()
+        compose.onNodeWithText("MID3").assertIsDisplayed()
+        compose.onNodeWithText("SMALL3").assertDoesNotExist()
+        compose.onNodeWithText("UNKNOWN3").assertDoesNotExist()
+
+        compose.onNodeWithTag("low-range-6m").performScrollTo()
+        compose.onNodeWithTag("low-range-6m").performClick()
+        compose.onNodeWithTag("six-month-low-screen")
+            .performScrollToNode(hasText("At/below or up to 10% above previous 6M low · 2 of 2"))
+        compose.onNodeWithText("LARGE6").assertIsDisplayed()
+        compose.onNodeWithText("MID6").assertIsDisplayed()
+        compose.onNodeWithText("SMALL6").assertDoesNotExist()
+        compose.onNodeWithText("UNKNOWN6").assertDoesNotExist()
+    }
+
 }
