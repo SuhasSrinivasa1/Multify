@@ -450,12 +450,22 @@ class EquityEodResearchRepository @Inject constructor(
             val price=pulse[sym];val open=opens[sym]
             if(price!=null && open!=null && open>0) sym to ((price/open-1)*100) else null
         }.toMap()
+        val allFive=memberMap.keys.mapNotNull { five[it]?.takeIf(Double::isFinite) }
+        val allIntraday=memberMap.keys.mapNotNull { peerIntraday[it] }
         val result=members.mapNotNull { symbol ->
             val sector=memberMap[symbol].orEmpty()
+            val sectorKeys=memberMap.filterValues { it==sector }.keys
+            val sectorFive=sectorKeys.mapNotNull { five[it]?.takeIf(Double::isFinite) }
+            val sectorIntraday=sectorKeys.mapNotNull { peerIntraday[it] }
+            // Some sectors contain only 1–2 stocks in a fallback universe. Use
+            // the BROAD peer proxy, explicitly labeled, rather than excluding
+            // the constituent from all research opportunities.
+            val broad=sectorFive.size<3 || (pulse.isNotEmpty() && sectorIntraday.size<3)
             LargeCapEquityResearchPolicy.scoreLargeCap(symbol,sector,history[symbol].orEmpty(),
-                memberMap.filterValues { it==sector }.keys.mapNotNull { five[it]?.takeIf(Double::isFinite) },
-                memberMap.filterValues { it==sector }.keys.mapNotNull { peerIntraday[it] },
-                pulse[symbol],opens[symbol])
+                if(broad)allFive else sectorFive,
+                if(broad)allIntraday else sectorIntraday,
+                pulse[symbol],opens[symbol],
+                comparisonBasis=if(broad)"LARGE_CAP_PEER_PROXY" else "SECTOR_PEERS")
         }.sortedWith(compareByDescending<LargeCapEquityObservation> { it.swingResearch }
             .thenByDescending { it.intradayResearch }.thenByDescending { it.relativeFiveDayPct ?: -999.0 })
         EquityResearchSnapshot(
