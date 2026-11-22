@@ -15,6 +15,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Cookie
+import okhttp3.CookieJar
+import okhttp3.HttpUrl
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.time.DayOfWeek
@@ -133,7 +136,24 @@ class EquityEodResearchRepository @Inject constructor(
 
     private val db = Store(context)
     private val prefs = context.getSharedPreferences("suhas_shree_eod_state", Context.MODE_PRIVATE)
+    private val cookieLock = Any()
+    private val cookies = mutableListOf<Cookie>()
+    @Volatile private var warmedNseDate = ""
     private val client = OkHttpClient.Builder()
+        .cookieJar(object: CookieJar {
+            override fun saveFromResponse(url: HttpUrl, incoming: List<Cookie>) {
+                synchronized(cookieLock) {
+                    for (cookie in incoming) {
+                        cookies.removeAll { it.name==cookie.name && it.domain==cookie.domain && it.path==cookie.path }
+                        cookies.add(cookie)
+                    }
+                }
+            }
+            override fun loadForRequest(url: HttpUrl): List<Cookie> = synchronized(cookieLock) {
+                cookies.removeAll { it.expiresAt<=System.currentTimeMillis() }
+                cookies.filter { it.matches(url) }
+            }
+        })
         .connectTimeout(Duration.ofSeconds(8))
         .readTimeout(Duration.ofSeconds(18))
         .followRedirects(true)
@@ -142,9 +162,24 @@ class EquityEodResearchRepository @Inject constructor(
 
     private fun request(url: String): Request = Request.Builder().url(url)
         .header("Accept", "text/csv,application/zip,application/octet-stream,*/*")
-        .header("Referer", "https://www.nseindia.com/")
+        .header("Referer", if(url.contains("niftyindices.com")) "https://www.niftyindices.com/" else "https://www.nseindia.com/")
         .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36")
         .build()
+
+    private fun warmNseSession() {
+        requireAfterHours()
+        val today=LocalDate.now(INDIA).toString()
+        if(warmedNseDate==today) return
+        warmedNseDate=today
+        runCatching {
+            client.newCall(request("https://www.nseindia.com/")).execute().use { response ->
+                check(response.isSuccessful) { "NSE_HOME_HTTP_${response.code}" }
+            }
+        }.onFailure { audit.logAsync("EOD_RESEARCH","NSE_COOKIE_PREWARM_UNAVAILABLE",mapOf(
+            "reason" to (it.message ?: it.javaClass.simpleName).take(80),
+            "archives_still_attempted" to true, "groww_requests" to 0
+        )) }
+    }
 
     private fun requireAfterHours() = check(afterHours(ZonedDateTime.now(INDIA))) {
         "EOD research network fetch is forbidden during NSE market or pre-close hours"
@@ -282,6 +317,9 @@ class EquityEodResearchRepository @Inject constructor(
     /** WorkManager may be late; all network attempts are guarded again immediately before send. */
     suspend fun refreshAfterHours(maxFiles: Int = 25): EquityEodRefreshProgress = withContext(Dispatchers.IO) {
         if (!afterHours(ZonedDateTime.now(INDIA))) return@withContext EquityEodRefreshProgress(0,0,false)
+        // NSE's archive domain sometimes needs an NSE homepage cookie session.
+        // Warm once nightly, not for every requested day, and never during the market.
+        warmNseSession()
         refreshMembers()
         val today = LocalDate.now(INDIA)
         val last = latestEligibleDate(ZonedDateTime.now(INDIA))
