@@ -488,7 +488,7 @@ class EquityEodResearchRepository @Inject constructor(
         val threeMonthHistoryComplete =
             EquityEodResearchRepository.threeMonthCoverageComplete(
                 three.sessions,
-                three.first.takeIf { it.isNotBlank() }?.let(LocalDate::parse),
+                three.first.takeIf { it.isNotBlank() }?.let { LocalDate.parse(it) },
                 today
             ) && three.latest.isNotBlank() && three.latest == latest
 
@@ -554,7 +554,7 @@ class EquityEodResearchRepository @Inject constructor(
         val members=memberMap.keys.toList()
         for (chunk in members.chunked(80)) {
             val markers=List(chunk.size){"?"}.joinToString(",")
-            val args=arrayOf(cutoff,*chunk.toTypedArray())
+            val args=arrayOf(sixCutoff.toString(),*chunk.toTypedArray())
             sql.rawQuery("SELECT day,symbol,low,close,volume FROM eod WHERE day>=? AND symbol IN ($markers) ORDER BY symbol,day",args).use { c ->
                 while(c.moveToNext()) {
                     val sym=c.getString(1)
