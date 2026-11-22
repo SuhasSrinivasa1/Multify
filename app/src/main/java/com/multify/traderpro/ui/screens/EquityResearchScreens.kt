@@ -12,8 +12,8 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.multify.traderpro.data.repository.EquityResearchSnapshot
+import com.multify.traderpro.data.repository.EquityLowObservation
 import com.multify.traderpro.engine.LargeCapEquityObservation
-import com.multify.traderpro.engine.SixMonthLowObservation
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -113,40 +113,69 @@ private fun LargeCapRow(r: LargeCapEquityObservation, label: String) {
 }
 
 @Composable
-internal fun SixMonthLowResearchScreen(state: TraderUiState, onScan: () -> Unit) {
-    val r=state.equityResearch
+internal fun SixMonthLowResearchScreen(state: TraderUiState, onScan: (Int) -> Unit) {
+    val r = state.equityResearch
+    var selectedMonths by rememberSaveable { mutableStateOf(3) }
     var search by rememberSaveable { mutableStateOf("") }
-    val filtered=remember(r.lowRows,search) {
-        r.lowRows.filter { search.isBlank() || it.symbol.contains(search.trim(),true) }
+    val isThreeMonth = selectedMonths == 3
+    val rows = if (isThreeMonth) r.threeMonthLowRows else r.sixMonthLowRows
+    val ready = if (isThreeMonth) r.threeMonthHistoryComplete else r.sixMonthHistoryComplete
+    val sessionCount = if (isThreeMonth) r.threeMonthCompletedDays else r.completedDays
+    val firstDay = if (isThreeMonth) r.threeMonthFirstDay else r.firstDay
+    val filtered = remember(r.threeMonthLowRows, r.sixMonthLowRows, search, selectedMonths) {
+        rows.filter { search.isBlank() || it.symbol.contains(search.trim(), true) }
     }
     LazyColumn(
-        modifier=Modifier.fillMaxSize(),
-        contentPadding=PaddingValues(14.dp),
-        verticalArrangement=Arrangement.spacedBy(9.dp)
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(14.dp),
+        verticalArrangement = Arrangement.spacedBy(9.dp)
     ) {
         item {
-            ResearchNotice("NSE SIX-MONTH-LOW SCREENER","0%–10% above the lowest daily low · EQ cash shares")
+            ResearchNotice("NSE LOWS SCREENER", "0%–10% above the lowest daily low · EQ cash shares")
             Spacer(Modifier.height(8.dp))
-            Text("Latest exchange day: ${r.latestDay.ifBlank { "not yet loaded" }}",
-                style=MaterialTheme.typography.titleSmall)
-            Text("Archive window: ${r.firstDay.ifBlank { "backfill pending" }} to ${r.latestDay.ifBlank { "pending" }}",
-                style=MaterialTheme.typography.bodySmall)
-            Text("Available session files: ${r.completedDays} · latest file equity rows: ${r.universeCount}",
-                style=MaterialTheme.typography.bodySmall)
-            if(!r.sixMonthHistoryComplete) {
-                Text("INCOMPLETE SIX-MONTH HISTORY — results remain withheld until at least 105 valid NSE sessions spanning roughly six months are present. Scan Now can continue the permitted backfill.",
-                    color=MaterialTheme.colorScheme.error,style=MaterialTheme.typography.bodyMedium)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(
+                    selected = isThreeMonth,
+                    onClick = { selectedMonths = 3 },
+                    label = { Text("3M") },
+                    modifier = Modifier.testTag("low-range-3m")
+                )
+                FilterChip(
+                    selected = !isThreeMonth,
+                    onClick = { selectedMonths = 6 },
+                    label = { Text("6M") },
+                    modifier = Modifier.testTag("low-range-6m")
+                )
             }
-            if(r.lastError.isNotBlank()) {
-                Text("Data source status: ${r.lastError}",color=MaterialTheme.colorScheme.error,
-                    style=MaterialTheme.typography.bodySmall)
+            Text("Latest exchange day: ${r.latestDay.ifBlank { "not yet loaded" }}",
+                style = MaterialTheme.typography.titleSmall)
+            Text("Selected archive window: ${firstDay.ifBlank { "coverage pending" }} to ${r.latestDay.ifBlank { "pending" }}",
+                style = MaterialTheme.typography.bodySmall)
+            Text("Validated sessions: $sessionCount · latest file equity rows: ${r.universeCount}",
+                style = MaterialTheme.typography.bodySmall)
+            Text("3M coverage: ${r.threeMonthCompletedDays} sessions · ${if (r.threeMonthHistoryComplete) "READY" else "building"}",
+                style = MaterialTheme.typography.labelSmall,
+                color = if (r.threeMonthHistoryComplete) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("6M backfill: ${r.completedDays} sessions · ${if (r.sixMonthHistoryComplete) "READY" else "in progress"}",
+                style = MaterialTheme.typography.labelSmall,
+                color = if (r.sixMonthHistoryComplete) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+            if (!ready && isThreeMonth) {
+                Text("INCOMPLETE THREE-MONTH HISTORY — results remain withheld until at least 55 valid NSE sessions spanning roughly 2.5 months are present.",
+                    color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium)
+            } else if (!ready) {
+                Text("INCOMPLETE SIX-MONTH HISTORY — results remain withheld until at least 105 valid NSE sessions spanning roughly six months are present. Scan Now can continue the permitted after-hours backfill.",
+                    color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium)
+            }
+            if (r.lastError.isNotBlank()) {
+                Text("Data source status: ${r.lastError}", color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall)
             }
             Text("Latest archive attempt: ${atIst(r.refreshAtMs)}",
-                style=MaterialTheme.typography.labelSmall)
-            Text("Official NSE cash EOD archives only; zero Groww calls. WorkManager is best-effort on Android. The app never downloads this history during NSE trading hours.",
-                style=MaterialTheme.typography.labelSmall)
+                style = MaterialTheme.typography.labelSmall)
+            Text("Official NSE cash EOD archives only; zero Groww calls. WorkManager continues best-effort six-month backfill after-hours. The app never downloads this history during NSE trading hours.",
+                style = MaterialTheme.typography.labelSmall)
             Button(
-                onClick = onScan,
+                onClick = { onScan(selectedMonths) },
                 enabled = !state.researchScanning,
                 modifier = Modifier.fillMaxWidth().testTag("six-month-low-scan-now"),
                 contentPadding = PaddingValues(vertical = 14.dp)
@@ -164,39 +193,48 @@ internal fun SixMonthLowResearchScreen(state: TraderUiState, onScan: () -> Unit)
                 }
             }
             Text(
-                "Runs against the saved archive immediately. During 18:30–08:00 IST it also imports up to 25 missing official NSE session files per tap; during 08:00–18:30 IST it stays local-only. Zero Groww calls.",
+                if (isThreeMonth)
+                    "3M Scan Now recalculates the saved archive immediately and makes no network or Groww requests. Switch to 6M to request the next permitted archive batch."
+                else
+                    "6M Scan Now recalculates the saved archive and, during 18:30–08:00 IST, imports up to 25 missing official NSE session files. During 08:00–18:30 IST it stays local-only. Zero Groww calls.",
                 style = MaterialTheme.typography.labelSmall
             )
             Text("Unadjusted exchange lows: splits, bonuses and other corporate actions require verification before acting. A low is not itself a BUY recommendation.",
-                style=MaterialTheme.typography.labelSmall)
+                style = MaterialTheme.typography.labelSmall)
         }
         item {
-            Text("Near six-month low · ${filtered.size} of ${r.lowRows.size}",
-                style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.Bold)
-            OutlinedTextField(value=search,onValueChange={ search=it },label={ Text("Filter NSE ticker") },
-                singleLine=true,modifier=Modifier.fillMaxWidth())
-            if(filtered.isEmpty()) Text(
-                if(!r.sixMonthHistoryComplete) "No six-month-low claims until the historic archive is complete."
-                else "No matching stocks within 0%–10% of their six-month low.",
-                style=MaterialTheme.typography.bodySmall)
+            Text("Near ${selectedMonths}-month low · ${filtered.size} of ${rows.size}",
+                style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            OutlinedTextField(value = search, onValueChange = { search = it },
+                label = { Text("Filter NSE ticker") }, singleLine = true,
+                modifier = Modifier.fillMaxWidth())
+            if (filtered.isEmpty()) Text(
+                when {
+                    !ready && isThreeMonth -> "No three-month-low claims until the minimum validated history is available."
+                    !ready -> "No six-month-low claims until the historic archive is complete."
+                    else -> "No matching stocks within 0%–10% of their ${selectedMonths}-month low."
+                },
+                style = MaterialTheme.typography.bodySmall)
         }
-        items(filtered,key={it.symbol}) { row -> LowRow(row) }
+        items(filtered, key = { "${selectedMonths}m_${it.symbol}" }) { row -> LowRow(row) }
     }
 }
 
 @Composable
-private fun LowRow(r: SixMonthLowObservation) {
-    Card(shape=RoundedCornerShape(12.dp)) {
-        Column(Modifier.fillMaxWidth().padding(12.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
-            Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween) {
-                Text(r.symbol,fontWeight=FontWeight.Bold)
-                Text(String.format(Locale.US,"%.2f%% above low",r.distancePct),
-                    style=MaterialTheme.typography.titleSmall)
+private fun LowRow(r: EquityLowObservation) {
+    Card(shape = RoundedCornerShape(12.dp)) {
+        Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text(r.symbol, fontWeight = FontWeight.Bold)
+                Text(String.format(Locale.US, "%.2f%% above %dM low", r.distancePct, r.lookbackMonths),
+                    style = MaterialTheme.typography.titleSmall)
             }
-            Text("Close ${price(r.close)} · six-month low ${price(r.sixMonthLow)}",
-                style=MaterialTheme.typography.bodySmall)
-            Text("As of ${r.latestDate} · ${r.tradingDays} observed sessions · NSE EQ",
-                style=MaterialTheme.typography.labelSmall)
+            Text("Close ${price(r.close)} · ${r.lookbackMonths}M low ${price(r.periodLow)}",
+                style = MaterialTheme.typography.bodySmall)
+            Text("Low date ${r.periodLowDate} · 1M low ${price(r.oneMonthLow)} (${String.format(Locale.US, "%.2f%%", r.oneMonthDistancePct)} above)",
+                style = MaterialTheme.typography.bodySmall)
+            Text("As of ${r.latestDate} · ${r.tradingDays} valid symbol sessions · NSE EQ",
+                style = MaterialTheme.typography.labelSmall)
         }
     }
 }

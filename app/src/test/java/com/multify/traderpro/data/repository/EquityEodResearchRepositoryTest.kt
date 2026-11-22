@@ -4,6 +4,7 @@ import org.junit.Assert.*
 import org.junit.Test
 import java.time.ZoneId
 import java.time.ZonedDateTime
+import java.time.LocalDate
 
 class EquityEodResearchRepositoryTest {
     private val ist=ZoneId.of("Asia/Kolkata")
@@ -32,4 +33,22 @@ class EquityEodResearchRepositoryTest {
         assertEquals(listOf("INFY","EQ","100.05","A, B Company","She said \"yes\""),
             EquityEodResearchRepository.csvCells(line))
     }
+    @Test fun threeMonthCoverageUnlocksFromTheExistingValidatedArchive() {
+        val asOf = LocalDate.of(2026, 11, 22)
+        assertTrue(EquityEodResearchRepository.threeMonthCoverageComplete(
+            60, LocalDate.of(2026, 8, 24), asOf
+        ))
+        assertFalse(EquityEodResearchRepository.threeMonthCoverageComplete(
+            54, LocalDate.of(2026, 8, 24), asOf
+        ))
+        assertFalse(EquityEodResearchRepository.threeMonthCoverageComplete(
+            60, LocalDate.of(2026, 9, 6), asOf
+        ))
+    }
+
+    @Test fun threeMonthSymbolRowsRequireEightyFivePercentCoverageAndFiftySessions() {
+        assertEquals(55, EquityEodResearchRepository.minimumThreeMonthSymbolSessions(64))
+        assertEquals(50, EquityEodResearchRepository.minimumThreeMonthSymbolSessions(55))
+    }
+
 }

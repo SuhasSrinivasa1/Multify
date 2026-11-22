@@ -108,7 +108,7 @@ fun FixedLiteApp(viewModel: TraderViewModel = hiltViewModel()) {
                                     LitePage.WORKING_RANGE -> "Working Range pilot"
                                     LitePage.MANUAL -> "Intraday MIS BUY / SELL"
                                     LitePage.LARGE_CAP -> "Large-cap research"
-                                    LitePage.SIX_MONTH_LOW -> "Six-month lows"
+                                    LitePage.SIX_MONTH_LOW -> "3M / 6M lows"
                                     LitePage.AVERAGES -> "Observed Fixed outcomes"
                                     LitePage.SETTINGS -> "Accounts and controls"
                                 },
@@ -145,13 +145,13 @@ fun FixedLiteApp(viewModel: TraderViewModel = hiltViewModel()) {
                 LitePage.WORKING_RANGE -> LiteRangeScreen(state)
                 LitePage.MANUAL -> LiteManualScreen(state, viewModel)
                 LitePage.LARGE_CAP -> LargeCapResearchScreen(state,viewModel::refreshResearchView)
-                LitePage.SIX_MONTH_LOW -> SixMonthLowResearchScreen(state,viewModel::scanSixMonthLowsNow)
+                LitePage.SIX_MONTH_LOW -> SixMonthLowResearchScreen(state,viewModel::scanLowRangeNow)
                 LitePage.AVERAGES -> LiteAveragesScreen(state)
                 LitePage.SETTINGS -> LiteSettingsScreen(
                     state, viewModel,
                     onEnableRequested = { confirmEnable = it },
                     onResetRequested = { confirmHaltReset = true },
-                    onExport = { export.launch("Phayra-v9035-eod-largecap-diagnostics.zip") }
+                    onExport = { export.launch("Phayra-v9036-eod-largecap-diagnostics.zip") }
                 )
             }
         }
@@ -245,7 +245,7 @@ internal fun LiteBottomBar(page: LitePage, onNavigate: (LitePage) -> Unit) {
             selected = page == LitePage.SIX_MONTH_LOW,
             onClick = { onNavigate(LitePage.SIX_MONTH_LOW) },
             icon = { Icon(Icons.Default.Analytics, contentDescription = null) },
-            label = { Text("6M lows") }
+            label = { Text("Lows", maxLines = 1) }
         )
     }
 }

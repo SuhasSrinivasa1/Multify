@@ -124,18 +124,18 @@ class TraderViewModel @Inject constructor(
     }
 
     /**
-     * User-requested six-month-low scan. It always recalculates the local archive.
-     * Official NSE downloads are attempted only in the repository's permitted
-     * 18:30–08:00 IST window, in a bounded batch of at most 25 missing sessions.
-     * This path never calls Groww and never creates a trading signal or order.
+     * User-requested 3M/6M low scan. Both modes recalculate local NSE EOD data.
+     * Only a selected 6M scan may request a bounded after-hours archive batch.
+     * This research path never calls Groww and never creates a trading signal or order.
      */
-    fun scanSixMonthLowsNow() {
+    fun scanLowRangeNow(months: Int) {
+        val selectedMonths = if (months == 6) 6 else 3
         viewModelScope.launch {
             if (researchScanning.value) return@launch
             researchScanning.value = true
             remote.value = remote.value.copy(message = null, error = null)
             try {
-                val downloadsAllowed = EquityEodResearchRepository.afterHours(
+                val downloadsAllowed = selectedMonths == 6 && EquityEodResearchRepository.afterHours(
                     ZonedDateTime.now(ZoneId.of("Asia/Kolkata"))
                 )
                 val progress = if (downloadsAllowed) {
@@ -145,26 +145,31 @@ class TraderViewModel @Inject constructor(
                 }
                 val snapshot = withContext(Dispatchers.IO) { equityEodResearch.snapshot() }
                 equityResearch.value = snapshot
-                val resultMessage = when {
+                val resultMessage = if (selectedMonths == 3) {
+                    if (snapshot.threeMonthHistoryComplete)
+                        "3M local scan complete · ${snapshot.threeMonthLowRows.size} validated candidates · ${snapshot.threeMonthCompletedDays} sessions · zero network/Groww requests."
+                    else
+                        "3M coverage incomplete · ${snapshot.threeMonthCompletedDays} validated sessions found; at least 55 sessions spanning roughly 2.5 months are required. No network/Groww requests."
+                } else when {
                     progress == null && snapshot.sixMonthHistoryComplete ->
-                        "Local scan complete · ${snapshot.lowRows.size} validated six-month-low candidates · ${snapshot.completedDays} sessions."
+                        "6M local scan complete · ${snapshot.sixMonthLowRows.size} validated candidates · ${snapshot.completedDays} sessions."
                     progress == null ->
-                        "Local scan complete · ${snapshot.completedDays} EOD sessions available. NSE downloads resume after 18:30 IST; history is still incomplete. No Groww calls."
+                        "6M local scan complete · ${snapshot.completedDays} EOD sessions available. NSE downloads resume after 18:30 IST; history is still incomplete. No Groww calls."
                     progress.sourceFailure ->
                         "NSE archive source unavailable · ${progress.importedDays} sessions imported · ${snapshot.completedDays} stored. Existing validated results, if any, are retained."
                     snapshot.sixMonthHistoryComplete ->
-                        "Scan complete · ${snapshot.lowRows.size} stocks within 0%–10% of validated six-month lows · ${snapshot.completedDays} sessions."
+                        "6M scan complete · ${snapshot.sixMonthLowRows.size} stocks within 0%–10% of validated six-month lows · ${snapshot.completedDays} sessions."
                     progress.importedDays > 0 ->
-                        "On-demand scan complete · imported ${progress.importedDays} NSE sessions using ${progress.requestedDays} archive requests · ${snapshot.completedDays} sessions stored. History remains incomplete; tap Scan Now again for the next batch."
+                        "6M backfill batch complete · imported ${progress.importedDays} NSE sessions using ${progress.requestedDays} archive requests · ${snapshot.completedDays} sessions stored. Tap Scan Now again for another permitted batch."
                     else ->
-                        "Scan complete · ${snapshot.completedDays} sessions stored. No new archive files were imported; six-month claims remain withheld until history is complete."
+                        "6M scan complete · ${snapshot.completedDays} sessions stored. No new archive files were imported; six-month claims remain withheld until history is complete."
                 }
                 remote.value = remote.value.copy(message = resultMessage, error = null)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (e: Exception) {
                 remote.value = remote.value.copy(
-                    error = "Six-month-low scan failed: ${e.userMessage()}",
+                    error = "${selectedMonths}M low scan failed: ${e.userMessage()}",
                     message = null
                 )
             } finally {
@@ -172,6 +177,9 @@ class TraderViewModel @Inject constructor(
             }
         }
     }
+
+    /** Compatibility entry point for any existing in-app caller. */
+    fun scanSixMonthLowsNow() = scanLowRangeNow(6)
 
     fun refresh(silent: Boolean = false) {
         viewModelScope.launch {

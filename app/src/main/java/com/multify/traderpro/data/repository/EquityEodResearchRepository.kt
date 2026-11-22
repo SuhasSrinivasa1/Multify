@@ -9,7 +9,6 @@ import com.multify.traderpro.engine.EquityEodBar
 import com.multify.traderpro.engine.LargeCapEquityObservation
 import com.multify.traderpro.engine.LargeCapEquityResearchPolicy
 import com.multify.traderpro.engine.NseEquitySessionCalendar
-import com.multify.traderpro.engine.SixMonthLowObservation
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -33,13 +32,29 @@ import java.util.zip.ZipInputStream
 import javax.inject.Inject
 import javax.inject.Singleton
 
+data class EquityLowObservation(
+    val symbol: String,
+    val close: Double,
+    val periodLow: Double,
+    val distancePct: Double,
+    val tradingDays: Int,
+    val latestDate: LocalDate,
+    val periodLowDate: LocalDate,
+    val oneMonthLow: Double,
+    val oneMonthDistancePct: Double,
+    val lookbackMonths: Int
+)
 data class EquityResearchSnapshot(
-    val lowRows: List<SixMonthLowObservation> = emptyList(),
+    val threeMonthLowRows: List<EquityLowObservation> = emptyList(),
+    val sixMonthLowRows: List<EquityLowObservation> = emptyList(),
     val largeCaps: List<LargeCapEquityObservation> = emptyList(),
     val completedDays: Int = 0,
     val firstDay: String = "",
+    val threeMonthCompletedDays: Int = 0,
+    val threeMonthFirstDay: String = "",
     val latestDay: String = "",
     val universeCount: Int = 0,
+    val threeMonthHistoryComplete: Boolean = false,
     val sixMonthHistoryComplete: Boolean = false,
     val lastError: String = "",
     val memberSource: String = "",
@@ -99,6 +114,13 @@ class EquityEodResearchRepository @Inject constructor(
             return if (ist.toLocalTime() >= LocalTime.of(18, 30)) ist.toLocalDate()
                 else ist.toLocalDate().minusDays(1)
         }
+        /** Three-month research unlocks only with a meaningful date span and 55 validated sessions. */
+        fun threeMonthCoverageComplete(totalSessions: Int, firstSession: LocalDate?, asOf: LocalDate): Boolean =
+            totalSessions >= 55 && firstSession != null &&
+                !firstSession.isAfter(asOf.minusMonths(2).plusDays(14))
+        /** At least 85% of observed NSE sessions, with a 50-session per-symbol floor. */
+        fun minimumThreeMonthSymbolSessions(totalSessions: Int): Int =
+            kotlin.math.ceil(totalSessions * 0.85).toInt().coerceAtLeast(50)
         fun csvCells(line: String): List<String> {
             val out = mutableListOf<String>()
             val b = StringBuilder()
@@ -441,38 +463,91 @@ class EquityEodResearchRepository @Inject constructor(
         }.toMap()
 
     fun snapshot(): EquityResearchSnapshot = synchronized(lock) {
-        val today=LocalDate.now(INDIA)
-        val cutoff=today.minusMonths(6).toString()
-        val sql=db.readableDatabase
-        var totalDays=0
-        var first=""
-        var latest=""
-        sql.rawQuery("SELECT COUNT(*),MIN(day),MAX(day) FROM eod_days WHERE day>=?",arrayOf(cutoff)).use { c ->
-            if(c.moveToFirst()) {
-                totalDays=c.getInt(0);first=c.getString(1).orEmpty();latest=c.getString(2).orEmpty()
+        val today = LocalDate.now(INDIA)
+        val sixCutoff = today.minusMonths(6)
+        val threeCutoff = today.minusMonths(3)
+        val sql = db.readableDatabase
+
+        data class WindowCoverage(val sessions: Int, val first: String, val latest: String)
+        fun coverage(cutoff: String): WindowCoverage =
+            sql.rawQuery(
+                "SELECT COUNT(*),MIN(day),MAX(day) FROM eod_days WHERE day>=? AND day<=?",
+                arrayOf(cutoff, today.toString())
+            ).use { c ->
+                if (c.moveToFirst()) WindowCoverage(c.getInt(0), c.getString(1).orEmpty(), c.getString(2).orEmpty())
+                else WindowCoverage(0, "", "")
             }
-        }
-        val spanComplete=totalDays>=105 && first.isNotBlank() &&
+
+        val six = coverage(sixCutoff.toString())
+        val three = coverage(threeCutoff.toString())
+        val totalDays = six.sessions
+        val first = six.first
+        val latest = six.latest
+        val spanComplete = totalDays >= 105 && first.isNotBlank() &&
             LocalDate.parse(first).isBefore(today.minusMonths(5).plusDays(14))
-        val minCount=(totalDays * .85).toInt().coerceAtLeast(90)
-        val rows=mutableListOf<SixMonthLowObservation>()
-        if (spanComplete && latest.isNotBlank()) {
-            val query="""SELECT s.symbol,MIN(s.low),COUNT(*),
-                (SELECT t.close FROM eod t WHERE t.symbol=s.symbol AND t.day=?) AS last_close
-                FROM eod s WHERE s.day>=? AND s.day<=? GROUP BY s.symbol
-                HAVING COUNT(*)>=CAST(? AS INTEGER) AND last_close IS NOT NULL"""
-            sql.rawQuery(query,arrayOf(latest,cutoff,latest,minCount.toString())).use { c ->
-                while(c.moveToNext()) {
-                    val low=c.getDouble(1)
-                    val close=c.getDouble(3)
-                    val pct=if(low>0.0) (close/low-1.0)*100.0 else Double.NaN
-                    if(pct.isFinite() && pct>=-0.000001 && pct<=10.000001) {
-                        rows+=SixMonthLowObservation(c.getString(0),close,low,
-                            pct.coerceAtLeast(0.0),c.getInt(2),LocalDate.parse(latest))
+        val threeMonthHistoryComplete =
+            EquityEodResearchRepository.threeMonthCoverageComplete(
+                three.sessions,
+                three.first.takeIf { it.isNotBlank() }?.let(LocalDate::parse),
+                today
+            ) && three.latest.isNotBlank() && three.latest == latest
+
+        fun readLowRows(cutoff: String, latestDay: String, minCount: Int, lookbackMonths: Int): List<EquityLowObservation> {
+            if (latestDay.isBlank() || minCount <= 0) return emptyList()
+            val oneMonthCutoff = LocalDate.parse(latestDay).minusMonths(1).toString()
+            val query = """
+                SELECT s.symbol,MIN(s.low),COUNT(*),
+                    (SELECT t.close FROM eod t WHERE t.symbol=s.symbol AND t.day=?) AS last_close,
+                    (SELECT l.day FROM eod l WHERE l.symbol=s.symbol AND l.day>=? AND l.day<=?
+                        ORDER BY l.low ASC,l.day ASC LIMIT 1) AS low_day,
+                    (SELECT MIN(m.low) FROM eod m WHERE m.symbol=s.symbol AND m.day>=? AND m.day<=?) AS month_low
+                FROM eod s
+                WHERE s.day>=? AND s.day<=? AND s.low>0 AND s.close>0
+                GROUP BY s.symbol
+                HAVING COUNT(*)>=CAST(? AS INTEGER) AND last_close IS NOT NULL
+                    AND low_day IS NOT NULL AND month_low IS NOT NULL
+            """.trimIndent()
+            val rows = mutableListOf<EquityLowObservation>()
+            sql.rawQuery(
+                query,
+                arrayOf(
+                    latestDay, cutoff, latestDay, oneMonthCutoff, latestDay,
+                    cutoff, latestDay, minCount.toString()
+                )
+            ).use { c ->
+                while (c.moveToNext()) {
+                    val low = c.getDouble(1)
+                    val close = c.getDouble(3)
+                    val oneMonthLow = c.getDouble(5)
+                    val distance = if (low > 0.0) (close / low - 1.0) * 100.0 else Double.NaN
+                    val oneMonthDistance = if (oneMonthLow > 0.0)
+                        (close / oneMonthLow - 1.0) * 100.0 else Double.NaN
+                    if (distance.isFinite() && distance >= -0.000001 && distance <= 10.000001 &&
+                        oneMonthDistance.isFinite() && oneMonthDistance >= -0.000001) {
+                        rows += EquityLowObservation(
+                            symbol = c.getString(0),
+                            close = close,
+                            periodLow = low,
+                            distancePct = distance.coerceAtLeast(0.0),
+                            tradingDays = c.getInt(2),
+                            latestDate = LocalDate.parse(latestDay),
+                            periodLowDate = LocalDate.parse(c.getString(4)),
+                            oneMonthLow = oneMonthLow,
+                            oneMonthDistancePct = oneMonthDistance.coerceAtLeast(0.0),
+                            lookbackMonths = lookbackMonths
+                        )
                     }
                 }
             }
+            return rows.sortedBy { it.distancePct }
         }
+
+        val threeMonthMinCount = EquityEodResearchRepository.minimumThreeMonthSymbolSessions(three.sessions)
+        val threeMonthRows = if (threeMonthHistoryComplete)
+            readLowRows(threeCutoff.toString(), latest, threeMonthMinCount, 3) else emptyList()
+        val sixMonthMinCount = (totalDays * 0.85).toInt().coerceAtLeast(90)
+        val sixMonthRows = if (spanComplete)
+            readLowRows(sixCutoff.toString(), latest, sixMonthMinCount, 6) else emptyList()
 
         val memberMap=members()
         val history=linkedMapOf<String,MutableList<EquityEodBar>>()
@@ -521,12 +596,19 @@ class EquityEodResearchRepository @Inject constructor(
         }.sortedWith(compareByDescending<LargeCapEquityObservation> { it.swingResearch }
             .thenByDescending { it.intradayResearch }.thenByDescending { it.relativeFiveDayPct ?: -999.0 })
         EquityResearchSnapshot(
-            lowRows=rows.sortedBy { it.distancePct },
-            largeCaps=result,completedDays=totalDays,firstDay=first,latestDay=latest,
+            threeMonthLowRows=threeMonthRows,
+            sixMonthLowRows=sixMonthRows,
+            largeCaps=result,
+            completedDays=totalDays,
+            firstDay=first,
+            threeMonthCompletedDays=three.sessions,
+            threeMonthFirstDay=three.first,
+            latestDay=latest,
             universeCount=if(latest.isBlank()) 0 else sql.rawQuery(
                 "SELECT symbols FROM eod_days WHERE day=?",arrayOf(latest)).use { c ->
                     if(c.moveToFirst())c.getInt(0) else 0
                 },
+            threeMonthHistoryComplete=threeMonthHistoryComplete,
             sixMonthHistoryComplete=spanComplete,
             lastError=prefs.getString("last_eod_error","").orEmpty(),
             memberSource=prefs.getString("members_source","CURATED_SEEDS_UNVERIFIED").orEmpty(),
