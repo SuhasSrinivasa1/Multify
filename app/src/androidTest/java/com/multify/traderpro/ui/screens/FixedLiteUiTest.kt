@@ -146,7 +146,8 @@ class FixedLiteUiTest {
         compose.onNodeWithText("+5.00% above low").assertIsDisplayed()
         compose.onNodeWithText("POSSIBLE CORPORATE-ACTION / PRICE-GAP REVIEW").assertIsDisplayed()
     }
-\n    @Test fun bottomNavigationExposesFixedWorkingRangeManualAndResearch() {
+
+    @Test fun bottomNavigationExposesFixedWorkingRangeManualAndResearch() {
         var selected = LitePage.FIXED
         compose.setContent {
             MultifyTraderTheme(darkTheme = false) {
