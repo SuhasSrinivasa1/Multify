@@ -178,7 +178,7 @@ def main() -> None:
     with output.open("w", encoding="utf-8", newline="") as handle:
         handle.write("#AMFI_MARKET_CAP_CLASSIFICATION_V1\n")
         handle.write(f"#period={period}\n")
-        handle.write(f"#source={AMFI_PAGE}\n")
+        handle.write(f"#source={source_url}\n")
         writer = csv.writer(handle, lineterminator="\n")
         writer.writerow(("symbol", "category", "rank"))
         writer.writerows(records)
