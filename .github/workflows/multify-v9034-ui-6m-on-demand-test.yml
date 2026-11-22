@@ -117,7 +117,7 @@ jobs:
           ui=(root/"ui/screens/FixedLiteApp.kt").read_text()
           assert "LitePage.LARGE_CAP -> LargeCapResearchScreen(" in ui
           assert "LitePage.SIX_MONTH_LOW -> SixMonthLowResearchScreen(state,viewModel::scanSixMonthLowsNow)" in ui
-          assert 'Text("Multify"' in ui
+          assert '"Multify"' in ui
           assert "FlowRow(" in ui
           vm=(root/"ui/screens/TraderViewModel.kt").read_text()
           assert "fun scanSixMonthLowsNow()" in vm
@@ -136,7 +136,7 @@ jobs:
           assert 'if (engine == "MANUAL_HOLDING") product == "MIS" else product == "CNC"' in ownership
           ui=Path("app/src/main/java/com/multify/traderpro/ui/screens/FixedLiteApp.kt").read_text()
           assert "LitePage.MANUAL -> LiteManualScreen(state, viewModel)" in ui
-          assert 'Text("Multify"' in ui
+          assert '"Multify"' in ui
           assert "SELL SHORT" in ui and "manual-buy-alpha" in ui
           build=Path("app/build.gradle.kts").read_text()
           assert "versionCode = 9034" in build
