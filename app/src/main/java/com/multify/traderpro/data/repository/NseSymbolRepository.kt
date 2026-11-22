@@ -2,6 +2,9 @@ package com.multify.traderpro.data.repository
 
 import android.content.Context
 import com.multify.traderpro.engine.NseInstrumentMasterParser
+import com.multify.traderpro.engine.NseBhavcopyParser
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import dagger.hilt.android.qualifiers.ApplicationContext
 import okhttp3.Cookie
 import okhttp3.CookieJar
@@ -9,6 +12,10 @@ import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.time.Duration
+import java.time.LocalDate
+import java.time.format.DateTimeFormatter
+import java.io.InputStreamReader
+import java.util.zip.ZipInputStream
 import java.util.Locale
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -28,6 +35,7 @@ class NseSymbolRepository @Inject constructor(
 ) {
     private val prefs = context.getSharedPreferences("nse_symbol_master", Context.MODE_PRIVATE)
     private val cookieLock = Any()
+    @Volatile private var lastNseSessionAtMs = 0L
     private val cookies = mutableListOf<Cookie>()
     private val client = OkHttpClient.Builder()
         .connectTimeout(Duration.ofSeconds(12))
@@ -161,6 +169,43 @@ class NseSymbolRepository @Inject constructor(
             NseInstrumentMasterParser.parseGrowwInstruments(stream)
         }
 
+    /**
+     * Download one official NSE CM UDiFF final bhavcopy archive. A single archive
+     * contains end-of-day OHLCV for the entire cash market, so the six-month
+     * watchlist never fans out into per-symbol Groww calls.
+     */
+    suspend fun downloadEodBhavcopy(date: LocalDate): List<NseBhavcopyParser.Bar>? =
+        withContext(Dispatchers.IO) {
+            val now = System.currentTimeMillis()
+            if (now - lastNseSessionAtMs > 10L * 60_000L) {
+                client.newCall(request(NSE_HOME_URL, csv = false)).execute().use { response ->
+                    check(response.isSuccessful) { "NSE session HTTP ${response.code}" }
+                }
+                lastNseSessionAtMs = now
+            }
+            val ymd = date.format(DateTimeFormatter.BASIC_ISO_DATE)
+            val url = "$NSE_ARCHIVE_BASE/BhavCopy_NSE_CM_0_0_0_${ymd}_F_0000.csv.zip"
+            val archiveRequest = Request.Builder().url(url)
+                .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36")
+                .header("Accept", "application/zip,application/octet-stream,*/*")
+                .header("Referer", NSE_HOME_URL)
+                .header("Accept-Language", "en-US,en;q=0.9")
+                .build()
+            client.newCall(archiveRequest).execute().use { response ->
+                if (response.code == 404) return@withContext null
+                check(response.isSuccessful) { "NSE UDiFF bhavcopy HTTP ${response.code} for $date" }
+                val body = response.body ?: error("NSE UDiFF bhavcopy response body empty")
+                val zip = ZipInputStream(body.byteStream())
+                zip.use { stream ->
+                    val entry = stream.nextEntry ?: error("NSE UDiFF bhavcopy ZIP has no CSV entry")
+                    check(!entry.isDirectory && entry.name.endsWith(".csv", true)) {
+                        "NSE UDiFF bhavcopy ZIP entry is not CSV"
+                    }
+                    NseBhavcopyParser.parse(InputStreamReader(stream, Charsets.UTF_8), date)
+                }
+            }
+        }
+
     /** Download once per scheduled sync, with bounded official fallback, no 403 retry storm. */
     @Synchronized
     fun refresh(): Status {
@@ -223,6 +268,7 @@ class NseSymbolRepository @Inject constructor(
         const val EQUITY_URL = "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
         const val NSE_HOME_URL = "https://www.nseindia.com/"
         const val GROWW_INSTRUMENT_URL = "https://growwapi-assets.groww.in/instruments/instrument.csv"
+        const val NSE_ARCHIVE_BASE = "https://nsearchives.nseindia.com/content/cm"
         const val MIN_SYMBOL_COUNT = 500
         const val MAX_SYMBOL_COUNT = 10_000
         private const val KEY_SYMBOLS = "symbols"
