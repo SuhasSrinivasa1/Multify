@@ -42,7 +42,9 @@ data class EquityLowObservation(
     val periodLowDate: LocalDate,
     val oneMonthLow: Double,
     val oneMonthDistancePct: Double,
-    val lookbackMonths: Int
+    val lookbackMonths: Int,
+    val marketCapCategory: String = "UNCLASSIFIED",
+    val marketCapRank: Int? = null
 )
 data class EquityResearchSnapshot(
     val threeMonthLowRows: List<EquityLowObservation> = emptyList(),
@@ -59,7 +61,10 @@ data class EquityResearchSnapshot(
     val lastError: String = "",
     val memberSource: String = "",
     val currentPulseAtMs: Long = 0L,
-    val refreshAtMs: Long = 0L
+    val refreshAtMs: Long = 0L,
+    val marketCapClassificationPeriod: String = "",
+    val marketCapSource: String = "",
+    val marketCapClassificationCount: Int = 0
 )
 data class EquityEodRefreshProgress(
     val importedDays: Int,
@@ -166,6 +171,21 @@ class EquityEodResearchRepository @Inject constructor(
 
     private val db = Store(context)
     private val prefs = context.getSharedPreferences("suhas_shree_eod_state", Context.MODE_PRIVATE)
+    // AMFI classification is bundled as a build-time asset. No runtime market-cap
+    // requests are added, and missing/unmatched symbols remain explicitly unclassified.
+    private val amfiMarketCapDataset: AmfiMarketCapDataset by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        runCatching {
+            context.assets.open("amfi_market_cap_categories.csv").bufferedReader().use {
+                AmfiMarketCapClassificationParser.parse(it.readText())
+            }
+        }.getOrElse { cause ->
+            audit.logAsync("EOD_RESEARCH", "AMFI_MARKET_CAP_ASSET_UNAVAILABLE", mapOf(
+                "error" to (cause.message ?: cause.javaClass.simpleName).take(100),
+                "classification_guessed" to false
+            ))
+            AmfiMarketCapDataset.EMPTY
+        }
+    }
     private val cookieLock = Any()
     private val cookies = mutableListOf<Cookie>()
     @Volatile private var warmedNseDate = ""
@@ -470,6 +490,7 @@ class EquityEodResearchRepository @Inject constructor(
         }.toMap()
 
     fun snapshot(): EquityResearchSnapshot = synchronized(lock) {
+        val marketCaps = amfiMarketCapDataset
         val today = LocalDate.now(INDIA)
         val sixCutoff = today.minusMonths(6)
         val threeCutoff = today.minusMonths(3)
@@ -533,6 +554,7 @@ class EquityEodResearchRepository @Inject constructor(
                     val oneMonthDistance = EquityEodResearchRepository.distanceFromReferenceLowPct(close, oneMonthLow)
                     if (EquityEodResearchRepository.isWithinTenPctAboveOrBelow(distance) &&
                         oneMonthDistance.isFinite()) {
+                        val cap = marketCaps.labels[c.getString(0)]
                         rows += EquityLowObservation(
                             symbol = c.getString(0),
                             close = close,
@@ -543,7 +565,9 @@ class EquityEodResearchRepository @Inject constructor(
                             periodLowDate = LocalDate.parse(c.getString(4)),
                             oneMonthLow = oneMonthLow,
                             oneMonthDistancePct = oneMonthDistance,
-                            lookbackMonths = lookbackMonths
+                            lookbackMonths = lookbackMonths,
+                            marketCapCategory = cap?.category ?: "UNCLASSIFIED",
+                            marketCapRank = cap?.rank
                         )
                     }
                 }
@@ -633,7 +657,10 @@ class EquityEodResearchRepository @Inject constructor(
             lastError=prefs.getString("last_eod_error","").orEmpty(),
             memberSource=prefs.getString("members_source","CURATED_SEEDS_UNVERIFIED").orEmpty(),
             currentPulseAtMs=if(fresh)prefs.getLong("pulse_at_ms",0L) else 0L,
-            refreshAtMs=prefs.getLong("last_eod_attempt_ms",0L)
+            refreshAtMs=prefs.getLong("last_eod_attempt_ms",0L),
+            marketCapClassificationPeriod=marketCaps.period,
+            marketCapSource=marketCaps.source,
+            marketCapClassificationCount=marketCaps.labels.size
         )
     }
 }

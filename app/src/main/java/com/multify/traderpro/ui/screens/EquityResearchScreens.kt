@@ -142,7 +142,19 @@ internal fun SixMonthLowResearchScreen(state: TraderUiState, onScan: (Int) -> Un
     ) {
         item {
             ResearchNotice("NSE LOWS SCREENER", "Latest EOD close vs previous 3M/6M low · all breakdowns and up to 10% above included · EQ cash shares")
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "AMFI size classification: ${r.marketCapClassificationPeriod.ifBlank { "unavailable" }} · " +
+                    "Large #1–100 · Mid #101–250 · Small #251+ · unmatched symbols are UNCLASSIFIED.",
+                style = MaterialTheme.typography.labelSmall
+            )
+            Text(
+                if (r.marketCapClassificationCount > 0)
+                    "${r.marketCapClassificationCount} NSE symbols mapped from the official AMFI list."
+                else "Official AMFI classification asset unavailable; no market-cap categories are guessed.",
+                style = MaterialTheme.typography.labelSmall
+            )
+            Spacer(Modifier.height(4.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 FilterChip(
                     selected = isThreeMonth,
@@ -235,7 +247,10 @@ private fun LowRow(r: EquityLowObservation) {
     Card(shape = RoundedCornerShape(12.dp)) {
         Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text(r.symbol, fontWeight = FontWeight.Bold)
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(r.symbol, fontWeight = FontWeight.Bold)
+                    MarketCapBadge(r.marketCapCategory, r.marketCapRank)
+                }
                 Text(lowDistanceLabel(r.distancePct, r.lookbackMonths),
                     style = MaterialTheme.typography.titleSmall,
                     color = if (r.distancePct < -0.000001) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary)
@@ -247,6 +262,29 @@ private fun LowRow(r: EquityLowObservation) {
             Text("As of ${r.latestDate} · ${r.tradingDays} prior symbol sessions · NSE EQ",
                 style = MaterialTheme.typography.labelSmall)
         }
+    }
+}
+
+@Composable
+private fun MarketCapBadge(category: String, rank: Int?) {
+    val scheme = MaterialTheme.colorScheme
+    val (label, background, foreground) = when (category) {
+        "LARGE_CAP" -> Triple("LARGE CAP", scheme.primaryContainer, scheme.onPrimaryContainer)
+        "MID_CAP" -> Triple("MID CAP", scheme.secondaryContainer, scheme.onSecondaryContainer)
+        "SMALL_CAP" -> Triple("SMALL CAP", scheme.tertiaryContainer, scheme.onTertiaryContainer)
+        else -> Triple("UNCLASSIFIED", scheme.surfaceVariant, scheme.onSurfaceVariant)
+    }
+    Surface(
+        shape = RoundedCornerShape(50),
+        color = background,
+        contentColor = foreground
+    ) {
+        Text(
+            if (rank != null && category != "UNCLASSIFIED") "$label · #$rank" else label,
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.SemiBold
+        )
     }
 }
 
