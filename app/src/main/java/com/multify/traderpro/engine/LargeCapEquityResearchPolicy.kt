@@ -34,7 +34,8 @@ data class LargeCapEquityObservation(
     val intradayPct: Double?,
     val intradayRelativePct: Double?,
     val intradayResearch: Boolean,
-    val swingResearch: Boolean
+    val swingResearch: Boolean,
+    val comparisonBasis: String = "SECTOR_PEERS"
 )
 
 object LargeCapEquityResearchPolicy {
@@ -62,7 +63,7 @@ object LargeCapEquityResearchPolicy {
             distance.coerceAtLeast(0.0), relevant.size, latestCompletedEodDate)
     }
 
-    /** Technical research on VERIFIED Nifty-100 constituents, not an automated trading strategy. */
+    /** Technical research on sourced large-cap constituents or explicitly labeled seed peers. */
     fun scoreLargeCap(
         symbol: String,
         sector: String,
@@ -70,7 +71,8 @@ object LargeCapEquityResearchPolicy {
         peerFiveDayReturns: List<Double>,
         peerIntradayReturns: List<Double>,
         marketLivePrice: Double?,
-        marketOpenPrice: Double?
+        marketOpenPrice: Double?,
+        comparisonBasis: String = "SECTOR_PEERS"
     ): LargeCapEquityObservation? {
         val bars = history.filter { it.close.isFinite() && it.close > 0.0 &&
             it.low.isFinite() && it.low > 0.0 }.sortedBy { it.date }
@@ -110,7 +112,7 @@ object LargeCapEquityResearchPolicy {
             liveRelative >= 0.15 && (breadth ?: 0.0) >= 50.0
         return LargeCapEquityObservation(
             symbol, sector, last, five, twenty, sectorReturn, breadth,
-            relative, e20, e50, vol, live, liveRelative, intraday, swing
+            relative, e20, e50, vol, live, liveRelative, intraday, swing, comparisonBasis
         )
     }
 }
