@@ -61,7 +61,7 @@ object LargeCapMomentumPolicy {
         val dayMoves = valid.associate { it.symbol to pct(it.currentPrice, it.firstObservedPrice) }
         val marketAverage = dayMoves.values.average()
         val sectorBreadth = valid.groupBy { it.sector }.mapValues { (_, members) ->
-            members.count { dayMoves[it.symbol] ?: 0.0 > 0.0 }.toDouble() /
+            members.count { (dayMoves[it.symbol] ?: 0.0) > 0.0 }.toDouble() /
                 members.size.coerceAtLeast(1) * 100.0
         }
         return valid.map { row ->
@@ -96,7 +96,7 @@ object LargeCapMomentumPolicy {
         val sma20 = closes.takeLast(20).average()
         val sma50 = closes.takeLast(50).average()
         val rsi = rsi14(closes)
-        val averageVolume = volumes.takeLast(20).dropLast(1).average().takeIf { it > 0.0 }
+        val averageVolume = volumes.dropLast(1).takeLast(20).average().takeIf { it > 0.0 }
         val volumeRatio = averageVolume?.let { volumes.last().toDouble() / it }
         val prior20High = highs.dropLast(1).takeLast(20).maxOrNull()
         val sixMonthLow = lows.minOrNull()?.takeIf { it > 0.0 }
