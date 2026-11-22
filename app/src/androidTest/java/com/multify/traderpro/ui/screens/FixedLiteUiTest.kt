@@ -192,7 +192,8 @@ class FixedLiteUiTest {
         compose.onNodeWithText("SMALL3").assertDoesNotExist()
         compose.onNodeWithText("UNKNOWN3").assertDoesNotExist()
 
-        compose.onNodeWithTag("low-range-6m").performScrollTo()
+        compose.onNodeWithTag("six-month-low-screen")
+            .performScrollToNode(hasText("NSE LOWS SCREENER"))
         compose.onNodeWithTag("low-range-6m").performClick()
         compose.onNodeWithTag("six-month-low-screen")
             .performScrollToNode(hasText("At/below or up to 10% above previous 6M low · 2 of 2"))
