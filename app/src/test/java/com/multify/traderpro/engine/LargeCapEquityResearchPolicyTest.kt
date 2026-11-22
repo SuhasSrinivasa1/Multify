@@ -10,7 +10,7 @@ class LargeCapEquityResearchPolicyTest {
                      f: (Int) -> Double = {100.0 + it * 0.25}): List<EquityEodBar> =
         (0 until n).map { i ->
             val price = f(i)
-            EquityEodBar(asOf.minusDays((n-i-1).toLong()), symbol,
+            EquityEodBar(asOf.minusDays(((n-i-1)*3L/2L)), symbol,
                 price * .99, price, 1_000_000L + i * 1000L)
         }
     @Test fun sixMonthLowRequiresSixMonthHistoryAndLatestCompleteSession() {
