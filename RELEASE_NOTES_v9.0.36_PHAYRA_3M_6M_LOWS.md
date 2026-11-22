@@ -8,8 +8,8 @@
 - Both modes rank 0%–10% above their own period low.
 - Each result shows latest close, period low, date of period low, 1M low, distance above 1M low, valid symbol sessions and latest EOD date.
 - Both modes include ticker filtering and a manual Scan Now button.
-- 3M Scan Now is local-only and makes no network or Groww requests.
-- 6M Scan Now requests at most 25 missing official NSE CM-UDiFF session archives only during 18:30–08:00 IST; otherwise it is local-only.
+- Both 3M and 6M Scan Now actions recalculate local results and request at most 25 missing official NSE CM-UDiFF archives only during 18:30–08:00 IST; during 08:00–18:30 IST both remain local-only.
+- A 3M scan can therefore build the short-window history in bounded after-hours batches while continuing to advance the 6M archive. No Groww calls are made.
 - Existing WorkManager best-effort after-hours six-month backfill remains active.
 
 ## Data integrity and frozen boundaries
@@ -22,6 +22,6 @@
 
 ## Build / install
 - Version 9.0.36 TEST, package suffix `.v9036test`.
-- Installs side-by-side with Phayra v9.0.35 and the live app; it does not inherit local databases.
+- Installs side-by-side with Phayra v9.0.35 and the live app; it does not inherit local databases. The v9.0.35 TEST build used an ephemeral CI signing certificate, so this build cannot update it in place or read its 71-session private archive. The new package must rebuild its own local archive through bounded NSE downloads.
 - Keep the existing live app installed and responsible for live positions and broker-side GTTs.
 - CI must pass and on-device 3M/6M screens must be checked before production use.

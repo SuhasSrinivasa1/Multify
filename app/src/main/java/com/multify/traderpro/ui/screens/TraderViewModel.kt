@@ -135,7 +135,7 @@ class TraderViewModel @Inject constructor(
             researchScanning.value = true
             remote.value = remote.value.copy(message = null, error = null)
             try {
-                val downloadsAllowed = selectedMonths == 6 && EquityEodResearchRepository.afterHours(
+                val downloadsAllowed = EquityEodResearchRepository.afterHours(
                     ZonedDateTime.now(ZoneId.of("Asia/Kolkata"))
                 )
                 val progress = if (downloadsAllowed) {
@@ -145,18 +145,23 @@ class TraderViewModel @Inject constructor(
                 }
                 val snapshot = withContext(Dispatchers.IO) { equityEodResearch.snapshot() }
                 equityResearch.value = snapshot
-                val resultMessage = if (selectedMonths == 3) {
-                    if (snapshot.threeMonthHistoryComplete)
-                        "3M local scan complete · ${snapshot.threeMonthLowRows.size} validated candidates · ${snapshot.threeMonthCompletedDays} sessions · zero network/Groww requests."
-                    else
-                        "3M coverage incomplete · ${snapshot.threeMonthCompletedDays} validated sessions found; at least 55 sessions spanning roughly 2.5 months are required. No network/Groww requests."
-                } else when {
-                    progress == null && snapshot.sixMonthHistoryComplete ->
+                val resultMessage = when {
+                    progress == null && selectedMonths == 3 && snapshot.threeMonthHistoryComplete ->
+                        "3M local scan complete · ${snapshot.threeMonthLowRows.size} validated candidates · ${snapshot.threeMonthCompletedDays} sessions · no network/Groww requests."
+                    progress == null && selectedMonths == 3 ->
+                        "3M local scan complete · ${snapshot.threeMonthCompletedDays} validated sessions available. NSE archive downloads resume after 18:30 IST; history remains incomplete. No Groww calls."
+                    progress == null && selectedMonths == 6 && snapshot.sixMonthHistoryComplete ->
                         "6M local scan complete · ${snapshot.sixMonthLowRows.size} validated candidates · ${snapshot.completedDays} sessions."
                     progress == null ->
                         "6M local scan complete · ${snapshot.completedDays} EOD sessions available. NSE downloads resume after 18:30 IST; history is still incomplete. No Groww calls."
                     progress.sourceFailure ->
                         "NSE archive source unavailable · ${progress.importedDays} sessions imported · ${snapshot.completedDays} stored. Existing validated results, if any, are retained."
+                    selectedMonths == 3 && snapshot.threeMonthHistoryComplete ->
+                        "3M scan complete · ${snapshot.threeMonthLowRows.size} validated candidates; 3M coverage is ready. Imported ${progress.importedDays} NSE sessions for the continuing 6M backfill."
+                    selectedMonths == 3 && progress.importedDays > 0 ->
+                        "3M backfill batch complete · imported ${progress.importedDays} NSE sessions using ${progress.requestedDays} archive requests · ${snapshot.threeMonthCompletedDays} 3M sessions stored. Tap Scan Now again until coverage is ready."
+                    selectedMonths == 3 ->
+                        "3M scan complete · ${snapshot.threeMonthCompletedDays} sessions stored. No new archives were imported; 3M claims remain withheld until coverage is validated."
                     snapshot.sixMonthHistoryComplete ->
                         "6M scan complete · ${snapshot.sixMonthLowRows.size} stocks within 0%–10% of validated six-month lows · ${snapshot.completedDays} sessions."
                     progress.importedDays > 0 ->

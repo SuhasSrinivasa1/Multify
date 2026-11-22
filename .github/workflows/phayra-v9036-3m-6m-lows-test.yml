@@ -122,7 +122,7 @@ jobs:
           vm=(root/"ui/screens/TraderViewModel.kt").read_text()
           assert "fun scanLowRangeNow(months: Int)" in vm
           assert "fun scanSixMonthLowsNow()" in vm
-          assert "selectedMonths == 6 && EquityEodResearchRepository.afterHours" in vm
+          assert "val downloadsAllowed = EquityEodResearchRepository.afterHours" in vm
           assert "equityEodResearch.refreshAfterHours(25)" in vm
           assert "EquityEodResearchRepository.afterHours" in vm
           assert "threeMonthHistoryComplete" in research

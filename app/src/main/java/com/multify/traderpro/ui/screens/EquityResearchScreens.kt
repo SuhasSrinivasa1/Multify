@@ -194,7 +194,7 @@ internal fun SixMonthLowResearchScreen(state: TraderUiState, onScan: (Int) -> Un
             }
             Text(
                 if (isThreeMonth)
-                    "3M Scan Now recalculates the saved archive immediately and makes no network or Groww requests. Switch to 6M to request the next permitted archive batch."
+                    "3M Scan Now recalculates the saved archive and, during 18:30–08:00 IST, imports up to 25 missing official NSE sessions to build 3M coverage and advance the 6M backfill. During 08:00–18:30 IST it stays local-only. Zero Groww calls."
                 else
                     "6M Scan Now recalculates the saved archive and, during 18:30–08:00 IST, imports up to 25 missing official NSE session files. During 08:00–18:30 IST it stays local-only. Zero Groww calls.",
                 style = MaterialTheme.typography.labelSmall
