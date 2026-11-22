@@ -82,7 +82,8 @@ class LargeCapResearchRepository @Inject constructor(
 
         nifty100.refreshSafely()
         var dates = barsDao.recentTradeDates(TRADING_SESSIONS)
-        if (dates.size < TRADING_SESSIONS) {
+        val didBackfill = dates.size < TRADING_SESSIONS
+        if (didBackfill) {
             var cursor = now.toLocalDate()
             val oldest = now.toLocalDate().minusDays(BACKFILL_CALENDAR_DAYS)
             var attempts = 0
@@ -93,8 +94,6 @@ class LargeCapResearchRepository @Inject constructor(
                     if (dayBars != null) {
                         barsDao.upsertBars(dayBars.map { it.toEntity() })
                         dates = (dates + cursor.toString()).distinct().sortedDescending().take(TRADING_SESSIONS)
-                    } else if (cursor == now.toLocalDate()) {
-                        throw IOException("Today's NSE final bhavcopy is not published yet")
                     }
                     attempts++
                     delay(350L)
@@ -105,7 +104,7 @@ class LargeCapResearchRepository @Inject constructor(
 
         // Incremental catch-up handles an app that was offline for one or more sessions.
         var latest = barsDao.latestTradeDate()?.let { LocalDate.parse(it) }
-        if (latest != null && latest.isBefore(now.toLocalDate())) {
+        if (!didBackfill && latest != null && latest.isBefore(now.toLocalDate())) {
             var cursor = latest.plusDays(1)
             while (!cursor.isAfter(now.toLocalDate())) {
                 if (cursor.dayOfWeek != DayOfWeek.SATURDAY && cursor.dayOfWeek != DayOfWeek.SUNDAY &&
@@ -113,8 +112,6 @@ class LargeCapResearchRepository @Inject constructor(
                     val dayBars = nseSymbols.downloadEodBhavcopy(cursor)
                     if (dayBars != null) {
                         barsDao.upsertBars(dayBars.map { it.toEntity() })
-                    } else if (cursor == now.toLocalDate()) {
-                        throw IOException("Today's NSE final bhavcopy is not published yet")
                     }
                     delay(350L)
                 }
