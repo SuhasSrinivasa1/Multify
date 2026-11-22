@@ -24,8 +24,11 @@ object EquityEodRefreshScheduler {
         val last=p.getLong("last_eod_attempt_ms",0L)
         val attemptedToday= last > 0 && java.time.Instant.ofEpochMilli(last).atZone(india).toLocalDate()==now.toLocalDate()
         val afterHours=EquityEodResearchRepository.afterHours(now)
-        val runNow=afterHours && !afterRun && !attemptedToday
-        val todayAt=now.toLocalDate().atTime(LocalTime.of(18,40)).atZone(india)
+        // Wait until 20:00 IST for the daily finalized bhavcopy to be published.
+        val readyForDaily = now.toLocalTime() >= LocalTime.of(20,0) ||
+            now.toLocalTime() < LocalTime.of(8,0)
+        val runNow=afterHours && readyForDaily && !afterRun && !attemptedToday
+        val todayAt=now.toLocalDate().atTime(LocalTime.of(20,0)).atZone(india)
         val scheduled=if(runNow)now else if(!now.isBefore(todayAt)) todayAt.plusDays(1) else todayAt
         val delay=Duration.between(now,scheduled).toMillis().coerceAtLeast(0)
         val request=OneTimeWorkRequestBuilder<EquityEodRefreshWorker>()
