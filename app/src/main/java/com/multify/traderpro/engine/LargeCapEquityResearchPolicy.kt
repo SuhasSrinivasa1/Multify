@@ -50,6 +50,8 @@ object LargeCapEquityResearchPolicy {
             !it.date.isAfter(asOf) && it.low.isFinite() && it.close.isFinite() &&
             it.low > 0.0 && it.close > 0.0 }.sortedBy { it.date }
         if (relevant.isEmpty() || relevant.last().date != latestCompletedEodDate) return null
+        // A short, recently recorded window cannot masquerade as six calendar months.
+        if (relevant.first().date.isAfter(asOf.minusMonths(5).plusDays(14))) return null
         if (relevant.size < (completedEodDays * 0.75).toInt().coerceAtLeast(70)) return null
         val low = relevant.minOf { it.low }
         val close = relevant.last().close
