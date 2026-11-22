@@ -99,13 +99,13 @@ private fun LargeCapRow(r: LargeCapEquityObservation, label: String) {
                     color=MaterialTheme.colorScheme.primary)
             }
             Text("${r.sector} · EOD ${price(r.close)}",style=MaterialTheme.typography.bodySmall)
-            Text("5-day ${pc(r.fiveDayPct)} · 20-day ${pc(r.twentyDayPct)} · sector peers ${pc(r.sectorFiveDayPct)}",
+            Text("5-day ${pc(r.fiveDayPct)} · 20-day ${pc(r.twentyDayPct)} · ${if(r.comparisonBasis=="SECTOR_PEERS")"sector peers" else "broad peers"} ${pc(r.sectorFiveDayPct)}",
                 style=MaterialTheme.typography.bodySmall)
-            Text("5-day relative strength ${pc(r.relativeFiveDayPct)} · breadth ${pc(r.sectorBreadthPct)}",
+            Text("5-day relative strength ${pc(r.relativeFiveDayPct)} · ${if(r.comparisonBasis=="SECTOR_PEERS")"sector" else "broad peer"} breadth ${pc(r.sectorBreadthPct)}",
                 style=MaterialTheme.typography.bodySmall)
             Text("EMA20 ${price(r.ema20)} · EMA50 ${price(r.ema50)} · volume acceleration ${r.volumeAcceleration?.let { String.format(Locale.US,"%.2fx",it) } ?: "unknown"}",
                 style=MaterialTheme.typography.labelSmall)
-            if(r.intradayPct!=null) Text("Intraday pulse ${pc(r.intradayPct)} · vs sector peers ${pc(r.intradayRelativePct)}",
+            if(r.intradayPct!=null) Text("Intraday pulse ${pc(r.intradayPct)} · vs ${if(r.comparisonBasis=="SECTOR_PEERS")"sector" else "broad"} peers ${pc(r.intradayRelativePct)}",
                 style=MaterialTheme.typography.bodySmall)
         }
     }
