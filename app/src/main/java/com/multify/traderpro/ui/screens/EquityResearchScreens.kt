@@ -132,11 +132,16 @@ internal fun SixMonthLowResearchScreen(state: TraderUiState, onScan: (Int) -> Un
     val ready = if (isThreeMonth) r.threeMonthHistoryComplete else r.sixMonthHistoryComplete
     val sessionCount = if (isThreeMonth) r.threeMonthCompletedDays else r.completedDays
     val firstDay = if (isThreeMonth) r.threeMonthFirstDay else r.firstDay
-    val filtered = remember(r.threeMonthLowRows, r.sixMonthLowRows, search, selectedMonths) {
-        rows.filter { search.isBlank() || it.symbol.contains(search.trim(), true) }
+    // This is a presentation-only filter: keep the complete EOD research
+    // dataset intact, but display only AMFI-classified large and mid caps.
+    val capEligibleRows = remember(rows) {
+        rows.filter { it.marketCapCategory == "LARGE_CAP" || it.marketCapCategory == "MID_CAP" }
+    }
+    val filtered = remember(capEligibleRows, search) {
+        capEligibleRows.filter { search.isBlank() || it.symbol.contains(search.trim(), true) }
     }
     LazyColumn(
-        modifier = Modifier.fillMaxSize(),
+        modifier = Modifier.fillMaxSize().testTag("six-month-low-screen"),
         contentPadding = PaddingValues(14.dp),
         verticalArrangement = Arrangement.spacedBy(9.dp)
     ) {
@@ -144,8 +149,7 @@ internal fun SixMonthLowResearchScreen(state: TraderUiState, onScan: (Int) -> Un
             ResearchNotice("NSE LOWS SCREENER", "Latest EOD close vs previous 3M/6M low · all breakdowns and up to 10% above included · EQ cash shares")
             Spacer(Modifier.height(6.dp))
             Text(
-                "AMFI size classification: ${r.marketCapClassificationPeriod.ifBlank { "unavailable" }} · " +
-                    "Large #1–100 · Mid #101–250 · Small #251+ · unmatched symbols are UNCLASSIFIED.",
+                "AMFI size classification: ${r.marketCapClassificationPeriod.ifBlank { "unavailable" }} · showing Large #1–100 and Mid #101–250 only; small-cap and unclassified symbols are hidden.",
                 style = MaterialTheme.typography.labelSmall
             )
             Text(
@@ -225,7 +229,7 @@ internal fun SixMonthLowResearchScreen(state: TraderUiState, onScan: (Int) -> Un
                 style = MaterialTheme.typography.labelSmall)
         }
         item {
-            Text("At/below or up to 10% above previous ${selectedMonths}M low · ${filtered.size} of ${rows.size}",
+            Text("At/below or up to 10% above previous ${selectedMonths}M low · ${filtered.size} of ${capEligibleRows.size}",
                 style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             OutlinedTextField(value = search, onValueChange = { search = it },
                 label = { Text("Filter NSE ticker") }, singleLine = true,
@@ -234,7 +238,7 @@ internal fun SixMonthLowResearchScreen(state: TraderUiState, onScan: (Int) -> Un
                 when {
                     !ready && isThreeMonth -> "No three-month-low claims until the minimum validated history is available."
                     !ready -> "No six-month-low claims until the historic archive is complete."
-                    else -> "No stocks at/below or up to 10% above their previous ${selectedMonths}-month low."
+                    else -> "No large- or mid-cap stocks at/below or up to 10% above their previous ${selectedMonths}-month low."
                 },
                 style = MaterialTheme.typography.bodySmall)
         }
