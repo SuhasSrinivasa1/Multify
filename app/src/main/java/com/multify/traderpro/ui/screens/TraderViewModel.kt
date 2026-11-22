@@ -9,6 +9,12 @@ import com.multify.traderpro.data.preferences.AppSettings
 import com.multify.traderpro.data.preferences.AppPreferences
 import com.multify.traderpro.data.repository.TradingRepository
 import com.multify.traderpro.data.repository.NseSymbolRepository
+import com.multify.traderpro.data.repository.LargeCapResearchRepository
+import com.multify.traderpro.data.repository.SixMonthLowRow
+import com.multify.traderpro.data.repository.SixMonthLowStatus
+import com.multify.traderpro.data.repository.Nifty100UniverseRepository
+import com.multify.traderpro.engine.LargeCapIntradaySignal
+import com.multify.traderpro.engine.LargeCapSwingSignal
 import com.multify.traderpro.engine.NseInstrumentMasterParser
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -32,6 +38,11 @@ data class TraderUiState(
     val credentialsConfigured: Boolean = false,
     val betaConfigured: Boolean = false,
     val betaAuthenticated: Boolean = false,
+    val largeCapIntraday: List<LargeCapIntradaySignal> = emptyList(),
+    val largeCapSwing: List<LargeCapSwingSignal> = emptyList(),
+    val sixMonthLow: List<SixMonthLowRow> = emptyList(),
+    val sixMonthLowStatus: SixMonthLowStatus = SixMonthLowStatus(),
+    val nifty100Status: Nifty100UniverseRepository.Status = Nifty100UniverseRepository.Status(0, 0L, "", ""),
     val message: String? = null,
     val error: String? = null
 )
@@ -40,7 +51,9 @@ data class TraderUiState(
 class TraderViewModel @Inject constructor(
     private val repository: TradingRepository,
     private val preferences: AppPreferences,
-    private val nseSymbols: NseSymbolRepository
+    private val nseSymbols: NseSymbolRepository,
+    private val largeCapResearch: LargeCapResearchRepository,
+    private val nifty100Universe: Nifty100UniverseRepository
 ) : ViewModel() {
     private val remote = MutableStateFlow(RemoteState())
 
@@ -57,6 +70,11 @@ class TraderViewModel @Inject constructor(
             credentialsConfigured = repository.hasBrokerCredentials(),
             betaConfigured = repository.betaCredentialsConfigured(),
             betaAuthenticated = repository.betaResearchAuthenticated(),
+            largeCapIntraday = r.largeCapIntraday,
+            largeCapSwing = r.largeCapSwing,
+            sixMonthLow = r.sixMonthLow,
+            sixMonthLowStatus = r.sixMonthLowStatus,
+            nifty100Status = r.nifty100Status,
             message = r.message,
             error = r.error
         )
@@ -70,6 +88,7 @@ class TraderViewModel @Inject constructor(
         // Migrate the previous research-only ON state to OFF before the new switch
         // can authorize real Alpha CNC orders.
         viewModelScope.launch { repository.initializeWorkingRangeAutoBuyOptIn() }
+        viewModelScope.launch { refreshMarketResearch() }
         viewModelScope.launch {
             repository.settings.collect { settings ->
                 if (settings.brokerAuthenticated) refresh(silent = true)
@@ -97,8 +116,36 @@ class TraderViewModel @Inject constructor(
         viewModelScope.launch {
             if (!silent) remote.value = remote.value.copy(loading = true, error = null, message = null)
             runCatching { repository.refreshDashboardLocal() }
-                .onSuccess { remote.value = RemoteState(dashboard = it, message = if (silent) null else "Broker state refreshed") }
+                .onSuccess { remote.value = remote.value.copy(
+                    dashboard = it, loading = false,
+                    message = if (silent) remote.value.message else "Broker state refreshed",
+                    error = null
+                ) }
                 .onFailure { remote.value = remote.value.copy(loading = false, error = it.userMessage()) }
+        }
+    }
+
+    fun refreshMarketResearch() {
+        viewModelScope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    Triple(
+                        largeCapResearch.latestIntradaySignals(),
+                        largeCapResearch.largeCapSwingSignals(),
+                        largeCapResearch.sixMonthLowWatchlist()
+                    )
+                }
+            }.onSuccess { (intraday, swing, lows) ->
+                remote.value = remote.value.copy(
+                    largeCapIntraday = intraday,
+                    largeCapSwing = swing,
+                    sixMonthLow = lows,
+                    sixMonthLowStatus = largeCapResearch.sixMonthLowStatus(),
+                    nifty100Status = nifty100Universe.status()
+                )
+            }.onFailure {
+                remote.value = remote.value.copy(error = "Market research: ${it.userMessage()}")
+            }
         }
     }
 
@@ -451,6 +498,11 @@ class TraderViewModel @Inject constructor(
     private data class RemoteState(
         val dashboard: DashboardDto? = null,
         val loading: Boolean = false,
+        val largeCapIntraday: List<LargeCapIntradaySignal> = emptyList(),
+        val largeCapSwing: List<LargeCapSwingSignal> = emptyList(),
+        val sixMonthLow: List<SixMonthLowRow> = emptyList(),
+        val sixMonthLowStatus: SixMonthLowStatus = SixMonthLowStatus(),
+        val nifty100Status: Nifty100UniverseRepository.Status = Nifty100UniverseRepository.Status(0, 0L, "", ""),
         val message: String? = null,
         val error: String? = null
     )
