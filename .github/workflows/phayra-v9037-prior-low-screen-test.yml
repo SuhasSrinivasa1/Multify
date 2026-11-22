@@ -138,6 +138,7 @@ jobs:
           research_ui=(root/"ui/screens/EquityResearchScreens.kt").read_text()
           assert 'Text("Scan Now")' in research_ui
           assert "previous 3M/6M low" in research_ui
+          assert "At/below or up to 10% above previous" in research_ui
           assert "all breakdowns and up to 10% above included" in research_ui
           assert "BELOW previous" in research_ui
           assert 'Text("3M")' in research_ui and 'Text("6M")' in research_ui
@@ -156,7 +157,7 @@ jobs:
           assert '"Phayra"' in ui
           assert "SELL SHORT" in ui and "manual-buy-alpha" in ui
           build=Path("app/build.gradle.kts").read_text()
-          assert "versionCode = 9036" in build
+          assert "versionCode = 9037" in build
           assert 'applicationIdSuffix = ".v9037test"' in build
           manifest=Path("app/src/main/AndroidManifest.xml").read_text()
           assert 'android:label="@string/app_name"' in manifest

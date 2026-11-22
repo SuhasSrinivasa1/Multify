@@ -213,7 +213,7 @@ internal fun SixMonthLowResearchScreen(state: TraderUiState, onScan: (Int) -> Un
                 style = MaterialTheme.typography.labelSmall)
         }
         item {
-            Text("Near ${selectedMonths}-month low · ${filtered.size} of ${rows.size}",
+            Text("At/below or up to 10% above previous ${selectedMonths}M low · ${filtered.size} of ${rows.size}",
                 style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             OutlinedTextField(value = search, onValueChange = { search = it },
                 label = { Text("Filter NSE ticker") }, singleLine = true,
