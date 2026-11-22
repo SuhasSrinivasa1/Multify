@@ -45,7 +45,8 @@ data class EquityResearchSnapshot(
 data class EquityEodRefreshProgress(
     val importedDays: Int,
     val missingWeekdays: Int,
-    val sourceFailure: Boolean
+    val sourceFailure: Boolean,
+    val requestedDays: Int = 0
 )
 
 /**
@@ -308,9 +309,11 @@ class EquityEodResearchRepository @Inject constructor(
         }
         val missing = valid.filter { it.toString() !in present }
         var imported = 0
+        var wireRequests = 0
+        var consecutiveNotFound = 0
         var blocked = false
         for (day in missing) {
-            if (imported >= maxFiles || !afterHours(ZonedDateTime.now(INDIA))) break
+            if (wireRequests >= maxFiles || !afterHours(ZonedDateTime.now(INDIA))) break
             val previous = attempts[day.toString()]
             // One attempt per date per calendar day: avoids 403/holiday retry storms.
             if (previous?.first == today.toString()) continue
@@ -320,14 +323,18 @@ class EquityEodResearchRepository @Inject constructor(
                 day.isBefore(today.minusDays(7)) &&
                 (previous.first.let { LocalDate.parse(it) }).isAfter(today.minusDays(7))) continue
             var failure = ""
+            wireRequests++
             try {
                 val rows=importArchive(day)
                 imported++
+                consecutiveNotFound = 0
                 audit.logAsync("EOD_RESEARCH","BHAVCOPY_IMPORTED",mapOf(
                     "date" to day.toString(),"equity_rows" to rows,"groww_api_calls" to 0
                 ))
             } catch (e:Exception) {
                 failure=(e.message ?: e.javaClass.simpleName).take(90)
+                consecutiveNotFound = if(failure=="NSE_BHAVCOPY_HTTP_404") consecutiveNotFound+1 else 0
+                if(consecutiveNotFound>=3) blocked=true
                 if (failure.contains("403") || failure.contains("429") ||
                     failure.contains("INVALID") || failure.contains("MISSING_COLUMN") ||
                     failure.contains("INCOMPLETE")) blocked = true
@@ -345,7 +352,7 @@ class EquityEodResearchRepository @Inject constructor(
         prefs.edit().putLong("last_eod_attempt_ms",System.currentTimeMillis())
             .putString("last_eod_error",if(blocked) "Exchange archive temporarily unavailable" else "")
             .apply()
-        EquityEodRefreshProgress(imported,missing.size,blocked)
+        EquityEodRefreshProgress(imported,missing.size,blocked,wireRequests)
     }
 
     /** No market-data requests: read-only copy from already completed Fixed full-market LTP sweep. */
