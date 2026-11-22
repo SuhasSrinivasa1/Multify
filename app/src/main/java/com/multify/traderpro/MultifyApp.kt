@@ -12,6 +12,7 @@ import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import com.multify.traderpro.worker.NseSymbolSyncWorker
 import com.multify.traderpro.worker.TradingSessionStartScheduler
+import com.multify.traderpro.worker.EquityEodRefreshScheduler
 import com.multify.traderpro.worker.ForecastNewsSyncWorker
 import com.multify.traderpro.data.network.GrowwRateLimitInterceptor
 import com.multify.traderpro.data.network.GrowwRecoveryGate
@@ -53,6 +54,9 @@ class MultifyApp : Application(), Configuration.Provider {
         // November 8 14:00 IST Muhurat warmup. The existing sticky foreground
         // service remains primary; WorkManager start time is not exact.
         TradingSessionStartScheduler.scheduleNext(this)
+        // Offline NSE equity research: enqueue only for 18:40 IST or a permitted off-hours catch-up.
+        // This worker has its own hard per-request after-hours guard and never calls Groww.
+        EquityEodRefreshScheduler.scheduleNext(this)
         // v9.0.14 ran initial and periodic workers together, doubling NSE 403s.
         // Retire both legacy jobs. One unique one-off performs recovery now;
         // a monthly periodic maintenance job first runs 30 days later.
