@@ -209,12 +209,14 @@ class LargeCapResearchRepository @Inject constructor(
         val dates = barsDao.recentTradeDates(TRADING_SESSIONS)
         if (dates.size < MIN_READY_SESSIONS) return emptyList()
         val cutoff = dates.last()
+        val recentDateSet = dates.take(5).toSet()
         val sectorBySymbol = nifty100.constituents().associate { it.symbol to it.sector }
         val grouped = barsDao.barsSince(cutoff).groupBy { it.symbol }
         return grouped.mapNotNull { (symbol, rows) ->
             val ordered = rows.sortedBy { it.tradeDate }
             if (ordered.size < MIN_SYMBOL_SESSIONS) return@mapNotNull null
             val last = ordered.last()
+            if (last.tradeDate !in recentDateSet) return@mapNotNull null
             val low = ordered.minByOrNull { it.low } ?: return@mapNotNull null
             val distance = LargeCapMomentumPolicy.pct(last.close, low.low)
             if (!distance.isFinite() || distance < -0.01 || distance > MAX_DISTANCE_FROM_LOW_PCT) {
@@ -238,10 +240,11 @@ class LargeCapResearchRepository @Inject constructor(
         val dates = barsDao.recentTradeDates(TRADING_SESSIONS)
         if (dates.size < MIN_READY_SESSIONS) return emptyList()
         val cutoff = dates.last()
+        val recentDateSet = dates.take(5).toSet()
         val rowsBySymbol = barsDao.barsSince(cutoff).groupBy { it.symbol }
         return nifty100.constituents().mapNotNull { member ->
             val rows = rowsBySymbol[member.symbol]?.sortedBy { it.tradeDate } ?: return@mapNotNull null
-            if (rows.size < MIN_SYMBOL_SESSIONS) return@mapNotNull null
+            if (rows.size < MIN_SYMBOL_SESSIONS || rows.last().tradeDate !in recentDateSet) return@mapNotNull null
             LargeCapMomentumPolicy.swing(
                 LargeCapSwingInput(
                     symbol = member.symbol,
