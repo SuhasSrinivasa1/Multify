@@ -174,31 +174,31 @@ jobs:
           missing=[name for name in required if not any(name in x for x in tests)]
           assert not missing, "Required regression tests not executed: "+str(missing)
           assert total>=100 and failures==0, (total,failures)
-          pathlib.Path("android-tests-v9032.txt").write_text(f"{total} Android unit tests; {failures} failures\n")
+          pathlib.Path("android-tests-v9033.txt").write_text(f"{total} Android unit tests; {failures} failures\n")
           print(total, "Android unit tests passed")
           PY
       - name: Package, certificate, app identity and integrity verification
         run: |
           set -euo pipefail
           apk=app/build/outputs/apk/debug/app-debug.apk
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$apk" | tee signer-v9032.txt
-          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$apk" > package-v9032.txt
-          grep -F "name='com.multify.traderpro.vivoy73final.v9032test'" package-v9032.txt >/dev/null || {
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$apk" | tee signer-v9033.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$apk" > package-v9033.txt
+          grep -F "name='com.multify.traderpro.vivoy73final.v9033test'" package-v9033.txt >/dev/null || {
             echo "Refusing to package test build with installed production application ID"; exit 1;
           }
-          grep -F "Suhas Shree Trader Pro v9.0.33 TEST" package-v9032.txt >/dev/null || {
+          grep -F "Suhas Shree Trader Pro v9.0.33 TEST" package-v9033.txt >/dev/null || {
             echo "Unexpected Android application label"; exit 1;
           }
-          sha256sum "$apk" | tee SHA256-v9032.txt
-          cert=$(grep -i 'Signer #1 certificate SHA-256 digest' signer-v9032.txt | head -n 1 | sed 's/.*: //' | tr -d ':' | tr '[:upper:]' '[:lower:]')
+          sha256sum "$apk" | tee SHA256-v9033.txt
+          cert=$(grep -i 'Signer #1 certificate SHA-256 digest' signer-v9033.txt | head -n 1 | sed 's/.*: //' | tr -d ':' | tr '[:upper:]' '[:lower:]')
           expected="3f72d5c24e676c712d9e7e9feaa829960bfca9cdffc9ea4da6738372824e8755"
           if [[ -f app/multify-v4-stable.jks ]]; then
             [[ "$cert" == "$expected" ]] || { echo "Unexpected stable signing certificate"; exit 1; }
-            echo "VERIFIED_STABLE_SIGNER_SEPARATE_TEST_APP_ID" | tee signer-channel-v9032.txt
+            echo "VERIFIED_STABLE_SIGNER_SEPARATE_TEST_APP_ID" | tee signer-channel-v9033.txt
           else
-            echo "EPHEMERAL_DEBUG_CERT_SEPARATE_TEST_APP_ID" | tee signer-channel-v9032.txt
+            echo "EPHEMERAL_DEBUG_CERT_SEPARATE_TEST_APP_ID" | tee signer-channel-v9033.txt
           fi
-          stat -c "APK size (bytes): %s" "$apk" | tee size-v9032.txt
+          stat -c "APK size (bytes): %s" "$apk" | tee size-v9033.txt
           echo "TEST ONLY: manual MIS trades require operator confirmation; never uninstall the live app with holdings."
       - name: Upload installable test APK and evidence
         if: always()
@@ -207,13 +207,13 @@ jobs:
           name: Suhas-Shree-Trader-Pro-v9.0.33-Large-Cap-6M-Low-TEST-APK
           path: |
             app/build/outputs/apk/debug/app-debug.apk
-            signer-v9032.txt
-            signer-channel-v9032.txt
-            package-v9032.txt
-            SHA256-v9032.txt
-            size-v9032.txt
-            android-tests-v9032.txt
-            backend-tests-v9032.txt
+            signer-v9033.txt
+            signer-channel-v9033.txt
+            package-v9033.txt
+            SHA256-v9033.txt
+            size-v9033.txt
+            android-tests-v9033.txt
+            backend-tests-v9033.txt
             app/build/test-results/testDebugUnitTest/
           if-no-files-found: warn
           retention-days: 30
