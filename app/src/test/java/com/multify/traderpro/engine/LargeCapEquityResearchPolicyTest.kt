@@ -42,12 +42,12 @@ class LargeCapEquityResearchPolicyTest {
     @Test fun independentIntradayAndSwingResearchHaveDistinctConditions() {
         val rising=bars(90)
         val result=LargeCapEquityResearchPolicy.scoreLargeCap(
-            "HDFCBANK","BANK",rising,listOf(1.5,1.5,1.5),
+            "HDFCBANK","BANK",rising,listOf(0.5,0.5,0.5),
             listOf(.3,.3,.3),103.0,100.0)!!
         assertTrue(result.intradayResearch)
         assertTrue(result.swingResearch)
         val noLive=LargeCapEquityResearchPolicy.scoreLargeCap(
-            "HDFCBANK","BANK",rising,listOf(1.5,1.5,1.5),
+            "HDFCBANK","BANK",rising,listOf(0.5,0.5,0.5),
             emptyList(),null,null)!!
         assertFalse(noLive.intradayResearch)
         assertTrue(noLive.swingResearch)
