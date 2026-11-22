@@ -1,6 +1,5 @@
 package com.multify.traderpro.ui.screens
 
-import androidx.compose.ui.test.assertDoesNotExist
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
@@ -8,6 +7,7 @@ import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToNode
 import com.multify.traderpro.data.network.DashboardDto
@@ -189,8 +189,8 @@ class FixedLiteUiTest {
             .performScrollToNode(hasText("At/below or up to 10% above previous 3M low · 2 of 2"))
         compose.onNodeWithText("LARGE3").assertIsDisplayed()
         compose.onNodeWithText("MID3").assertIsDisplayed()
-        compose.onNodeWithText("SMALL3").assertDoesNotExist()
-        compose.onNodeWithText("UNKNOWN3").assertDoesNotExist()
+        assertEquals(0, compose.onAllNodesWithText("SMALL3").fetchSemanticsNodes().size)
+        assertEquals(0, compose.onAllNodesWithText("UNKNOWN3").fetchSemanticsNodes().size)
 
         compose.onNodeWithTag("six-month-low-screen")
             .performScrollToNode(hasText("NSE LOWS SCREENER"))
@@ -199,8 +199,8 @@ class FixedLiteUiTest {
             .performScrollToNode(hasText("At/below or up to 10% above previous 6M low · 2 of 2"))
         compose.onNodeWithText("LARGE6").assertIsDisplayed()
         compose.onNodeWithText("MID6").assertIsDisplayed()
-        compose.onNodeWithText("SMALL6").assertDoesNotExist()
-        compose.onNodeWithText("UNKNOWN6").assertDoesNotExist()
+        assertEquals(0, compose.onAllNodesWithText("SMALL6").fetchSemanticsNodes().size)
+        assertEquals(0, compose.onAllNodesWithText("UNKNOWN6").fetchSemanticsNodes().size)
     }
 
 }
