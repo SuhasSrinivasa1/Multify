@@ -1,0 +1,35 @@
+package com.multify.traderpro.data.repository
+
+import org.junit.Assert.*
+import org.junit.Test
+import java.time.ZoneId
+import java.time.ZonedDateTime
+
+class EquityEodResearchRepositoryTest {
+    private val ist=ZoneId.of("Asia/Kolkata")
+    private fun at(hour:Int, minute:Int): ZonedDateTime =
+        ZonedDateTime.of(2026,11,23,hour,minute,0,0,ist)
+
+    @Test fun noNetworkDuringMarketOrPremarketHours() {
+        assertFalse(EquityEodResearchRepository.afterHours(at(9,15)))
+        assertFalse(EquityEodResearchRepository.afterHours(at(15,30)))
+        assertFalse(EquityEodResearchRepository.afterHours(at(18,29)))
+        assertFalse(EquityEodResearchRepository.afterHours(at(8,0)))
+        assertTrue(EquityEodResearchRepository.afterHours(at(18,30)))
+        assertTrue(EquityEodResearchRepository.afterHours(at(23,55)))
+        assertTrue(EquityEodResearchRepository.afterHours(at(7,59)))
+    }
+
+    @Test fun latestEodDateIsNotInventedBeforeEveningAvailability() {
+        assertEquals("2026-11-22",
+            EquityEodResearchRepository.latestEligibleDate(at(18,29)).toString())
+        assertEquals("2026-11-23",
+            EquityEodResearchRepository.latestEligibleDate(at(18,30)).toString())
+    }
+
+    @Test fun csvCellsHandleQuotedCompaniesCommasAndEscapedQuotes() {
+        val line="INFY,EQ,100.05,\"A, B Company\",\"She said \"\"yes\"\"\""
+        assertEquals(listOf("INFY","EQ","100.05","A, B Company","She said \"yes\""),
+            EquityEodResearchRepository.csvCells(line))
+    }
+}
