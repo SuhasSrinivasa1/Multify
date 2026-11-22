@@ -29,12 +29,13 @@ class EquityEodRefreshWorker @AssistedInject constructor(
         return result.fold({ done ->
             audit.logAsync("EOD_RESEARCH","AFTER_HOURS_PASS",mapOf(
                 "imported_days" to done.importedDays,
+                "actual_archive_requests" to done.requestedDays,
                 "missing_weekdays_before_pass" to done.missingWeekdays,
                 "source_failure" to done.sourceFailure,
                 "groww_requests" to 0,
                 "attempt" to runAttemptCount
             ))
-            if(!done.sourceFailure && done.importedDays >= 25 && runAttemptCount < 7)
+            if(!done.sourceFailure && done.requestedDays >= 25 && done.importedDays > 0 && runAttemptCount < 7)
                 Result.retry() else Result.success()
         }, { e ->
             audit.logAsync("EOD_RESEARCH","WORK_FAILED",mapOf(
