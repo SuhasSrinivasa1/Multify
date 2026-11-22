@@ -12,5 +12,10 @@ class TradingBootReceiver : BroadcastReceiver() {
             Intent.ACTION_LOCKED_BOOT_COMPLETED,
             Intent.ACTION_MY_PACKAGE_REPLACED -> TradingEngineService.start(context.applicationContext)
         }
+        when (intent?.action) {
+            Intent.ACTION_BOOT_COMPLETED,
+            Intent.ACTION_LOCKED_BOOT_COMPLETED,
+            Intent.ACTION_MY_PACKAGE_REPLACED -> com.multify.traderpro.worker.SixMonthLowScheduler.scheduleNext(context.applicationContext)
+        }
     }
 }

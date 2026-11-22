@@ -255,6 +255,7 @@ class TradingRepository @Inject constructor(
     private val fixedImportedSameDayDedupJournal: FixedImportedSameDayDedupJournal,
     private val fixedAutoBuyOrderStore: FixedAutoBuyOrderStore,
     private val fixedMarketDiscoveryStateStore: FixedMarketDiscoveryStateStore,
+    private val largeCapResearchRepository: LargeCapResearchRepository,
     @ApplicationContext private val appContext: Context
 ) {
     /**
@@ -5501,6 +5502,13 @@ class TradingRepository @Inject constructor(
             previousLtps = previous, sessionOpenLtps = sessionOpen,
             selected = ranked, baselineReady = baselineReady
         )
+        // Research-only Large Cap intraday ranking reuses this already-complete
+        // market-wide LTP map. It adds no Groww calls and cannot affect Fixed ranking.
+        if (baselineReady && !abortedForNetwork) {
+            largeCapResearchRepository.recordIntradaySnapshot(
+                today, current, previous, sessionOpen
+            )
+        }
         preferences.recordMarketData()
         auditLogger.log("FIXED_DISCOVERY", "MARKET_WIDE_SCAN", mapOf(
             "snapshot_id" to FixedEngineSnapshotStore.SNAPSHOT_ID,

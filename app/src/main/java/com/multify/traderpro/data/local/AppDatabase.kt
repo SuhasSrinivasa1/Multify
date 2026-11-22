@@ -17,17 +17,36 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         ForecastResearchEntity::class,
         ForecastPositiveEvidenceEntity::class,
         ForecastChampionEntity::class,
-        ResearchReportEntity::class
+        ResearchReportEntity::class,
+        NseEodBarEntity::class
     ],
-    version = 16,
+    version = 17,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun signalEventDao(): SignalEventDao
     abstract fun managedTradeDao(): ManagedTradeDao
     abstract fun learningDao(): LearningDao
+    abstract fun nseEodBarDao(): NseEodBarDao
 
     companion object {
+        val MIGRATION_16_17 = object : Migration(16, 17) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("""CREATE TABLE IF NOT EXISTS nse_eod_bars (
+                    symbol TEXT NOT NULL,
+                    tradeDate TEXT NOT NULL,
+                    open REAL NOT NULL,
+                    high REAL NOT NULL,
+                    low REAL NOT NULL,
+                    close REAL NOT NULL,
+                    volume INTEGER NOT NULL,
+                    PRIMARY KEY(symbol, tradeDate)
+                )""")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_nse_eod_bars_tradeDate ON nse_eod_bars(tradeDate)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_nse_eod_bars_symbol ON nse_eod_bars(symbol)")
+            }
+        }
+
         val MIGRATION_15_16 = object : Migration(15, 16) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("DROP INDEX IF EXISTS index_long_forecasts_forecastDate_symbol")

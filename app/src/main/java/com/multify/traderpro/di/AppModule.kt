@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.room.Room
 import com.multify.traderpro.data.local.AppDatabase
 import com.multify.traderpro.data.local.LearningDao
+import com.multify.traderpro.data.local.NseEodBarDao
 import com.multify.traderpro.data.local.ManagedTradeDao
 import com.multify.traderpro.data.local.SignalEventDao
 import dagger.Module
@@ -20,7 +21,7 @@ object AppModule {
     @Singleton
     fun provideDatabase(@ApplicationContext context: Context): AppDatabase =
         Room.databaseBuilder(context, AppDatabase::class.java, "multify_trader_pro.db")
-            .addMigrations(AppDatabase.MIGRATION_7_8, AppDatabase.MIGRATION_8_9, AppDatabase.MIGRATION_9_10, AppDatabase.MIGRATION_10_11, AppDatabase.MIGRATION_11_12, AppDatabase.MIGRATION_12_13, AppDatabase.MIGRATION_13_14, AppDatabase.MIGRATION_14_15, AppDatabase.MIGRATION_15_16)
+            .addMigrations(AppDatabase.MIGRATION_7_8, AppDatabase.MIGRATION_8_9, AppDatabase.MIGRATION_9_10, AppDatabase.MIGRATION_10_11, AppDatabase.MIGRATION_11_12, AppDatabase.MIGRATION_12_13, AppDatabase.MIGRATION_13_14, AppDatabase.MIGRATION_14_15, AppDatabase.MIGRATION_15_16, AppDatabase.MIGRATION_16_17)
             .build()
 
     @Provides
@@ -31,4 +32,7 @@ object AppModule {
 
     @Provides
     fun provideLearningDao(db: AppDatabase): LearningDao = db.learningDao()
+
+    @Provides
+    fun provideNseEodBarDao(db: AppDatabase): NseEodBarDao = db.nseEodBarDao()
 }

@@ -60,7 +60,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-internal enum class LitePage { FIXED, WORKING_RANGE, MANUAL, AVERAGES, SETTINGS }
+internal enum class LitePage { FIXED, WORKING_RANGE, MANUAL, LARGE_CAP, SIX_MONTH_LOW, AVERAGES, SETTINGS }
 private enum class LiteTone { POSITIVE, WARNING, NEGATIVE, INFO, NEUTRAL }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -74,6 +74,10 @@ fun FixedLiteApp(viewModel: TraderViewModel = hiltViewModel()) {
     val snackbar = remember { SnackbarHostState() }
     val export = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) {
         if (it != null) viewModel.exportLogs(it)
+    }
+
+    LaunchedEffect(page) {
+        if (page == LitePage.LARGE_CAP || page == LitePage.SIX_MONTH_LOW) viewModel.refreshMarketResearch()
     }
 
     LaunchedEffect(state.message, state.error) {
@@ -98,6 +102,8 @@ fun FixedLiteApp(viewModel: TraderViewModel = hiltViewModel()) {
                                     LitePage.FIXED -> "15-minute Fixed strategy"
                                     LitePage.WORKING_RANGE -> "Working Range pilot"
                                     LitePage.MANUAL -> "Intraday MIS BUY / SELL"
+                                    LitePage.LARGE_CAP -> "Nifty 100 · intraday and swing equity radar"
+                                    LitePage.SIX_MONTH_LOW -> "NSE equities · within 10% of six-month low"
                                     LitePage.AVERAGES -> "Observed Fixed outcomes"
                                     LitePage.SETTINGS -> "Accounts and controls"
                                 },
@@ -113,7 +119,7 @@ fun FixedLiteApp(viewModel: TraderViewModel = hiltViewModel()) {
                         IconButton(onClick = { page = LitePage.SETTINGS }) {
                             Icon(Icons.Default.Settings, contentDescription = "Open settings")
                         }
-                        IconButton(onClick = { viewModel.refresh() }, enabled = !state.loading) {
+                        IconButton(onClick = { viewModel.refresh(); viewModel.refreshMarketResearch() }, enabled = !state.loading) {
                             Icon(Icons.Default.Refresh, contentDescription = "Refresh dashboard")
                         }
                     },
@@ -130,12 +136,14 @@ fun FixedLiteApp(viewModel: TraderViewModel = hiltViewModel()) {
                 LitePage.FIXED -> LiteFixedScreen(state, viewModel::generateFixed) { confirmBuy = it }
                 LitePage.WORKING_RANGE -> LiteRangeScreen(state)
                 LitePage.MANUAL -> LiteManualScreen(state, viewModel)
+                LitePage.LARGE_CAP -> LiteLargeCapScreen(state)
+                LitePage.SIX_MONTH_LOW -> LiteSixMonthLowScreen(state)
                 LitePage.AVERAGES -> LiteAveragesScreen(state)
                 LitePage.SETTINGS -> LiteSettingsScreen(
                     state, viewModel,
                     onEnableRequested = { confirmEnable = it },
                     onResetRequested = { confirmHaltReset = true },
-                    onExport = { export.launch("SuhasShree-v9032-diagnostics.zip") }
+                    onExport = { export.launch("SuhasShree-v9033-diagnostics.zip") }
                 )
             }
         }
@@ -218,6 +226,18 @@ internal fun LiteBottomBar(page: LitePage, onNavigate: (LitePage) -> Unit) {
             onClick = { onNavigate(LitePage.MANUAL) },
             icon = { Icon(Icons.Default.TrendingUp, contentDescription = null) },
             label = { Text("Manual") }
+        )
+        NavigationBarItem(
+            selected = page == LitePage.LARGE_CAP,
+            onClick = { onNavigate(LitePage.LARGE_CAP) },
+            icon = { Icon(Icons.Default.Analytics, contentDescription = null) },
+            label = { Text("Large Cap") }
+        )
+        NavigationBarItem(
+            selected = page == LitePage.SIX_MONTH_LOW,
+            onClick = { onNavigate(LitePage.SIX_MONTH_LOW) },
+            icon = { Icon(Icons.Default.Timeline, contentDescription = null) },
+            label = { Text("6M Low") }
         )
     }
 }
@@ -648,6 +668,141 @@ private fun FixedRecommendationCard(
         }
     }
 }
+
+@Composable
+internal fun LiteLargeCapScreen(state: TraderUiState) {
+    val leaders = state.largeCapIntraday.take(12)
+    val laggards = state.largeCapIntraday.sortedBy { it.relativeStrengthPct }.take(8)
+    val swing = state.largeCapSwing.filter { it.stage != "WATCH" }.take(20)
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        item {
+            Card {
+                Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                    Text("Nifty 100 large-cap universe", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    Text("${state.nifty100Status.count} constituents · ${state.nifty100Status.source.ifBlank { "universe not yet synced" }}",
+                        style = MaterialTheme.typography.bodySmall)
+                    Text("Intraday leaders reuse the existing complete NSE LTP sweep. No additional Groww requests are added.",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Swing radar uses daily NSE EOD candles. Research-only: no auto BUY or strategy changes.",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+        item { Text("INTRADAY RELATIVE-STRENGTH LEADERS", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold) }
+        if (leaders.isEmpty()) item {
+            Text("Waiting for a complete Fixed market-wide LTP sweep during market hours.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+        }
+        items(leaders) { row ->
+            Card {
+                Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text(row.symbol, fontWeight = FontWeight.Bold)
+                        Text("${row.dayMovePct.formatPct()} since first scan", color = if (row.dayMovePct >= 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
+                    }
+                    Text("${row.companyName} · ${row.sector}", style = MaterialTheme.typography.bodySmall)
+                    Text("Relative strength ${row.relativeStrengthPct.formatPct()} · last sweep ${row.lastSweepMovePct.formatPct()} · sector breadth ${row.sectorBreadthPct.toInt()}%",
+                        style = MaterialTheme.typography.labelSmall)
+                }
+            }
+        }
+        item { Text("INTRADAY RELATIVE-STRENGTH LAGGARDS", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold) }
+        items(laggards) { row ->
+            Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 3.dp),
+                horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("${row.symbol} · ${row.sector}", style = MaterialTheme.typography.bodySmall)
+                Text("${row.relativeStrengthPct.formatPct()} RS", style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error)
+            }
+        }
+        item { Text("SWING RADAR · 2–10 SESSION RESEARCH", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold) }
+        if (swing.isEmpty()) item {
+            Text("Daily history is being initialized. Swing signals appear after sufficient EOD candles are available.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+        }
+        items(swing) { row ->
+            Card {
+                Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text(row.symbol, fontWeight = FontWeight.Bold)
+                        Text(row.stage, style = MaterialTheme.typography.labelMedium,
+                            color = when (row.stage) {
+                                "BREAKOUT", "EARLY MOMENTUM", "CONTINUATION" -> MaterialTheme.colorScheme.primary
+                                "EXHAUSTION" -> MaterialTheme.colorScheme.error
+                                else -> MaterialTheme.colorScheme.onSurfaceVariant
+                            })
+                    }
+                    Text("${row.companyName} · ${row.sector}", style = MaterialTheme.typography.bodySmall)
+                    Text("5D ${row.fiveDayReturnPct.formatPct()} · 20D ${row.twentyDayReturnPct.formatPct()} · RSI ${row.rsi14?.let { "%.1f".format(Locale.US, it) } ?: "n/a"}",
+                        style = MaterialTheme.typography.bodySmall)
+                    Text("Volume vs 20D ${row.volumeRatio20?.let { "%.2fx".format(Locale.US, it) } ?: "n/a"} · distance from 6M low ${row.sixMonthLowDistancePct?.formatPct() ?: "n/a"}",
+                        style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+internal fun LiteSixMonthLowScreen(state: TraderUiState) {
+    val status = state.sixMonthLowStatus
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        item {
+            Card {
+                Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                    Text("NSE stocks near six-month low", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    Text("All NSE EQ-series cash equities with sufficient history · 0–10% above the lowest daily low across 126 trading sessions; each symbol needs at least 110 valid daily bars.",
+                        style = MaterialTheme.typography.bodySmall)
+                    Text("Status: ${status.state} · sessions: ${status.historySessions}/126 · symbols: ${status.symbolsStored}",
+                        style = MaterialTheme.typography.labelMedium)
+                    Text("Latest EOD: ${status.latestTradeDate.ifBlank { "not available" }} · ${if (status.updatedAtMs > 0) Date(status.updatedAtMs).toString() else "not refreshed"}",
+                        style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Source: NSE UDiFF final bhavcopy. This job runs after market hours only and uses zero Groww API calls. Raw bhavcopy prices are not corporate-action adjusted; flagged symbols need review.",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (status.lastError.isNotBlank()) Text(status.lastError, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall)
+                }
+            }
+        }
+        item {
+            Text("${state.sixMonthLow.size} qualifying stocks · sorted nearest to six-month low",
+                style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+        }
+        if (state.sixMonthLow.isEmpty()) item {
+            Text("No completed six-month snapshot yet, or no EQ-series stock is currently within 10% of its six-month low.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        items(state.sixMonthLow) { row ->
+            Card {
+                Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text(row.symbol, fontWeight = FontWeight.Bold)
+                        Text("${row.distancePct.formatPct()} above low",
+                            color = if (row.distancePct <= 3.0) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface)
+                    }
+                    Text("${row.sector} · last close ₹${"%.2f".format(Locale.US, row.lastClose)} · 6M low ₹${"%.2f".format(Locale.US, row.sixMonthLow)}",
+                        style = MaterialTheme.typography.bodySmall)
+                    Text("Low date ${row.lowDate} · EOD ${row.dataDate} · history ${row.historySessions} sessions",
+                        style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (row.corporateActionReview) {
+                        Text("POSSIBLE CORPORATE-ACTION / PRICE-GAP REVIEW",
+                            color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun Double.formatPct(): String = "${if (this >= 0.0) "+" else ""}${"%.2f".format(Locale.US, this)}%"
 
 @Composable
 internal fun LiteManualScreen(state: TraderUiState, viewModel: TraderViewModel) {

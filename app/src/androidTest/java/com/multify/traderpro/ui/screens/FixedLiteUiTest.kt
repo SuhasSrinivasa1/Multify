@@ -15,6 +15,10 @@ import com.multify.traderpro.data.network.ForecastDto
 import com.multify.traderpro.data.network.WorkingRangeRecommendationDto
 import com.multify.traderpro.ui.theme.MultifyTraderTheme
 import com.multify.traderpro.data.preferences.AppSettings
+import com.multify.traderpro.data.repository.SixMonthLowRow
+import com.multify.traderpro.data.repository.SixMonthLowStatus
+import com.multify.traderpro.engine.LargeCapIntradaySignal
+import com.multify.traderpro.engine.LargeCapSwingSignal
 import java.time.LocalDateTime
 import java.time.ZoneId
 import org.junit.Assert.assertEquals
@@ -118,7 +122,32 @@ class FixedLiteUiTest {
         compose.onNodeWithText("UNRESOLVED · SPARSE CLIENT LTP SAMPLES").assertIsDisplayed()
     }
 
-    @Test fun bottomNavigationExposesFixedWorkingRangeAndManual() {
+
+    @Test fun sixMonthLowScreenShowsDistanceHistoryAndCorporateActionWarning() {
+        compose.setContent {
+            MultifyTraderTheme(darkTheme = false) {
+                LiteSixMonthLowScreen(
+                    TraderUiState(
+                        sixMonthLowStatus = SixMonthLowStatus(
+                            state = "READY", updatedAtMs = ist(18, 30),
+                            latestTradeDate = "2026-11-20", historySessions = 126,
+                            symbolsStored = 1800
+                        ),
+                        sixMonthLow = listOf(
+                            SixMonthLowRow("TESTCO", "Information Technology", 105.0, 100.0,
+                                5.0, "2026-10-30", "2026-11-20", 126, true)
+                        )
+                    )
+                )
+            }
+        }
+        compose.onNodeWithText("NSE stocks near six-month low").assertIsDisplayed()
+        compose.onNodeWithText("TESTCO").assertIsDisplayed()
+        compose.onNodeWithText("+5.00% above low").assertIsDisplayed()
+        compose.onNodeWithText("POSSIBLE CORPORATE-ACTION / PRICE-GAP REVIEW").assertIsDisplayed()
+    }
+
+    @Test fun bottomNavigationExposesFixedWorkingRangeManualAndResearch() {
         var selected = LitePage.FIXED
         compose.setContent {
             MultifyTraderTheme(darkTheme = false) {

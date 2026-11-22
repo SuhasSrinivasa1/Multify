@@ -1,4 +1,4 @@
-# v9.0.32 — Suhas Shree Trader Pro · Manual Long/Short TEST
+# v9.0.33 — Suhas Shree Trader Pro · Manual Long/Short TEST
 
 ## What is added from v9.0.30
 
@@ -33,9 +33,17 @@
 ## Monday TEST installation
 
 - Application label: **Suhas Shree Trader Pro TEST**
-- Application ID: `com.multify.traderpro.vivoy73final.v9032test`
+- Application ID: `com.multify.traderpro.vivoy73final.v9033test`
 - Separate debug package/database. It does not import or manage positions created by the existing installed app.
 - Auto-Buy switches remain OFF by default.
 - Keep the existing app responsible for existing live positions and GTTs while shadow-testing this app. Do not uninstall the existing app to install this TEST variant.
 - CI verifies the frozen-policy parity, manual MIS ownership separation, Android unit tests, backend tests, APK identity and signature.
 - A CI-built APK is not proof of live Groww execution. Broker-confirmed fills and active stops must be verified during supervised testing.
+
+
+## v9.0.33 additions
+- Nifty 100 large-cap equity radar for intraday relative strength (reuses completed Fixed NSE LTP sweeps; zero additional Groww calls) and daily swing research (5D/20D return, RSI14, volume ratio, SMA20/50, breakout/pullback/continuation/exhaustion stages).
+- Daily NSE six-month-low dashboard for all NSE EQ-series cash shares with sufficient history: 0–10% above the lowest low over 126 trading sessions.
+- After-hours WorkManager schedule at 18:15 IST. The watchlist uses the single market-wide NSE CM UDiFF final bhavcopy ZIP per trading date, not per-symbol Groww historical requests. A first install backfills up to 126 trading sessions.
+- Raw UDiFF prices are not corporate-action adjusted; suspected >50% adjacent-close discontinuities are flagged for review, not silently adjusted.
+- Large-cap signals are research-only; Fixed/Working Range scoring, entry thresholds, and auto-buy paths remain unchanged.
