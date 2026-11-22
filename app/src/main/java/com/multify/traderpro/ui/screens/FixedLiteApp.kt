@@ -60,7 +60,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-internal enum class LitePage { FIXED, WORKING_RANGE, MANUAL, AVERAGES, SETTINGS }
+internal enum class LitePage { FIXED, WORKING_RANGE, MANUAL, LARGE_CAP, SIX_MONTH_LOW, AVERAGES, SETTINGS }
 private enum class LiteTone { POSITIVE, WARNING, NEGATIVE, INFO, NEUTRAL }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -98,6 +98,8 @@ fun FixedLiteApp(viewModel: TraderViewModel = hiltViewModel()) {
                                     LitePage.FIXED -> "15-minute Fixed strategy"
                                     LitePage.WORKING_RANGE -> "Working Range pilot"
                                     LitePage.MANUAL -> "Intraday MIS BUY / SELL"
+                                    LitePage.LARGE_CAP -> "NSE equity · intraday and swing research"
+                                    LitePage.SIX_MONTH_LOW -> "Daily NSE six-month-low screen"
                                     LitePage.AVERAGES -> "Observed Fixed outcomes"
                                     LitePage.SETTINGS -> "Accounts and controls"
                                 },
@@ -130,12 +132,14 @@ fun FixedLiteApp(viewModel: TraderViewModel = hiltViewModel()) {
                 LitePage.FIXED -> LiteFixedScreen(state, viewModel::generateFixed) { confirmBuy = it }
                 LitePage.WORKING_RANGE -> LiteRangeScreen(state)
                 LitePage.MANUAL -> LiteManualScreen(state, viewModel)
+                LitePage.LARGE_CAP -> LargeCapResearchScreen(state,viewModel::refreshResearchView)
+                LitePage.SIX_MONTH_LOW -> SixMonthLowResearchScreen(state,viewModel::refreshResearchView)
                 LitePage.AVERAGES -> LiteAveragesScreen(state)
                 LitePage.SETTINGS -> LiteSettingsScreen(
                     state, viewModel,
                     onEnableRequested = { confirmEnable = it },
                     onResetRequested = { confirmHaltReset = true },
-                    onExport = { export.launch("SuhasShree-v9032-diagnostics.zip") }
+                    onExport = { export.launch("SuhasShree-v9033-eod-largecap-diagnostics.zip") }
                 )
             }
         }
@@ -218,6 +222,18 @@ internal fun LiteBottomBar(page: LitePage, onNavigate: (LitePage) -> Unit) {
             onClick = { onNavigate(LitePage.MANUAL) },
             icon = { Icon(Icons.Default.TrendingUp, contentDescription = null) },
             label = { Text("Manual") }
+        )
+        NavigationBarItem(
+            selected = page == LitePage.LARGE_CAP,
+            onClick = { onNavigate(LitePage.LARGE_CAP) },
+            icon = { Icon(Icons.Default.TrendingUp, contentDescription = null) },
+            label = { Text("Large caps") }
+        )
+        NavigationBarItem(
+            selected = page == LitePage.SIX_MONTH_LOW,
+            onClick = { onNavigate(LitePage.SIX_MONTH_LOW) },
+            icon = { Icon(Icons.Default.Analytics, contentDescription = null) },
+            label = { Text("6M lows") }
         )
     }
 }
