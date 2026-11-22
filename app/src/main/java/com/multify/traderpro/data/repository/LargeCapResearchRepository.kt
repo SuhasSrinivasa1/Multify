@@ -285,8 +285,8 @@ class LargeCapResearchRepository @Inject constructor(
         private val INDIA = ZoneId.of("Asia/Kolkata")
         private val AFTER_HOURS_START = LocalTime.of(16, 0)
         private const val TRADING_SESSIONS = 126
-        private const val MIN_READY_SESSIONS = 100
-        private const val MIN_SYMBOL_SESSIONS = 100
+        private const val MIN_READY_SESSIONS = TRADING_SESSIONS
+        private const val MIN_SYMBOL_SESSIONS = 110
         private const val BACKFILL_CALENDAR_DAYS = 240L
         private const val MAX_BACKFILL_DAYS = 180
         private const val MAX_DISTANCE_FROM_LOW_PCT = 10.0
