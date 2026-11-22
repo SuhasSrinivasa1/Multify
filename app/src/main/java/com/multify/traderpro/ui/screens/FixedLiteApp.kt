@@ -698,7 +698,7 @@ internal fun LiteLargeCapScreen(state: TraderUiState) {
                 Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                         Text(row.symbol, fontWeight = FontWeight.Bold)
-                        Text("${row.dayMovePct.formatPct()} today", color = if (row.dayMovePct >= 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
+                        Text("${row.dayMovePct.formatPct()} since first scan", color = if (row.dayMovePct >= 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
                     }
                     Text("${row.companyName} · ${row.sector}", style = MaterialTheme.typography.bodySmall)
                     Text("Relative strength ${row.relativeStrengthPct.formatPct()} · last sweep ${row.lastSweepMovePct.formatPct()} · sector breadth ${row.sectorBreadthPct.toInt()}%",
@@ -755,7 +755,7 @@ internal fun LiteSixMonthLowScreen(state: TraderUiState) {
             Card {
                 Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
                     Text("NSE stocks near six-month low", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                    Text("All NSE EQ-series cash equities with sufficient history · 0–10% above the lowest daily low across 126 trading sessions.",
+                    Text("All NSE EQ-series cash equities with sufficient history · 0–10% above the lowest daily low across 126 trading sessions; each symbol needs at least 110 valid daily bars.",
                         style = MaterialTheme.typography.bodySmall)
                     Text("Status: ${status.state} · sessions: ${status.historySessions}/126 · symbols: ${status.symbolsStored}",
                         style = MaterialTheme.typography.labelMedium)
