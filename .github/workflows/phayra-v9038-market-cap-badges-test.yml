@@ -1,0 +1,263 @@
+name: Phayra v9.0.38 3M/6M Lows TEST
+on:
+  push:
+    branches: [v9038-phayra-market-cap-badges-20261122]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify-and-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      MULTIFY_KEYSTORE_PASSWORD: ${{ secrets.MULTIFY_KEYSTORE_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Restore stable signing identity when configured
+        shell: bash
+        env:
+          MULTIFY_KEYSTORE_BASE64: ${{ secrets.MULTIFY_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${MULTIFY_KEYSTORE_BASE64:-}" && -n "${MULTIFY_KEYSTORE_PASSWORD:-}" ]]; then
+            printf '%s' "$MULTIFY_KEYSTORE_BASE64" | base64 --decode > app/multify-v4-stable.jks
+            chmod 600 app/multify-v4-stable.jks
+            echo "STABLE_KEYSTORED: certificate will be verified after APK assembly"
+          else
+            echo "UNSTABLE_DEBUG_SIGNER: separate test package ID will be enforced"
+          fi
+      - name: Android SDK
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
+      - name: Fetch and validate the latest official AMFI market-cap list
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check openpyxl==3.1.5
+          python tools/fetch_amfi_market_cap.py --output app/src/main/assets/amfi_market_cap_categories.csv --metadata build/amfi-market-cap-source.txt
+          test -s app/src/main/assets/amfi_market_cap_categories.csv
+          test -s build/amfi-market-cap-source.txt
+          cat build/amfi-market-cap-source.txt
+      - name: Frozen Fixed and CNC production parity; manual-only MIS audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+          baseline="686f9c960f3ff1f95b99a06ae4a615c5c11991e4"
+          root=Path("app/src/main/java/com/multify/traderpro")
+          locked=[
+              "engine/FixedFinalContract.kt",
+              "engine/FixedLocalStrategyEngine.kt",
+              "engine/FixedMarketDiscoveryPolicy.kt",
+              "engine/FixedForecastPublicationPolicy.kt",
+              "engine/FixedForecastQualityPolicy.kt",
+              "engine/FixedEntryActionabilityPolicy.kt",
+              "engine/FixedMultifyFactorFamilies.kt",
+              "engine/SteppedTrailingPolicy.kt",
+              "engine/HardStopLossPolicy.kt",
+              "engine/WorkingRangeCandidatePolicy.kt",
+              "engine/WorkingRangeEntryMomentumPolicy.kt",
+              "engine/WorkingRangeAutoBuyPolicy.kt",
+              "engine/WorkingRangeExitPolicy.kt",
+              "data/network/BetaReadOnlyInterceptor.kt",
+              "data/network/GrowwApiFactory.kt",
+              "data/network/GrowwRateLimitInterceptor.kt",
+              "data/network/GrowwHistoricalThrottlePolicy.kt",
+              "data/network/BetaResearchGate.kt",
+              "engine/FixedResearchCapacityPolicy.kt",
+              "engine/FixedResearchLtpPacingPolicy.kt",
+              "engine/FixedDualAccountPolicy.kt",
+              "engine/FixedSingleWorkerStartGate.kt",
+              "engine/MarketDataPriorityAdmissionPolicy.kt",
+          ]
+          def original(path):
+              return subprocess.check_output(["git","show",f"{baseline}:{path}"])
+          for rel in locked:
+              p=root/rel
+              assert p.read_bytes()==original(p.as_posix()), "LOCK_CHANGED: "+rel
+
+          source=(root/"data/repository/TradingRepository.kt").read_text()
+          assert source.count("BROKER_FLAT_TERMINAL_GTT_QUARANTINED")==1
+          assert "BrokerFlatTerminalGttQuarantinePolicy.shouldQuarantine" in source
+          start=source.index("private suspend fun placeCncBuy(")
+          end=source.index("private fun LongForecastEntity.toForecastDto",start)
+          buy=source[start:end]
+          assert 'orderProduct: String = "CNC"' in buy
+          assert 'val manualMisEntry = reference.startsWith("MNH") && orderProduct.equals("MIS", true)' in buy
+          assert 'require(orderProduct.equals("CNC", true) || manualMisEntry)' in buy
+          assert 'submitMarketOrder(token, symbol, "BUY", capitalVerdict.allowedQuantity, orderProduct, reference' in buy
+          assert 'val order = if (manualMisEntry)' in buy
+          manual=source[source.index("suspend fun executeManualNse("):source.index("suspend fun executeFixed(",source.index("suspend fun executeManualNse("))]
+          assert 'orderProduct = "MIS"' in manual
+          short=source[source.index("suspend fun executeManualShort("):source.index("suspend fun monitorManualShortIntraday(",source.index("suspend fun executeManualShort("))]
+          assert 'submitMarketOrder(token, symbol, "SELL", capital.allowedQuantity, "MIS", ref)' in short
+          assert "no_blind_resubmission" in short
+          assert "private suspend fun registerMisLongAndProtect" in source
+          assert "suspend fun monitorMisLongPositions" in source
+          assert "suspend fun monitorManualShortIntraday" in source
+          assert "MANUAL_HOLDING" in source
+          assert "equityEodResearch.captureFixedLivePulse(" in source
+          research=(root/"data/repository/EquityEodResearchRepository.kt").read_text()
+          cap_parser=(root/"data/repository/AmfiMarketCapClassification.kt").read_text()
+          assert "AmfiMarketCapClassificationParser.parse" in research
+          assert "amfi_market_cap_categories.csv" in research
+          assert "marketCapCategory = cap?.category" in research
+          assert "marketCapClassificationPeriod=marketCaps.period" in research
+          assert "rank <= 100" in cap_parser and "rank <= 250" in cap_parser
+          worker=(root/"worker/EquityEodRefreshWorker.kt").read_text()
+          scheduler=(root/"worker/EquityEodRefreshScheduler.kt").read_text()
+          assert "NSE_BHAVCOPY" in research and "MIN_VALID_EQ_ROWS = 1500" in research
+          assert "requireAfterHours()" in research
+          assert "SELECT s.symbol,MIN(s.low)" in research
+          assert "val referenceEndDay = LocalDate.parse(latestDay).minusDays(1).toString()" in research
+          assert "s.day<=?" in research
+          assert "distanceFromReferenceLowPct(close, low)" in research
+          assert "isWithinTenPctAboveOrBelow(distance)" in research
+          assert "distancePct <= 10.000001" in research
+          assert "NseEquitySessionCalendar.isFixedScanWindow(at)" in research
+          assert "EquityEodResearchRepository.afterHours" in worker
+          assert "groww_requests" in worker and "groww_api_calls" in research
+          assert "EquityEodRefreshWorker" in scheduler
+          assert not any(x in research for x in ["apiFactory.", "groww.order", "ensureToken(", "submitMarketOrder("])
+          ui=(root/"ui/screens/FixedLiteApp.kt").read_text()
+          assert "LitePage.LARGE_CAP -> LargeCapResearchScreen(" in ui
+          assert "LitePage.SIX_MONTH_LOW -> SixMonthLowResearchScreen(state,viewModel::scanLowRangeNow)" in ui
+          assert '"Phayra"' in ui
+          assert "FlowRow(" in ui
+          vm=(root/"ui/screens/TraderViewModel.kt").read_text()
+          assert "fun scanLowRangeNow(months: Int)" in vm
+          assert "fun scanSixMonthLowsNow()" in vm
+          assert "val downloadsAllowed = EquityEodResearchRepository.afterHours" in vm
+          assert "equityEodResearch.refreshAfterHours(25)" in vm
+          assert "EquityEodResearchRepository.afterHours" in vm
+          assert "threeMonthHistoryComplete" in research
+          assert "sixMonthHistoryComplete" in research
+          assert "threeMonthLowRows" in research and "sixMonthLowRows" in research
+          assert "threeMonthCoverageComplete" in research
+          assert "minimumThreeMonthSymbolSessions" in research
+          research_ui=(root/"ui/screens/EquityResearchScreens.kt").read_text()
+          assert 'Text("Scan Now")' in research_ui
+          assert "previous 3M/6M low" in research_ui
+          assert "At/below or up to 10% above previous" in research_ui
+          assert "all breakdowns and up to 10% above included" in research_ui
+          assert "BELOW previous" in research_ui
+          assert "MarketCapBadge(r.marketCapCategory, r.marketCapRank)" in research_ui
+          assert "AMFI size classification:" in research_ui
+          assert "UNCLASSIFIED" in research_ui
+          assert 'Text("3M")' in research_ui and 'Text("6M")' in research_ui
+          assert 'testTag("low-range-3m")' in research_ui and 'testTag("low-range-6m")' in research_ui
+          assert 'testTag("six-month-low-scan-now")' in research_ui
+          assert "refreshMutex.lock()" in research
+
+          service=Path("app/src/main/java/com/multify/traderpro/service/TradingEngineService.kt").read_text()
+          assert "repository.monitorManualShortIntraday()" in service
+          assert "repository.monitorMisLongPositions()" in service
+          ownership=(root/"engine/AppPositionOwnershipPolicy.kt").read_text()
+          assert '"MANUAL_HOLDING" to setOf("MNH")' in ownership
+          assert 'if (engine == "MANUAL_HOLDING") product == "MIS" else product == "CNC"' in ownership
+          ui=Path("app/src/main/java/com/multify/traderpro/ui/screens/FixedLiteApp.kt").read_text()
+          assert "LitePage.MANUAL -> LiteManualScreen(state, viewModel)" in ui
+          assert '"Phayra"' in ui
+          assert "SELL SHORT" in ui and "manual-buy-alpha" in ui
+          build=Path("app/build.gradle.kts").read_text()
+          assert "versionCode = 9038" in build
+          assert 'applicationIdSuffix = ".v9038test"' in build
+          manifest=Path("app/src/main/AndroidManifest.xml").read_text()
+          assert 'android:label="@string/app_name"' in manifest
+          strings=Path("app/src/main/res/values/strings.xml").read_text()
+          assert '<string name="app_name">Phayra</string>' in strings
+          debug=Path("app/src/debug/AndroidManifest.xml").read_text()
+          assert 'android:label="Phayra"' in debug
+          print(f"PASS: {len(locked)} frozen strategy/account policies unchanged; MIS product is restricted to explicit Manual long/short paths")
+          PY
+      - name: Backend regression tests
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check -r backend/requirements.txt
+          python -m pytest -q backend/tests | tee backend-tests-v9038.txt
+      - name: Android unit tests and TEST APK
+        run: |
+          set -euo pipefail
+          gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest
+          python - <<'PY'
+          import glob,xml.etree.ElementTree as ET,pathlib
+          test_files=glob.glob("app/build/test-results/testDebugUnitTest/TEST-*.xml")
+          rows=[ET.parse(p).getroot() for p in test_files]
+          total=sum(int(x.attrib.get("tests",0)) for x in rows)
+          failures=sum(int(x.attrib.get("failures",0))+int(x.attrib.get("errors",0)) for x in rows)
+          tests=set()
+          for p in test_files:
+              try: tests.add(ET.parse(p).getroot().attrib.get("name",""))
+              except Exception: pass
+          required=[
+              "BrokerFlatTerminalGttQuarantinePolicyTest",
+              "ManualShortIntradayPolicyTest",
+              "MisIntradayLongPolicyTest",
+              "NseInstrumentMasterParserTest",
+              "AppPositionOwnershipPolicyTest",
+              "LargeCapEquityResearchPolicyTest",
+              "EquityEodResearchRepositoryTest",
+              "AmfiMarketCapClassificationParserTest"
+          ]
+          missing=[name for name in required if not any(name in x for x in tests)]
+          assert not missing, "Required regression tests not executed: "+str(missing)
+          assert total>=100 and failures==0, (total,failures)
+          pathlib.Path("android-tests-v9038.txt").write_text(f"{total} Android unit tests; {failures} failures\n")
+          print(total, "Android unit tests passed")
+          PY
+      - name: Package, certificate, app identity and integrity verification
+        run: |
+          set -euo pipefail
+          apk=app/build/outputs/apk/debug/app-debug.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$apk" | tee signer-v9038.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$apk" > package-v9038.txt
+          grep -F "name='com.multify.traderpro.vivoy73final.v9038test'" package-v9038.txt >/dev/null || {
+            echo "Refusing to package test build with installed production application ID"; exit 1;
+          }
+          grep -F "Phayra" package-v9038.txt >/dev/null || {
+            echo "Unexpected Android application label"; exit 1;
+          }
+          sha256sum "$apk" | tee SHA256-v9038.txt
+          cert=$(grep -i 'Signer #1 certificate SHA-256 digest' signer-v9038.txt | head -n 1 | sed 's/.*: //' | tr -d ':' | tr '[:upper:]' '[:lower:]')
+          expected="3f72d5c24e676c712d9e7e9feaa829960bfca9cdffc9ea4da6738372824e8755"
+          if [[ -f app/multify-v4-stable.jks ]]; then
+            [[ "$cert" == "$expected" ]] || { echo "Unexpected stable signing certificate"; exit 1; }
+            echo "VERIFIED_STABLE_SIGNER_SEPARATE_TEST_APP_ID" | tee signer-channel-v9038.txt
+          else
+            echo "EPHEMERAL_DEBUG_CERT_SEPARATE_TEST_APP_ID" | tee signer-channel-v9038.txt
+          fi
+          stat -c "APK size (bytes): %s" "$apk" | tee size-v9038.txt
+          echo "TEST ONLY: manual MIS trades require operator confirmation; never uninstall the live app with holdings."
+      - name: Upload installable test APK and evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Phayra-v9.0.38-MARKET-CAP-TEST-APK
+          path: |
+            app/build/outputs/apk/debug/app-debug.apk
+            signer-v9038.txt
+            signer-channel-v9038.txt
+            package-v9038.txt
+            SHA256-v9038.txt
+            size-v9038.txt
+            android-tests-v9038.txt
+            backend-tests-v9038.txt
+            app/build/test-results/testDebugUnitTest/
+            app/src/main/assets/amfi_market_cap_categories.csv
+            build/amfi-market-cap-source.txt
+          if-no-files-found: warn
+          retention-days: 30

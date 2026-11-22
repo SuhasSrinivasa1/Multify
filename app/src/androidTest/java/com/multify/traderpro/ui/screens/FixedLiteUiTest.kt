@@ -7,6 +7,7 @@ import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToNode
 import com.multify.traderpro.data.network.DashboardDto
@@ -15,6 +16,9 @@ import com.multify.traderpro.data.network.ForecastDto
 import com.multify.traderpro.data.network.WorkingRangeRecommendationDto
 import com.multify.traderpro.ui.theme.MultifyTraderTheme
 import com.multify.traderpro.data.preferences.AppSettings
+import com.multify.traderpro.data.repository.EquityLowObservation
+import com.multify.traderpro.data.repository.EquityResearchSnapshot
+import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.ZoneId
 import org.junit.Assert.assertEquals
@@ -133,4 +137,70 @@ class FixedLiteUiTest {
         compose.onNodeWithText("Manual").performClick()
         compose.runOnIdle { assertEquals(LitePage.MANUAL, selected) }
     }
+    @Test fun lowScreenerShowsOnlyLargeAndMidCapsInBothLookbacks() {
+        val date = LocalDate.of(2026, 11, 20)
+        fun row(symbol: String, category: String, rank: Int?) = EquityLowObservation(
+            symbol = symbol,
+            close = 100.0,
+            periodLow = 99.0,
+            distancePct = 1.01,
+            tradingDays = 55,
+            latestDate = date,
+            periodLowDate = date.minusDays(1),
+            oneMonthLow = 99.0,
+            oneMonthDistancePct = 1.01,
+            lookbackMonths = 3,
+            marketCapCategory = category,
+            marketCapRank = rank
+        )
+        val snapshot = EquityResearchSnapshot(
+            threeMonthLowRows = listOf(
+                row("LARGE3", "LARGE_CAP", 10),
+                row("MID3", "MID_CAP", 150),
+                row("SMALL3", "SMALL_CAP", 300),
+                row("UNKNOWN3", "UNCLASSIFIED", null)
+            ),
+            sixMonthLowRows = listOf(
+                row("LARGE6", "LARGE_CAP", 20),
+                row("MID6", "MID_CAP", 200),
+                row("SMALL6", "SMALL_CAP", 400),
+                row("UNKNOWN6", "UNCLASSIFIED", null)
+            ),
+            threeMonthCompletedDays = 60,
+            completedDays = 120,
+            threeMonthFirstDay = "2026-08-20",
+            firstDay = "2026-05-01",
+            latestDay = "2026-11-20",
+            threeMonthHistoryComplete = true,
+            sixMonthHistoryComplete = true,
+            marketCapClassificationPeriod = "Jan–Jun 2026",
+            marketCapClassificationCount = 350
+        )
+        compose.setContent {
+            MultifyTraderTheme(darkTheme = false) {
+                SixMonthLowResearchScreen(
+                    TraderUiState(equityResearch = snapshot),
+                    onScan = {}
+                )
+            }
+        }
+
+        compose.onNodeWithTag("six-month-low-screen")
+            .performScrollToNode(hasText("At/below or up to 10% above previous 3M low · 2 of 2"))
+        compose.onNodeWithText("LARGE3").assertIsDisplayed()
+        compose.onNodeWithText("MID3").assertIsDisplayed()
+        assertEquals(0, compose.onAllNodesWithText("SMALL3").fetchSemanticsNodes().size)
+        assertEquals(0, compose.onAllNodesWithText("UNKNOWN3").fetchSemanticsNodes().size)
+
+        compose.onNodeWithTag("six-month-low-screen")
+            .performScrollToNode(hasText("NSE LOWS SCREENER"))
+        compose.onNodeWithTag("low-range-6m").performClick()
+        compose.onNodeWithTag("six-month-low-screen")
+            .performScrollToNode(hasText("At/below or up to 10% above previous 6M low · 2 of 2"))
+        compose.onNodeWithText("LARGE6").assertIsDisplayed()
+        compose.onNodeWithText("MID6").assertIsDisplayed()
+        assertEquals(0, compose.onAllNodesWithText("SMALL6").fetchSemanticsNodes().size)
+        assertEquals(0, compose.onAllNodesWithText("UNKNOWN6").fetchSemanticsNodes().size)
+    }
+
 }
