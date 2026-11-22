@@ -13,6 +13,7 @@ import com.multify.traderpro.engine.SixMonthLowObservation
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Cookie
@@ -159,6 +160,7 @@ class EquityEodResearchRepository @Inject constructor(
         .followRedirects(true)
         .build()
     private val lock = Any()
+    private val refreshMutex = Mutex()
 
     private fun request(url: String): Request = Request.Builder().url(url)
         .header("Accept", "text/csv,application/zip,application/octet-stream,*/*")
@@ -314,9 +316,11 @@ class EquityEodResearchRepository @Inject constructor(
         }
     }
 
-    /** WorkManager may be late; all network attempts are guarded again immediately before send. */
+    /** WorkManager and manual taps share one serialized importer; every request is still time-guarded. */
     suspend fun refreshAfterHours(maxFiles: Int = 25): EquityEodRefreshProgress = withContext(Dispatchers.IO) {
-        if (!afterHours(ZonedDateTime.now(INDIA))) return@withContext EquityEodRefreshProgress(0,0,false)
+        refreshMutex.lock()
+        try {
+            if (!afterHours(ZonedDateTime.now(INDIA))) return@withContext EquityEodRefreshProgress(0,0,false)
         // NSE's archive domain sometimes needs an NSE homepage cookie session.
         // Warm once nightly, not for every requested day, and never during the market.
         warmNseSession()
@@ -390,7 +394,10 @@ class EquityEodResearchRepository @Inject constructor(
         prefs.edit().putLong("last_eod_attempt_ms",System.currentTimeMillis())
             .putString("last_eod_error",if(blocked) "Exchange archive temporarily unavailable" else "")
             .apply()
-        EquityEodRefreshProgress(imported,missing.size,blocked,wireRequests)
+            EquityEodRefreshProgress(imported,missing.size,blocked,wireRequests)
+        } finally {
+            refreshMutex.unlock()
+        }
     }
 
     /** No market-data requests: read-only copy from already completed Fixed full-market LTP sweep. */

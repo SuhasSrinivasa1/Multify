@@ -89,22 +89,34 @@ fun FixedLiteApp(viewModel: TraderViewModel = hiltViewModel()) {
         snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
             Column {
-                CenterAlignedTopAppBar(
+                TopAppBar(
                     title = {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text("Suhas Shree Trader Pro", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                        Column(
+                            horizontalAlignment = Alignment.Start,
+                            verticalArrangement = Arrangement.spacedBy(0.dp)
+                        ) {
+                            Text(
+                                "Multify",
+                                style = MaterialTheme.typography.titleLarge,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                softWrap = false
+                            )
                             Text(
                                 when (page) {
                                     LitePage.FIXED -> "15-minute Fixed strategy"
                                     LitePage.WORKING_RANGE -> "Working Range pilot"
                                     LitePage.MANUAL -> "Intraday MIS BUY / SELL"
-                                    LitePage.LARGE_CAP -> "NSE equity · intraday and swing research"
-                                    LitePage.SIX_MONTH_LOW -> "Daily NSE six-month-low screen"
+                                    LitePage.LARGE_CAP -> "Large-cap research"
+                                    LitePage.SIX_MONTH_LOW -> "Six-month lows"
                                     LitePage.AVERAGES -> "Observed Fixed outcomes"
                                     LitePage.SETTINGS -> "Accounts and controls"
                                 },
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                softWrap = false
                             )
                         }
                     },
@@ -119,10 +131,10 @@ fun FixedLiteApp(viewModel: TraderViewModel = hiltViewModel()) {
                             Icon(Icons.Default.Refresh, contentDescription = "Refresh dashboard")
                         }
                     },
-                    colors = TopAppBarDefaults.centerAlignedTopAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
+                    colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
                 )
                 AccountStatusStrip(state)
-                if (state.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
+                if (state.loading || state.researchScanning) LinearProgressIndicator(Modifier.fillMaxWidth())
             }
         },
         bottomBar = { LiteBottomBar(page) { page = it } }
@@ -133,13 +145,13 @@ fun FixedLiteApp(viewModel: TraderViewModel = hiltViewModel()) {
                 LitePage.WORKING_RANGE -> LiteRangeScreen(state)
                 LitePage.MANUAL -> LiteManualScreen(state, viewModel)
                 LitePage.LARGE_CAP -> LargeCapResearchScreen(state,viewModel::refreshResearchView)
-                LitePage.SIX_MONTH_LOW -> SixMonthLowResearchScreen(state,viewModel::refreshResearchView)
+                LitePage.SIX_MONTH_LOW -> SixMonthLowResearchScreen(state,viewModel::scanSixMonthLowsNow)
                 LitePage.AVERAGES -> LiteAveragesScreen(state)
                 LitePage.SETTINGS -> LiteSettingsScreen(
                     state, viewModel,
                     onEnableRequested = { confirmEnable = it },
                     onResetRequested = { confirmHaltReset = true },
-                    onExport = { export.launch("SuhasShree-v9033-eod-largecap-diagnostics.zip") }
+                    onExport = { export.launch("Multify-v9034-eod-largecap-diagnostics.zip") }
                 )
             }
         }
@@ -215,7 +227,7 @@ internal fun LiteBottomBar(page: LitePage, onNavigate: (LitePage) -> Unit) {
             selected = page == LitePage.WORKING_RANGE,
             onClick = { onNavigate(LitePage.WORKING_RANGE) },
             icon = { Icon(Icons.Default.Timeline, contentDescription = null) },
-            label = { Text("Working Range") }
+            label = { Text("Range", maxLines = 1) }
         )
         NavigationBarItem(
             selected = page == LitePage.MANUAL,
@@ -227,7 +239,7 @@ internal fun LiteBottomBar(page: LitePage, onNavigate: (LitePage) -> Unit) {
             selected = page == LitePage.LARGE_CAP,
             onClick = { onNavigate(LitePage.LARGE_CAP) },
             icon = { Icon(Icons.Default.TrendingUp, contentDescription = null) },
-            label = { Text("Large caps") }
+            label = { Text("Large", maxLines = 1) }
         )
         NavigationBarItem(
             selected = page == LitePage.SIX_MONTH_LOW,
@@ -238,6 +250,7 @@ internal fun LiteBottomBar(page: LitePage, onNavigate: (LitePage) -> Unit) {
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun AccountStatusStrip(state: TraderUiState) {
     val alphaReady = state.settings.brokerAuthenticated && state.settings.staticIpMatched
@@ -251,11 +264,10 @@ private fun AccountStatusStrip(state: TraderUiState) {
         state.betaConfigured -> "AUTH REQUIRED"
         else -> "OPTIONAL"
     }
-    Row(
-        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
-            .padding(horizontal = 16.dp, vertical = 8.dp),
+    FlowRow(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.CenterVertically
+        verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         AccountPill("ALPHA", alphaStatus, if (alphaReady) LiteTone.POSITIVE else LiteTone.WARNING)
         AccountPill("BETA", betaStatus, if (state.betaAuthenticated) LiteTone.INFO else LiteTone.NEUTRAL)

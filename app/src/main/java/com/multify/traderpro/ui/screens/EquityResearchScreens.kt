@@ -8,6 +8,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.multify.traderpro.data.repository.EquityResearchSnapshot
@@ -112,7 +113,7 @@ private fun LargeCapRow(r: LargeCapEquityObservation, label: String) {
 }
 
 @Composable
-internal fun SixMonthLowResearchScreen(state: TraderUiState, onRefresh: () -> Unit) {
+internal fun SixMonthLowResearchScreen(state: TraderUiState, onScan: () -> Unit) {
     val r=state.equityResearch
     var search by rememberSaveable { mutableStateOf("") }
     val filtered=remember(r.lowRows,search) {
@@ -133,18 +134,39 @@ internal fun SixMonthLowResearchScreen(state: TraderUiState, onRefresh: () -> Un
             Text("Available session files: ${r.completedDays} · latest file equity rows: ${r.universeCount}",
                 style=MaterialTheme.typography.bodySmall)
             if(!r.sixMonthHistoryComplete) {
-                Text("INCOMPLETE SIX-MONTH HISTORY — list withheld until validated coverage exists. Backfill proceeds on permitted evenings.",
+                Text("INCOMPLETE SIX-MONTH HISTORY — results remain withheld until at least 105 valid NSE sessions spanning roughly six months are present. Scan Now can continue the permitted backfill.",
                     color=MaterialTheme.colorScheme.error,style=MaterialTheme.typography.bodyMedium)
             }
             if(r.lastError.isNotBlank()) {
                 Text("Data source status: ${r.lastError}",color=MaterialTheme.colorScheme.error,
                     style=MaterialTheme.typography.bodySmall)
             }
-            Text("Latest refresh attempt: ${atIst(r.refreshAtMs)}",
+            Text("Latest archive attempt: ${atIst(r.refreshAtMs)}",
                 style=MaterialTheme.typography.labelSmall)
             Text("Official NSE cash EOD archives only; zero Groww calls. WorkManager is best-effort on Android. The app never downloads this history during NSE trading hours.",
                 style=MaterialTheme.typography.labelSmall)
-            OutlinedButton(onClick=onRefresh) { Text("Reload local EOD results") }
+            Button(
+                onClick = onScan,
+                enabled = !state.researchScanning,
+                modifier = Modifier.fillMaxWidth().testTag("six-month-low-scan-now"),
+                contentPadding = PaddingValues(vertical = 14.dp)
+            ) {
+                if (state.researchScanning) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.onPrimary
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Text("Scanning…")
+                } else {
+                    Text("Scan Now")
+                }
+            }
+            Text(
+                "Runs against the saved archive immediately. During 18:30–08:00 IST it also imports up to 25 missing official NSE session files per tap; during 08:00–18:30 IST it stays local-only. Zero Groww calls.",
+                style = MaterialTheme.typography.labelSmall
+            )
             Text("Unadjusted exchange lows: splits, bonuses and other corporate actions require verification before acting. A low is not itself a BUY recommendation.",
                 style=MaterialTheme.typography.labelSmall)
         }

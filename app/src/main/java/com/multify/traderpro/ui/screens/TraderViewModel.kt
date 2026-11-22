@@ -16,6 +16,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -25,12 +26,15 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import javax.inject.Inject
+import java.time.ZoneId
+import java.time.ZonedDateTime
 
 data class TraderUiState(
     val settings: AppSettings = AppSettings(),
     val events: List<SignalEventEntity> = emptyList(),
     val dashboard: DashboardDto? = null,
     val equityResearch: EquityResearchSnapshot = EquityResearchSnapshot(),
+    val researchScanning: Boolean = false,
     val loading: Boolean = false,
     val credentialsConfigured: Boolean = false,
     val betaConfigured: Boolean = false,
@@ -48,18 +52,21 @@ class TraderViewModel @Inject constructor(
 ) : ViewModel() {
     private val remote = MutableStateFlow(RemoteState())
     private val equityResearch = MutableStateFlow(EquityResearchSnapshot())
+    private val researchScanning = MutableStateFlow(false)
 
     val uiState: StateFlow<TraderUiState> = combine(
         repository.settings,
         repository.recentEvents,
         remote,
-        equityResearch
-    ) { settings, events, r, research ->
+        equityResearch,
+        researchScanning
+    ) { settings, events, r, research, scanning ->
         TraderUiState(
             settings = settings,
             events = events,
             dashboard = r.dashboard,
             equityResearch = research,
+            researchScanning = scanning,
             loading = r.loading,
             credentialsConfigured = repository.hasBrokerCredentials(),
             betaConfigured = repository.betaCredentialsConfigured(),
@@ -113,6 +120,56 @@ class TraderViewModel @Inject constructor(
             runCatching { withContext(Dispatchers.IO) { equityEodResearch.snapshot() } }
                 .onSuccess { equityResearch.value=it }
                 .onFailure { remote.value=remote.value.copy(error="Local EOD screen: ${it.userMessage()}") }
+        }
+    }
+
+    /**
+     * User-requested six-month-low scan. It always recalculates the local archive.
+     * Official NSE downloads are attempted only in the repository's permitted
+     * 18:30–08:00 IST window, in a bounded batch of at most 25 missing sessions.
+     * This path never calls Groww and never creates a trading signal or order.
+     */
+    fun scanSixMonthLowsNow() {
+        viewModelScope.launch {
+            if (researchScanning.value) return@launch
+            researchScanning.value = true
+            remote.value = remote.value.copy(message = null, error = null)
+            try {
+                val downloadsAllowed = EquityEodResearchRepository.afterHours(
+                    ZonedDateTime.now(ZoneId.of("Asia/Kolkata"))
+                )
+                val progress = if (downloadsAllowed) {
+                    withContext(Dispatchers.IO) { equityEodResearch.refreshAfterHours(25) }
+                } else {
+                    null
+                }
+                val snapshot = withContext(Dispatchers.IO) { equityEodResearch.snapshot() }
+                equityResearch.value = snapshot
+                val resultMessage = when {
+                    progress == null && snapshot.sixMonthHistoryComplete ->
+                        "Local scan complete · ${snapshot.lowRows.size} validated six-month-low candidates · ${snapshot.completedDays} sessions."
+                    progress == null ->
+                        "Local scan complete · ${snapshot.completedDays} EOD sessions available. NSE downloads resume after 18:30 IST; history is still incomplete. No Groww calls."
+                    progress.sourceFailure ->
+                        "NSE archive source unavailable · ${progress.importedDays} sessions imported · ${snapshot.completedDays} stored. Existing validated results, if any, are retained."
+                    snapshot.sixMonthHistoryComplete ->
+                        "Scan complete · ${snapshot.lowRows.size} stocks within 0%–10% of validated six-month lows · ${snapshot.completedDays} sessions."
+                    progress.importedDays > 0 ->
+                        "On-demand scan complete · imported ${progress.importedDays} NSE sessions using ${progress.requestedDays} archive requests · ${snapshot.completedDays} sessions stored. History remains incomplete; tap Scan Now again for the next batch."
+                    else ->
+                        "Scan complete · ${snapshot.completedDays} sessions stored. No new archive files were imported; six-month claims remain withheld until history is complete."
+                }
+                remote.value = remote.value.copy(message = resultMessage, error = null)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (e: Exception) {
+                remote.value = remote.value.copy(
+                    error = "Six-month-low scan failed: ${e.userMessage()}",
+                    message = null
+                )
+            } finally {
+                researchScanning.value = false
+            }
         }
     }
 
