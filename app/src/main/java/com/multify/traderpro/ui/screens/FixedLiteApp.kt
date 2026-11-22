@@ -76,7 +76,11 @@ fun FixedLiteApp(viewModel: TraderViewModel = hiltViewModel()) {
         if (it != null) viewModel.exportLogs(it)
     }
 
-    LaunchedEffect(page) {\n        if (page == LitePage.LARGE_CAP || page == LitePage.SIX_MONTH_LOW) viewModel.refreshMarketResearch()\n    }\n\n    LaunchedEffect(state.message, state.error) {
+    LaunchedEffect(page) {
+        if (page == LitePage.LARGE_CAP || page == LitePage.SIX_MONTH_LOW) viewModel.refreshMarketResearch()
+    }
+
+    LaunchedEffect(state.message, state.error) {
         (state.error ?: state.message)?.takeIf { it.isNotBlank() }?.let {
             snackbar.showSnackbar(it)
             viewModel.clearBanner()
