@@ -147,23 +147,23 @@ class TraderViewModel @Inject constructor(
                 equityResearch.value = snapshot
                 val resultMessage = when {
                     progress == null && selectedMonths == 3 && snapshot.threeMonthHistoryComplete ->
-                        "3M local scan complete · ${snapshot.threeMonthLowRows.size} validated candidates · ${snapshot.threeMonthCompletedDays} sessions · no network/Groww requests."
+                        "3M local scan complete · ${snapshot.threeMonthLowRows.size} validated prior-low candidates · ${snapshot.threeMonthCompletedDays} sessions · no network/Groww requests."
                     progress == null && selectedMonths == 3 ->
                         "3M local scan complete · ${snapshot.threeMonthCompletedDays} validated sessions available. NSE archive downloads resume after 18:30 IST; history remains incomplete. No Groww calls."
                     progress == null && selectedMonths == 6 && snapshot.sixMonthHistoryComplete ->
-                        "6M local scan complete · ${snapshot.sixMonthLowRows.size} validated candidates · ${snapshot.completedDays} sessions."
+                        "6M local scan complete · ${snapshot.sixMonthLowRows.size} validated prior-low candidates · ${snapshot.completedDays} sessions."
                     progress == null ->
                         "6M local scan complete · ${snapshot.completedDays} EOD sessions available. NSE downloads resume after 18:30 IST; history is still incomplete. No Groww calls."
                     progress.sourceFailure ->
                         "NSE archive source unavailable · ${progress.importedDays} sessions imported · ${snapshot.completedDays} stored. Existing validated results, if any, are retained."
                     selectedMonths == 3 && snapshot.threeMonthHistoryComplete ->
-                        "3M scan complete · ${snapshot.threeMonthLowRows.size} validated candidates; 3M coverage is ready. Imported ${progress.importedDays} NSE sessions for the continuing 6M backfill."
+                        "3M scan complete · ${snapshot.threeMonthLowRows.size} validated prior-low candidates; 3M coverage is ready. Imported ${progress.importedDays} NSE sessions for the continuing 6M backfill."
                     selectedMonths == 3 && progress.importedDays > 0 ->
                         "3M backfill batch complete · imported ${progress.importedDays} NSE sessions using ${progress.requestedDays} archive requests · ${snapshot.threeMonthCompletedDays} 3M sessions stored. Tap Scan Now again until coverage is ready."
                     selectedMonths == 3 ->
                         "3M scan complete · ${snapshot.threeMonthCompletedDays} sessions stored. No new archives were imported; 3M claims remain withheld until coverage is validated."
                     snapshot.sixMonthHistoryComplete ->
-                        "6M scan complete · ${snapshot.sixMonthLowRows.size} stocks within 0%–10% of validated six-month lows · ${snapshot.completedDays} sessions."
+                        "6M scan complete · ${snapshot.sixMonthLowRows.size} stocks at/below or up to 10% above validated previous six-month lows · ${snapshot.completedDays} sessions."
                     progress.importedDays > 0 ->
                         "6M backfill batch complete · imported ${progress.importedDays} NSE sessions using ${progress.requestedDays} archive requests · ${snapshot.completedDays} sessions stored. Tap Scan Now again for another permitted batch."
                     else ->

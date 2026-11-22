@@ -51,4 +51,22 @@ class EquityEodResearchRepositoryTest {
         assertEquals(50, EquityEodResearchRepository.minimumThreeMonthSymbolSessions(55))
     }
 
+    @Test fun latestCloseDistanceIsSignedAgainstThePreviousReferenceLow() {
+        assertEquals(-20.0,
+            EquityEodResearchRepository.distanceFromReferenceLowPct(80.0, 100.0), 0.000001)
+        assertEquals(0.0,
+            EquityEodResearchRepository.distanceFromReferenceLowPct(100.0, 100.0), 0.000001)
+        assertEquals(5.0,
+            EquityEodResearchRepository.distanceFromReferenceLowPct(105.0, 100.0), 0.000001)
+    }
+
+    @Test fun priorLowScreenerIncludesEveryBreakdownAndCapsOnlyAboveTenPercent() {
+        assertTrue(EquityEodResearchRepository.isWithinTenPctAboveOrBelow(-75.0))
+        assertTrue(EquityEodResearchRepository.isWithinTenPctAboveOrBelow(-0.01))
+        assertTrue(EquityEodResearchRepository.isWithinTenPctAboveOrBelow(0.0))
+        assertTrue(EquityEodResearchRepository.isWithinTenPctAboveOrBelow(10.0))
+        assertFalse(EquityEodResearchRepository.isWithinTenPctAboveOrBelow(10.01))
+        assertFalse(EquityEodResearchRepository.isWithinTenPctAboveOrBelow(Double.NaN))
+    }
+
 }

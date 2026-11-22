@@ -22,6 +22,16 @@ import java.util.Locale
 private fun pc(v: Double?): String = v?.takeIf { it.isFinite() }
     ?.let { String.format(Locale.US,"%+.2f%%",it) } ?: "—"
 private fun price(v: Double): String = String.format(Locale.US,"₹%,.2f",v)
+private fun lowDistanceLabel(distancePct: Double, months: Int): String = when {
+    distancePct < -0.000001 -> String.format(Locale.US,"%.2f%% BELOW previous %dM low",kotlin.math.abs(distancePct),months)
+    distancePct > 0.000001 -> String.format(Locale.US,"%.2f%% ABOVE previous %dM low",distancePct,months)
+    else -> "AT previous ${months}M low"
+}
+private fun oneMonthDistanceLabel(distancePct: Double): String = when {
+    distancePct < -0.000001 -> String.format(Locale.US,"%.2f%% below previous 1M low",kotlin.math.abs(distancePct))
+    distancePct > 0.000001 -> String.format(Locale.US,"%.2f%% above previous 1M low",distancePct)
+    else -> "at previous 1M low"
+}
 private val india=ZoneId.of("Asia/Kolkata")
 private fun atIst(ms: Long): String =
     if(ms<=0L) "Not yet fetched" else Instant.ofEpochMilli(ms).atZone(india)
@@ -131,7 +141,7 @@ internal fun SixMonthLowResearchScreen(state: TraderUiState, onScan: (Int) -> Un
         verticalArrangement = Arrangement.spacedBy(9.dp)
     ) {
         item {
-            ResearchNotice("NSE LOWS SCREENER", "0%–10% above the lowest daily low · EQ cash shares")
+            ResearchNotice("NSE LOWS SCREENER", "Latest EOD close vs previous 3M/6M low · all breakdowns and up to 10% above included · EQ cash shares")
             Spacer(Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 FilterChip(
@@ -212,7 +222,7 @@ internal fun SixMonthLowResearchScreen(state: TraderUiState, onScan: (Int) -> Un
                 when {
                     !ready && isThreeMonth -> "No three-month-low claims until the minimum validated history is available."
                     !ready -> "No six-month-low claims until the historic archive is complete."
-                    else -> "No matching stocks within 0%–10% of their ${selectedMonths}-month low."
+                    else -> "No stocks at/below or up to 10% above their previous ${selectedMonths}-month low."
                 },
                 style = MaterialTheme.typography.bodySmall)
         }
@@ -226,14 +236,15 @@ private fun LowRow(r: EquityLowObservation) {
         Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text(r.symbol, fontWeight = FontWeight.Bold)
-                Text(String.format(Locale.US, "%.2f%% above %dM low", r.distancePct, r.lookbackMonths),
-                    style = MaterialTheme.typography.titleSmall)
+                Text(lowDistanceLabel(r.distancePct, r.lookbackMonths),
+                    style = MaterialTheme.typography.titleSmall,
+                    color = if (r.distancePct < -0.000001) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary)
             }
-            Text("Close ${price(r.close)} · ${r.lookbackMonths}M low ${price(r.periodLow)}",
+            Text("Latest close ${price(r.close)} · previous ${r.lookbackMonths}M low ${price(r.periodLow)}",
                 style = MaterialTheme.typography.bodySmall)
-            Text("Low date ${r.periodLowDate} · 1M low ${price(r.oneMonthLow)} (${String.format(Locale.US, "%.2f%%", r.oneMonthDistancePct)} above)",
+            Text("Reference low date ${r.periodLowDate} · previous 1M low ${price(r.oneMonthLow)} (${oneMonthDistanceLabel(r.oneMonthDistancePct)})",
                 style = MaterialTheme.typography.bodySmall)
-            Text("As of ${r.latestDate} · ${r.tradingDays} valid symbol sessions · NSE EQ",
+            Text("As of ${r.latestDate} · ${r.tradingDays} prior symbol sessions · NSE EQ",
                 style = MaterialTheme.typography.labelSmall)
         }
     }
