@@ -71,7 +71,7 @@ class EquityEodResearchRepository @Inject constructor(
         private val BASIC = DateTimeFormatter.BASIC_ISO_DATE
         private val SYMBOL_REGEX = Regex("[A-Z0-9&._-]{1,32}")
         private const val MAX_ARCHIVE_ROWS = 12000
-        private const val MIN_VALID_EQ_ROWS = 500
+        private const val MIN_VALID_EQ_ROWS = 1500
         private const val MAX_BARS_PER_SYMBOL = 200
         private const val SOURCE_URL = "https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_%s_F_0000.csv.zip"
         private const val NIFTY100_URL = "https://www.niftyindices.com/IndexConstituent/ind_nifty100list.csv"
