@@ -400,9 +400,9 @@ class EquityEodResearchRepository @Inject constructor(
                 totalDays=c.getInt(0);first=c.getString(1).orEmpty();latest=c.getString(2).orEmpty()
             }
         }
-        val spanComplete=totalDays>=90 && first.isNotBlank() &&
+        val spanComplete=totalDays>=105 && first.isNotBlank() &&
             LocalDate.parse(first).isBefore(today.minusMonths(5).plusDays(14))
-        val minCount=(totalDays * .75).toInt().coerceAtLeast(70)
+        val minCount=(totalDays * .85).toInt().coerceAtLeast(90)
         val rows=mutableListOf<SixMonthLowObservation>()
         if (spanComplete && latest.isNotBlank()) {
             val query="""SELECT s.symbol,MIN(s.low),COUNT(*),
