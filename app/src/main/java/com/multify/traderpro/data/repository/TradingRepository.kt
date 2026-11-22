@@ -232,6 +232,7 @@ class TradingRepository @Inject constructor(
     private val brokerRetryGuard: BrokerExecutionRetryGuard,
     private val parser: NotificationParser,
     private val nseSymbols: NseSymbolRepository,
+    private val equityEodResearch: EquityEodResearchRepository,
     private val auditLogger: AuditLogger,
     private val decisionEvidenceJournal: DecisionEvidenceJournal,
     private val fixedFactorTelemetry: FixedFactorTelemetry,
@@ -5501,6 +5502,13 @@ class TradingRepository @Inject constructor(
             previousLtps = previous, sessionOpenLtps = sessionOpen,
             selected = ranked, baselineReady = baselineReady
         )
+        // Passive copy of an already completed full-NSE sweep. Zero additional HTTP calls.
+        // This does not change Fixed discovery rankings, publications, or execution.
+        runCatching { equityEodResearch.captureFixedLivePulse(
+            current,sessionOpen,baselineReady
+        ) }.onFailure { auditLogger.logAsync("LARGE_CAP_SHADOW","PULSE_CAPTURE_SKIPPED",mapOf(
+            "type" to it.javaClass.simpleName, "fixed_selection_changed" to false
+        )) }
         preferences.recordMarketData()
         auditLogger.log("FIXED_DISCOVERY", "MARKET_WIDE_SCAN", mapOf(
             "snapshot_id" to FixedEngineSnapshotStore.SNAPSHOT_ID,

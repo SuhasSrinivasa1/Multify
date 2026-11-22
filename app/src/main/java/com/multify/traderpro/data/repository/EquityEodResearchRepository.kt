@@ -1,0 +1,530 @@
+package com.multify.traderpro.data.repository
+
+import android.content.ContentValues
+import android.content.Context
+import android.database.sqlite.SQLiteDatabase
+import android.database.sqlite.SQLiteOpenHelper
+import com.multify.traderpro.data.logging.AuditLogger
+import com.multify.traderpro.engine.EquityEodBar
+import com.multify.traderpro.engine.LargeCapEquityObservation
+import com.multify.traderpro.engine.LargeCapEquityResearchPolicy
+import com.multify.traderpro.engine.NseEquitySessionCalendar
+import com.multify.traderpro.engine.SixMonthLowObservation
+import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.Cookie
+import okhttp3.CookieJar
+import okhttp3.HttpUrl
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.time.DayOfWeek
+import java.time.Duration
+import java.time.LocalDate
+import java.time.LocalTime
+import java.time.ZoneId
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
+import java.util.Locale
+import java.util.zip.ZipInputStream
+import javax.inject.Inject
+import javax.inject.Singleton
+
+data class EquityResearchSnapshot(
+    val lowRows: List<SixMonthLowObservation> = emptyList(),
+    val largeCaps: List<LargeCapEquityObservation> = emptyList(),
+    val completedDays: Int = 0,
+    val firstDay: String = "",
+    val latestDay: String = "",
+    val universeCount: Int = 0,
+    val sixMonthHistoryComplete: Boolean = false,
+    val lastError: String = "",
+    val memberSource: String = "",
+    val currentPulseAtMs: Long = 0L,
+    val refreshAtMs: Long = 0L
+)
+data class EquityEodRefreshProgress(
+    val importedDays: Int,
+    val missingWeekdays: Int,
+    val sourceFailure: Boolean,
+    val requestedDays: Int = 0
+)
+
+/**
+ * NSE cash equity research ONLY. Uses official daily CM-UDiFF bhavcopy archives (ONE
+ * public file per session for all EQ symbols), never Groww historical/quote/order APIs.
+ * All remote calls are denied outside 18:30–08:00 IST. An unverified partial archive
+ * cannot replace a previously valid trading-day snapshot.
+ *
+ * Separate SQLite database avoids changing the frozen trading Room schema.
+ */
+@Singleton
+class EquityEodResearchRepository @Inject constructor(
+    @ApplicationContext private val context: Context,
+    private val symbols: NseSymbolRepository,
+    private val audit: AuditLogger
+) {
+    companion object {
+        private val INDIA = ZoneId.of("Asia/Kolkata")
+        private val BASIC = DateTimeFormatter.BASIC_ISO_DATE
+        private val SYMBOL_REGEX = Regex("[A-Z0-9&._-]{1,32}")
+        private const val MAX_ARCHIVE_ROWS = 12000
+        private const val MIN_VALID_EQ_ROWS = 1500
+        private const val MAX_BARS_PER_SYMBOL = 200
+        private const val SOURCE_URL = "https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_%s_F_0000.csv.zip"
+        private const val NIFTY100_URL = "https://www.niftyindices.com/IndexConstituent/ind_nifty100list.csv"
+        private const val NIFTYBANK_URL = "https://www.niftyindices.com/IndexConstituent/ind_niftybanklist.csv"
+        private const val NIFTYIT_URL = "https://www.niftyindices.com/IndexConstituent/ind_niftyitlist.csv"
+        private const val EOD_MARKET_CLOSE = 18 // first availability attempt at 18:30 IST
+        private val SEEDS = mapOf(
+            "HDFCBANK" to "BANK", "SBIN" to "BANK", "ICICIBANK" to "BANK",
+            "AXISBANK" to "BANK", "KOTAKBANK" to "BANK", "BANKBARODA" to "BANK",
+            "INDUSINDBK" to "BANK", "PNB" to "BANK",
+            "TCS" to "IT", "INFY" to "IT", "HCLTECH" to "IT",
+            "WIPRO" to "IT", "TECHM" to "IT", "LTIM" to "IT",
+            "RELIANCE" to "ENERGY", "ONGC" to "ENERGY", "BPCL" to "ENERGY",
+            "LT" to "INDUSTRIAL", "ADANIPORTS" to "INDUSTRIAL",
+            "BHARTIARTL" to "TELECOM", "SUNPHARMA" to "PHARMA",
+            "DRREDDY" to "PHARMA", "MARUTI" to "AUTO", "M&M" to "AUTO"
+        )
+        fun afterHours(at: ZonedDateTime): Boolean {
+            val ist = at.withZoneSameInstant(INDIA).toLocalTime()
+            return ist >= LocalTime.of(18, 30) || ist < LocalTime.of(8, 0)
+        }
+        fun latestEligibleDate(at: ZonedDateTime): LocalDate {
+            val ist = at.withZoneSameInstant(INDIA)
+            return if (ist.toLocalTime() >= LocalTime.of(18, 30)) ist.toLocalDate()
+                else ist.toLocalDate().minusDays(1)
+        }
+        fun csvCells(line: String): List<String> {
+            val out = mutableListOf<String>()
+            val b = StringBuilder()
+            var quoted = false
+            var i = 0
+            while (i < line.length) {
+                val c = line[i]
+                when {
+                    c == '"' && quoted && i+1 < line.length && line[i+1] == '"' -> {
+                        b.append('"'); i++
+                    }
+                    c == '"' -> quoted = !quoted
+                    c == ',' && !quoted -> { out += b.toString().trim(); b.setLength(0) }
+                    else -> b.append(c)
+                }
+                i++
+            }
+            out += b.toString().trim()
+            return out
+        }
+    }
+
+    private class Store(context: Context) : SQLiteOpenHelper(
+        context, "suhas_shree_eod_research_v1.db", null, 1
+    ) {
+        override fun onCreate(db: SQLiteDatabase) {
+            db.execSQL("CREATE TABLE eod(day TEXT NOT NULL, symbol TEXT NOT NULL, low REAL NOT NULL, close REAL NOT NULL, volume INTEGER NOT NULL, PRIMARY KEY(day,symbol))")
+            db.execSQL("CREATE INDEX idx_eod_symbol_day ON eod(symbol,day)")
+            db.execSQL("CREATE TABLE eod_days(day TEXT PRIMARY KEY, symbols INTEGER NOT NULL, updated_ms INTEGER NOT NULL)")
+            db.execSQL("CREATE TABLE attempts(day TEXT PRIMARY KEY, attempt_day TEXT NOT NULL, failure TEXT NOT NULL)")
+            db.execSQL("CREATE TABLE members(symbol TEXT PRIMARY KEY, sector TEXT NOT NULL)")
+        }
+        override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) =
+            error("EOD research migration must be explicit")
+    }
+
+    private val db = Store(context)
+    private val prefs = context.getSharedPreferences("suhas_shree_eod_state", Context.MODE_PRIVATE)
+    private val cookieLock = Any()
+    private val cookies = mutableListOf<Cookie>()
+    @Volatile private var warmedNseDate = ""
+    private val client = OkHttpClient.Builder()
+        .cookieJar(object: CookieJar {
+            override fun saveFromResponse(url: HttpUrl, incoming: List<Cookie>) {
+                synchronized(cookieLock) {
+                    for (cookie in incoming) {
+                        cookies.removeAll { it.name==cookie.name && it.domain==cookie.domain && it.path==cookie.path }
+                        cookies.add(cookie)
+                    }
+                }
+            }
+            override fun loadForRequest(url: HttpUrl): List<Cookie> = synchronized(cookieLock) {
+                cookies.removeAll { it.expiresAt<=System.currentTimeMillis() }
+                cookies.filter { it.matches(url) }
+            }
+        })
+        .connectTimeout(Duration.ofSeconds(8))
+        .readTimeout(Duration.ofSeconds(18))
+        .followRedirects(true)
+        .build()
+    private val lock = Any()
+
+    private fun request(url: String): Request = Request.Builder().url(url)
+        .header("Accept", "text/csv,application/zip,application/octet-stream,*/*")
+        .header("Referer", if(url.contains("niftyindices.com")) "https://www.niftyindices.com/" else "https://www.nseindia.com/")
+        .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36")
+        .build()
+
+    private fun warmNseSession() {
+        requireAfterHours()
+        val today=LocalDate.now(INDIA).toString()
+        if(warmedNseDate==today) return
+        warmedNseDate=today
+        runCatching {
+            client.newCall(request("https://www.nseindia.com/")).execute().use { response ->
+                check(response.isSuccessful) { "NSE_HOME_HTTP_${response.code}" }
+            }
+        }.onFailure { audit.logAsync("EOD_RESEARCH","NSE_COOKIE_PREWARM_UNAVAILABLE",mapOf(
+            "reason" to (it.message ?: it.javaClass.simpleName).take(80),
+            "archives_still_attempted" to true, "groww_requests" to 0
+        )) }
+    }
+
+    private fun requireAfterHours() = check(afterHours(ZonedDateTime.now(INDIA))) {
+        "EOD research network fetch is forbidden during NSE market or pre-close hours"
+    }
+
+    private fun importArchive(date: LocalDate): Int {
+        requireAfterHours()
+        val url = SOURCE_URL.format(date.format(BASIC))
+        val rows = client.newCall(request(url)).execute().use { response ->
+            if (!response.isSuccessful) error("NSE_BHAVCOPY_HTTP_${response.code}")
+            val body = response.body ?: error("NSE_BHAVCOPY_EMPTY")
+            val zip = ZipInputStream(body.byteStream())
+            zip.use { stream ->
+                val entry = stream.nextEntry ?: error("NSE_BHAVCOPY_ZIP_EMPTY")
+                check(entry.name.endsWith(".csv", true) && !entry.name.contains("..")) {
+                    "NSE_BHAVCOPY_ZIP_ENTRY_INVALID"
+                }
+                val reader = BufferedReader(InputStreamReader(stream, Charsets.UTF_8))
+                val headings = csvCells(reader.readLine() ?: error("NSE_BHAVCOPY_HEADER_EMPTY"))
+                    .map { it.removePrefix("\uFEFF").trim() }
+                val indices = listOf("TckrSymb", "SctySrs", "LwPric", "ClsPric", "TtlTradgVol")
+                    .associateWith { field ->
+                        headings.indexOf(field).takeIf { it >= 0 }
+                            ?: error("NSE_BHAVCOPY_MISSING_COLUMN_$field")
+                    }
+                val sym = indices.getValue("TckrSymb")
+                val series = indices.getValue("SctySrs")
+                val low = indices.getValue("LwPric")
+                val close = indices.getValue("ClsPric")
+                val vol = indices.getValue("TtlTradgVol")
+                val map = linkedMapOf<String, EquityEodBar>()
+                var read = 0
+                while (true) {
+                    val line = reader.readLine() ?: break
+                    read++
+                    check(read <= MAX_ARCHIVE_ROWS) { "NSE_BHAVCOPY_TOO_MANY_ROWS" }
+                    val values = csvCells(line)
+                    if (values.size <= maxOf(sym,series,low,close,vol)) continue
+                    if (values[series] != "EQ") continue
+                    val symbol = values[sym].uppercase(Locale.US)
+                    if (!SYMBOL_REGEX.matches(symbol)) continue
+                    val l = values[low].toDoubleOrNull() ?: continue
+                    val c = values[close].toDoubleOrNull() ?: continue
+                    val v = values[vol].toLongOrNull() ?: 0L
+                    if (!l.isFinite() || !c.isFinite() || l <= 0.0 || c < l ||
+                        v < 0L) continue
+                    map[symbol] = EquityEodBar(date, symbol, l, c, v)
+                }
+                check(map.size >= MIN_VALID_EQ_ROWS) { "NSE_BHAVCOPY_INCOMPLETE_EQ_${map.size}" }
+                map.values.toList()
+            }
+        }
+        synchronized(lock) {
+            val sql = db.writableDatabase
+            sql.beginTransaction()
+            try {
+                sql.delete("eod","day=?",arrayOf(date.toString()))
+                for (bar in rows) {
+                    sql.insertOrThrow("eod", null, ContentValues().apply {
+                        put("day",bar.date.toString());put("symbol",bar.symbol)
+                        put("low",bar.low);put("close",bar.close);put("volume",bar.volume)
+                    })
+                }
+                sql.insertWithOnConflict("eod_days", null, ContentValues().apply {
+                    put("day",date.toString());put("symbols",rows.size)
+                    put("updated_ms",System.currentTimeMillis())
+                },SQLiteDatabase.CONFLICT_REPLACE)
+                sql.setTransactionSuccessful()
+            } finally { sql.endTransaction() }
+        }
+        return rows.size
+    }
+
+    private fun symbolsFromIndex(url: String): Map<String,String> {
+        requireAfterHours()
+        return client.newCall(request(url)).execute().use { r ->
+            check(r.isSuccessful) { "NIFTY_INDEX_HTTP_${r.code}" }
+            val raw = r.body?.string().orEmpty()
+            check(raw.length in 100..100_000) { "NIFTY_INDEX_INVALID_SIZE" }
+            val lines = raw.lineSequence().filter { it.isNotBlank() }.iterator()
+            val headers = csvCells(lines.next()).map { it.removePrefix("\uFEFF").trim() }
+            val sym = headers.indexOfFirst { it.equals("Symbol",true) }
+            val industry = headers.indexOfFirst { it.equals("Industry",true) }
+            check(sym >= 0) { "NIFTY_INDEX_NO_SYMBOL_HEADER" }
+            val out = linkedMapOf<String,String>()
+            while (lines.hasNext() && out.size < 250) {
+                val row = csvCells(lines.next())
+                if (sym >= row.size) continue
+                val symbol = row[sym].uppercase(Locale.US)
+                if (!SYMBOL_REGEX.matches(symbol)) continue
+                val sector = if (url == NIFTYBANK_URL) "BANK"
+                    else if (url == NIFTYIT_URL) "IT"
+                    else row.getOrNull(industry)?.takeIf { it.isNotBlank() } ?: "UNKNOWN"
+                out[symbol] = sector
+            }
+            check(out.size >= if (url == NIFTY100_URL) 85 else 7) {
+                "NIFTY_INDEX_INCOMPLETE_${out.size}"
+            }
+            out
+        }
+    }
+
+    private fun refreshMembers() {
+        if (!afterHours(ZonedDateTime.now(INDIA))) return
+        val previous = prefs.getLong("members_last_good_ms",0L)
+        if (previous > 0L && System.currentTimeMillis()-previous < 7*24*60*60_000L) return
+        try {
+            val all = symbolsFromIndex(NIFTY100_URL).toMutableMap()
+            val banks = runCatching { symbolsFromIndex(NIFTYBANK_URL) }.getOrDefault(emptyMap())
+            val it = runCatching { symbolsFromIndex(NIFTYIT_URL) }.getOrDefault(emptyMap())
+            all.keys.toList().forEach { symbol ->
+                if (symbol in banks) all[symbol]="BANK"
+                if (symbol in it) all[symbol]="IT"
+            }
+            synchronized(lock) {
+                val sql = db.writableDatabase
+                sql.beginTransaction()
+                try {
+                    sql.delete("members",null,null)
+                    for ((symbol,sector) in all) {
+                        sql.insertOrThrow("members",null,ContentValues().apply {
+                            put("symbol",symbol);put("sector",sector)
+                        })
+                    }
+                    sql.setTransactionSuccessful()
+                } finally { sql.endTransaction() }
+            }
+            prefs.edit().putLong("members_last_good_ms",System.currentTimeMillis())
+                .putString("members_source","NIFTY100_OFFICIAL").apply()
+        } catch (e:Exception) {
+            prefs.edit().putString("member_error",(e.message ?: e.javaClass.simpleName).take(100)).apply()
+        }
+    }
+
+    /** WorkManager may be late; all network attempts are guarded again immediately before send. */
+    suspend fun refreshAfterHours(maxFiles: Int = 25): EquityEodRefreshProgress = withContext(Dispatchers.IO) {
+        if (!afterHours(ZonedDateTime.now(INDIA))) return@withContext EquityEodRefreshProgress(0,0,false)
+        // NSE's archive domain sometimes needs an NSE homepage cookie session.
+        // Warm once nightly, not for every requested day, and never during the market.
+        warmNseSession()
+        refreshMembers()
+        val today = LocalDate.now(INDIA)
+        val last = latestEligibleDate(ZonedDateTime.now(INDIA))
+        val first = today.minusMonths(6)
+        val valid = buildList {
+            var day = last
+            while (!day.isBefore(first)) {
+                if (day.dayOfWeek != DayOfWeek.SATURDAY && day.dayOfWeek != DayOfWeek.SUNDAY) add(day)
+                day = day.minusDays(1)
+            }
+        }
+        val present = synchronized(lock) {
+            val dates = mutableSetOf<String>()
+            db.readableDatabase.rawQuery("SELECT day FROM eod_days WHERE day >= ?",arrayOf(first.toString())).use { c ->
+                while (c.moveToNext()) dates += c.getString(0)
+            }
+            dates
+        }
+        val attempts = synchronized(lock) {
+            val statuses = mutableMapOf<String,Pair<String,String>>()
+            db.readableDatabase.rawQuery("SELECT day,attempt_day,failure FROM attempts",null).use { c ->
+                while (c.moveToNext()) statuses[c.getString(0)] = c.getString(1) to c.getString(2)
+            }
+            statuses
+        }
+        val missing = valid.filter { it.toString() !in present }
+        var imported = 0
+        var wireRequests = 0
+        var consecutiveNotFound = 0
+        var blocked = false
+        for (day in missing) {
+            if (wireRequests >= maxFiles || !afterHours(ZonedDateTime.now(INDIA))) break
+            val previous = attempts[day.toString()]
+            // One attempt per date per calendar day: avoids 403/holiday retry storms.
+            if (previous?.first == today.toString()) continue
+            // Absent files older than seven days are likely exchange holidays. Retest
+            // weekly rather than refetching the same missing archive every evening.
+            if (previous?.second == "NSE_BHAVCOPY_HTTP_404" &&
+                day.isBefore(today.minusDays(7)) &&
+                (previous.first.let { LocalDate.parse(it) }).isAfter(today.minusDays(7))) continue
+            var failure = ""
+            wireRequests++
+            try {
+                val rows=importArchive(day)
+                imported++
+                consecutiveNotFound = 0
+                audit.logAsync("EOD_RESEARCH","BHAVCOPY_IMPORTED",mapOf(
+                    "date" to day.toString(),"equity_rows" to rows,"groww_api_calls" to 0
+                ))
+            } catch (e:Exception) {
+                failure=(e.message ?: e.javaClass.simpleName).take(90)
+                consecutiveNotFound = if(failure=="NSE_BHAVCOPY_HTTP_404") consecutiveNotFound+1 else 0
+                if(consecutiveNotFound>=3) blocked=true
+                if (failure.contains("403") || failure.contains("429") ||
+                    failure.contains("INVALID") || failure.contains("MISSING_COLUMN") ||
+                    failure.contains("INCOMPLETE")) blocked = true
+                audit.logAsync("EOD_RESEARCH","BHAVCOPY_UNAVAILABLE",mapOf(
+                    "date" to day.toString(),"reason" to failure,"groww_api_calls" to 0
+                ))
+            }
+            synchronized(lock) {
+                db.writableDatabase.insertWithOnConflict("attempts",null,ContentValues().apply {
+                    put("day",day.toString());put("attempt_day",today.toString());put("failure",failure)
+                },SQLiteDatabase.CONFLICT_REPLACE)
+            }
+            if (blocked) break
+        }
+        prefs.edit().putLong("last_eod_attempt_ms",System.currentTimeMillis())
+            .putString("last_eod_error",if(blocked) "Exchange archive temporarily unavailable" else "")
+            .apply()
+        EquityEodRefreshProgress(imported,missing.size,blocked,wireRequests)
+    }
+
+    /** No market-data requests: read-only copy from already completed Fixed full-market LTP sweep. */
+    fun captureFixedLivePulse(
+        current: Map<String,Double>,
+        open: Map<String,Double>,
+        completedSweep: Boolean
+    ) {
+        val at = ZonedDateTime.now(INDIA)
+        if (!NseEquitySessionCalendar.isFixedScanWindow(at) || !completedSweep) return
+        val memberSet = members().keys
+        val live = current.filter { (symbol,price) ->
+            symbol in memberSet && price.isFinite() && price > 0.0
+        }
+        val opens = open.filter { (symbol,price) ->
+            symbol in memberSet && price.isFinite() && price > 0.0
+        }
+        if (live.size < 10 || opens.size < 10) return
+        prefs.edit().putString("pulse_date",at.toLocalDate().toString())
+            .putString("pulse_prices",live.entries.joinToString("|") { "${it.key}~${it.value}" })
+            .putString("pulse_open",opens.entries.joinToString("|") { "${it.key}~${it.value}" })
+            .putLong("pulse_at_ms",System.currentTimeMillis()).apply()
+    }
+
+    private fun members(): Map<String,String> = synchronized(lock) {
+        val saved=linkedMapOf<String,String>()
+        db.readableDatabase.rawQuery("SELECT symbol,sector FROM members",null).use { c ->
+            while(c.moveToNext()) saved[c.getString(0)]=c.getString(1)
+        }
+        // Curated seeds are an explicitly marked research fallback, never an
+        // assertion that all names belong to today's official Nifty-100 index.
+        if (saved.isEmpty()) SEEDS else saved
+    }
+
+    private fun unpackPulse(field: String): Map<String,Double> =
+        prefs.getString(field,"").orEmpty().split('|').mapNotNull { row ->
+            val i=row.indexOf('~')
+            if(i<=0) null else row.substring(i+1).toDoubleOrNull()?.takeIf {
+                it.isFinite() && it>0.0
+            }?.let { row.substring(0,i) to it }
+        }.toMap()
+
+    fun snapshot(): EquityResearchSnapshot = synchronized(lock) {
+        val today=LocalDate.now(INDIA)
+        val cutoff=today.minusMonths(6).toString()
+        val sql=db.readableDatabase
+        var totalDays=0
+        var first=""
+        var latest=""
+        sql.rawQuery("SELECT COUNT(*),MIN(day),MAX(day) FROM eod_days WHERE day>=?",arrayOf(cutoff)).use { c ->
+            if(c.moveToFirst()) {
+                totalDays=c.getInt(0);first=c.getString(1).orEmpty();latest=c.getString(2).orEmpty()
+            }
+        }
+        val spanComplete=totalDays>=105 && first.isNotBlank() &&
+            LocalDate.parse(first).isBefore(today.minusMonths(5).plusDays(14))
+        val minCount=(totalDays * .85).toInt().coerceAtLeast(90)
+        val rows=mutableListOf<SixMonthLowObservation>()
+        if (spanComplete && latest.isNotBlank()) {
+            val query="""SELECT s.symbol,MIN(s.low),COUNT(*),
+                (SELECT t.close FROM eod t WHERE t.symbol=s.symbol AND t.day=?) AS last_close
+                FROM eod s WHERE s.day>=? AND s.day<=? GROUP BY s.symbol
+                HAVING COUNT(*)>=CAST(? AS INTEGER) AND last_close IS NOT NULL"""
+            sql.rawQuery(query,arrayOf(latest,cutoff,latest,minCount.toString())).use { c ->
+                while(c.moveToNext()) {
+                    val low=c.getDouble(1)
+                    val close=c.getDouble(3)
+                    val pct=if(low>0.0) (close/low-1.0)*100.0 else Double.NaN
+                    if(pct.isFinite() && pct>=-0.000001 && pct<=10.000001) {
+                        rows+=SixMonthLowObservation(c.getString(0),close,low,
+                            pct.coerceAtLeast(0.0),c.getInt(2),LocalDate.parse(latest))
+                    }
+                }
+            }
+        }
+
+        val memberMap=members()
+        val history=linkedMapOf<String,MutableList<EquityEodBar>>()
+        val members=memberMap.keys.toList()
+        for (chunk in members.chunked(80)) {
+            val markers=List(chunk.size){"?"}.joinToString(",")
+            val args=arrayOf(cutoff,*chunk.toTypedArray())
+            sql.rawQuery("SELECT day,symbol,low,close,volume FROM eod WHERE day>=? AND symbol IN ($markers) ORDER BY symbol,day",args).use { c ->
+                while(c.moveToNext()) {
+                    val sym=c.getString(1)
+                    history.getOrPut(sym){mutableListOf()}+=EquityEodBar(
+                        LocalDate.parse(c.getString(0)),sym,c.getDouble(2),c.getDouble(3),c.getLong(4)
+                    )
+                }
+            }
+        }
+        // Stale pulse data never participates in an intraday recommendation.
+        val age=System.currentTimeMillis()-prefs.getLong("pulse_at_ms",0)
+        val fresh=NseEquitySessionCalendar.isOpen(ZonedDateTime.now(INDIA)) &&
+            prefs.getString("pulse_date","")==today.toString() && age in 0..600_000L
+        val pulse=if(fresh) unpackPulse("pulse_prices") else emptyMap()
+        val opens=if(fresh) unpackPulse("pulse_open") else emptyMap()
+        val five=history.mapValues { (_,bars) ->
+            if(bars.size>=6) (bars.last().close/bars[bars.lastIndex-5].close-1)*100 else Double.NaN
+        }
+        val peerIntraday=memberMap.keys.mapNotNull { sym ->
+            val price=pulse[sym];val open=opens[sym]
+            if(price!=null && open!=null && open>0) sym to ((price/open-1)*100) else null
+        }.toMap()
+        val allFive=memberMap.keys.mapNotNull { five[it]?.takeIf(Double::isFinite) }
+        val allIntraday=memberMap.keys.mapNotNull { peerIntraday[it] }
+        val result=members.mapNotNull { symbol ->
+            val sector=memberMap[symbol].orEmpty()
+            val sectorKeys=memberMap.filterValues { it==sector }.keys
+            val sectorFive=sectorKeys.mapNotNull { five[it]?.takeIf(Double::isFinite) }
+            val sectorIntraday=sectorKeys.mapNotNull { peerIntraday[it] }
+            // Some sectors contain only 1–2 stocks in a fallback universe. Use
+            // the BROAD peer proxy, explicitly labeled, rather than excluding
+            // the constituent from all research opportunities.
+            val broad=sectorFive.size<3 || (pulse.isNotEmpty() && sectorIntraday.size<3)
+            LargeCapEquityResearchPolicy.scoreLargeCap(symbol,sector,history[symbol].orEmpty(),
+                if(broad)allFive else sectorFive,
+                if(broad)allIntraday else sectorIntraday,
+                pulse[symbol],opens[symbol],
+                comparisonBasis=if(broad)"LARGE_CAP_PEER_PROXY" else "SECTOR_PEERS")
+        }.sortedWith(compareByDescending<LargeCapEquityObservation> { it.swingResearch }
+            .thenByDescending { it.intradayResearch }.thenByDescending { it.relativeFiveDayPct ?: -999.0 })
+        EquityResearchSnapshot(
+            lowRows=rows.sortedBy { it.distancePct },
+            largeCaps=result,completedDays=totalDays,firstDay=first,latestDay=latest,
+            universeCount=if(latest.isBlank()) 0 else sql.rawQuery(
+                "SELECT symbols FROM eod_days WHERE day=?",arrayOf(latest)).use { c ->
+                    if(c.moveToFirst())c.getInt(0) else 0
+                },
+            sixMonthHistoryComplete=spanComplete,
+            lastError=prefs.getString("last_eod_error","").orEmpty(),
+            memberSource=prefs.getString("members_source","CURATED_SEEDS_UNVERIFIED").orEmpty(),
+            currentPulseAtMs=if(fresh)prefs.getLong("pulse_at_ms",0L) else 0L,
+            refreshAtMs=prefs.getLong("last_eod_attempt_ms",0L)
+        )
+    }
+}

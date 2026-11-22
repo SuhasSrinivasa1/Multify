@@ -9,6 +9,8 @@ import com.multify.traderpro.data.preferences.AppSettings
 import com.multify.traderpro.data.preferences.AppPreferences
 import com.multify.traderpro.data.repository.TradingRepository
 import com.multify.traderpro.data.repository.NseSymbolRepository
+import com.multify.traderpro.data.repository.EquityEodResearchRepository
+import com.multify.traderpro.data.repository.EquityResearchSnapshot
 import com.multify.traderpro.engine.NseInstrumentMasterParser
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -28,6 +30,7 @@ data class TraderUiState(
     val settings: AppSettings = AppSettings(),
     val events: List<SignalEventEntity> = emptyList(),
     val dashboard: DashboardDto? = null,
+    val equityResearch: EquityResearchSnapshot = EquityResearchSnapshot(),
     val loading: Boolean = false,
     val credentialsConfigured: Boolean = false,
     val betaConfigured: Boolean = false,
@@ -40,19 +43,23 @@ data class TraderUiState(
 class TraderViewModel @Inject constructor(
     private val repository: TradingRepository,
     private val preferences: AppPreferences,
-    private val nseSymbols: NseSymbolRepository
+    private val nseSymbols: NseSymbolRepository,
+    private val equityEodResearch: EquityEodResearchRepository
 ) : ViewModel() {
     private val remote = MutableStateFlow(RemoteState())
+    private val equityResearch = MutableStateFlow(EquityResearchSnapshot())
 
     val uiState: StateFlow<TraderUiState> = combine(
         repository.settings,
         repository.recentEvents,
-        remote
-    ) { settings, events, r ->
+        remote,
+        equityResearch
+    ) { settings, events, r, research ->
         TraderUiState(
             settings = settings,
             events = events,
             dashboard = r.dashboard,
+            equityResearch = research,
             loading = r.loading,
             credentialsConfigured = repository.hasBrokerCredentials(),
             betaConfigured = repository.betaCredentialsConfigured(),
@@ -70,6 +77,14 @@ class TraderViewModel @Inject constructor(
         // Migrate the previous research-only ON state to OFF before the new switch
         // can authorize real Alpha CNC orders.
         viewModelScope.launch { repository.initializeWorkingRangeAutoBuyOptIn() }
+        // Screens read local NSE EOD database only. No broker or exchange HTTP request on UI refresh.
+        viewModelScope.launch {
+            while (isActive) {
+                runCatching { withContext(Dispatchers.IO) { equityEodResearch.snapshot() } }
+                    .onSuccess { equityResearch.value=it }
+                delay(60_000L)
+            }
+        }
         viewModelScope.launch {
             repository.settings.collect { settings ->
                 if (settings.brokerAuthenticated) refresh(silent = true)
@@ -90,6 +105,14 @@ class TraderViewModel @Inject constructor(
                         remote.value = remote.value.copy(dashboard = dashboard)
                     }
             }
+        }
+    }
+
+    fun refreshResearchView() {
+        viewModelScope.launch {
+            runCatching { withContext(Dispatchers.IO) { equityEodResearch.snapshot() } }
+                .onSuccess { equityResearch.value=it }
+                .onFailure { remote.value=remote.value.copy(error="Local EOD screen: ${it.userMessage()}") }
         }
     }
 
