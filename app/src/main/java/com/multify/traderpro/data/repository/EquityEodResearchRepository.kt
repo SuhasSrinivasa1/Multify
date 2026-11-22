@@ -117,7 +117,7 @@ class EquityEodResearchRepository @Inject constructor(
         /** Three-month research unlocks only with a meaningful date span and 55 validated sessions. */
         fun threeMonthCoverageComplete(totalSessions: Int, firstSession: LocalDate?, asOf: LocalDate): Boolean =
             totalSessions >= 55 && firstSession != null &&
-                !firstSession.isAfter(asOf.minusMonths(2).plusDays(14))
+                !firstSession.isAfter(asOf.minusMonths(3).plusDays(14))
         /** At least 85% of observed NSE sessions, with a 50-session per-symbol floor. */
         fun minimumThreeMonthSymbolSessions(totalSessions: Int): Int =
             kotlin.math.ceil(totalSessions * 0.85).toInt().coerceAtLeast(50)
