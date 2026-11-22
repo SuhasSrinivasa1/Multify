@@ -98,6 +98,8 @@ fun FixedLiteApp(viewModel: TraderViewModel = hiltViewModel()) {
                                     LitePage.FIXED -> "15-minute Fixed strategy"
                                     LitePage.WORKING_RANGE -> "Working Range pilot"
                                     LitePage.MANUAL -> "Intraday MIS BUY / SELL"
+                                    LitePage.LARGE_CAP -> "Nifty 100 · intraday and swing equity radar"
+                                    LitePage.SIX_MONTH_LOW -> "NSE equities · within 10% of six-month low"
                                     LitePage.AVERAGES -> "Observed Fixed outcomes"
                                     LitePage.SETTINGS -> "Accounts and controls"
                                 },
@@ -130,12 +132,14 @@ fun FixedLiteApp(viewModel: TraderViewModel = hiltViewModel()) {
                 LitePage.FIXED -> LiteFixedScreen(state, viewModel::generateFixed) { confirmBuy = it }
                 LitePage.WORKING_RANGE -> LiteRangeScreen(state)
                 LitePage.MANUAL -> LiteManualScreen(state, viewModel)
+                LitePage.LARGE_CAP -> LiteLargeCapScreen(state)
+                LitePage.SIX_MONTH_LOW -> LiteSixMonthLowScreen(state)
                 LitePage.AVERAGES -> LiteAveragesScreen(state)
                 LitePage.SETTINGS -> LiteSettingsScreen(
                     state, viewModel,
                     onEnableRequested = { confirmEnable = it },
                     onResetRequested = { confirmHaltReset = true },
-                    onExport = { export.launch("SuhasShree-v9032-diagnostics.zip") }
+                    onExport = { export.launch("SuhasShree-v9033-diagnostics.zip") }
                 )
             }
         }
