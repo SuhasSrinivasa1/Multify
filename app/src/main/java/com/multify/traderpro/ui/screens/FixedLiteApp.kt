@@ -662,7 +662,7 @@ private fun FixedRecommendationCard(
 }
 
 @Composable
-private fun LiteLargeCapScreen(state: TraderUiState) {
+internal fun LiteLargeCapScreen(state: TraderUiState) {
     val leaders = state.largeCapIntraday.take(12)
     val laggards = state.largeCapIntraday.sortedBy { it.relativeStrengthPct }.take(8)
     val swing = state.largeCapSwing.filter { it.stage != "WATCH" }.take(20)
@@ -740,7 +740,7 @@ private fun LiteLargeCapScreen(state: TraderUiState) {
 }
 
 @Composable
-private fun LiteSixMonthLowScreen(state: TraderUiState) {
+internal fun LiteSixMonthLowScreen(state: TraderUiState) {
     val status = state.sixMonthLowStatus
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
