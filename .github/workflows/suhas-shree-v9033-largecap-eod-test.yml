@@ -106,7 +106,7 @@ jobs:
           research=(root/"data/repository/EquityEodResearchRepository.kt").read_text()
           worker=(root/"worker/EquityEodRefreshWorker.kt").read_text()
           scheduler=(root/"worker/EquityEodRefreshScheduler.kt").read_text()
-          assert "NSE_BHAVCOPY" in research and "MIN_VALID_EQ_ROWS = 500" in research
+          assert "NSE_BHAVCOPY" in research and "MIN_VALID_EQ_ROWS = 1500" in research
           assert "requireAfterHours()" in research
           assert "SELECT s.symbol,MIN(s.low)" in research
           assert "NseEquitySessionCalendar.isFixedScanWindow(at)" in research
