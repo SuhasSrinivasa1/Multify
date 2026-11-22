@@ -408,7 +408,7 @@ class EquityEodResearchRepository @Inject constructor(
             val query="""SELECT s.symbol,MIN(s.low),COUNT(*),
                 (SELECT t.close FROM eod t WHERE t.symbol=s.symbol AND t.day=?) AS last_close
                 FROM eod s WHERE s.day>=? AND s.day<=? GROUP BY s.symbol
-                HAVING COUNT(*)>=? AND last_close IS NOT NULL"""
+                HAVING COUNT(*)>=CAST(? AS INTEGER) AND last_close IS NOT NULL"""
             sql.rawQuery(query,arrayOf(latest,cutoff,latest,minCount.toString())).use { c ->
                 while(c.moveToNext()) {
                     val low=c.getDouble(1)
