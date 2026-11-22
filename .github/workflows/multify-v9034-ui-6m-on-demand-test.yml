@@ -1,7 +1,7 @@
-name: Multify v9.0.34 UI Alignment & On-demand 6M Scan TEST
+name: Phayra v9.0.35 UI Alignment & On-demand 6M Scan TEST
 on:
   push:
-    branches: [v9034-multify-ui-6m-on-demand-20261122]
+    branches: [v9035-phayra-ui-6m-on-demand-20261122]
   workflow_dispatch:
 permissions:
   contents: read
@@ -117,7 +117,7 @@ jobs:
           ui=(root/"ui/screens/FixedLiteApp.kt").read_text()
           assert "LitePage.LARGE_CAP -> LargeCapResearchScreen(" in ui
           assert "LitePage.SIX_MONTH_LOW -> SixMonthLowResearchScreen(state,viewModel::scanSixMonthLowsNow)" in ui
-          assert '"Multify"' in ui
+          assert '"Phayra"' in ui
           assert "FlowRow(" in ui
           vm=(root/"ui/screens/TraderViewModel.kt").read_text()
           assert "fun scanSixMonthLowsNow()" in vm
@@ -136,24 +136,24 @@ jobs:
           assert 'if (engine == "MANUAL_HOLDING") product == "MIS" else product == "CNC"' in ownership
           ui=Path("app/src/main/java/com/multify/traderpro/ui/screens/FixedLiteApp.kt").read_text()
           assert "LitePage.MANUAL -> LiteManualScreen(state, viewModel)" in ui
-          assert '"Multify"' in ui
+          assert '"Phayra"' in ui
           assert "SELL SHORT" in ui and "manual-buy-alpha" in ui
           build=Path("app/build.gradle.kts").read_text()
-          assert "versionCode = 9034" in build
-          assert 'applicationIdSuffix = ".v9034test"' in build
+          assert "versionCode = 9035" in build
+          assert 'applicationIdSuffix = ".v9035test"' in build
           manifest=Path("app/src/main/AndroidManifest.xml").read_text()
           assert 'android:label="@string/app_name"' in manifest
           strings=Path("app/src/main/res/values/strings.xml").read_text()
-          assert '<string name="app_name">Multify</string>' in strings
+          assert '<string name="app_name">Phayra</string>' in strings
           debug=Path("app/src/debug/AndroidManifest.xml").read_text()
-          assert 'android:label="Multify"' in debug
+          assert 'android:label="Phayra"' in debug
           print(f"PASS: {len(locked)} frozen strategy/account policies unchanged; MIS product is restricted to explicit Manual long/short paths")
           PY
       - name: Backend regression tests
         run: |
           set -euo pipefail
           python -m pip install --disable-pip-version-check -r backend/requirements.txt
-          python -m pytest -q backend/tests | tee backend-tests-v9034.txt
+          python -m pytest -q backend/tests | tee backend-tests-v9035.txt
       - name: Android unit tests and TEST APK
         run: |
           set -euo pipefail
@@ -180,46 +180,46 @@ jobs:
           missing=[name for name in required if not any(name in x for x in tests)]
           assert not missing, "Required regression tests not executed: "+str(missing)
           assert total>=100 and failures==0, (total,failures)
-          pathlib.Path("android-tests-v9034.txt").write_text(f"{total} Android unit tests; {failures} failures\n")
+          pathlib.Path("android-tests-v9035.txt").write_text(f"{total} Android unit tests; {failures} failures\n")
           print(total, "Android unit tests passed")
           PY
       - name: Package, certificate, app identity and integrity verification
         run: |
           set -euo pipefail
           apk=app/build/outputs/apk/debug/app-debug.apk
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$apk" | tee signer-v9034.txt
-          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$apk" > package-v9034.txt
-          grep -F "name='com.multify.traderpro.vivoy73final.v9034test'" package-v9034.txt >/dev/null || {
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$apk" | tee signer-v9035.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$apk" > package-v9035.txt
+          grep -F "name='com.multify.traderpro.vivoy73final.v9035test'" package-v9035.txt >/dev/null || {
             echo "Refusing to package test build with installed production application ID"; exit 1;
           }
-          grep -F "Multify v9.0.34 TEST" package-v9034.txt >/dev/null || {
+          grep -F "Phayra" package-v9035.txt >/dev/null || {
             echo "Unexpected Android application label"; exit 1;
           }
-          sha256sum "$apk" | tee SHA256-v9034.txt
-          cert=$(grep -i 'Signer #1 certificate SHA-256 digest' signer-v9034.txt | head -n 1 | sed 's/.*: //' | tr -d ':' | tr '[:upper:]' '[:lower:]')
+          sha256sum "$apk" | tee SHA256-v9035.txt
+          cert=$(grep -i 'Signer #1 certificate SHA-256 digest' signer-v9035.txt | head -n 1 | sed 's/.*: //' | tr -d ':' | tr '[:upper:]' '[:lower:]')
           expected="3f72d5c24e676c712d9e7e9feaa829960bfca9cdffc9ea4da6738372824e8755"
           if [[ -f app/multify-v4-stable.jks ]]; then
             [[ "$cert" == "$expected" ]] || { echo "Unexpected stable signing certificate"; exit 1; }
-            echo "VERIFIED_STABLE_SIGNER_SEPARATE_TEST_APP_ID" | tee signer-channel-v9034.txt
+            echo "VERIFIED_STABLE_SIGNER_SEPARATE_TEST_APP_ID" | tee signer-channel-v9035.txt
           else
-            echo "EPHEMERAL_DEBUG_CERT_SEPARATE_TEST_APP_ID" | tee signer-channel-v9034.txt
+            echo "EPHEMERAL_DEBUG_CERT_SEPARATE_TEST_APP_ID" | tee signer-channel-v9035.txt
           fi
-          stat -c "APK size (bytes): %s" "$apk" | tee size-v9034.txt
+          stat -c "APK size (bytes): %s" "$apk" | tee size-v9035.txt
           echo "TEST ONLY: manual MIS trades require operator confirmation; never uninstall the live app with holdings."
       - name: Upload installable test APK and evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Multify-v9.0.34-LargeCap-EOD-TEST-APK
+          name: Phayra-v9.0.35-UI-6M-TEST-APK
           path: |
             app/build/outputs/apk/debug/app-debug.apk
-            signer-v9034.txt
-            signer-channel-v9034.txt
-            package-v9034.txt
-            SHA256-v9034.txt
-            size-v9034.txt
-            android-tests-v9034.txt
-            backend-tests-v9034.txt
+            signer-v9035.txt
+            signer-channel-v9035.txt
+            package-v9035.txt
+            SHA256-v9035.txt
+            size-v9035.txt
+            android-tests-v9035.txt
+            backend-tests-v9035.txt
             app/build/test-results/testDebugUnitTest/
           if-no-files-found: warn
           retention-days: 30

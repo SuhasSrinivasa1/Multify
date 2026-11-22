@@ -96,7 +96,7 @@ fun FixedLiteApp(viewModel: TraderViewModel = hiltViewModel()) {
                             verticalArrangement = Arrangement.spacedBy(0.dp)
                         ) {
                             Text(
-                                "Multify",
+                                "Phayra",
                                 style = MaterialTheme.typography.titleLarge,
                                 fontWeight = FontWeight.Bold,
                                 maxLines = 1,
@@ -151,7 +151,7 @@ fun FixedLiteApp(viewModel: TraderViewModel = hiltViewModel()) {
                     state, viewModel,
                     onEnableRequested = { confirmEnable = it },
                     onResetRequested = { confirmHaltReset = true },
-                    onExport = { export.launch("Multify-v9034-eod-largecap-diagnostics.zip") }
+                    onExport = { export.launch("Phayra-v9035-eod-largecap-diagnostics.zip") }
                 )
             }
         }
