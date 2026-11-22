@@ -121,6 +121,13 @@ class EquityEodResearchRepository @Inject constructor(
         /** At least 85% of observed NSE sessions, with a 50-session per-symbol floor. */
         fun minimumThreeMonthSymbolSessions(totalSessions: Int): Int =
             kotlin.math.ceil(totalSessions * 0.85).toInt().coerceAtLeast(50)
+        /** Signed distance of the latest close from a historical reference low. */
+        fun distanceFromReferenceLowPct(close: Double, referenceLow: Double): Double =
+            if (close.isFinite() && close > 0.0 && referenceLow.isFinite() && referenceLow > 0.0)
+                (close / referenceLow - 1.0) * 100.0 else Double.NaN
+        /** Include every breakdown and every close no more than 10% above the prior low. */
+        fun isWithinTenPctAboveOrBelow(distancePct: Double): Boolean =
+            distancePct.isFinite() && distancePct <= 10.000001
         fun csvCells(line: String): List<String> {
             val out = mutableListOf<String>()
             val b = StringBuilder()
@@ -494,6 +501,9 @@ class EquityEodResearchRepository @Inject constructor(
 
         fun readLowRows(cutoff: String, latestDay: String, minCount: Int, lookbackMonths: Int): List<EquityLowObservation> {
             if (latestDay.isBlank() || minCount <= 0) return emptyList()
+            // The latest EOD row supplies the current close only. It must never
+            // redefine the historical low against which that close is measured.
+            val referenceEndDay = LocalDate.parse(latestDay).minusDays(1).toString()
             val oneMonthCutoff = LocalDate.parse(latestDay).minusMonths(1).toString()
             val query = """
                 SELECT s.symbol,MIN(s.low),COUNT(*),
@@ -511,41 +521,51 @@ class EquityEodResearchRepository @Inject constructor(
             sql.rawQuery(
                 query,
                 arrayOf(
-                    latestDay, cutoff, latestDay, oneMonthCutoff, latestDay,
-                    cutoff, latestDay, minCount.toString()
+                    latestDay, cutoff, referenceEndDay, oneMonthCutoff, referenceEndDay,
+                    cutoff, referenceEndDay, minCount.toString()
                 )
             ).use { c ->
                 while (c.moveToNext()) {
                     val low = c.getDouble(1)
                     val close = c.getDouble(3)
                     val oneMonthLow = c.getDouble(5)
-                    val distance = if (low > 0.0) (close / low - 1.0) * 100.0 else Double.NaN
-                    val oneMonthDistance = if (oneMonthLow > 0.0)
-                        (close / oneMonthLow - 1.0) * 100.0 else Double.NaN
-                    if (distance.isFinite() && distance >= -0.000001 && distance <= 10.000001 &&
-                        oneMonthDistance.isFinite() && oneMonthDistance >= -0.000001) {
+                    val distance = EquityEodResearchRepository.distanceFromReferenceLowPct(close, low)
+                    val oneMonthDistance = EquityEodResearchRepository.distanceFromReferenceLowPct(close, oneMonthLow)
+                    if (EquityEodResearchRepository.isWithinTenPctAboveOrBelow(distance) &&
+                        oneMonthDistance.isFinite()) {
                         rows += EquityLowObservation(
                             symbol = c.getString(0),
                             close = close,
                             periodLow = low,
-                            distancePct = distance.coerceAtLeast(0.0),
+                            distancePct = distance,
                             tradingDays = c.getInt(2),
                             latestDate = LocalDate.parse(latestDay),
                             periodLowDate = LocalDate.parse(c.getString(4)),
                             oneMonthLow = oneMonthLow,
-                            oneMonthDistancePct = oneMonthDistance.coerceAtLeast(0.0),
+                            oneMonthDistancePct = oneMonthDistance,
                             lookbackMonths = lookbackMonths
                         )
                     }
                 }
             }
-            return rows.sortedBy { it.distancePct }
+            // Nearest to the prior low first. A breakdown is retained as a
+            // negative signed percentage; at equal distance it ranks before
+            // a stock still above the old low.
+            return rows.sortedWith(
+                compareBy<EquityLowObservation> { kotlin.math.abs(it.distancePct) }
+                    .thenBy { if (it.distancePct < 0.0) 0 else 1 }
+            )
         }
 
-        val threeMonthMinCount = EquityEodResearchRepository.minimumThreeMonthSymbolSessions(three.sessions)
+        // Latest EOD day is the price being screened, not a historical observation.
+        val threeReferenceSessions = (three.sessions - if (three.latest == latest && latest.isNotBlank()) 1 else 0)
+            .coerceAtLeast(0)
+        val sixReferenceSessions = (totalDays - if (six.latest == latest && latest.isNotBlank()) 1 else 0)
+            .coerceAtLeast(0)
+        val threeMonthMinCount = EquityEodResearchRepository.minimumThreeMonthSymbolSessions(threeReferenceSessions)
         val threeMonthRows = if (threeMonthHistoryComplete)
             readLowRows(threeCutoff.toString(), latest, threeMonthMinCount, 3) else emptyList()
-        val sixMonthMinCount = (totalDays * 0.85).toInt().coerceAtLeast(90)
+        val sixMonthMinCount = kotlin.math.ceil(sixReferenceSessions * 0.85).toInt().coerceAtLeast(90)
         val sixMonthRows = if (spanComplete)
             readLowRows(sixCutoff.toString(), latest, sixMonthMinCount, 6) else emptyList()
 
