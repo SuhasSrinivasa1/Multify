@@ -45,8 +45,9 @@ object NseBhavcopyParser {
             val high = price(highAt) ?: continue
             val low = price(lowAt) ?: continue
             val close = price(closeAt) ?: continue
-            val volume = f.getOrNull(volumeAt)?.trim()?.replace(",", "")?.toLongOrNull()
-                ?.takeIf { it >= 0L } ?: continue
+            val volumeValue = f.getOrNull(volumeAt)?.trim()?.replace(",", "")?.toDoubleOrNull()
+                ?.takeIf { it.isFinite() && it >= 0.0 && it <= Long.MAX_VALUE.toDouble() } ?: continue
+            val volume = volumeValue.toLong()
             if (high < low || high < maxOf(open, close) || low > minOf(open, close)) continue
             result[symbol] = Bar(symbol, expectedDate.toString(), open, high, low, close, volume)
         }
