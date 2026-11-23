@@ -548,6 +548,7 @@ class EquityEodResearchRepository @Inject constructor(
         val today=LocalDate.now(INDIA)
         val valData=valuationStore.snapshot()
         val capData=amfiMarketCapDataset
+        val instrumentNames=symbols.instruments().associate{it.symbol to it.companyName}
         val members=members()
         val meta=synchronized(lock) {
             db.readableDatabase.rawQuery(
@@ -598,6 +599,7 @@ class EquityEodResearchRepository @Inject constructor(
             val sec=mapped?.let{indexHistory[it]?.lastOrNull()}
                 ?.takeIf{it.day==day}
             return c.copy(
+                companyName=instrumentNames[c.symbol].orEmpty(),
                 marketCapCategory=capData.labels[c.symbol]?.category?:"UNCLASSIFIED",
                 sector=sector,
                 stockPe=pe[c.symbol],
