@@ -133,7 +133,8 @@ internal class LargeWatchLearningStore(context:Context) {
 
     fun record(day:String,symbol:String,kind:String,price:Double,
                capturedAtMs:Long,e:LargeWatchEvidence) = synchronized(lock){
-        require(kind=="SWING"||kind=="INTRADAY")
+        // UNIVERSE is the hidden daily control cohort, never a recommendation.
+        require(kind=="SWING"||kind=="INTRADAY"||kind=="UNIVERSE")
         require(price.isFinite()&&price>0 && e.eodDate.isNotBlank())
         require(day.matches(Regex("\\d{4}-\\d{2}-\\d{2}")))
         val variants=LargeWatchLearningPolicy.variants(e).joinToString("|")
