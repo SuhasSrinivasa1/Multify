@@ -8,7 +8,7 @@ import com.google.gson.Gson
 import java.time.LocalDate
 import kotlin.math.sqrt
 
-internal data class LargeWatchLearningSummary(
+data class LargeWatchLearningSummary(
     val type:String,
     val variant:String,
     val matured:Int,
@@ -154,28 +154,7 @@ internal class LargeWatchLearningStore(context:Context) {
             },SQLiteDatabase.CONFLICT_IGNORE)
     }
 
-    /**
-     * Resolve only with subsequent persisted exchange EOD closes, not synthetic
-     * target-first intrabar paths. Swing requires three future EOD sessions;
-     * intraday uses that signal day's confirmed EOD close.
-     */
-    fun matureOutcomes()=synchronized(lock){
-        data class Pending(val day:String,val symbol:String,val kind:String,val price:Double)
-        val pending=mutableListOf<Pending>()
-        db.readableDatabase.rawQuery(
-            "SELECT day,symbol,kind,ref_price FROM watch_event WHERE outcome_day IS NULL ORDER BY day,symbol LIMIT 2500",
-            null).use{c->while(c.moveToNext())pending+=Pending(c.getString(0),c.getString(1),c.getString(2),c.getDouble(3))}
-        val w=db.writableDatabase
-        for(p in pending){
-            val sql=if(p.kind=="INTRADAY")
-                "SELECT day,close FROM eod_master.eod WHERE day=? AND symbol=? LIMIT 1"
-                else "SELECT day,close FROM eod_master.eod WHERE day>? AND symbol=? ORDER BY day ASC LIMIT 3"
-            // The EOD archive is deliberately owned by another research DB; caller
-            // supplies outcomes via resolveEvent instead of cross-DB ATTACH.
-            @Suppress("UNUSED_VARIABLE") val unusedSql=sql
-        }
-    }
-
+    /** Unresolved events remain censored until the required EOD horizon matures. */
     fun unresolved():List<Triple<String,String,String>>=synchronized(lock){
         val events=mutableListOf<Triple<String,String,String>>()
         db.readableDatabase.rawQuery(
