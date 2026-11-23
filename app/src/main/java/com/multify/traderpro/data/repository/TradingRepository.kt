@@ -12746,7 +12746,7 @@ class TradingRepository @Inject constructor(
             smartOrderId = id
         ).requirePayload("GTT status ${position.symbol}")
         val updated = position.copy(
-            smartOrderStatus = payload.status.ifBlank { position.smartOrderStatus },
+            smartOrderStatus = com.multify.traderpro.engine.GttProtectionReadinessPolicy.brokerStatusOrUnverified(payload.status),
             smartOrderUpdatedAtMs = now
         )
         managedDao.updatePosition(updated)
@@ -12784,9 +12784,9 @@ class TradingRepository @Inject constructor(
                 smartOrderType = "GTT",
                 smartOrderId = position.smartOrderId
             ).requirePayload("Groww triggered GTT parent status ${position.symbol}")
-            val parentStatus = parent.status.uppercase(Locale.US)
+            val parentStatus = com.multify.traderpro.engine.GttProtectionReadinessPolicy.brokerStatusOrUnverified(parent.status)
             val confirmed = position.copy(
-                smartOrderStatus = parent.status.ifBlank { position.smartOrderStatus },
+                smartOrderStatus = parentStatus,
                 smartOrderUpdatedAtMs = now,
                 smartOrderTriggerPrice = parent.triggerPrice?.toDoubleOrNull()?.takeIf { it.isFinite() && it > 0.0 }
                     ?: position.smartOrderTriggerPrice
