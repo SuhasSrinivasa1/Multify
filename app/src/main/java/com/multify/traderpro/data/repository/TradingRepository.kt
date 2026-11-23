@@ -1186,6 +1186,7 @@ class TradingRepository @Inject constructor(
         token: String, chunk: List<String>
     ): Map<String, Double> = betaMarketRead(
         token, BetaResearchGate.Type.LIVE,
+        priority = BetaResearchGate.Priority.MARKET_DISCOVERY,
         alphaCall = { error("Fixed Beta lane may not borrow Alpha credentials") },
         betaCall = {
             apiFactory.betaGroww.ltp(bearer(token),
@@ -1205,8 +1206,14 @@ class TradingRepository @Inject constructor(
     private fun forecastUsesBeta(token: String): Boolean = secretStore.hasBetaCredentials() &&
         cachedBetaResearchToken == token && !betaSessionInvalid
 
-    private suspend fun <T> betaMarketRead(token: String, type: BetaResearchGate.Type,
-                                           alphaCall: suspend () -> T, betaCall: suspend () -> T): T {
+    private suspend fun <T> betaMarketRead(
+        token: String,
+        type: BetaResearchGate.Type,
+        priority: BetaResearchGate.Priority = if (type == BetaResearchGate.Type.LIVE)
+            BetaResearchGate.Priority.DETAIL_RESEARCH else BetaResearchGate.Priority.HISTORICAL_RESEARCH,
+        alphaCall: suspend () -> T,
+        betaCall: suspend () -> T
+    ): T {
         val tokenIsBeta = cachedBetaResearchToken == token || secretStore.getBetaAccessToken() == token
         if (tokenIsBeta || secretStore.hasBetaCredentials()) {
             if (!forecastUsesBeta(token)) {
@@ -1220,7 +1227,7 @@ class TradingRepository @Inject constructor(
         }
         val started = SystemClock.elapsedRealtime()
         return try {
-            val result = betaResearchGate.read(type, betaCall)
+            val result = betaResearchGate.read(type, priority, betaCall)
             val usage = betaResearchGate.snapshot()
             auditLogger.logAsync("BETA_API", "REQUEST_PROFILE", mapOf(
                 "account" to "BETA", "category" to type.name, "outcome" to "SUCCESS",
@@ -7124,6 +7131,7 @@ class TradingRepository @Inject constructor(
                 val exchangeSymbols = chunk.joinToString(",") { "NSE_$it" }
                 return withForecastLiveDataSlot {
                     betaMarketRead(token, BetaResearchGate.Type.LIVE,
+                        priority = BetaResearchGate.Priority.MARKET_DISCOVERY,
                         alphaCall = { apiFactory.groww.ltp(bearer(token), exchangeSymbols = exchangeSymbols)
                             .requirePayload("Market-wide discovery LTP") },
                         betaCall = { apiFactory.betaGroww.ltp(bearer(token), exchangeSymbols = exchangeSymbols)
@@ -15056,7 +15064,7 @@ class TradingRepository @Inject constructor(
         private const val BULK_MARKET_DATA_MIN_GAP_MS = 210L
         private const val BULK_MARKET_DATA_429_COOLDOWN_MS = 1_500L
         private const val BROKER_INVENTORY_REFRESH_MS = 5_000L
-        private const val EMPTY_PORTFOLIO_BROKER_RECHECK_MS = 45_000L
+        private const val EMPTY_PORTFOLIO_BROKER_RECHECK_MS = 180_000L
         private const val ACTIVE_GTT_REFRESH_MS = 30_000L
         private const val ACTIVE_GTT_PAGE_SIZE = 50
         private const val MAX_ACTIVE_GTT_PAGES = 20
