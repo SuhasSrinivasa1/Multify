@@ -177,17 +177,23 @@ class EquityEodResearchRepository @Inject constructor(
     }
 
     private class Store(context: Context) : SQLiteOpenHelper(
-        context, "suhas_shree_eod_research_v1.db", null, 1
+        context, "suhas_shree_eod_research_v1.db", null, 2
     ) {
         override fun onCreate(db: SQLiteDatabase) {
-            db.execSQL("CREATE TABLE eod(day TEXT NOT NULL, symbol TEXT NOT NULL, low REAL NOT NULL, close REAL NOT NULL, volume INTEGER NOT NULL, PRIMARY KEY(day,symbol))")
+            db.execSQL("CREATE TABLE eod(day TEXT NOT NULL, symbol TEXT NOT NULL, low REAL NOT NULL, close REAL NOT NULL, volume INTEGER NOT NULL, open REAL, high REAL, PRIMARY KEY(day,symbol))")
             db.execSQL("CREATE INDEX idx_eod_symbol_day ON eod(symbol,day)")
             db.execSQL("CREATE TABLE eod_days(day TEXT PRIMARY KEY, symbols INTEGER NOT NULL, updated_ms INTEGER NOT NULL)")
             db.execSQL("CREATE TABLE attempts(day TEXT PRIMARY KEY, attempt_day TEXT NOT NULL, failure TEXT NOT NULL)")
             db.execSQL("CREATE TABLE members(symbol TEXT PRIMARY KEY, sector TEXT NOT NULL)")
         }
-        override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) =
-            error("EOD research migration must be explicit")
+        override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+            // Preserve all existing 3M/6M history, membership and broker-independent
+            // research state. Old rows retain NULL for OHLC until after-hours backfill.
+            if(oldVersion==1 && newVersion==2) {
+                db.execSQL("ALTER TABLE eod ADD COLUMN open REAL")
+                db.execSQL("ALTER TABLE eod ADD COLUMN high REAL")
+            } else error("Unsupported EOD research database upgrade $oldVersion to $newVersion")
+        }
     }
 
     private val db = Store(context)
@@ -275,13 +281,15 @@ class EquityEodResearchRepository @Inject constructor(
                 val reader = BufferedReader(InputStreamReader(stream, Charsets.UTF_8))
                 val headings = csvCells(reader.readLine() ?: error("NSE_BHAVCOPY_HEADER_EMPTY"))
                     .map { it.removePrefix("\uFEFF").trim() }
-                val indices = listOf("TckrSymb", "SctySrs", "LwPric", "ClsPric", "TtlTradgVol")
+                val indices = listOf("TckrSymb", "SctySrs", "OpnPric", "HghPric", "LwPric", "ClsPric", "TtlTradgVol")
                     .associateWith { field ->
                         headings.indexOf(field).takeIf { it >= 0 }
                             ?: error("NSE_BHAVCOPY_MISSING_COLUMN_$field")
                     }
                 val sym = indices.getValue("TckrSymb")
                 val series = indices.getValue("SctySrs")
+                val open = indices.getValue("OpnPric")
+                val high = indices.getValue("HghPric")
                 val low = indices.getValue("LwPric")
                 val close = indices.getValue("ClsPric")
                 val vol = indices.getValue("TtlTradgVol")
@@ -292,16 +300,18 @@ class EquityEodResearchRepository @Inject constructor(
                     read++
                     check(read <= MAX_ARCHIVE_ROWS) { "NSE_BHAVCOPY_TOO_MANY_ROWS" }
                     val values = csvCells(line)
-                    if (values.size <= maxOf(sym,series,low,close,vol)) continue
+                    if (values.size <= maxOf(sym,series,open,high,low,close,vol)) continue
                     if (values[series] != "EQ") continue
                     val symbol = values[sym].uppercase(Locale.US)
                     if (!SYMBOL_REGEX.matches(symbol)) continue
+                    val o = values[open].toDoubleOrNull() ?: continue
+                    val h = values[high].toDoubleOrNull() ?: continue
                     val l = values[low].toDoubleOrNull() ?: continue
                     val c = values[close].toDoubleOrNull() ?: continue
                     val v = values[vol].toLongOrNull() ?: 0L
-                    if (!l.isFinite() || !c.isFinite() || l <= 0.0 || c < l ||
-                        v < 0L) continue
-                    map[symbol] = EquityEodBar(date, symbol, l, c, v)
+                    if (!l.isFinite() || !c.isFinite() || !o.isFinite() || !h.isFinite() ||
+                        l <= 0.0 || o < l || h < maxOf(o,c) || c < l || v < 0L) continue
+                    map[symbol] = EquityEodBar(date, symbol, l, c, v, open=o, high=h)
                 }
                 check(map.size >= MIN_VALID_EQ_ROWS) { "NSE_BHAVCOPY_INCOMPLETE_EQ_${map.size}" }
                 map.values.toList()
@@ -316,6 +326,8 @@ class EquityEodResearchRepository @Inject constructor(
                     sql.insertOrThrow("eod", null, ContentValues().apply {
                         put("day",bar.date.toString());put("symbol",bar.symbol)
                         put("low",bar.low);put("close",bar.close);put("volume",bar.volume)
+                        bar.open?.let{put("open",it)}
+                        bar.high?.let{put("high",it)}
                     })
                 }
                 sql.insertWithOnConflict("eod_days", null, ContentValues().apply {
