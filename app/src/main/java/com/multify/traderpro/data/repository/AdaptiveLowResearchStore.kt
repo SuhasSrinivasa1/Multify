@@ -192,7 +192,7 @@ internal class AdaptiveLowResearchStore(context:Context) {
             arrayOf(p.day,p.months.toString(),p.symbol))
     }
 
-    fun learning(months:Int):List<AdaptiveLowResearchSummary>=synchronized(lock) {
+    fun learning(months:Int):List<AdaptiveLowResearchSummary> = synchronized(lock) {
         data class E(val day:String,val vs:Set<String>,val hit:Boolean)
         val all=mutableListOf<E>()
         store.readableDatabase.rawQuery(
