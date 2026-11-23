@@ -9,7 +9,7 @@ class BetaRecoveryStatePolicyTest {
     }
     @Test fun incidentHistoryRestoresOnlyCurrentHourAndRejectsFutureTimestamps() {
         val now = 10_000_000L
-        val raw = "${now - 3_000_000},${now - 10_000},${now - 1},${now + 1}"
+        val raw = "${now - 4_000_000},${now - 10_000},${now - 1},${now + 1}"
         assertEquals(listOf(now - 10_000, now - 1), BetaRecoveryStatePolicy.parseRecentIncidents(raw, now))
     }
     @Test fun rollingMinuteAdmissionsRestoreAndExpireAtSixtySeconds() {
