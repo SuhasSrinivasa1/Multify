@@ -34,13 +34,13 @@ The wire log contains seven actual HTTP 429 responses: five Alpha and two Beta. 
 
 | IST | Account | Endpoint | Same-account LIVE_DATA requests in preceding 60s | Multify cooldown |
 |---|---|---|---:|---:|
-| 11:30:08 | Alpha | LTP | 35 | 90 sec |
+| 11:30:08 | Alpha | LTP | 36 | 90 sec |
 | 11:35:03 | Beta | LTP | 15 | 90 sec |
-| 11:36:23 | Alpha | LTP | 55 | 5 min |
-| 11:45:02 | Alpha | LTP | 10 | 15 min |
-| 11:46:59 | Beta | LTP | 8 | 5 min |
-| 12:02:05 | Alpha | LTP | 6 | 60 min |
-| 13:08:06 | Alpha | Quote | 14 | 90 sec |
+| 11:36:23 | Alpha | LTP | 56 | 5 min |
+| 11:45:02 | Alpha | LTP | 11 | 15 min |
+| 11:46:58 | Beta | LTP | 8 | 5 min |
+| 12:02:04 | Alpha | LTP | 6 | 60 min |
+| 13:08:05 | Alpha | Quote | 14 | 90 sec |
 
 Counts are reconstructed from actual wire-start timestamps, not logical/suppressed attempts. They are below Groww's published Live Data ceiling, but do not prove a hidden per-endpoint, per-UCC, IP or concurrency limit. External traffic and undocumented provider behaviour remain possible. Do not raise local request budgets based on these logs.
 
