@@ -14,7 +14,9 @@ object MisIntradayLongPolicy {
     const val STOP_PENDING = "MIS_LONG_STOP_PENDING"
     const val STOP_VERIFIED = "MIS_LONG_SL_M"
     const val EXIT_PENDING = "MIS_LONG_EXIT_PENDING"
-    const val HARD_STOP_LOSS_PCT = HardStopLossPolicy.MAX_LOSS_PCT
+    // MIS is an intraday/manual product with its own unchanged -1% stop.
+    // The common app-owned CNC stop is the separately approved -2%.
+    const val HARD_STOP_LOSS_PCT = 1.0
     private val IST = ZoneId.of("Asia/Kolkata")
     private val ENTRY_CUTOFF = LocalTime.of(14, 30)
     private val EXIT_TIME = LocalTime.of(14, 55)
@@ -37,7 +39,7 @@ object MisIntradayLongPolicy {
         require(entry.isFinite() && entry > 0)
         if (workingRange) return WorkingRangeExitPolicy.stopPrice(entry)
         val gain = SteppedTrailingPolicy.stopGainPctForHighWater(entry, high)
-        return if (gain == null) HardStopLossPolicy.stopPrice(entry)
+        return if (gain == null) entry * (1.0 - HARD_STOP_LOSS_PCT / 100.0)
         else SteppedTrailingPolicy.stopPrice(entry, gain)
     }
 
