@@ -1,13 +1,19 @@
 package com.multify.traderpro.data.network
 
+import android.content.Context
 import android.os.SystemClock
+import dagger.hilt.android.qualifiers.ApplicationContext
 import com.multify.traderpro.data.logging.AuditLogger
+import com.multify.traderpro.engine.BetaLtpAdaptivePacingPolicy
+import com.multify.traderpro.engine.BetaRecoveryStatePolicy
 import com.multify.traderpro.engine.DualMinuteAdmissionPolicy
 import com.multify.traderpro.engine.FixedDualAccountPolicy
 import com.multify.traderpro.engine.GrowwRecoveryPolicy
 import com.multify.traderpro.engine.GrowwRetryAfterPolicy
-import com.multify.traderpro.engine.LtpAdaptivePacingPolicy
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import retrofit2.HttpException
@@ -25,9 +31,14 @@ import javax.inject.Singleton
  */
 @Singleton
 class BetaResearchGate @Inject constructor(
+    @ApplicationContext context: Context,
     private val auditLogger: AuditLogger
 ) {
+    private val recoveryPreferences = context.getSharedPreferences("groww_beta_rate_state_v1", Context.MODE_PRIVATE)
     enum class Type { LIVE, HISTORICAL }
+    enum class Priority(val rank: Int) {
+        MARKET_DISCOVERY(0), DETAIL_RESEARCH(10), HISTORICAL_RESEARCH(20)
+    }
     data class UsageSnapshot(
         val liveRequests: Long, val historicalRequests: Long,
         val liveFailures: Long, val historicalFailures: Long,
@@ -44,7 +55,7 @@ class BetaResearchGate @Inject constructor(
         val cooldownRemainingMs: Long = 0L,
         val halfOpenProbeInFlight: Boolean = false,
         val rateLimitResponses: Long = 0L,
-        val activeGapMs: Long = LtpAdaptivePacingPolicy.START_GAP_MS,
+        val activeGapMs: Long = BetaLtpAdaptivePacingPolicy.START_GAP_MS,
         val fixedMinuteBucket: Long = Long.MIN_VALUE,
         val fixedMinuteUsed: Int = 0,
         val fixedMinuteRemaining: Int = FixedDualAccountPolicy.BETA_LIVE_PER_MINUTE,
@@ -53,6 +64,7 @@ class BetaResearchGate @Inject constructor(
     private data class Window(
         val second: ArrayDeque<Long> = ArrayDeque(),
         val minute: ArrayDeque<Long> = ArrayDeque(),
+        val admissionTimesEpochMs: ArrayDeque<Long> = ArrayDeque(),
         val rateLimitIncidents: ArrayDeque<Long> = ArrayDeque(),
         var cooldownUntil: Long = 0L,
         var lastGrantedAt: Long = 0L,
@@ -63,6 +75,7 @@ class BetaResearchGate @Inject constructor(
     )
     private val lock = Mutex()
     private val historicalInFlight = Mutex()
+    private val livePriorityQueue = BetaPriorityPermitQueue()
     private val windows = Type.values().associateWith { Window() }
     // Conservative per-endpoint limits observed necessary after 429s. Groww
     // documents 300 LIVE category requests/min per account; that is not a
@@ -71,7 +84,9 @@ class BetaResearchGate @Inject constructor(
     private val liveMinute = FixedDualAccountPolicy.BETA_LIVE_PER_MINUTE
     private val histSec = 1
     private val histMinute = FixedDualAccountPolicy.BETA_HISTORICAL_PER_MINUTE
-    private var livePace = LtpAdaptivePacingPolicy.State(LtpAdaptivePacingPolicy.START_GAP_MS, SystemClock.elapsedRealtime())
+    private var livePace = BetaLtpAdaptivePacingPolicy.State(
+        BetaLtpAdaptivePacingPolicy.START_GAP_MS, SystemClock.elapsedRealtime()
+    )
 
     private val liveRequests = AtomicLong()
     private val historicalRequests = AtomicLong()
@@ -85,9 +100,65 @@ class BetaResearchGate @Inject constructor(
     private val livePermitWaitMs = AtomicLong()
     private val historicalPermitWaitMs = AtomicLong()
 
-    suspend fun <T> read(type: Type, block: suspend () -> T): T =
-        if (type == Type.HISTORICAL) historicalInFlight.withLock { readRateLimited(type, block) }
-        else readRateLimited(type, block)
+    init {
+        val wallNow = System.currentTimeMillis()
+        val elapsedNow = SystemClock.elapsedRealtime()
+        Type.values().forEach { type ->
+            val window = windows.getValue(type)
+            val remaining = BetaRecoveryStatePolicy.remainingCooldownMs(
+                recoveryPreferences.getLong(cooldownKey(type), 0L), wallNow
+            )
+            window.cooldownUntil = elapsedNow + remaining
+            window.probeRequired = recoveryPreferences.getBoolean(probeKey(type), false)
+            BetaRecoveryStatePolicy.parseRecentIncidents(
+                recoveryPreferences.getString(incidentsKey(type), null), wallNow
+            ).forEach { window.rateLimitIncidents.addLast(it) }
+            BetaRecoveryStatePolicy.parseRecentAdmissions(
+                recoveryPreferences.getString(admissionsKey(type), null), wallNow
+            ).forEach { admittedAt ->
+                val age = (wallNow - admittedAt).coerceAtLeast(0L)
+                val elapsedAt = (elapsedNow - age).coerceAtLeast(0L)
+                window.admissionTimesEpochMs.addLast(admittedAt)
+                window.minute.addLast(elapsedAt)
+                if (age < 1_000L) window.second.addLast(elapsedAt)
+                window.lastGrantedAt = maxOf(window.lastGrantedAt, elapsedAt)
+            }
+            val bucket = DualMinuteAdmissionPolicy.minuteId(wallNow)
+            window.calendar = DualMinuteAdmissionPolicy.CalendarState(
+                bucket, window.admissionTimesEpochMs.count {
+                    DualMinuteAdmissionPolicy.minuteId(it) == bucket
+                }
+            )
+        }
+        val restoredGap = recoveryPreferences.getLong(LIVE_GAP_KEY, BetaLtpAdaptivePacingPolicy.START_GAP_MS)
+            .coerceIn(BetaLtpAdaptivePacingPolicy.MIN_GAP_MS, BetaLtpAdaptivePacingPolicy.MAX_GAP_MS)
+        livePace = BetaLtpAdaptivePacingPolicy.State(restoredGap, elapsedNow)
+        updateLiveStatus(elapsedNow, windows.getValue(Type.LIVE))
+        auditLogger.logAsync("API_RATE_LIMIT", "BETA_RECOVERY_STATE_RESTORED", mapOf(
+            "account" to "BETA",
+            "live_cooldown_remaining_ms" to (windows.getValue(Type.LIVE).cooldownUntil - elapsedNow).coerceAtLeast(0L),
+            "historical_cooldown_remaining_ms" to (windows.getValue(Type.HISTORICAL).cooldownUntil - elapsedNow).coerceAtLeast(0L),
+            "live_adaptive_gap_ms" to livePace.gapMs,
+            "live_recent_admissions_restored" to windows.getValue(Type.LIVE).minute.size,
+            "historical_recent_admissions_restored" to windows.getValue(Type.HISTORICAL).minute.size,
+            "beta_read_only" to true
+        ))
+    }
+
+    suspend fun <T> read(
+        type: Type,
+        priority: Priority = if (type == Type.LIVE) Priority.DETAIL_RESEARCH else Priority.HISTORICAL_RESEARCH,
+        block: suspend () -> T
+    ): T {
+        if (type == Type.HISTORICAL) return historicalInFlight.withLock {
+            readRateLimited(type, priority, 0L, block)
+        }
+        val queuedAt = SystemClock.elapsedRealtime()
+        return livePriorityQueue.withPermit(priority.rank) {
+            readRateLimited(type, priority,
+                (SystemClock.elapsedRealtime() - queuedAt).coerceAtLeast(0L), block)
+        }
+    }
 
     private fun updateLiveStatus(now: Long, w: Window) {
         liveStatusCapturedAtElapsedMs = now
@@ -107,10 +178,13 @@ class BetaResearchGate @Inject constructor(
         )
     }
 
-    private suspend fun <T> readRateLimited(type: Type, block: suspend () -> T): T {
+    private suspend fun <T> readRateLimited(
+        type: Type, priority: Priority, priorityQueueWaitMs: Long, block: suspend () -> T
+    ): T {
         var totalWaitMs = 0L
         var waitIterations = 0
         while (true) {
+            var reservationMade = false
             val waitMs = lock.withLock {
                 val w = windows.getValue(type)
                 val now = SystemClock.elapsedRealtime()
@@ -119,6 +193,8 @@ class BetaResearchGate @Inject constructor(
                 val perSecond = if (type == Type.LIVE) liveSec else histSec
                 val perMinute = if (type == Type.LIVE) liveMinute else histMinute
                 val wallNow = System.currentTimeMillis()
+                while (w.admissionTimesEpochMs.isNotEmpty() &&
+                    w.admissionTimesEpochMs.first() <= wallNow - 60_000L) w.admissionTimesEpochMs.removeFirst()
                 w.calendar = DualMinuteAdmissionPolicy.normalize(w.calendar, wallNow)
                 val fixedMinuteWait = DualMinuteAdmissionPolicy.calendarWaitMs(
                     w.calendar, wallNow, perMinute)
@@ -138,10 +214,26 @@ class BetaResearchGate @Inject constructor(
                     w.minute.addLast(now)
                     w.lastGrantedAt = now
                     w.calendar = DualMinuteAdmissionPolicy.reserve(w.calendar, wallNow)
+                    w.admissionTimesEpochMs.addLast(wallNow)
                     if (w.probeRequired) w.probeInFlight = true
+                    reservationMade = true
                 }
                 if (type == Type.LIVE) updateLiveStatus(now, w)
                 wait
+            }
+            if (reservationMade) {
+                if (!persistRecoveryState(type, SystemClock.elapsedRealtime())) {
+                    lock.withLock {
+                        val w = windows.getValue(type)
+                        w.probeInFlight = false
+                        if (w.probeRequired) w.cooldownUntil = maxOf(
+                            w.cooldownUntil, SystemClock.elapsedRealtime() + 10_000L
+                        )
+                        if (type == Type.LIVE) updateLiveStatus(SystemClock.elapsedRealtime(), w)
+                    }
+                    throw IOException("BETA_RECOVERY_STATE_PERSIST_FAILED")
+                }
+                break
             }
             if (waitMs <= 0L) break
             // Waiting for a Beta-only cooldown cannot stall Fixed's official scan.
@@ -158,17 +250,20 @@ class BetaResearchGate @Inject constructor(
             waitIterations++
             delay(sleepMs)
         }
-        if (totalWaitMs > 0L) {
+        val combinedWaitMs = totalWaitMs + priorityQueueWaitMs
+        if (combinedWaitMs > 0L) {
             if (type == Type.LIVE) {
                 livePermitWaitRequests.incrementAndGet()
-                livePermitWaitMs.addAndGet(totalWaitMs)
+                livePermitWaitMs.addAndGet(combinedWaitMs)
             } else {
                 historicalPermitWaitRequests.incrementAndGet()
-                historicalPermitWaitMs.addAndGet(totalWaitMs)
+                historicalPermitWaitMs.addAndGet(combinedWaitMs)
             }
             auditLogger.logAsync("API_RATE_LIMIT", "BETA_CLIENT_GOVERNOR_WAIT", mapOf(
                 "account" to "BETA", "category" to if (type == Type.LIVE) "LIVE_DATA" else "HISTORICAL",
-                "wait_ms" to totalWaitMs, "wait_iterations" to waitIterations,
+                "priority" to priority.name, "wait_ms" to combinedWaitMs,
+                "pacing_wait_ms" to totalWaitMs, "priority_queue_wait_ms" to priorityQueueWaitMs,
+                "wait_iterations" to waitIterations,
                 "local_per_second_limit" to if (type == Type.LIVE) liveSec else histSec,
                 "local_per_minute_limit" to if (type == Type.LIVE) liveMinute else histMinute,
                 "wait_is_local_not_broker_429" to true,
@@ -179,65 +274,84 @@ class BetaResearchGate @Inject constructor(
         if (type == Type.LIVE) liveRequests.incrementAndGet() else historicalRequests.incrementAndGet()
         return try {
             val result = block()
+            var persistAfterSuccess = false
             lock.withLock {
                 val w = windows.getValue(type)
-                if (w.probeInFlight) {
-                    w.probeInFlight = false
-                    w.probeRequired = false
-                }
+                val now = SystemClock.elapsedRealtime()
+                val wasProbe = w.probeInFlight
+                if (wasProbe) { w.probeInFlight = false; w.probeRequired = false }
                 if (type == Type.LIVE) {
-                    livePace = LtpAdaptivePacingPolicy.onSuccess(livePace, SystemClock.elapsedRealtime())
-                    updateLiveStatus(SystemClock.elapsedRealtime(), w)
-                }
+                    val priorPace = livePace
+                    livePace = BetaLtpAdaptivePacingPolicy.onSuccess(livePace, now)
+                    persistAfterSuccess = wasProbe || priorPace != livePace
+                    updateLiveStatus(now, w)
+                } else if (wasProbe) persistAfterSuccess = true
             }
+            if (persistAfterSuccess) persistRecoveryState(type, SystemClock.elapsedRealtime())
             result
         } catch (failure: Throwable) {
             if (type == Type.LIVE) liveFailures.incrementAndGet() else historicalFailures.incrementAndGet()
             var appliedCooldownMs = 0L
             var retryAfterRaw: String? = null
             var incidentCount = 0
-            lock.withLock {
+            var endpointPath = ""
+            var cooldownUntilWallMs = 0L
+            var persistAfterFailure = false
+            withContext(NonCancellable) {
+                lock.withLock {
                 val w = windows.getValue(type)
                 val now = SystemClock.elapsedRealtime()
+                val wallNow = System.currentTimeMillis()
+                var persistState = false
                 if (failure is HttpException && failure.code() == 429) {
+                    endpointPath = failure.response()?.raw()?.request?.url?.encodedPath.orEmpty()
                     if (type == Type.LIVE) {
                         liveRateLimits.incrementAndGet()
-                        livePace = LtpAdaptivePacingPolicy.on429(livePace, now)
+                        livePace = BetaLtpAdaptivePacingPolicy.on429(livePace, now)
                     } else historicalRateLimits.incrementAndGet()
-                    while (w.rateLimitIncidents.isNotEmpty() && w.rateLimitIncidents.first() <= now - 3_600_000L)
+                    while (w.rateLimitIncidents.isNotEmpty() &&
+                        w.rateLimitIncidents.first() <= wallNow - BetaRecoveryStatePolicy.INCIDENT_WINDOW_MS)
                         w.rateLimitIncidents.removeFirst()
-                    // Multiple replies in the same 5-second window are ONE incident.
-                    if (w.rateLimitIncidents.lastOrNull()?.let { now - it < 5_000L } != true)
-                        w.rateLimitIncidents.addLast(now)
+                    if (w.rateLimitIncidents.lastOrNull()?.let { wallNow - it < 5_000L } != true)
+                        w.rateLimitIncidents.addLast(wallNow)
                     incidentCount = w.rateLimitIncidents.size
                     retryAfterRaw = failure.response()?.headers()?.get("Retry-After")
-                    val retryAfter = GrowwRetryAfterPolicy.retryAfterMs(
-                        retryAfterRaw, System.currentTimeMillis()
-                    )
+                    val retryAfter = GrowwRetryAfterPolicy.retryAfterMs(retryAfterRaw, wallNow)
                     appliedCooldownMs = GrowwRecoveryPolicy.cooldownMs(incidentCount, retryAfter)
                     w.cooldownUntil = maxOf(w.cooldownUntil, now + appliedCooldownMs)
                     w.probeRequired = true
+                    persistState = true
                 } else if (w.probeInFlight) {
-                    // A failed probe does not release a burst of queued Beta calls.
                     w.cooldownUntil = maxOf(w.cooldownUntil, now + 10_000L)
                     w.probeRequired = true
+                    persistState = true
                 }
                 w.probeInFlight = false
+                if (persistState) {
+                    persistAfterFailure = true
+                    cooldownUntilWallMs = BetaRecoveryStatePolicy.cooldownUntilEpochMs(
+                        wallNow, (w.cooldownUntil - now).coerceAtLeast(0L))
+                }
                 if (type == Type.LIVE) updateLiveStatus(now, w)
+                }
+                if (persistAfterFailure) persistRecoveryState(type, SystemClock.elapsedRealtime())
             }
             if (failure is HttpException && failure.code() == 429) {
                 val category = if (type == Type.LIVE) "LIVE_DATA" else "HISTORICAL"
                 val wire = GrowwHttpTraceLedger.counters("BETA", category)
                 auditLogger.logAsync("API_RATE_LIMIT", "BETA_HTTP_429", mapOf(
-                    "account" to "BETA", "category" to category,
+                    "account" to "BETA", "category" to category, "endpoint" to endpointPath,
                     "http_status" to 429, "retry_after_raw" to retryAfterRaw,
                     "applied_local_cooldown_ms" to appliedCooldownMs,
+                    "cooldown_until_epoch_ms" to cooldownUntilWallMs,
                     "incident_count_last_hour" to incidentCount,
+                    "active_gap_ms" to if (type == Type.LIVE) livePace.gapMs else 0L,
+                    "local_per_second_limit" to if (type == Type.LIVE) liveSec else histSec,
+                    "local_per_minute_limit" to if (type == Type.LIVE) liveMinute else histMinute,
                     "category_wire_requests_total" to wire.requests,
                     "category_wire_429_total" to wire.rateLimits,
                     "broker_category_limit_proven" to false,
-                    "beta_read_only" to true,
-                    "alpha_cooldown_independent" to true
+                    "beta_read_only" to true, "alpha_cooldown_independent" to true
                 ))
             }
             throw failure
@@ -245,6 +359,31 @@ class BetaResearchGate @Inject constructor(
             lastLatencyMs.set((SystemClock.elapsedRealtime() - started).coerceAtLeast(0L))
         }
     }
+
+    private suspend fun persistRecoveryState(type: Type, nowElapsedMs: Long): Boolean {
+        val wallNow = System.currentTimeMillis()
+        val window = windows.getValue(type)
+        val remaining = (window.cooldownUntil - nowElapsedMs).coerceAtLeast(0L)
+        val editor = recoveryPreferences.edit()
+            .putLong(cooldownKey(type), BetaRecoveryStatePolicy.cooldownUntilEpochMs(wallNow, remaining))
+            .putBoolean(probeKey(type), window.probeRequired)
+            .putString(incidentsKey(type), BetaRecoveryStatePolicy.serializeIncidents(window.rateLimitIncidents, wallNow))
+            .putString(admissionsKey(type), BetaRecoveryStatePolicy.serializeAdmissions(window.admissionTimesEpochMs, wallNow))
+        if (type == Type.LIVE) editor.putLong(LIVE_GAP_KEY, livePace.gapMs)
+        val started = SystemClock.elapsedRealtime()
+        val committed = withContext(Dispatchers.IO) { editor.commit() }
+        val persistMs = (SystemClock.elapsedRealtime() - started).coerceAtLeast(0L)
+        if (!committed || persistMs >= 50L) auditLogger.logAsync("API_RATE_LIMIT",
+            if (committed) "BETA_RECOVERY_PERSIST_SLOW" else "BETA_RECOVERY_STATE_PERSIST_FAILED",
+            mapOf("account" to "BETA", "category" to type.name,
+                "cooldown_remaining_ms" to remaining, "admission_count_last_minute" to window.minute.size,
+                "persistence_elapsed_ms" to persistMs, "persist_succeeded" to committed))
+        return committed
+    }
+    private fun cooldownKey(type: Type) = "cooldown_until_epoch_${type.name}"
+    private fun probeKey(type: Type) = "probe_required_${type.name}"
+    private fun incidentsKey(type: Type) = "incidents_epoch_${type.name}"
+    private fun admissionsKey(type: Type) = "admissions_epoch_${type.name}"
 
     /**
      * Non-reserving advisory headroom for the *optional* deterministic Beta
@@ -288,6 +427,7 @@ class BetaResearchGate @Inject constructor(
     fun configuredHistoricalLimitPerMinute() = histMinute
 
     companion object {
+        private const val LIVE_GAP_KEY = "live_adaptive_gap_ms"
         @Volatile private var liveStatusSnapshot = LiveStatus()
         @Volatile private var liveStatusCapturedAtElapsedMs = 0L
         fun latestLiveStatus(): LiveStatus {
