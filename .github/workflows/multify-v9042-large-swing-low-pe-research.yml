@@ -7,7 +7,7 @@ on:
   pull_request:
     branches:
       - main
-      - v9042-fixed-safety-reliability-20261123
+      - v9041-fixed-safety-reliability-20261123
   workflow_dispatch:
 
 permissions:
