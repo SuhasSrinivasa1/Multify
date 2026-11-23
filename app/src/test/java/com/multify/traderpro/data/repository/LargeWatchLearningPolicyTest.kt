@@ -5,7 +5,7 @@ import org.junit.Test
 
 class LargeWatchLearningPolicyTest {
     private fun evidence(nifty:Double?,sector:Double?,relative:Double?):LargeWatchEvidence {
-        val m=LargeWatchFeaturePolicy.METRICS.associateWith<String,Double?>{null}.toMutableMap()
+        val m=LargeWatchFeaturePolicy.METRICS.associateWith { null as Double? }.toMutableMap()
         m["nifty_eod_move_pct"]=nifty
         m["sector_eod_move_pct"]=sector
         m["sector_5d_move_pct"]=relative
