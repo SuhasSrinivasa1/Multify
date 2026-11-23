@@ -9,7 +9,11 @@ data class EquityEodBar(
     val symbol: String,
     val low: Double,
     val close: Double,
-    val volume: Long
+    val volume: Long,
+    // Added as optional fields: preserve original EOD rows and existing callers.
+    // Missing OHLC stays unknown until explicitly backfilled after NSE close.
+    val open: Double? = null,
+    val high: Double? = null
 )
 data class SixMonthLowObservation(
     val symbol: String,
