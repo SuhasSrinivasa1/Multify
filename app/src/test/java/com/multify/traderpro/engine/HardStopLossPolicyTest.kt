@@ -6,19 +6,19 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class HardStopLossPolicyTest {
-    @Test fun commonStopIsOnePercentBelowActualFill() {
-        assertEquals(1.0, HardStopLossPolicy.MAX_LOSS_PCT, 0.0)
-        assertEquals(99.0, HardStopLossPolicy.stopPrice(100.0), 0.0001)
-        assertEquals(247.5, HardStopLossPolicy.stopPrice(250.0), 0.0001)
-        assertEquals(123.0174, HardStopLossPolicy.stopPrice(124.26), 0.0001)
-        assertEquals(1.0, ReleaseIntegrityManifest.HARD_STOP_LOSS_PCT, 0.0)
+    @Test fun commonStopIsTwoPercentBelowActualFill() {
+        assertEquals(2.0, HardStopLossPolicy.MAX_LOSS_PCT, 0.0)
+        assertEquals(98.0, HardStopLossPolicy.stopPrice(100.0), 0.0001)
+        assertEquals(245.0, HardStopLossPolicy.stopPrice(250.0), 0.0001)
+        assertEquals(121.7748, HardStopLossPolicy.stopPrice(124.26), 0.0001)
+        assertEquals(2.0, ReleaseIntegrityManifest.HARD_STOP_LOSS_PCT, 0.0)
         assertTrue(ReleaseIntegrityManifest.verifyRuntimeConstants())
     }
 
-    @Test fun breachOccursAtOrBelowOnePercentLoss() {
-        assertFalse(HardStopLossPolicy.breached(100.0, 99.01))
-        assertTrue(HardStopLossPolicy.breached(100.0, 99.0))
-        assertTrue(HardStopLossPolicy.breached(100.0, 98.99))
+    @Test fun breachOccursAtOrBelowTwoPercentLoss() {
+        assertFalse(HardStopLossPolicy.breached(100.0, 98.01))
+        assertTrue(HardStopLossPolicy.breached(100.0, 98.0))
+        assertTrue(HardStopLossPolicy.breached(100.0, 97.99))
         assertFalse(HardStopLossPolicy.breached(100.0, Double.NaN))
     }
 
