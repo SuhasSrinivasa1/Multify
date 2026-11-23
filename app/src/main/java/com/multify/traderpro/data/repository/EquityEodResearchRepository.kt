@@ -71,7 +71,17 @@ data class EquityResearchSnapshot(
     val officialPeDate: String = "",
     val officialPeSymbols: Int = 0,
     val industryClassifiedSymbols: Int = 0,
-    val fullIndustryPeCoverage: Boolean = false
+    val fullIndustryPeCoverage: Boolean = false,
+    val largeWatchEvidence: Map<String,LargeWatchEvidence> = emptyMap(),
+    val largeWatchLearning: List<LargeWatchLearningSummary> = emptyList(),
+    val niftyContextDay: String = "",
+    val niftyEodMovePct: Double? = null,
+    val niftyPreviousEodMovePct: Double? = null,
+    val niftyFiveDayMovePct: Double? = null,
+    val niftyEodRegime: String = "UNKNOWN",
+    val niftyIndexPe: Double? = null,
+    val niftyIndexPb: Double? = null,
+    val liveLargeCapBreadthProxyPct: Double? = null
 )
 data class EquityEodRefreshProgress(
     val importedDays: Int,
@@ -103,6 +113,7 @@ class EquityEodResearchRepository @Inject constructor(
         private const val MAX_BARS_PER_SYMBOL = 200
         private const val SOURCE_URL = "https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_%s_F_0000.csv.zip"
         private const val NIFTY100_URL = "https://www.niftyindices.com/IndexConstituent/ind_nifty100list.csv"
+        private const val NSE_INDICES_EOD_URL = "https://nsearchives.nseindia.com/content/indices/ind_close_all_%s.csv"
         // Official NSE daily per-stock Symbol P/E (NOT Nifty index P/E).
         private const val NSE_PE_URL = "https://nsearchives.nseindia.com/content/equities/peDetail/PE_%s.csv"
         private const val NSE_TOTAL_MARKET_INDUSTRIES_URL = "https://nsearchives.nseindia.com/content/indices/ind_niftytotalmarket_list.csv"
@@ -181,6 +192,7 @@ class EquityEodResearchRepository @Inject constructor(
 
     private val db = Store(context)
     private val valuationStore = EquityLowValuationStore(context)
+    private val largeWatchStore = LargeWatchLearningStore(context)
     private val prefs = context.getSharedPreferences("suhas_shree_eod_state", Context.MODE_PRIVATE)
     // AMFI classification is bundled as a build-time asset. No runtime market-cap
     // requests are added, and missing/unmatched symbols remain explicitly unclassified.
@@ -454,6 +466,7 @@ class EquityEodResearchRepository @Inject constructor(
         // Read-only NSE PE and index-industry imports, after hours only, independent of Groww.
         // Neither data source changes the frozen Fixed selection/BUY path.
         refreshValuationAfterHours()
+        refreshLargeIndexEodAfterHours()
         prefs.edit().putLong("last_eod_attempt_ms",System.currentTimeMillis())
             .putString("last_eod_error",if(blocked) "Exchange archive temporarily unavailable" else "")
             .apply()
@@ -524,6 +537,56 @@ class EquityEodResearchRepository @Inject constructor(
                 "reason" to (err.message ?: err.javaClass.simpleName).take(100),
                 "industry_guessed" to false, "groww_api_calls" to 0
             ))
+        }
+    }
+
+    /**
+     * Official NSE index snapshots: 1 CSV for every index on a trading day.
+     * Backfills up to three missing EOD dates per after-hours pass, independent
+     * of the Groww research/order governor. No daytime HTTP calls are allowed.
+     */
+    private fun refreshLargeIndexEodAfterHours() {
+        requireAfterHours()
+        val today=LocalDate.now(INDIA).toString()
+        val dates=synchronized(lock) {
+            val days=mutableListOf<String>()
+            db.readableDatabase.rawQuery(
+                "SELECT day FROM eod_days ORDER BY day DESC LIMIT 7",null).use{c->
+                while(c.moveToNext())days+=c.getString(0)
+            }
+            days
+        }
+        var attempted=0
+        for(day in dates){
+            if(attempted>=3 || !afterHours(ZonedDateTime.now(INDIA)))break
+            if(largeWatchStore.hasIndex(day))continue
+            val key="nse_index_eod_attempt_${day}"
+            if(prefs.getString(key,"")==today)continue
+            attempted++
+            prefs.edit().putString(key,today).apply()
+            runCatching {
+                val localDate=LocalDate.parse(day)
+                val url=NSE_INDICES_EOD_URL.format(
+                    localDate.format(DateTimeFormatter.ofPattern("ddMMyyyy",Locale.US)))
+                val csv=client.newCall(request(url)).execute().use{resp->
+                    check(resp.isSuccessful){"NSE_INDEX_EOD_HTTP_${resp.code}"}
+                    resp.body?.string()?.takeIf{it.length in 1_500..500_000}
+                        ?: error("NSE_INDEX_EOD_PAYLOAD_MISSING")
+                }
+                val parsed=LargeIndexResearchPolicy.parseCsv(csv,localDate)
+                largeWatchStore.saveIndex(day,parsed)
+                audit.logAsync("LARGE_WATCH","NSE_INDEX_EOD_IMPORTED",mapOf(
+                    "day" to day,"indices" to parsed.size,
+                    "nifty_move_pct" to parsed.firstOrNull{it.name=="NIFTY 50"}?.changePct,
+                    "groww_api_calls" to 0
+                ))
+            }.onFailure{err->
+                audit.logAsync("LARGE_WATCH","NSE_INDEX_EOD_MISSING",mapOf(
+                    "day" to day,
+                    "reason" to (err.message ?: err.javaClass.simpleName).take(120),
+                    "market_regime_guessed" to false,"groww_api_calls" to 0
+                ))
+            }
         }
     }
 
@@ -714,6 +777,9 @@ class EquityEodResearchRepository @Inject constructor(
         }.toMap()
         val allFive=memberMap.keys.mapNotNull { five[it]?.takeIf(Double::isFinite) }
         val allIntraday=memberMap.keys.mapNotNull { peerIntraday[it] }
+        // This is equal-weighted constituent pulse breadth; it is NOT the live Nifty index.
+        val liveLargeBreadth=allIntraday.takeIf{it.size>=10}
+            ?.let {moves -> moves.count { it>0.0 }.toDouble()/moves.size*100.0 }
         val result=members.mapNotNull { symbol ->
             val sector=memberMap[symbol].orEmpty()
             val sectorKeys=memberMap.filterValues { it==sector }.keys
@@ -730,6 +796,67 @@ class EquityEodResearchRepository @Inject constructor(
                 comparisonBasis=if(broad)"LARGE_CAP_PEER_PROXY" else "SECTOR_PEERS")
         }.sortedWith(compareByDescending<LargeCapEquityObservation> { it.swingResearch }
             .thenByDescending { it.intradayResearch }.thenByDescending { it.relativeFiveDayPct ?: -999.0 })
+        // Stock, Nifty and sector features use only data that existed as of the
+        // observation. Index and sector returns remain null when EOD source is missing.
+        val indexHistories=largeWatchStore.indexHistories(latest.ifBlank{"0000-01-01"})
+        val niftyHistory=indexHistories["NIFTY 50"].orEmpty()
+        val niftyToday=niftyHistory.lastOrNull()?.takeIf{it.day.toString()==latest}
+        val evidence=linkedMapOf<String,LargeWatchEvidence>()
+        for(row in result){
+            val sectorIndex=LargeIndexResearchPolicy.sectorIndex(row.sector)
+            val historyBySector=sectorIndex?.let{indexHistories[it]}.orEmpty()
+            val item=LargeWatchFeaturePolicy.build(
+                bars=history[row.symbol].orEmpty(),eodDate=latest,
+                pe=peMap[row.symbol],
+                rank=marketCaps.labels[row.symbol]?.rank,
+                nifty=niftyHistory,sector=historyBySector,
+                sectorIndexName=sectorIndex,
+                intradayPct=row.intradayPct,
+                intradayRelativePct=row.intradayRelativePct,
+                intradayBreadthPct=liveLargeBreadth,
+                relativeFiveDayPct=row.relativeFiveDayPct,
+                sectorFiveDayPct=row.sectorFiveDayPct,
+                sectorBreadthPct=row.sectorBreadthPct,
+                volumeAcceleration=row.volumeAcceleration,
+                swing=row.swingResearch,intraday=row.intradayResearch
+            ) ?: continue
+            evidence[row.symbol]=item
+            if(row.swingResearch && latest.isNotBlank() &&
+                !LocalDate.parse(latest).isBefore(today.minusDays(4))) {
+                largeWatchStore.record(latest,row.symbol,"SWING",row.close,
+                    System.currentTimeMillis(),item)
+            }
+            if(fresh && row.intradayResearch) {
+                val livePrice=pulse[row.symbol]
+                if(livePrice!=null && livePrice.isFinite() && livePrice>0) {
+                    largeWatchStore.record(today.toString(),row.symbol,
+                        "INTRADAY",livePrice,prefs.getLong("pulse_at_ms",0L),item)
+                }
+            }
+        }
+        // EOD-close learning is local-only. Events without the full horizon are
+        // censored, never recorded as failures or simulated broker profits.
+        for((signalDay,symbol,kind) in largeWatchStore.unresolved().take(300)){
+            if(kind=="INTRADAY"){
+                sql.rawQuery(
+                    "SELECT day,close FROM eod WHERE day=? AND symbol=?",
+                    arrayOf(signalDay,symbol)).use{c->
+                    if(c.moveToFirst() && c.getDouble(1)>0.0)
+                        largeWatchStore.resolveEvent(signalDay,symbol,kind,c.getDouble(1),c.getString(0))
+                }
+            }else{
+                val future=mutableListOf<Pair<String,Double>>()
+                sql.rawQuery(
+                    "SELECT day,close FROM eod WHERE day>? AND symbol=? ORDER BY day ASC LIMIT 3",
+                    arrayOf(signalDay,symbol)).use{c->
+                    while(c.moveToNext())future+=c.getString(0) to c.getDouble(1)
+                }
+                if(future.size==3 && future.last().second>0.0)
+                    largeWatchStore.resolveEvent(signalDay,symbol,kind,
+                        future.last().second,future.last().first)
+            }
+        }
+        val learning=largeWatchStore.learningSummaries()
         EquityResearchSnapshot(
             threeMonthLowRows=threeMonthRows,
             sixMonthLowRows=sixMonthRows,
@@ -755,7 +882,18 @@ class EquityEodResearchRepository @Inject constructor(
             officialPeDate=valuation.peDate,
             officialPeSymbols=valuation.peBySymbol.size,
             industryClassifiedSymbols=valuation.industryBySymbol.size,
-            fullIndustryPeCoverage=fullIndustryPeCoverage
+            fullIndustryPeCoverage=fullIndustryPeCoverage,
+            largeWatchEvidence=evidence,
+            largeWatchLearning=learning,
+            niftyContextDay=niftyToday?.day?.toString().orEmpty(),
+            niftyEodMovePct=niftyToday?.changePct,
+            niftyPreviousEodMovePct=if(niftyToday!=null)niftyHistory.dropLast(1).lastOrNull()?.changePct else null,
+            niftyFiveDayMovePct=if(niftyToday!=null && niftyHistory.size>5)
+                (niftyToday.close/niftyHistory[niftyHistory.lastIndex-5].close-1.0)*100.0 else null,
+            niftyEodRegime=LargeIndexResearchPolicy.regime(niftyToday?.changePct),
+            niftyIndexPe=niftyToday?.pe,
+            niftyIndexPb=niftyToday?.pb,
+            liveLargeCapBreadthProxyPct=liveLargeBreadth
         )
     }
 }
