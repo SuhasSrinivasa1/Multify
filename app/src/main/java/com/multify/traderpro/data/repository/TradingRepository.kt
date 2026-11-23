@@ -4582,6 +4582,18 @@ class TradingRepository @Inject constructor(
         val betaHasDetailCapacity = minOf(betaLiveStatus.rollingMinuteRemaining,
             betaLiveStatus.fixedMinuteRemaining) >
             com.multify.traderpro.engine.FixedResearchCapacityPolicy.BETA_DETAIL_RESERVE
+        val betaHasImmediateFullDetailCycleHeadroom =
+            com.multify.traderpro.engine.FixedBetaDetailCycleCapacityPolicy
+                .hasImmediateHeadroomForFullDetailCycle(
+                    betaLiveStatus.rollingMinuteRemaining,
+                    betaLiveStatus.fixedMinuteRemaining
+                )
+        // If Alpha LIVE_DATA is cooling, Beta may continue read-only market
+        // discovery, but it must not start 48 per-symbol detail quotes unless
+        // all 48 plus reserve fit in current headroom. Otherwise the detail
+        // loop would wait across quota windows and turn one scan into minutes.
+        val betaLiveReadyForDetail = betaLiveReady &&
+            (alphaLiveReady || betaHasImmediateFullDetailCycleHeadroom)
         val deterministicBeta = com.multify.traderpro.engine.FixedDualAccountPolicy
             .betaDetailedEvaluation(symbol, betaLiveReady && betaHasDetailCapacity)
         // If Alpha's independently verified quote pace is still in post-429
@@ -4598,7 +4610,7 @@ class TradingRepository @Inject constructor(
             )
         val route = com.multify.traderpro.engine.FixedCategoryAccountRoutingPolicy.choose(
             deterministicBeta, alphaLiveReady, alphaHistoricalReady,
-            betaLiveReady, betaHistoricalReady, betaHistoricalHeadroom,
+            betaLiveReadyForDetail, betaHistoricalReady, betaHistoricalHeadroom,
             preferBetaLiveForQuote = (preferBetaToProtectAlphaExecution ||
                 (alphaQuoteSlow && betaHasDetailCapacity)) && betaLiveReady
         )
@@ -4624,8 +4636,19 @@ class TradingRepository @Inject constructor(
                 "alpha_live_ready" to alphaLiveReady,
                 "alpha_historical_ready" to alphaHistoricalReady,
                 "beta_live_ready" to betaLiveReady,
-                "beta_historical_ready" to betaHistoricalReady,
-                "reason" to "MISSING_QUOTES_OR_15M_CANDLE_TRANSPORT",
+                "beta_live_ready_for_detail" to betaLiveReadyForDetail,
+                "beta_live_remaining_rolling" to betaLiveStatus.rollingMinuteRemaining,
+                "beta_live_remaining_calendar" to betaLiveStatus.fixedMinuteRemaining,
+                "beta_full_detail_cycle_headroom" to betaHasImmediateFullDetailCycleHeadroom,
+                "beta_full_detail_cycle_required" to (
+                    com.multify.traderpro.engine.FixedBetaDetailCycleCapacityPolicy.REQUIRED_DETAIL_QUOTES +
+                        com.multify.traderpro.engine.FixedBetaDetailCycleCapacityPolicy.RESERVED_HEADROOM
+                    ),
+                "beta_discovery_still_allowed" to betaLiveReady,
+                "reason" to if (!alphaLiveReady && betaLiveReady &&
+                    !betaHasImmediateFullDetailCycleHeadroom)
+                    "BETA_LIVE_CAPACITY_BELOW_FULL_DETAIL_CYCLE"
+                else "MISSING_QUOTES_OR_15M_CANDLE_TRANSPORT",
                 "partial_publication_blocked" to true
             ))
             throw IOException("FIXED_READONLY_CATEGORY_UNAVAILABLE")
