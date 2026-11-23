@@ -147,7 +147,7 @@ internal class AdaptiveLowResearchStore(context:Context) {
     }
 
     /** UI reads the fully published EOD candidate snapshot: no scan or HTTP calls. */
-    fun rows(months:Int,latestDay:String):List<AdaptiveLowCandidate>=synchronized(lock){
+    fun rows(months:Int,latestDay:String):List<AdaptiveLowCandidate> = synchronized(lock){
         if(!hasRun(latestDay,months))return@synchronized emptyList()
         val result=mutableListOf<AdaptiveLowCandidate>()
         store.readableDatabase.rawQuery(
@@ -164,7 +164,7 @@ internal class AdaptiveLowResearchStore(context:Context) {
 
     data class Pending(val day:String,val months:Int,val symbol:String,val close:Double)
 
-    fun pending():List<Pending>=synchronized(lock){
+    fun pending():List<Pending> = synchronized(lock){
         val list=mutableListOf<Pending>()
         store.readableDatabase.rawQuery(
             "SELECT day,months,symbol,reference_close FROM low_signal WHERE outcome_day IS NULL ORDER BY day ASC LIMIT 1500",
