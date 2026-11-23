@@ -73,7 +73,7 @@ internal fun LargeCapResearchScreen(state: TraderUiState, onRefresh: () -> Unit)
                 style=MaterialTheme.typography.bodySmall
             )
         }
-        items(intraday.take(30), key={ "intraday_${it.symbol}" }) { row ->
+        items(intraday, key={ "intraday_${it.symbol}" }) { row ->
             LargeCapRow(row,"INTRADAY SHADOW")
         }
         item {
@@ -84,7 +84,7 @@ internal fun LargeCapResearchScreen(state: TraderUiState, onRefresh: () -> Unit)
                 style=MaterialTheme.typography.bodySmall
             )
         }
-        items(swing.take(40),key={"swing_${it.symbol}"}) { row ->
+        items(swing,key={"swing_${it.symbol}"}) { row ->
             LargeCapRow(row,"SWING SHADOW",r.latestDay)
         }
         item {
@@ -92,7 +92,7 @@ internal fun LargeCapResearchScreen(state: TraderUiState, onRefresh: () -> Unit)
             Text("No entry signal; displayed to avoid selection-only reporting.",
                 style=MaterialTheme.typography.labelSmall)
         }
-        items(others.take(50),key={"monitor_${it.symbol}"}) { row ->
+        items(others,key={"monitor_${it.symbol}"}) { row ->
             LargeCapRow(row,"MONITOR")
         }
         item {
