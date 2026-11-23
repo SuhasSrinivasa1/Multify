@@ -44,7 +44,10 @@ data class EquityLowObservation(
     val oneMonthDistancePct: Double,
     val lookbackMonths: Int,
     val marketCapCategory: String = "UNCLASSIFIED",
-    val marketCapRank: Int? = null
+    val marketCapRank: Int? = null,
+    val peRatio: Double? = null,
+    val industry: String? = null,
+    val verifiedIndustryPeMinimum: Boolean = false
 )
 data class EquityResearchSnapshot(
     val threeMonthLowRows: List<EquityLowObservation> = emptyList(),
@@ -64,7 +67,11 @@ data class EquityResearchSnapshot(
     val refreshAtMs: Long = 0L,
     val marketCapClassificationPeriod: String = "",
     val marketCapSource: String = "",
-    val marketCapClassificationCount: Int = 0
+    val marketCapClassificationCount: Int = 0,
+    val officialPeDate: String = "",
+    val officialPeSymbols: Int = 0,
+    val industryClassifiedSymbols: Int = 0,
+    val fullIndustryPeCoverage: Boolean = false
 )
 data class EquityEodRefreshProgress(
     val importedDays: Int,
@@ -96,6 +103,9 @@ class EquityEodResearchRepository @Inject constructor(
         private const val MAX_BARS_PER_SYMBOL = 200
         private const val SOURCE_URL = "https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_%s_F_0000.csv.zip"
         private const val NIFTY100_URL = "https://www.niftyindices.com/IndexConstituent/ind_nifty100list.csv"
+        // Official NSE daily per-stock Symbol P/E (NOT Nifty index P/E).
+        private const val NSE_PE_URL = "https://nsearchives.nseindia.com/content/equities/peDetail/PE_%s.csv"
+        private const val NSE_TOTAL_MARKET_INDUSTRIES_URL = "https://nsearchives.nseindia.com/content/indices/ind_niftytotalmarket_list.csv"
         private const val NIFTYBANK_URL = "https://www.niftyindices.com/IndexConstituent/ind_niftybanklist.csv"
         private const val NIFTYIT_URL = "https://www.niftyindices.com/IndexConstituent/ind_niftyitlist.csv"
         private const val EOD_MARKET_CLOSE = 18 // first availability attempt at 18:30 IST
@@ -170,6 +180,7 @@ class EquityEodResearchRepository @Inject constructor(
     }
 
     private val db = Store(context)
+    private val valuationStore = EquityLowValuationStore(context)
     private val prefs = context.getSharedPreferences("suhas_shree_eod_state", Context.MODE_PRIVATE)
     // AMFI classification is bundled as a build-time asset. No runtime market-cap
     // requests are added, and missing/unmatched symbols remain explicitly unclassified.
@@ -440,12 +451,79 @@ class EquityEodResearchRepository @Inject constructor(
             }
             if (blocked) break
         }
+        // Read-only NSE PE and index-industry imports, after hours only, independent of Groww.
+        // Neither data source changes the frozen Fixed selection/BUY path.
+        refreshValuationAfterHours()
         prefs.edit().putLong("last_eod_attempt_ms",System.currentTimeMillis())
             .putString("last_eod_error",if(blocked) "Exchange archive temporarily unavailable" else "")
             .apply()
             EquityEodRefreshProgress(imported,missing.size,blocked,wireRequests)
         } finally {
             refreshMutex.unlock()
+        }
+    }
+
+    /**
+     * Fetch the NSE daily PE file once per calendar day after EOD history is available.
+     * The current EOD date must match the PE report date before the screen can sort by it.
+     * No quote, Groww API, order, or intraday network request is involved.
+     */
+    private fun refreshValuationAfterHours() {
+        requireAfterHours()
+        val today = LocalDate.now(INDIA).toString()
+        val latestDay = synchronized(lock) {
+            db.readableDatabase.rawQuery("SELECT MAX(day) FROM eod_days", null).use { c ->
+                if (c.moveToFirst()) c.getString(0).orEmpty() else ""
+            }
+        }
+        if (latestDay.isNotBlank() && valuationStore.peDate() != latestDay &&
+            prefs.getString("nse_pe_attempt_day", "") != today) {
+            prefs.edit().putString("nse_pe_attempt_day", today).apply()
+            runCatching {
+                val date = LocalDate.parse(latestDay)
+                val path = NSE_PE_URL.format(date.format(DateTimeFormatter.ofPattern("ddMMyy")))
+                val csv = client.newCall(request(path)).execute().use { r ->
+                    check(r.isSuccessful) { "NSE_PE_HTTP_${r.code}" }
+                    r.body?.string()?.takeIf { it.length in 5_000..500_000 }
+                        ?: error("NSE_PE_EMPTY_OR_OVERSIZE")
+                }
+                val values = NsePeReportResearchPolicy.parse(csv)
+                valuationStore.savePe(latestDay, values)
+                audit.logAsync("EOD_RESEARCH", "NSE_PE_IMPORT_OK", mapOf(
+                    "date" to latestDay, "symbols_with_positive_pe" to values.size,
+                    "source" to "NSE_PE_DAILY", "groww_api_calls" to 0
+                ))
+            }.onFailure { err ->
+                audit.logAsync("EOD_RESEARCH", "NSE_PE_IMPORT_UNAVAILABLE", mapOf(
+                    "date" to latestDay,
+                    "reason" to (err.message ?: err.javaClass.simpleName).take(100),
+                    "pe_guessed" to false, "groww_api_calls" to 0
+                ))
+            }
+        }
+        val industryAttempt = prefs.getLong("nse_industry_last_attempt_ms", 0L)
+        if (System.currentTimeMillis() - industryAttempt < 7L * 24L * 60L * 60_000L) return
+        prefs.edit().putLong("nse_industry_last_attempt_ms", System.currentTimeMillis()).apply()
+        runCatching {
+            val raw = client.newCall(request(NSE_TOTAL_MARKET_INDUSTRIES_URL)).execute().use { r ->
+                check(r.isSuccessful) { "NSE_INDUSTRY_HTTP_${r.code}" }
+                r.body?.string()?.takeIf { it.length in 10_000..500_000 }
+                    ?: error("NSE_INDUSTRY_EMPTY_OR_OVERSIZE")
+            }
+            val classified = NseIndustryResearchPolicy.parseIndex(raw)
+            // Nifty Total Market constituents do NOT cover every listed NSE stock.
+            // The full-coverage test must reject promotion of speculative small caps.
+            valuationStore.saveIndustries("NSE_NIFTY_TOTAL_MARKET_SUBSET", classified)
+            audit.logAsync("EOD_RESEARCH", "NSE_INDUSTRY_SUBSET_IMPORTED", mapOf(
+                "classified_symbols" to classified.size,
+                "full_nse_industry_coverage_claimed" to false,
+                "groww_api_calls" to 0
+            ))
+        }.onFailure { err ->
+            audit.logAsync("EOD_RESEARCH", "NSE_INDUSTRY_UNAVAILABLE", mapOf(
+                "reason" to (err.message ?: err.javaClass.simpleName).take(100),
+                "industry_guessed" to false, "groww_api_calls" to 0
+            ))
         }
     }
 
@@ -491,6 +569,7 @@ class EquityEodResearchRepository @Inject constructor(
 
     fun snapshot(): EquityResearchSnapshot = synchronized(lock) {
         val marketCaps = amfiMarketCapDataset
+        val valuation = valuationStore.snapshot()
         val today = LocalDate.now(INDIA)
         val sixCutoff = today.minusMonths(6)
         val threeCutoff = today.minusMonths(3)
@@ -587,11 +666,23 @@ class EquityEodResearchRepository @Inject constructor(
         val sixReferenceSessions = (totalDays - if (six.latest == latest && latest.isNotBlank()) 1 else 0)
             .coerceAtLeast(0)
         val threeMonthMinCount = EquityEodResearchRepository.minimumThreeMonthSymbolSessions(threeReferenceSessions)
+        val peCurrent = latest.isNotBlank() && latest == valuation.peDate
+        val peMap = if (peCurrent) valuation.peBySymbol else emptyMap()
+        val fullIndustryPeCoverage = peCurrent && LowPeScreenResearchPolicy.marketIndustryCoverageComplete(
+            peMap, valuation.industryBySymbol)
+        fun enrichValuations(rows: List<EquityLowObservation>): List<EquityLowObservation> = rows.map { row ->
+            row.copy(
+                peRatio = peMap[row.symbol],
+                industry = valuation.industryBySymbol[row.symbol],
+                verifiedIndustryPeMinimum = LowPeScreenResearchPolicy.eligibleSmallCap(
+                    row, peMap, valuation.industryBySymbol, peCurrent)
+            )
+        }
         val threeMonthRows = if (threeMonthHistoryComplete)
-            readLowRows(threeCutoff.toString(), latest, threeMonthMinCount, 3) else emptyList()
+            enrichValuations(readLowRows(threeCutoff.toString(), latest, threeMonthMinCount, 3)) else emptyList()
         val sixMonthMinCount = kotlin.math.ceil(sixReferenceSessions * 0.85).toInt().coerceAtLeast(90)
         val sixMonthRows = if (spanComplete)
-            readLowRows(sixCutoff.toString(), latest, sixMonthMinCount, 6) else emptyList()
+            enrichValuations(readLowRows(sixCutoff.toString(), latest, sixMonthMinCount, 6)) else emptyList()
 
         val memberMap=members()
         val history=linkedMapOf<String,MutableList<EquityEodBar>>()
@@ -660,7 +751,11 @@ class EquityEodResearchRepository @Inject constructor(
             refreshAtMs=prefs.getLong("last_eod_attempt_ms",0L),
             marketCapClassificationPeriod=marketCaps.period,
             marketCapSource=marketCaps.source,
-            marketCapClassificationCount=marketCaps.labels.size
+            marketCapClassificationCount=marketCaps.labels.size,
+            officialPeDate=valuation.peDate,
+            officialPeSymbols=valuation.peBySymbol.size,
+            industryClassifiedSymbols=valuation.industryBySymbol.size,
+            fullIndustryPeCoverage=fullIndustryPeCoverage
         )
     }
 }
