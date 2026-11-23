@@ -7,7 +7,7 @@ import kotlin.math.pow
 import kotlin.math.sqrt
 
 /** Immutable per-symbol observation. Sources and absences are exported in the daily feature snapshot. */
-internal data class LargeWatchEvidence(
+data class LargeWatchEvidence(
     val features: Map<String, Double?>,
     val eodDate: String,
     val marketDate: String,
