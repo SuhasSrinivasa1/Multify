@@ -113,7 +113,7 @@ internal class LargeWatchLearningStore(context:Context) {
         }finally{w.endTransaction()}
     }
 
-    fun indexHistories(day:String):Map<String,List<LargeIndexDaily>>=synchronized(lock){
+    fun indexHistories(day:String):Map<String,List<LargeIndexDaily>> = synchronized(lock){
         val all=linkedMapOf<String,MutableList<LargeIndexDaily>>()
         db.readableDatabase.rawQuery(
             "SELECT day,name,close,change_pct,pe,pb FROM index_eod WHERE day<=? ORDER BY day DESC LIMIT 2000",
@@ -155,7 +155,7 @@ internal class LargeWatchLearningStore(context:Context) {
     }
 
     /** Unresolved events remain censored until the required EOD horizon matures. */
-    fun unresolved():List<Triple<String,String,String>>=synchronized(lock){
+    fun unresolved():List<Triple<String,String,String>> = synchronized(lock){
         val events=mutableListOf<Triple<String,String,String>>()
         db.readableDatabase.rawQuery(
             "SELECT day,symbol,kind FROM watch_event WHERE outcome_day IS NULL ORDER BY day,symbol LIMIT 2500",
