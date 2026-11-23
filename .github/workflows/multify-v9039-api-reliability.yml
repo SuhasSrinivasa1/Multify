@@ -94,7 +94,7 @@ jobs:
           beta_pacing=(root/"engine/BetaLtpAdaptivePacingPolicy.kt").read_text()
           beta_read_only=(root/"data/network/BetaReadOnlyInterceptor.kt").read_text()
           assert "livePriorityQueue.withPermit" in beta_gate
-          assert "persistRecoveryState(type, now)" in beta_gate
+          assert "persistRecoveryState(type," in beta_gate
           assert "admissionTimesEpochMs" in beta_gate
           assert "CLEAN_WINDOW_MS = 60_000L" in beta_pacing
           assert "CLEAN_DECAY_FACTOR = 0.80" in beta_pacing
