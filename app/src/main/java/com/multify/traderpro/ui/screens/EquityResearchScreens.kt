@@ -14,6 +14,7 @@ import androidx.compose.ui.unit.dp
 import com.multify.traderpro.data.repository.EquityResearchSnapshot
 import com.multify.traderpro.data.repository.EquityLowObservation
 import com.multify.traderpro.engine.LargeCapEquityObservation
+import com.multify.traderpro.engine.SwingPullbackResearchPolicy
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -52,6 +53,7 @@ internal fun LargeCapResearchScreen(state: TraderUiState, onRefresh: () -> Unit)
             ResearchNotice("LARGE-CAP NSE EQUITY", "Research only · cash shares · Fixed is unchanged")
             Spacer(Modifier.height(8.dp))
             Text("Intraday momentum + multi-day swing opportunities",style=MaterialTheme.typography.titleMedium)
+            Text("Swing: EOD trend-qualified stocks for the NEXT session, with a pullback price reference. Intraday: fresh market-sweep strength DURING the session. Other: monitored universe, NOT entry signals.",style=MaterialTheme.typography.bodySmall)
             Text("Universe: ${r.memberSource} · ${r.largeCaps.size} stocks with usable EOD history",
                 style=MaterialTheme.typography.bodySmall)
             Text("Daily prices: ${r.latestDay.ifBlank { "not loaded" }} · ${r.completedDays} available sessions",
@@ -71,7 +73,7 @@ internal fun LargeCapResearchScreen(state: TraderUiState, onRefresh: () -> Unit)
                 style=MaterialTheme.typography.bodySmall
             )
         }
-        items(intraday.take(30), key={ "intraday_${it.symbol}" }) { row ->
+        items(intraday, key={ "intraday_${it.symbol}" }) { row ->
             LargeCapRow(row,"INTRADAY SHADOW")
         }
         item {
@@ -82,15 +84,15 @@ internal fun LargeCapResearchScreen(state: TraderUiState, onRefresh: () -> Unit)
                 style=MaterialTheme.typography.bodySmall
             )
         }
-        items(swing.take(40),key={"swing_${it.symbol}"}) { row ->
-            LargeCapRow(row,"SWING SHADOW")
+        items(swing,key={"swing_${it.symbol}"}) { row ->
+            LargeCapRow(row,"SWING SHADOW",r.latestDay)
         }
         item {
             Text("Other monitored large caps · ${others.size}",style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.Bold)
             Text("No entry signal; displayed to avoid selection-only reporting.",
                 style=MaterialTheme.typography.labelSmall)
         }
-        items(others.take(50),key={"monitor_${it.symbol}"}) { row ->
+        items(others,key={"monitor_${it.symbol}"}) { row ->
             LargeCapRow(row,"MONITOR")
         }
         item {
@@ -101,7 +103,7 @@ internal fun LargeCapResearchScreen(state: TraderUiState, onRefresh: () -> Unit)
 }
 
 @Composable
-private fun LargeCapRow(r: LargeCapEquityObservation, label: String) {
+private fun LargeCapRow(r: LargeCapEquityObservation, label: String, eodDate: String = "") {
     Card(shape=RoundedCornerShape(12.dp)) {
         Column(Modifier.fillMaxWidth().padding(12.dp),verticalArrangement=Arrangement.spacedBy(3.dp)) {
             Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween) {
@@ -118,6 +120,15 @@ private fun LargeCapRow(r: LargeCapEquityObservation, label: String) {
                 style=MaterialTheme.typography.labelSmall)
             if(r.intradayPct!=null) Text("Intraday pulse ${pc(r.intradayPct)} · vs ${if(r.comparisonBasis=="SECTOR_PEERS")"sector" else "broad"} peers ${pc(r.intradayRelativePct)}",
                 style=MaterialTheme.typography.bodySmall)
+            if(r.swingResearch && label == "SWING SHADOW") {
+                val zone = SwingPullbackResearchPolicy.evaluate(r.close,r.ema20,r.ema50)
+                if(zone != null) {
+                    Text("Next-session pullback reference ${price(zone.preferred)} · watch zone ${price(zone.lower)}–${price(zone.upper)}",
+                        fontWeight=FontWeight.Bold,style=MaterialTheme.typography.bodyMedium)
+                    Text("Based on ${eodDate.ifBlank { "latest saved EOD" }} close; ${String.format(Locale.US,"%.2f%%",zone.closeExtensionPct)} below EOD close. ${if(zone.distantPullback)"EXTENDED — wait for a pullback; do not chase." else "Wait for a fresh price/volume confirmation."}",
+                        style=MaterialTheme.typography.labelSmall)
+                }
+            }
         }
     }
 }
@@ -132,10 +143,14 @@ internal fun SixMonthLowResearchScreen(state: TraderUiState, onScan: (Int) -> Un
     val ready = if (isThreeMonth) r.threeMonthHistoryComplete else r.sixMonthHistoryComplete
     val sessionCount = if (isThreeMonth) r.threeMonthCompletedDays else r.completedDays
     val firstDay = if (isThreeMonth) r.threeMonthFirstDay else r.firstDay
-    // This is a presentation-only filter: keep the complete EOD research
-    // dataset intact, but display only AMFI-classified large and mid caps.
+    // NSE positive P/E is official and dated; missing P/E ranks last, never zero.
+    // Small caps require proven WHOLE-industry peer coverage, not just a partial index.
     val capEligibleRows = remember(rows) {
-        rows.filter { it.marketCapCategory == "LARGE_CAP" || it.marketCapCategory == "MID_CAP" }
+        rows.filter { it.marketCapCategory == "LARGE_CAP" ||
+            it.marketCapCategory == "MID_CAP" ||
+            (it.marketCapCategory == "SMALL_CAP" && it.verifiedIndustryPeMinimum) }
+            .sortedWith(compareBy<EquityLowObservation> { it.peRatio ?: Double.POSITIVE_INFINITY }
+                .thenBy { kotlin.math.abs(it.distancePct) }.thenBy { it.symbol })
     }
     val filtered = remember(capEligibleRows, search) {
         capEligibleRows.filter { search.isBlank() || it.symbol.contains(search.trim(), true) }
@@ -149,9 +164,21 @@ internal fun SixMonthLowResearchScreen(state: TraderUiState, onScan: (Int) -> Un
             ResearchNotice("NSE LOWS SCREENER", "Latest EOD close vs previous 3M/6M low · all breakdowns and up to 10% above included · EQ cash shares")
             Spacer(Modifier.height(6.dp))
             Text(
-                "AMFI size classification: ${r.marketCapClassificationPeriod.ifBlank { "unavailable" }} · showing Large #1–100 and Mid #101–250 only; small-cap and unclassified symbols are hidden.",
+                "AMFI size classification: ${r.marketCapClassificationPeriod.ifBlank { "unavailable" }} · Large/Mid ranked by lowest verified NSE P/E first (missing P/E last). Small caps shown ONLY if proven lowest P/E in their full industry.",
                 style = MaterialTheme.typography.labelSmall
             )
+            Text(
+                "NSE stock P/E report: ${r.officialPeDate.ifBlank { "unavailable" }} · ${r.officialPeSymbols} positive-P/E symbols · industry mapping ${r.industryClassifiedSymbols} stocks.",
+                style = MaterialTheme.typography.labelSmall
+            )
+            if (r.officialPeDate != r.latestDay || !r.fullIndustryPeCoverage) {
+                Text(
+                    (if (r.officialPeDate != r.latestDay) "No matching-date NSE P/E report: values withheld until valid data arrives. " else "") +
+                        (if (!r.fullIndustryPeCoverage) "Small caps withheld: the available industry map is incomplete and cannot prove a market-wide minimum." else ""),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
             Text(
                 if (r.marketCapClassificationCount > 0)
                     "${r.marketCapClassificationCount} NSE symbols mapped from the official AMFI list."
@@ -229,7 +256,7 @@ internal fun SixMonthLowResearchScreen(state: TraderUiState, onScan: (Int) -> Un
                 style = MaterialTheme.typography.labelSmall)
         }
         item {
-            Text("At/below or up to 10% above previous ${selectedMonths}M low · ${filtered.size} of ${capEligibleRows.size}",
+            Text("At/below or up to 10% above previous ${selectedMonths}M low · ${filtered.size} of ${capEligibleRows.size} · lowest P/E first",
                 style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             OutlinedTextField(value = search, onValueChange = { search = it },
                 label = { Text("Filter NSE ticker") }, singleLine = true,
@@ -238,7 +265,7 @@ internal fun SixMonthLowResearchScreen(state: TraderUiState, onScan: (Int) -> Un
                 when {
                     !ready && isThreeMonth -> "No three-month-low claims until the minimum validated history is available."
                     !ready -> "No six-month-low claims until the historic archive is complete."
-                    else -> "No large- or mid-cap stocks at/below or up to 10% above their previous ${selectedMonths}-month low."
+                    else -> "No eligible stocks at/below or up to 10% above their previous ${selectedMonths}-month low."
                 },
                 style = MaterialTheme.typography.bodySmall)
         }
@@ -260,6 +287,9 @@ private fun LowRow(r: EquityLowObservation) {
                     color = if (r.distancePct < -0.000001) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary)
             }
             Text("Latest close ${price(r.close)} · previous ${r.lookbackMonths}M low ${price(r.periodLow)}",
+                style = MaterialTheme.typography.bodySmall)
+            Text("NSE P/E ${r.peRatio?.let { String.format(Locale.US,"%.2fx",it) } ?: "unavailable"} · ${r.industry?.let { "Industry $it" } ?: "industry unverified"}" +
+                if (r.verifiedIndustryPeMinimum) " · verified lowest industry P/E" else "",
                 style = MaterialTheme.typography.bodySmall)
             Text("Reference low date ${r.periodLowDate} · previous 1M low ${price(r.oneMonthLow)} (${oneMonthDistanceLabel(r.oneMonthDistancePct)})",
                 style = MaterialTheme.typography.bodySmall)
