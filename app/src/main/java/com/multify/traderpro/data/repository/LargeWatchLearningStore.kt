@@ -177,7 +177,7 @@ internal class LargeWatchLearningStore(context:Context) {
         },"day=? AND symbol=? AND kind=? AND outcome_day IS NULL",arrayOf(day,symbol,kind))
     }
 
-    fun learningSummaries():List<LargeWatchLearningSummary>=synchronized(lock){
+    fun learningSummaries():List<LargeWatchLearningSummary> = synchronized(lock){
         data class Event(val day:String,val kind:String,val variants:Set<String>,val hit:Boolean)
         val observed=mutableListOf<Event>()
         db.readableDatabase.rawQuery(
