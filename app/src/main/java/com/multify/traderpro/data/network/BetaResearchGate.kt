@@ -184,6 +184,7 @@ class BetaResearchGate @Inject constructor(
         var totalWaitMs = 0L
         var waitIterations = 0
         while (true) {
+            var reservationMade = false
             val waitMs = lock.withLock {
                 val w = windows.getValue(type)
                 val now = SystemClock.elapsedRealtime()
@@ -215,10 +216,24 @@ class BetaResearchGate @Inject constructor(
                     w.calendar = DualMinuteAdmissionPolicy.reserve(w.calendar, wallNow)
                     w.admissionTimesEpochMs.addLast(wallNow)
                     if (w.probeRequired) w.probeInFlight = true
-                    if (!persistRecoveryState(type, now)) throw IOException("BETA_RECOVERY_STATE_PERSIST_FAILED")
+                    reservationMade = true
                 }
                 if (type == Type.LIVE) updateLiveStatus(now, w)
                 wait
+            }
+            if (reservationMade) {
+                if (!persistRecoveryState(type, SystemClock.elapsedRealtime())) {
+                    lock.withLock {
+                        val w = windows.getValue(type)
+                        w.probeInFlight = false
+                        if (w.probeRequired) w.cooldownUntil = maxOf(
+                            w.cooldownUntil, SystemClock.elapsedRealtime() + 10_000L
+                        )
+                        if (type == Type.LIVE) updateLiveStatus(SystemClock.elapsedRealtime(), w)
+                    }
+                    throw IOException("BETA_RECOVERY_STATE_PERSIST_FAILED")
+                }
+                break
             }
             if (waitMs <= 0L) break
             // Waiting for a Beta-only cooldown cannot stall Fixed's official scan.
@@ -259,6 +274,7 @@ class BetaResearchGate @Inject constructor(
         if (type == Type.LIVE) liveRequests.incrementAndGet() else historicalRequests.incrementAndGet()
         return try {
             val result = block()
+            var persistAfterSuccess = false
             lock.withLock {
                 val w = windows.getValue(type)
                 val now = SystemClock.elapsedRealtime()
@@ -267,10 +283,11 @@ class BetaResearchGate @Inject constructor(
                 if (type == Type.LIVE) {
                     val priorPace = livePace
                     livePace = BetaLtpAdaptivePacingPolicy.onSuccess(livePace, now)
-                    if (wasProbe || priorPace != livePace) persistRecoveryState(type, now)
+                    persistAfterSuccess = wasProbe || priorPace != livePace
                     updateLiveStatus(now, w)
-                } else if (wasProbe) persistRecoveryState(type, now)
+                } else if (wasProbe) persistAfterSuccess = true
             }
+            if (persistAfterSuccess) persistRecoveryState(type, SystemClock.elapsedRealtime())
             result
         } catch (failure: Throwable) {
             if (type == Type.LIVE) liveFailures.incrementAndGet() else historicalFailures.incrementAndGet()
@@ -279,6 +296,7 @@ class BetaResearchGate @Inject constructor(
             var incidentCount = 0
             var endpointPath = ""
             var cooldownUntilWallMs = 0L
+            var persistAfterFailure = false
             withContext(NonCancellable) {
                 lock.withLock {
                 val w = windows.getValue(type)
@@ -310,12 +328,13 @@ class BetaResearchGate @Inject constructor(
                 }
                 w.probeInFlight = false
                 if (persistState) {
-                    persistRecoveryState(type, now)
+                    persistAfterFailure = true
                     cooldownUntilWallMs = BetaRecoveryStatePolicy.cooldownUntilEpochMs(
                         wallNow, (w.cooldownUntil - now).coerceAtLeast(0L))
                 }
                 if (type == Type.LIVE) updateLiveStatus(now, w)
                 }
+                if (persistAfterFailure) persistRecoveryState(type, SystemClock.elapsedRealtime())
             }
             if (failure is HttpException && failure.code() == 429) {
                 val category = if (type == Type.LIVE) "LIVE_DATA" else "HISTORICAL"
