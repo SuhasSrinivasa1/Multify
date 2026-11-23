@@ -1,0 +1,125 @@
+name: Phayra v9.0.41 Fixed Safety Reliability TEST
+
+on:
+  push:
+    branches:
+      - v9041-fixed-safety-reliability-20261123
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-and-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Android SDK
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
+      - name: Frozen Fixed selection/targets, broker-only safety policy and TEST identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import pathlib, subprocess
+          base="4e184e07ab1df1b0047bd3893d427f49cb9ea02f"
+          root=pathlib.Path("app/src/main/java/com/multify/traderpro")
+          # Frozen selection, confirmation, transport-research decision and trailing MUST be byte-identical.
+          locked=[
+            "engine/FixedFinalContract.kt", "engine/FixedLocalStrategyEngine.kt",
+            "engine/FixedForecastPublicationPolicy.kt", "engine/FixedForecastQualityPolicy.kt",
+            "engine/FixedMarketDiscoveryPolicy.kt", "engine/FixedRepeatQualificationPolicy.kt",
+            "engine/FixedCategoryAccountRoutingPolicy.kt", "engine/FixedBetaDetailCycleCapacityPolicy.kt",
+            "engine/SteppedTrailingPolicy.kt", "data/network/BetaReadOnlyInterceptor.kt",
+            "engine/FixedResearchCapacityPolicy.kt", "engine/FixedHistoricalWindowStore.kt",
+            "data/network/GrowwHistoricalThrottlePolicy.kt"
+          ]
+          for rel in locked:
+            path=root/rel
+            assert path.read_bytes()==subprocess.check_output(["git","show",f"{base}:{path.as_posix()}"]), "FROZEN_SOURCE_CHANGED "+rel
+          hard=(root/"engine/HardStopLossPolicy.kt").read_text()
+          integrity=(root/"engine/ReleaseIntegrityManifest.kt").read_text()
+          readiness=(root/"engine/GttProtectionReadinessPolicy.kt").read_text()
+          repo=(root/"data/repository/TradingRepository.kt").read_text()
+          build=pathlib.Path("app/build.gradle.kts").read_text()
+          assert "const val MAX_LOSS_PCT = 2.0" in hard
+          assert "const val HARD_STOP_LOSS_PCT = 2.0" in integrity
+          assert "brokerStatusOrUnverified(rawStatus: String?)" in readiness
+          assert '"UNVERIFIED"' in readiness
+          assert "GTT_CREATE_ACK_ID_MISSING_RECONCILE_ONLY" in repo
+          assert 'payload.status.ifBlank { "ACTIVE" }' not in repo
+          assert 'recovered.payload.status.ifBlank { "ACTIVE" }' not in repo
+          assert "versionCode = 9041" in build
+          assert 'applicationIdSuffix = ".v9041test"' in build
+          assert "fixed_auto_buy_enabled" not in build
+          print(f"PASS: {len(locked)} frozen source files identical; -2% invariant and broker-status fail-closed")
+          PY
+      - name: Backend regression tests
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check -r backend/requirements.txt
+          python -m pytest -q backend/tests | tee backend-tests-v9041.txt
+      - name: Android unit tests and assemble isolated TEST APK
+        run: |
+          set -euo pipefail
+          gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug
+          python - <<'PY'
+          import glob,xml.etree.ElementTree as ET,pathlib
+          fs=glob.glob("app/build/test-results/testDebugUnitTest/TEST-*.xml")
+          roots=[ET.parse(p).getroot() for p in fs]
+          n=sum(int(x.attrib.get("tests",0)) for x in roots)
+          errors=sum(int(x.attrib.get("failures",0))+int(x.attrib.get("errors",0)) for x in roots)
+          names=[x.attrib.get("name","") for x in roots]
+          essential=["HardStopLossPolicyTest","GttProtectionReadinessPolicyTest",
+                     "FixedFinalContractTest","FixedBetaDetailCycleCapacityPolicyTest",
+                     "BrokerOrderAcknowledgementPolicyTest"]
+          absent=[x for x in essential if not any(x in y for y in names)]
+          assert not absent, absent
+          assert n>=100 and errors==0,(n,errors)
+          pathlib.Path("android-tests-v9041.txt").write_text(f"{n} Android tests; {errors} failures; required suites present\n")
+          print(n,"Android unit tests passed")
+          PY
+      - name: Inspect debug APK identity and signer
+        run: |
+          set -euo pipefail
+          apk="app/build/outputs/apk/debug/app-debug.apk"
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$apk" > signer-v9041.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$apk" > package-v9041.txt
+          grep -F "name='com.multify.traderpro.vivoy73final.v9041test'" package-v9041.txt >/dev/null
+          sha256sum "$apk" > SHA256-v9041.txt
+          stat -c "APK size (bytes): %s" "$apk" > size-v9041.txt
+          echo "TEST side-by-side only; never replace active trading app or infer broker protection from unit tests." > safety-v9041.txt
+      - name: Upload TEST APK and validation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Phayra-v9.0.41-fixed-safety-reliability-TEST-APK
+          path: |
+            app/build/outputs/apk/debug/app-debug.apk
+            SHA256-v9041.txt
+            signer-v9041.txt
+            package-v9041.txt
+            size-v9041.txt
+            safety-v9041.txt
+            android-tests-v9041.txt
+            backend-tests-v9041.txt
+          if-no-files-found: warn
+          retention-days: 30
