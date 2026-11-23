@@ -12,7 +12,6 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.multify.traderpro.data.repository.EquityResearchSnapshot
-import com.multify.traderpro.data.repository.EquityLowObservation
 import com.multify.traderpro.data.repository.LargeWatchEvidence
 import com.multify.traderpro.engine.LargeCapEquityObservation
 import com.multify.traderpro.engine.SwingPullbackResearchPolicy
@@ -169,166 +168,200 @@ private fun LargeCapRow(r: LargeCapEquityObservation, label: String, eodDate: St
 
 @Composable
 internal fun SixMonthLowResearchScreen(state: TraderUiState, onScan: (Int) -> Unit) {
-    val r = state.equityResearch
+    val research=state.equityResearch
     var selectedMonths by rememberSaveable { mutableStateOf(3) }
     var search by rememberSaveable { mutableStateOf("") }
-    val isThreeMonth = selectedMonths == 3
-    val rows = if (isThreeMonth) r.threeMonthLowRows else r.sixMonthLowRows
-    val ready = if (isThreeMonth) r.threeMonthHistoryComplete else r.sixMonthHistoryComplete
-    val sessionCount = if (isThreeMonth) r.threeMonthCompletedDays else r.completedDays
-    val firstDay = if (isThreeMonth) r.threeMonthFirstDay else r.firstDay
-    // NSE positive P/E is official and dated; missing P/E ranks last, never zero.
-    // Small caps require proven WHOLE-industry peer coverage, not just a partial index.
-    val capEligibleRows = remember(rows) {
-        rows.filter { it.marketCapCategory == "LARGE_CAP" ||
-            it.marketCapCategory == "MID_CAP" ||
-            (it.marketCapCategory == "SMALL_CAP" && it.verifiedIndustryPeMinimum) }
-            .sortedWith(compareBy<EquityLowObservation> { it.peRatio ?: Double.POSITIVE_INFINITY }
-                .thenBy { kotlin.math.abs(it.distancePct) }.thenBy { it.symbol })
-    }
-    val filtered = remember(capEligibleRows, search) {
-        capEligibleRows.filter { search.isBlank() || it.symbol.contains(search.trim(), true) }
+    val isThree=selectedMonths==3
+    val historyReady=if(isThree)research.threeMonthHistoryComplete else research.sixMonthHistoryComplete
+    val result=if(isThree)research.adaptiveLowThreeRows else research.adaptiveLowSixRows
+    val scan=if(isThree)research.adaptiveLowThreeRun else research.adaptiveLowSixRun
+    val learning=if(isThree)research.adaptiveLowThreeLearning else research.adaptiveLowSixLearning
+    val scanFresh=historyReady && scan!=null && scan.day==research.latestDay
+    // Closest confirmed approaches first. No "hot" API request or dynamic
+    // eligibility change occurs on this UI thread.
+    val visible=remember(result,scanFresh,search) {
+        if(!scanFresh) emptyList() else result.filter {
+            search.isBlank() || it.symbol.contains(search.trim(),true) ||
+                it.companyName.contains(search.trim(),true) ||
+                (it.sector?.contains(search.trim(),true)==true)
+        }.sortedWith(
+            compareBy<com.multify.traderpro.engine.AdaptiveLowCandidate> {
+                if(it.phase=="IN_ENTRY_ZONE")0 else 1
+            }.thenBy{it.distanceAboveSupportPct}
+                .thenByDescending{it.reactions.size}
+                .thenByDescending{it.patternScore}.thenBy{it.symbol}
+        )
     }
     LazyColumn(
-        modifier = Modifier.fillMaxSize().testTag("six-month-low-screen"),
-        contentPadding = PaddingValues(14.dp),
-        verticalArrangement = Arrangement.spacedBy(9.dp)
+        modifier=Modifier.fillMaxSize().testTag("six-month-low-screen"),
+        contentPadding=PaddingValues(14.dp),
+        verticalArrangement=Arrangement.spacedBy(10.dp)
     ) {
         item {
-            ResearchNotice("NSE LOWS SCREENER", "Latest EOD close vs previous 3M/6M low · all breakdowns and up to 10% above included · EQ cash shares")
-            Spacer(Modifier.height(6.dp))
-            Text(
-                "AMFI size classification: ${r.marketCapClassificationPeriod.ifBlank { "unavailable" }} · Large/Mid ranked by lowest verified NSE P/E first (missing P/E last). Small caps shown ONLY if proven lowest P/E in their full industry.",
-                style = MaterialTheme.typography.labelSmall
+            ResearchNotice(
+                "ADAPTIVE NSE SUPPORT RETESTS",
+                "Research-only · repeated rebound lows, approaching from ABOVE within strictly 5% · no automatic BUY"
             )
             Text(
-                "NSE stock P/E report: ${r.officialPeDate.ifBlank { "unavailable" }} · ${r.officialPeSymbols} positive-P/E symbols · industry mapping ${r.industryClassifiedSymbols} stocks.",
-                style = MaterialTheme.typography.labelSmall
+                "Find previous support levels that produced at least TWO confirmed +5% rebounds within ten subsequent EOD sessions and are now being revisited during a decline.",
+                style=MaterialTheme.typography.bodyMedium
             )
-            if (r.officialPeDate != r.latestDay || !r.fullIndustryPeCoverage) {
+            Text(
+                "This is NOT a list of stocks simply near a 3M/6M low. Raw NSE OHLC/volume history is scanned across all saved NSE EQ names after market hours.",
+                style=MaterialTheme.typography.bodySmall
+            )
+            Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                FilterChip(selected=isThree,onClick={selectedMonths=3},
+                    label={Text("3M")},modifier=Modifier.testTag("low-range-3m"))
+                FilterChip(selected=!isThree,onClick={selectedMonths=6},
+                    label={Text("6M")},modifier=Modifier.testTag("low-range-6m"))
+            }
+            Text(
+                "Latest exchange EOD: ${research.latestDay.ifBlank{"not imported"}} · ${if(isThree)research.threeMonthCompletedDays else research.completedDays} archive sessions",
+                style=MaterialTheme.typography.bodySmall
+            )
+            if(scanFresh) {
                 Text(
-                    (if (r.officialPeDate != r.latestDay) "No matching-date NSE P/E report: values withheld until valid data arrives. " else "") +
-                        (if (!r.fullIndustryPeCoverage) "Small caps withheld: the available industry map is incomplete and cannot prove a market-wide minimum." else ""),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    "Completed full-NSE EOD scan: ${scan!!.allNseEquitySymbols} EQ symbols · ${scan.historicallyCompleteSymbols} symbols with adequate ${selectedMonths}M history · ${scan.qualifiedPatterns} confirmed near-support patterns",
+                    style=MaterialTheme.typography.bodyMedium,fontWeight=FontWeight.SemiBold
+                )
+                Text("Cached analysis completed ${atIst(scan.completedAtMs)}; no Groww market-data use.",
+                    style=MaterialTheme.typography.labelSmall)
+            } else {
+                Text(
+                    if(!historyReady)
+                        "HISTORY BUILDING — full ${selectedMonths}M evidence is not yet ready; no support-pattern claim will be made."
+                    else "PENDING AFTER-HOURS FULL-NSE PATTERN SCAN — new TEST install has no precomputed local watchlist yet.",
+                    color=MaterialTheme.colorScheme.error,
+                    style=MaterialTheme.typography.bodySmall
                 )
             }
             Text(
-                if (r.marketCapClassificationCount > 0)
-                    "${r.marketCapClassificationCount} NSE symbols mapped from the official AMFI list."
-                else "Official AMFI classification asset unavailable; no market-cap categories are guessed.",
-                style = MaterialTheme.typography.labelSmall
+                "Last sourced Nifty EOD: ${research.niftyContextDay.ifBlank{"unknown"}} · ${research.niftyEodRegime} ${pc(research.niftyEodMovePct)}. Sector readings are attached only when an actual matching NSE index is available.",
+                style=MaterialTheme.typography.bodySmall
             )
-            Spacer(Modifier.height(4.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilterChip(
-                    selected = isThreeMonth,
-                    onClick = { selectedMonths = 3 },
-                    label = { Text("3M") },
-                    modifier = Modifier.testTag("low-range-3m")
-                )
-                FilterChip(
-                    selected = !isThreeMonth,
-                    onClick = { selectedMonths = 6 },
-                    label = { Text("6M") },
-                    modifier = Modifier.testTag("low-range-6m")
-                )
-            }
-            Text("Latest exchange day: ${r.latestDay.ifBlank { "not yet loaded" }}",
-                style = MaterialTheme.typography.titleSmall)
-            Text("Selected archive window: ${firstDay.ifBlank { "coverage pending" }} to ${r.latestDay.ifBlank { "pending" }}",
-                style = MaterialTheme.typography.bodySmall)
-            Text("Validated sessions: $sessionCount · latest file equity rows: ${r.universeCount}",
-                style = MaterialTheme.typography.bodySmall)
-            Text("3M coverage: ${r.threeMonthCompletedDays} sessions · ${if (r.threeMonthHistoryComplete) "READY" else "building"}",
-                style = MaterialTheme.typography.labelSmall,
-                color = if (r.threeMonthHistoryComplete) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
-            Text("6M backfill: ${r.completedDays} sessions · ${if (r.sixMonthHistoryComplete) "READY" else "in progress"}",
-                style = MaterialTheme.typography.labelSmall,
-                color = if (r.sixMonthHistoryComplete) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
-            if (!ready && isThreeMonth) {
-                Text("INCOMPLETE THREE-MONTH HISTORY — results remain withheld until at least 55 valid NSE sessions spanning roughly 2.5 months are present.",
-                    color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium)
-            } else if (!ready) {
-                Text("INCOMPLETE SIX-MONTH HISTORY — results remain withheld until at least 105 valid NSE sessions spanning roughly six months are present. Scan Now can continue the permitted after-hours backfill.",
-                    color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium)
-            }
-            if (r.lastError.isNotBlank()) {
-                Text("Data source status: ${r.lastError}", color = MaterialTheme.colorScheme.error,
-                    style = MaterialTheme.typography.bodySmall)
-            }
-            Text("Latest archive attempt: ${atIst(r.refreshAtMs)}",
-                style = MaterialTheme.typography.labelSmall)
-            Text("Official NSE cash EOD archives only; zero Groww calls. WorkManager continues best-effort six-month backfill after-hours. The app never downloads this history during NSE trading hours.",
-                style = MaterialTheme.typography.labelSmall)
-            Button(
-                onClick = { onScan(selectedMonths) },
-                enabled = !state.researchScanning,
-                modifier = Modifier.fillMaxWidth().testTag("six-month-low-scan-now"),
-                contentPadding = PaddingValues(vertical = 14.dp)
-            ) {
-                if (state.researchScanning) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(18.dp),
-                        strokeWidth = 2.dp,
-                        color = MaterialTheme.colorScheme.onPrimary
-                    )
-                    Spacer(Modifier.width(10.dp))
-                    Text("Scanning…")
-                } else {
-                    Text("Scan Now")
-                }
-            }
             Text(
-                if (isThreeMonth)
-                    "3M Scan Now recalculates the saved archive and, during 18:30–08:00 IST, imports up to 25 missing official NSE sessions to build 3M coverage and advance the 6M backfill. During 08:00–18:30 IST it stays local-only. Zero Groww calls."
-                else
-                    "6M Scan Now recalculates the saved archive and, during 18:30–08:00 IST, imports up to 25 missing official NSE session files. During 08:00–18:30 IST it stays local-only. Zero Groww calls.",
-                style = MaterialTheme.typography.labelSmall
+                "NSE archives and optional legacy OHLC backfill run only during 18:30–08:00 IST. During market hours, Scan Now reads LOCAL results; Fixed and Working Range keep their Groww API bandwidth.",
+                style=MaterialTheme.typography.labelSmall
             )
-            Text("Unadjusted exchange lows: splits, bonuses and other corporate actions require verification before acting. A low is not itself a BUY recommendation.",
-                style = MaterialTheme.typography.labelSmall)
+            Button(onClick={onScan(selectedMonths)},enabled=!state.researchScanning,
+                modifier=Modifier.fillMaxWidth().testTag("six-month-low-scan-now")) {
+                if(state.researchScanning) {
+                    CircularProgressIndicator(Modifier.size(18.dp),
+                        strokeWidth=2.dp,color=MaterialTheme.colorScheme.onPrimary)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Recalculating…")
+                } else Text("Refresh research / Scan Now")
+            }
+            if(research.lastError.isNotBlank())
+                Text("Exchange archive status: ${research.lastError}",
+                    style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.error)
+            Text(
+                "CAUTION: Prices are corporate-action UNADJUSTED unless verified. Review splits, dividends, actual liquidity, earnings and live price before placing any MANUAL staged entry. Do not automatically average down through invalidated support.",
+                style=MaterialTheme.typography.labelSmall
+            )
         }
         item {
-            Text("At/below or up to 10% above previous ${selectedMonths}M low · ${filtered.size} of ${capEligibleRows.size} · lowest P/E first",
-                style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            OutlinedTextField(value = search, onValueChange = { search = it },
-                label = { Text("Filter NSE ticker") }, singleLine = true,
-                modifier = Modifier.fillMaxWidth())
-            if (filtered.isEmpty()) Text(
-                when {
-                    !ready && isThreeMonth -> "No three-month-low claims until the minimum validated history is available."
-                    !ready -> "No six-month-low claims until the historic archive is complete."
-                    else -> "No eligible stocks at/below or up to 10% above their previous ${selectedMonths}-month low."
-                },
-                style = MaterialTheme.typography.bodySmall)
+            Text("Approaching historical rebound zones · ${visible.size}",
+                style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.Bold)
+            OutlinedTextField(value=search,onValueChange={search=it},singleLine=true,
+                label={Text("Filter ticker, company or mapped sector")},
+                modifier=Modifier.fillMaxWidth())
+            if(visible.isEmpty()) Text(
+                if(scanFresh)
+                    "No NSE EQ shares meet the full repeated-rebound, falling-toward-support and STRICTLY under-5% criteria today. An empty list is a valid outcome."
+                else "No eligible list until the local after-hours scan completes.",
+                style=MaterialTheme.typography.bodySmall
+            )
         }
-        items(filtered, key = { "${selectedMonths}m_${it.symbol}" }) { row -> LowRow(row) }
+        items(visible,key={"${selectedMonths}M_${it.symbol}"}) { c ->
+            AdaptiveLowOpportunityRow(c)
+        }
+        item {
+            Text("Adaptive research audit · ${selectedMonths}M",
+                style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.Bold)
+            Text(
+                "Each independent observation is followed for ten FULL future EOD sessions. A +5% later EOD close is only a research rebound, not a fill or executable P&L. Unmatured observations remain unresolved.",
+                style=MaterialTheme.typography.bodySmall
+            )
+            if(learning.isEmpty()) Text("No matured prospective rebound observations yet.",
+                style=MaterialTheme.typography.bodySmall)
+            learning.take(8).forEach{m->
+                Text(
+                    "${m.variant.replace('_',' ')} · ${m.successes}/${m.matured} observed (${String.format(Locale.US,"%.1f%%",m.observedPct)}) · ${m.independentDays} independent dates · lower bound ${String.format(Locale.US,"%.1f%%",m.wilsonLowerPct)} · ${if(m.researchFreezeEligible)"SHADOW FREEZE REVIEW" else "LEARNING"}",
+                    style=MaterialTheme.typography.labelSmall
+                )
+            }
+            Text(
+                "Research freeze review requires 100+ matured calls, 20+ independent days, >=90% observed outcomes, >=85% conservative confidence and a valid chronological holdout. Nothing here changes Fixed, Working Range, Alpha, Beta or broker orders.",
+                style=MaterialTheme.typography.labelSmall
+            )
+        }
     }
 }
 
 @Composable
-private fun LowRow(r: EquityLowObservation) {
-    Card(shape = RoundedCornerShape(12.dp)) {
-        Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text(r.symbol, fontWeight = FontWeight.Bold)
-                    MarketCapBadge(r.marketCapCategory, r.marketCapRank)
-                }
-                Text(lowDistanceLabel(r.distancePct, r.lookbackMonths),
-                    style = MaterialTheme.typography.titleSmall,
-                    color = if (r.distancePct < -0.000001) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary)
+private fun AdaptiveLowOpportunityRow(c: com.multify.traderpro.engine.AdaptiveLowCandidate) {
+    var expanded by rememberSaveable(c.symbol,c.months,c.asOfDay) { mutableStateOf(false) }
+    Card(shape=RoundedCornerShape(12.dp)) {
+        Column(Modifier.fillMaxWidth().padding(12.dp),
+            verticalArrangement=Arrangement.spacedBy(5.dp)) {
+            Text(c.symbol,fontWeight=FontWeight.Bold,style=MaterialTheme.typography.titleMedium)
+            if(c.companyName.isNotBlank() && !c.companyName.equals(c.symbol,true))
+                Text(c.companyName,style=MaterialTheme.typography.bodySmall)
+            MarketCapBadge(c.marketCapCategory,null)
+            Text(
+                "${if(c.phase=="IN_ENTRY_ZONE")"IN HISTORICAL WATCH ZONE" else "APPROACHING SUPPORT — NOT IN ENTRY ZONE"} · ${c.months}M",
+                style=MaterialTheme.typography.labelMedium,
+                color=if(c.phase=="IN_ENTRY_ZONE")MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text("Research entry reference ${price(c.preferredEntry)}",
+                fontWeight=FontWeight.Bold,style=MaterialTheme.typography.titleMedium)
+            Text("Historical support watch range ${price(c.entryLow)}–${price(c.entryHigh)}",
+                style=MaterialTheme.typography.bodyMedium)
+            Text(
+                "Latest ${c.asOfDay} close ${price(c.latestClose)} · ${String.format(Locale.US,"%.2f%%",c.distanceAboveSupportPct)} above repeated support ${price(c.supportPrice)}",
+                style=MaterialTheme.typography.bodySmall
+            )
+            Text(
+                "${c.reactions.size} separate prior rebounds · median +${String.format(Locale.US,"%.2f%%",c.medianHistoricalReboundPct)} within ${String.format(Locale.US,"%.1f",c.medianSessionsToRebound)} sessions · recent descent ${String.format(Locale.US,"%.2f%%",c.approachDrawdown10Pct)} from 10-day peak",
+                style=MaterialTheme.typography.bodySmall
+            )
+            Text(
+                "Nifty ${c.niftyRegime} ${pc(c.niftyEodPct)} · ${c.sectorIndexName?:c.sector?:"Sector unclassified"} ${c.sectorRegime} ${pc(c.sectorEodPct)}",
+                style=MaterialTheme.typography.bodySmall
+            )
+            Text(
+                "NSE P/E ${c.stockPe?.let{String.format(Locale.US,"%.2fx",it)}?:"unavailable"} · P/B unavailable · revenue/profit history unavailable",
+                style=MaterialTheme.typography.labelSmall
+            )
+            Text(
+                "Historical breakdown reference ${price(c.historicalBreakReference)} — NOT a placed stop. No partial BUY or averaging orders are submitted by this tab.",
+                style=MaterialTheme.typography.labelSmall
+            )
+            OutlinedButton(onClick={expanded=!expanded},modifier=Modifier.fillMaxWidth()) {
+                Text(if(expanded)"Hide historical evidence" else "Show previous rebound dates & indicators")
             }
-            Text("Latest close ${price(r.close)} · previous ${r.lookbackMonths}M low ${price(r.periodLow)}",
-                style = MaterialTheme.typography.bodySmall)
-            Text("NSE P/E ${r.peRatio?.let { String.format(Locale.US,"%.2fx",it) } ?: "unavailable"} · ${r.industry?.let { "Industry $it" } ?: "industry unverified"}" +
-                if (r.verifiedIndustryPeMinimum) " · verified lowest industry P/E" else "",
-                style = MaterialTheme.typography.bodySmall)
-            Text("Reference low date ${r.periodLowDate} · previous 1M low ${price(r.oneMonthLow)} (${oneMonthDistanceLabel(r.oneMonthDistancePct)})",
-                style = MaterialTheme.typography.bodySmall)
-            Text("As of ${r.latestDate} · ${r.tradingDays} prior symbol sessions · NSE EQ",
-                style = MaterialTheme.typography.labelSmall)
+            if(expanded) {
+                Text("EMA9 ${c.ema9?.let(::price)?:"—"} · EMA20 ${c.ema20?.let(::price)?:"—"} · EMA50 ${c.ema50?.let(::price)?:"—"}",
+                    style=MaterialTheme.typography.bodySmall)
+                Text(
+                    "RSI14 ${c.rsi14?.let{String.format(Locale.US,"%.1f",it)}?:"—"} · ATR14 ${c.atr14?.let(::price)?:"missing OHLC"} · today's volume / 20D avg ${c.volumeTo20Day?.let{String.format(Locale.US,"%.2fx",it)}?:"—"}",
+                    style=MaterialTheme.typography.bodySmall
+                )
+                Text("Recorded candle reversal evidence: ${c.candleCoverage} of ${c.reactions.size} prior lows have full OHLC. Blank older candles await bounded after-hours backfill.",
+                    style=MaterialTheme.typography.labelSmall)
+                c.reactions.forEach{touch->
+                    Text(
+                        "${touch.lowDay} · support ${price(touch.supportLow)} · subsequent max EOD close +${String.format(Locale.US,"%.2f%%",touch.reboundPctFromLow)} · first +5% close ${touch.sessionsToRebound} sessions later · P/E at time unavailable · RSI ${touch.rsi14AtLow?.let{String.format(Locale.US,"%.1f",it)}?:"—"} · volume ${touch.volumeToPrior20?.let{String.format(Locale.US,"%.2fx",it)}?:"—"}",
+                        style=MaterialTheme.typography.labelSmall
+                    )
+                }
+                Text(
+                    "Historical observations include no contemporaneous verified fundamentals at prior lows. EOD high/low order, intraday fill prices, split adjustments and next-session direction are not inferred.",
+                    style=MaterialTheme.typography.labelSmall
+                )
+            }
         }
     }
 }
