@@ -47,7 +47,7 @@ jobs:
           locked=[
             "data/repository/TradingRepository.kt", "engine/HardStopLossPolicy.kt",
             "engine/GttProtectionReadinessPolicy.kt",
-            "            "data/repository/LowPeResearchPolicy.kt", "data/repository/EquityLowValuationStore.kt",
+                        "data/repository/LowPeResearchPolicy.kt", "data/repository/EquityLowValuationStore.kt",
             "engine/SwingPullbackResearchPolicy.kt",
             "engine/WorkingRangeCandidatePolicy.kt",
             "engine/WorkingRangeEntryMomentumPolicy.kt",
