@@ -525,7 +525,7 @@ class EquityEodResearchRepository @Inject constructor(
         var performed=0
         for(day in days) {
             if(performed>=maxDays || !afterHours(ZonedDateTime.now(INDIA)))break
-            val key="ohlc_backfill_attempt_\$day"
+            val key="ohlc_backfill_attempt_$day"
             if(prefs.getString(key,"")==today)continue
             performed++
             prefs.edit().putString(key,today).apply()
