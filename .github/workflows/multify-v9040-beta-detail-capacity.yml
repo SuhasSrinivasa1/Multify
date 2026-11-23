@@ -192,7 +192,7 @@ jobs:
           assert '"Phayra"' in ui
           assert "SELL SHORT" in ui and "manual-buy-alpha" in ui
           build=Path("app/build.gradle.kts").read_text()
-          assert "versionCode = 9039" in build
+          assert "versionCode = 9040" in build
           assert 'applicationIdSuffix = ".v9040test"' in build
           manifest=Path("app/src/main/AndroidManifest.xml").read_text()
           assert 'android:label="@string/app_name"' in manifest
