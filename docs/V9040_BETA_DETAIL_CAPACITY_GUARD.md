@@ -20,7 +20,7 @@ All five exceeded the 90-second target. Completed scan start gaps were approxima
 
 During the fifth completed Fixed scan, Beta supplied:
 
-- 70 full-market LTP requests;
+- 70 Beta LTP batch requests (the corresponding 70-batch sweep profile was marked aborted, not a completed full sweep);
 - 47 individual detailed quote requests;
 - 117 total Beta LIVE_DATA requests during a 160-second scan.
 
