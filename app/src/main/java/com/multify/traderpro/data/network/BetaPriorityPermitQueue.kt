@@ -1,8 +1,10 @@
 package com.multify.traderpro.data.network
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import java.util.PriorityQueue
 /** Beta-only priority permit: lower rank first, FIFO within rank, never preempts an active read. */
 internal class BetaPriorityPermitQueue {
@@ -19,10 +21,14 @@ internal class BetaPriorityPermitQueue {
         }
         try { waiter.granted.await() }
         catch (cancelled: CancellationException) {
-            lock.withLock { if (!waiting.remove(waiter)) releaseLocked() }
+            withContext(NonCancellable) {
+                lock.withLock { if (!waiting.remove(waiter)) releaseLocked() }
+            }
             throw cancelled
         }
-        try { return block() } finally { lock.withLock { releaseLocked() } }
+        try { return block() } finally {
+            withContext(NonCancellable) { lock.withLock { releaseLocked() } }
+        }
     }
     internal suspend fun queuedCount(): Int = lock.withLock { waiting.size }
     private fun releaseLocked() {

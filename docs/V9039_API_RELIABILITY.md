@@ -4,8 +4,8 @@ Transport/reliability update based on the v9.0.38 TEST branch. No production tra
 
 ## Changes
 - **Beta-only adaptive recovery:** 1,300 ms start, 950 ms floor, 8,000 ms ceiling; each clean 60-second window reduces the gap by 20%; a 429 doubles it. Alpha pacing is unchanged.
-- **Restart-persistent Beta governor:** persists cooldown deadlines, recent 429 incident history, adaptive gap, half-open probe state and recent admissions. Restores rolling 1-second, rolling 60-second and calendar-minute usage. Admission is committed before dispatch.
-- **Priority-aware Beta live queue:** full-market Fixed discovery LTP batches outrank detail quote/research; equal-priority requests are FIFO; active reads are never preempted; cancelled waiters are removed.
+- **Restart-persistent Beta governor:** persists cooldown deadlines, recent 429 incident history, adaptive gap, half-open probe state and recent admissions. Restores rolling 1-second, rolling 60-second and calendar-minute usage. Admission is committed on Dispatchers.IO before dispatch; a failed reservation write suppresses that Beta request.
+- **Priority-aware Beta live queue:** full-market Fixed discovery LTP batches outrank detail quote/research; equal-priority requests are FIFO; active reads are never preempted; cancellation cleanup releases permits even when the coroutine is cancelled.
 - **Idle inventory heartbeat:** verified-empty portfolio polling changes from 45 to 180 seconds. If external/manual holdings or GTTs are present, the previous 45-second cadence remains for quarantine/reconciliation. The slower interval requires recent empty inventory and GTT snapshots, no app-owned open positions, no pending entries and no critical trade. BUY preflight still forces fresh Alpha inventory; app-owned SELL/GTT safety is unchanged.
 
 ## Retained protections

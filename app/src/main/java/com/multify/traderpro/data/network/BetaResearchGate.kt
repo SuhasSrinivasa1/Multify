@@ -10,7 +10,10 @@ import com.multify.traderpro.engine.DualMinuteAdmissionPolicy
 import com.multify.traderpro.engine.FixedDualAccountPolicy
 import com.multify.traderpro.engine.GrowwRecoveryPolicy
 import com.multify.traderpro.engine.GrowwRetryAfterPolicy
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import retrofit2.HttpException
@@ -212,7 +215,7 @@ class BetaResearchGate @Inject constructor(
                     w.calendar = DualMinuteAdmissionPolicy.reserve(w.calendar, wallNow)
                     w.admissionTimesEpochMs.addLast(wallNow)
                     if (w.probeRequired) w.probeInFlight = true
-                    persistRecoveryState(type, now)
+                    if (!persistRecoveryState(type, now)) throw IOException("BETA_RECOVERY_STATE_PERSIST_FAILED")
                 }
                 if (type == Type.LIVE) updateLiveStatus(now, w)
                 wait
@@ -276,7 +279,8 @@ class BetaResearchGate @Inject constructor(
             var incidentCount = 0
             var endpointPath = ""
             var cooldownUntilWallMs = 0L
-            lock.withLock {
+            withContext(NonCancellable) {
+                lock.withLock {
                 val w = windows.getValue(type)
                 val now = SystemClock.elapsedRealtime()
                 val wallNow = System.currentTimeMillis()
@@ -311,6 +315,7 @@ class BetaResearchGate @Inject constructor(
                         wallNow, (w.cooldownUntil - now).coerceAtLeast(0L))
                 }
                 if (type == Type.LIVE) updateLiveStatus(now, w)
+                }
             }
             if (failure is HttpException && failure.code() == 429) {
                 val category = if (type == Type.LIVE) "LIVE_DATA" else "HISTORICAL"
@@ -336,7 +341,7 @@ class BetaResearchGate @Inject constructor(
         }
     }
 
-    private fun persistRecoveryState(type: Type, nowElapsedMs: Long) {
+    private suspend fun persistRecoveryState(type: Type, nowElapsedMs: Long): Boolean {
         val wallNow = System.currentTimeMillis()
         val window = windows.getValue(type)
         val remaining = (window.cooldownUntil - nowElapsedMs).coerceAtLeast(0L)
@@ -347,13 +352,14 @@ class BetaResearchGate @Inject constructor(
             .putString(admissionsKey(type), BetaRecoveryStatePolicy.serializeAdmissions(window.admissionTimesEpochMs, wallNow))
         if (type == Type.LIVE) editor.putLong(LIVE_GAP_KEY, livePace.gapMs)
         val started = SystemClock.elapsedRealtime()
-        val committed = editor.commit()
+        val committed = withContext(Dispatchers.IO) { editor.commit() }
         val persistMs = (SystemClock.elapsedRealtime() - started).coerceAtLeast(0L)
         if (!committed || persistMs >= 50L) auditLogger.logAsync("API_RATE_LIMIT",
             if (committed) "BETA_RECOVERY_PERSIST_SLOW" else "BETA_RECOVERY_STATE_PERSIST_FAILED",
             mapOf("account" to "BETA", "category" to type.name,
                 "cooldown_remaining_ms" to remaining, "admission_count_last_minute" to window.minute.size,
                 "persistence_elapsed_ms" to persistMs, "persist_succeeded" to committed))
+        return committed
     }
     private fun cooldownKey(type: Type) = "cooldown_until_epoch_${type.name}"
     private fun probeKey(type: Type) = "probe_required_${type.name}"
