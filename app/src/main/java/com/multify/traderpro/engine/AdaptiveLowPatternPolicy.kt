@@ -150,6 +150,10 @@ object AdaptiveLowPatternPolicy {
         for(i in 3..(lastIdx-FULL_REBOUND_HORIZON_SESSIONS-1)){
             val low=bars[i].low
             if((i-2..i+2).any{it!=i && bars[it].low<low-1e-7})continue
+            // A legitimate support retest must descend INTO its low. Flat
+            // post-rebound consolidation must not be counted as a fresh touch.
+            val priorPeak=bars.subList(max(0,i-6),i).maxOf{it.close}
+            if(pct(priorPeak,low)<3.0 || pct(bars[i].close,bars[i-3].close)>-1.0)continue
             if(bars[i].close>low*1.045)continue // huge wick alone is not a support touch
             val quick=(i+1..i+RAPID_HORIZON_SESSIONS).maxOf{bars[it].close}
             if(pct(quick,low)<RAPID_REBOUND_PCT)continue
