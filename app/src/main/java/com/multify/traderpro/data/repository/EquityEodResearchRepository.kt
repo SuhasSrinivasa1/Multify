@@ -6,6 +6,8 @@ import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import com.multify.traderpro.data.logging.AuditLogger
 import com.multify.traderpro.engine.EquityEodBar
+import com.multify.traderpro.engine.AdaptiveLowPatternPolicy
+import com.multify.traderpro.engine.AdaptiveLowCandidate
 import com.multify.traderpro.engine.LargeCapEquityObservation
 import com.multify.traderpro.engine.LargeCapEquityResearchPolicy
 import com.multify.traderpro.engine.NseEquitySessionCalendar
@@ -72,6 +74,12 @@ data class EquityResearchSnapshot(
     val officialPeSymbols: Int = 0,
     val industryClassifiedSymbols: Int = 0,
     val fullIndustryPeCoverage: Boolean = false,
+    val adaptiveLowThreeRows: List<AdaptiveLowCandidate> = emptyList(),
+    val adaptiveLowSixRows: List<AdaptiveLowCandidate> = emptyList(),
+    val adaptiveLowThreeRun: AdaptiveLowRunState? = null,
+    val adaptiveLowSixRun: AdaptiveLowRunState? = null,
+    val adaptiveLowThreeLearning: List<AdaptiveLowResearchSummary> = emptyList(),
+    val adaptiveLowSixLearning: List<AdaptiveLowResearchSummary> = emptyList(),
     val largeWatchEvidence: Map<String,LargeWatchEvidence> = emptyMap(),
     val largeWatchLearning: List<LargeWatchLearningSummary> = emptyList(),
     val niftyContextDay: String = "",
@@ -177,22 +185,29 @@ class EquityEodResearchRepository @Inject constructor(
     }
 
     private class Store(context: Context) : SQLiteOpenHelper(
-        context, "suhas_shree_eod_research_v1.db", null, 1
+        context, "suhas_shree_eod_research_v1.db", null, 2
     ) {
         override fun onCreate(db: SQLiteDatabase) {
-            db.execSQL("CREATE TABLE eod(day TEXT NOT NULL, symbol TEXT NOT NULL, low REAL NOT NULL, close REAL NOT NULL, volume INTEGER NOT NULL, PRIMARY KEY(day,symbol))")
+            db.execSQL("CREATE TABLE eod(day TEXT NOT NULL, symbol TEXT NOT NULL, low REAL NOT NULL, close REAL NOT NULL, volume INTEGER NOT NULL, open REAL, high REAL, PRIMARY KEY(day,symbol))")
             db.execSQL("CREATE INDEX idx_eod_symbol_day ON eod(symbol,day)")
             db.execSQL("CREATE TABLE eod_days(day TEXT PRIMARY KEY, symbols INTEGER NOT NULL, updated_ms INTEGER NOT NULL)")
             db.execSQL("CREATE TABLE attempts(day TEXT PRIMARY KEY, attempt_day TEXT NOT NULL, failure TEXT NOT NULL)")
             db.execSQL("CREATE TABLE members(symbol TEXT PRIMARY KEY, sector TEXT NOT NULL)")
         }
-        override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) =
-            error("EOD research migration must be explicit")
+        override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+            // Preserve all existing 3M/6M history, membership and broker-independent
+            // research state. Old rows retain NULL for OHLC until after-hours backfill.
+            if(oldVersion==1 && newVersion==2) {
+                db.execSQL("ALTER TABLE eod ADD COLUMN open REAL")
+                db.execSQL("ALTER TABLE eod ADD COLUMN high REAL")
+            } else error("Unsupported EOD research database upgrade $oldVersion to $newVersion")
+        }
     }
 
     private val db = Store(context)
     private val valuationStore = EquityLowValuationStore(context)
     private val largeWatchStore = LargeWatchLearningStore(context)
+    private val adaptiveLowStore = AdaptiveLowResearchStore(context)
     private var lastUniverseCapturedDay = ""
     private val prefs = context.getSharedPreferences("suhas_shree_eod_state", Context.MODE_PRIVATE)
     // AMFI classification is bundled as a build-time asset. No runtime market-cap
@@ -275,13 +290,15 @@ class EquityEodResearchRepository @Inject constructor(
                 val reader = BufferedReader(InputStreamReader(stream, Charsets.UTF_8))
                 val headings = csvCells(reader.readLine() ?: error("NSE_BHAVCOPY_HEADER_EMPTY"))
                     .map { it.removePrefix("\uFEFF").trim() }
-                val indices = listOf("TckrSymb", "SctySrs", "LwPric", "ClsPric", "TtlTradgVol")
+                val indices = listOf("TckrSymb", "SctySrs", "OpnPric", "HghPric", "LwPric", "ClsPric", "TtlTradgVol")
                     .associateWith { field ->
                         headings.indexOf(field).takeIf { it >= 0 }
                             ?: error("NSE_BHAVCOPY_MISSING_COLUMN_$field")
                     }
                 val sym = indices.getValue("TckrSymb")
                 val series = indices.getValue("SctySrs")
+                val open = indices.getValue("OpnPric")
+                val high = indices.getValue("HghPric")
                 val low = indices.getValue("LwPric")
                 val close = indices.getValue("ClsPric")
                 val vol = indices.getValue("TtlTradgVol")
@@ -292,16 +309,18 @@ class EquityEodResearchRepository @Inject constructor(
                     read++
                     check(read <= MAX_ARCHIVE_ROWS) { "NSE_BHAVCOPY_TOO_MANY_ROWS" }
                     val values = csvCells(line)
-                    if (values.size <= maxOf(sym,series,low,close,vol)) continue
+                    if (values.size <= maxOf(sym,series,open,high,low,close,vol)) continue
                     if (values[series] != "EQ") continue
                     val symbol = values[sym].uppercase(Locale.US)
                     if (!SYMBOL_REGEX.matches(symbol)) continue
+                    val o = values[open].toDoubleOrNull() ?: continue
+                    val h = values[high].toDoubleOrNull() ?: continue
                     val l = values[low].toDoubleOrNull() ?: continue
                     val c = values[close].toDoubleOrNull() ?: continue
                     val v = values[vol].toLongOrNull() ?: 0L
-                    if (!l.isFinite() || !c.isFinite() || l <= 0.0 || c < l ||
-                        v < 0L) continue
-                    map[symbol] = EquityEodBar(date, symbol, l, c, v)
+                    if (!l.isFinite() || !c.isFinite() || !o.isFinite() || !h.isFinite() ||
+                        l <= 0.0 || o < l || h < maxOf(o,c) || c < l || v < 0L) continue
+                    map[symbol] = EquityEodBar(date, symbol, l, c, v, open=o, high=h)
                 }
                 check(map.size >= MIN_VALID_EQ_ROWS) { "NSE_BHAVCOPY_INCOMPLETE_EQ_${map.size}" }
                 map.values.toList()
@@ -316,6 +335,8 @@ class EquityEodResearchRepository @Inject constructor(
                     sql.insertOrThrow("eod", null, ContentValues().apply {
                         put("day",bar.date.toString());put("symbol",bar.symbol)
                         put("low",bar.low);put("close",bar.close);put("volume",bar.volume)
+                        bar.open?.let{put("open",it)}
+                        bar.high?.let{put("high",it)}
                     })
                 }
                 sql.insertWithOnConflict("eod_days", null, ContentValues().apply {
@@ -468,12 +489,214 @@ class EquityEodResearchRepository @Inject constructor(
         // Neither data source changes the frozen Fixed selection/BUY path.
         refreshValuationAfterHours()
         refreshLargeIndexEodAfterHours()
+        // Daily support-retest research is sourced from COMPLETE, saved NSE EQ
+        // day files. The Lows screen never issues a trading-hours market request.
+        refreshExistingOhlcAfterHours(maxDays = 6)
+        refreshAdaptiveLowsAfterHours()
         prefs.edit().putLong("last_eod_attempt_ms",System.currentTimeMillis())
             .putString("last_eod_error",if(blocked) "Exchange archive temporarily unavailable" else "")
             .apply()
             EquityEodRefreshProgress(imported,missing.size,blocked,wireRequests)
         } finally {
             refreshMutex.unlock()
+        }
+    }
+
+    /**
+     * Upgrade historical L/C/volume archives to OHLC locally, in bounded nightly
+     * batches. No existing daily EOD file is discarded until a full replacement
+     * passes size and exchange-column validation in a database transaction.
+     */
+    private fun refreshExistingOhlcAfterHours(maxDays:Int) {
+        requireAfterHours()
+        val today=LocalDate.now(INDIA).toString()
+        val days=synchronized(lock) {
+            val out=mutableListOf<String>()
+            db.readableDatabase.rawQuery("""
+                SELECT d.day FROM eod_days d
+                WHERE d.day>=? AND EXISTS (
+                    SELECT 1 FROM eod e WHERE e.day=d.day AND e.open IS NULL LIMIT 1)
+                ORDER BY d.day DESC LIMIT 45
+            """.trimIndent(),arrayOf(LocalDate.now(INDIA).minusMonths(6).toString())).use{c->
+                while(c.moveToNext())out+=c.getString(0)
+            }
+            out
+        }
+        var performed=0
+        for(day in days) {
+            if(performed>=maxDays || !afterHours(ZonedDateTime.now(INDIA)))break
+            val key="ohlc_backfill_attempt_$day"
+            if(prefs.getString(key,"")==today)continue
+            performed++
+            prefs.edit().putString(key,today).apply()
+            runCatching{importArchive(LocalDate.parse(day))}
+                .onSuccess{count->audit.logAsync("ADAPTIVE_LOWS","NSE_OHLC_BACKFILL",mapOf(
+                    "day" to day,"symbols" to count,"groww_api_calls" to 0))}
+                .onFailure{err->audit.logAsync("ADAPTIVE_LOWS","NSE_OHLC_BACKFILL_FAILED",mapOf(
+                    "day" to day,"reason" to (err.message?:err.javaClass.simpleName).take(120),
+                    "existing_archive_preserved" to true,"groww_api_calls" to 0))}
+        }
+    }
+
+    /**
+     * On-device full-NSE pattern computation. Called ONLY from existing serialized
+     * after-hours NSE archive importer. Stream symbol bars in order, rather than
+     * loading 500k+ candles into memory or touching Alpha/Beta Groww quotas.
+     */
+    private fun refreshAdaptiveLowsAfterHours() {
+        requireAfterHours()
+        val today=LocalDate.now(INDIA)
+        val valData=valuationStore.snapshot()
+        val capData=amfiMarketCapDataset
+        val instrumentNames=symbols.instruments().associate{it.symbol to it.companyName}
+        val members=members()
+        val meta=synchronized(lock) {
+            db.readableDatabase.rawQuery(
+                "SELECT COUNT(*),MIN(day),MAX(day) FROM eod_days WHERE day>=?",
+                arrayOf(today.minusMonths(6).toString())).use{c->
+                c.moveToFirst()
+                Triple(c.getInt(0),c.getString(1).orEmpty(),c.getString(2).orEmpty())
+            }
+        }
+        val latest=meta.third
+        if(latest.isBlank())return
+        val day=LocalDate.parse(latest)
+        val three=synchronized(lock) {
+            db.readableDatabase.rawQuery("SELECT COUNT(*),MIN(day) FROM eod_days WHERE day>=? AND day<=?",
+                arrayOf(today.minusMonths(3).toString(),latest)).use{c->
+                c.moveToFirst()
+                c.getInt(0) to c.getString(1).orEmpty()
+            }
+        }
+        val threeReady=EquityEodResearchRepository.threeMonthCoverageComplete(
+            three.first,three.second.takeIf{it.isNotBlank()}?.let(LocalDate::parse),today)
+        val sixReady=meta.first>=105 && meta.second.isNotBlank() &&
+            LocalDate.parse(meta.second).isBefore(today.minusMonths(5).plusDays(14))
+        val do3=threeReady && !adaptiveLowStore.hasRun(latest,3)
+        val do6=sixReady && !adaptiveLowStore.hasRun(latest,6)
+        if(!do3 && !do6) {
+            resolveMaturedAdaptiveLowOutcomes()
+            return
+        }
+        val min3=kotlin.math.ceil(three.first.coerceAtLeast(1)*0.85).toInt().coerceAtLeast(50)
+        val min6=kotlin.math.ceil(meta.first.coerceAtLeast(1)*0.85).toInt().coerceAtLeast(90)
+        val pe=if(valData.peDate==latest)valData.peBySymbol else emptyMap()
+        val indexHistory=largeWatchStore.indexHistories(latest)
+        val nifty=indexHistory["NIFTY 50"].orEmpty().lastOrNull()
+            ?.takeIf{it.day==day}
+        val nPct=nifty?.changePct
+        val nRegime=LargeIndexResearchPolicy.regime(nPct)
+        val rows3=mutableListOf<AdaptiveLowCandidate>()
+        val rows6=mutableListOf<AdaptiveLowCandidate>()
+        var eligible3=0
+        var eligible6=0
+        var processed=0
+        val runStart=System.currentTimeMillis()
+        fun enrich(c:AdaptiveLowCandidate):AdaptiveLowCandidate {
+            val sector=valData.industryBySymbol[c.symbol]
+                ?:members[c.symbol]
+            val mapped=sector?.let{LargeIndexResearchPolicy.sectorIndex(it)}
+            val sec=mapped?.let{indexHistory[it]?.lastOrNull()}
+                ?.takeIf{it.day==day}
+            return c.copy(
+                companyName=instrumentNames[c.symbol].orEmpty(),
+                marketCapCategory=capData.labels[c.symbol]?.category?:"UNCLASSIFIED",
+                sector=sector,
+                stockPe=pe[c.symbol],
+                // No historical stock P/B, financial revenue or EPS is invented.
+                stockPb=null,revenueGrowthPct=null,profitGrowthPct=null,
+                niftyEodPct=nPct,niftyRegime=nRegime,
+                sectorIndexName=mapped,sectorEodPct=sec?.changePct,
+                sectorRegime=LargeIndexResearchPolicy.regime(sec?.changePct),
+                marketEvidenceDay=nifty?.day?.toString().orEmpty(),
+                valuationEvidenceDay=if(pe.isNotEmpty())latest else ""
+            )
+        }
+        fun process(symbol:String,bars:List<EquityEodBar>) {
+            if(symbol.isBlank() || bars.lastOrNull()?.date!=day)return
+            processed++
+            if(do3) {
+                val subset=bars.filter{!it.date.isBefore(today.minusMonths(3))}
+                if(subset.size>=min3) {
+                    eligible3++
+                    AdaptiveLowPatternPolicy.evaluate(symbol,3,day,subset)?.let{
+                        rows3+=enrich(it)
+                    }
+                }
+            }
+            if(do6 && bars.size>=min6) {
+                eligible6++
+                AdaptiveLowPatternPolicy.evaluate(symbol,6,day,bars)?.let{
+                    rows6+=enrich(it)
+                }
+            }
+        }
+        synchronized(lock) {
+            var activeSymbol=""
+            val collected=mutableListOf<EquityEodBar>()
+            db.readableDatabase.rawQuery("""
+                SELECT day,symbol,low,close,volume,open,high FROM eod
+                WHERE day>=? AND day<=? ORDER BY symbol,day
+            """.trimIndent(),arrayOf(
+                (if(do6)today.minusMonths(6) else today.minusMonths(3)).toString(),latest
+            )).use{cursor->
+                while(cursor.moveToNext()) {
+                    val symbol=cursor.getString(1)
+                    if(activeSymbol.isNotEmpty() && symbol!=activeSymbol){
+                        process(activeSymbol,collected)
+                        collected.clear()
+                    }
+                    activeSymbol=symbol
+                    collected+=EquityEodBar(
+                        date=LocalDate.parse(cursor.getString(0)),
+                        symbol=symbol,low=cursor.getDouble(2),close=cursor.getDouble(3),
+                        volume=cursor.getLong(4),
+                        open=if(cursor.isNull(5))null else cursor.getDouble(5),
+                        high=if(cursor.isNull(6))null else cursor.getDouble(6)
+                    )
+                }
+                if(activeSymbol.isNotBlank())process(activeSymbol,collected)
+            }
+        }
+        val exchangeUniverse=synchronized(lock) {
+            db.readableDatabase.rawQuery("SELECT symbols FROM eod_days WHERE day=?",
+                arrayOf(latest)).use{c->if(c.moveToFirst())c.getInt(0)else 0}
+        }
+        // Refuse a partial cached archive claiming to cover the NSE universe.
+        if(processed<1500 || processed<exchangeUniverse*0.85) {
+            audit.logAsync("ADAPTIVE_LOWS","UNIVERSE_INCOMPLETE_SKIP",mapOf(
+                "day" to latest,"processed" to processed,"expected" to exchangeUniverse,
+                "market_hours_fetch" to false))
+            return
+        }
+        if(do3)adaptiveLowStore.saveDay(latest,3,exchangeUniverse,eligible3,rows3)
+        if(do6)adaptiveLowStore.saveDay(latest,6,exchangeUniverse,eligible6,rows6)
+        resolveMaturedAdaptiveLowOutcomes()
+        audit.logAsync("ADAPTIVE_LOWS","FULL_NSE_EOD_SUPPORT_SCAN_COMPLETE",mapOf(
+            "day" to latest,"nse_eq_universe" to exchangeUniverse,
+            "symbols_with_latest_eod" to processed,
+            "eligible_three_month" to eligible3,"matches_three_month" to rows3.size,
+            "eligible_six_month" to eligible6,"matches_six_month" to rows6.size,
+            "elapsed_ms" to (System.currentTimeMillis()-runStart),
+            "source" to "NSE_BHAVCOPY_OFF_MARKET_ONLY",
+            "groww_api_calls" to 0,
+            "fixed_working_range_execution_unchanged" to true
+        ))
+    }
+
+    private fun resolveMaturedAdaptiveLowOutcomes() {
+        requireAfterHours()
+        val unresolved=adaptiveLowStore.pending()
+        synchronized(lock) {
+            for(event in unresolved) {
+                val future=mutableListOf<Pair<String,Double>>()
+                db.readableDatabase.rawQuery(
+                    "SELECT day,close FROM eod WHERE symbol=? AND day>? ORDER BY day ASC LIMIT 10",
+                    arrayOf(event.symbol,event.day)).use{c->
+                    while(c.moveToNext())future+=c.getString(0) to c.getDouble(1)
+                }
+                adaptiveLowStore.resolve(event,future)
+            }
         }
     }
 
@@ -742,12 +965,20 @@ class EquityEodResearchRepository @Inject constructor(
                     row, peMap, valuation.industryBySymbol, peCurrent)
             )
         }
-        val threeMonthRows = if (threeMonthHistoryComplete)
-            enrichValuations(readLowRows(threeCutoff.toString(), latest, threeMonthMinCount, 3)) else emptyList()
-        val sixMonthMinCount = kotlin.math.ceil(sixReferenceSessions * 0.85).toInt().coerceAtLeast(90)
-        val sixMonthRows = if (spanComplete)
-            enrichValuations(readLowRows(sixCutoff.toString(), latest, sixMonthMinCount, 6)) else emptyList()
+        // Legacy proximity-only near-low rows are intentionally not recalculated on
+        // foreground refresh. Prospective support-retest candidates are computed
+        // once after hours across ALL valid NSE EQ symbols and persisted atomically.
+        val threeMonthRows: List<EquityLowObservation> = emptyList()
+        val sixMonthRows: List<EquityLowObservation> = emptyList()
 
+        val adaptive3 = if(threeMonthHistoryComplete)
+            adaptiveLowStore.rows(3,latest) else emptyList()
+        val adaptive6 = if(spanComplete)
+            adaptiveLowStore.rows(6,latest) else emptyList()
+        val adaptive3Run=adaptiveLowStore.latestRun(3)
+        val adaptive6Run=adaptiveLowStore.latestRun(6)
+        val adaptive3Learning=adaptiveLowStore.learning(3)
+        val adaptive6Learning=adaptiveLowStore.learning(6)
         val memberMap=members()
         val history=linkedMapOf<String,MutableList<EquityEodBar>>()
         val members=memberMap.keys.toList()
@@ -896,6 +1127,12 @@ class EquityEodResearchRepository @Inject constructor(
             officialPeSymbols=valuation.peBySymbol.size,
             industryClassifiedSymbols=valuation.industryBySymbol.size,
             fullIndustryPeCoverage=fullIndustryPeCoverage,
+            adaptiveLowThreeRows=adaptive3,
+            adaptiveLowSixRows=adaptive6,
+            adaptiveLowThreeRun=adaptive3Run,
+            adaptiveLowSixRun=adaptive6Run,
+            adaptiveLowThreeLearning=adaptive3Learning,
+            adaptiveLowSixLearning=adaptive6Learning,
             largeWatchEvidence=evidence,
             largeWatchLearning=learning,
             niftyContextDay=niftyToday?.day?.toString().orEmpty(),
