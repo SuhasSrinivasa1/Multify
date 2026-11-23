@@ -50,6 +50,7 @@ data class AdaptiveLowCandidate(
     val candleCoverage: Int,
     val phase: String,
     val patternScore: Double,
+    val companyName: String = "",
     val marketCapCategory: String = "UNCLASSIFIED",
     val sector: String? = null,
     val stockPe: Double? = null,
