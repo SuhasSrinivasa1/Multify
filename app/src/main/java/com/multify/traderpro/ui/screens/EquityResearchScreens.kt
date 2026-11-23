@@ -13,6 +13,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.multify.traderpro.data.repository.EquityResearchSnapshot
 import com.multify.traderpro.data.repository.EquityLowObservation
+import com.multify.traderpro.data.repository.LargeWatchEvidence
 import com.multify.traderpro.engine.LargeCapEquityObservation
 import com.multify.traderpro.engine.SwingPullbackResearchPolicy
 import java.time.Instant
@@ -43,7 +44,6 @@ internal fun LargeCapResearchScreen(state: TraderUiState, onRefresh: () -> Unit)
     val r=state.equityResearch
     val intraday=r.largeCaps.filter { it.intradayResearch }
     val swing=r.largeCaps.filter { it.swingResearch }
-    val others=r.largeCaps.filterNot { it.intradayResearch || it.swingResearch }
     LazyColumn(
         modifier=Modifier.fillMaxSize(),
         contentPadding=PaddingValues(14.dp),
@@ -53,13 +53,19 @@ internal fun LargeCapResearchScreen(state: TraderUiState, onRefresh: () -> Unit)
             ResearchNotice("LARGE-CAP NSE EQUITY", "Research only · cash shares · Fixed is unchanged")
             Spacer(Modifier.height(8.dp))
             Text("Intraday momentum + multi-day swing opportunities",style=MaterialTheme.typography.titleMedium)
-            Text("Swing: EOD trend-qualified stocks for the NEXT session, with a pullback price reference. Intraday: fresh market-sweep strength DURING the session. Other: monitored universe, NOT entry signals.",style=MaterialTheme.typography.bodySmall)
+            Text("Swing: EOD trend watch for the next session. Intraday: fresh Fixed-sweep strength during the session. Nonqualifying large caps are monitored internally but hidden.",style=MaterialTheme.typography.bodySmall)
             Text("Universe: ${r.memberSource} · ${r.largeCaps.size} stocks with usable EOD history",
                 style=MaterialTheme.typography.bodySmall)
             Text("Daily prices: ${r.latestDay.ifBlank { "not loaded" }} · ${r.completedDays} available sessions",
                 style=MaterialTheme.typography.bodySmall)
             Text("Intraday pulse: ${if(r.currentPulseAtMs>0)atIst(r.currentPulseAtMs) else "No fresh, complete Fixed sweep"}",
                 style=MaterialTheme.typography.bodySmall)
+            Text("Nifty 50 official EOD (${r.niftyContextDay.ifBlank { "unavailable" }}): ${r.niftyEodRegime} · day ${pc(r.niftyEodMovePct)} · previous ${pc(r.niftyPreviousEodMovePct)} · 5 sessions ${pc(r.niftyFiveDayMovePct)}",
+                style=MaterialTheme.typography.bodyMedium,fontWeight=FontWeight.SemiBold)
+            Text("Nifty index P/E ${r.niftyIndexPe?.let { String.format(Locale.US,"%.2fx",it) } ?: "missing"} · index P/B ${r.niftyIndexPb?.let { String.format(Locale.US,"%.2fx",it) } ?: "missing"} · sourced NSE index CSV, never stock P/B",
+                style=MaterialTheme.typography.labelSmall)
+            Text("Live large-cap breadth PROXY ${r.liveLargeCapBreadthProxyPct?.let { String.format(Locale.US,"%.1f%% positive",it) } ?: "unavailable"}; not the live Nifty index. Live Nifty regime is not claimed without a verified index quote.",
+                style=MaterialTheme.typography.labelSmall)
             Spacer(Modifier.height(5.dp))
             OutlinedButton(onClick=onRefresh) { Text("Refresh local research view") }
             Text("No extra Groww requests. Intraday observations reuse Fixed's existing NSE-wide LTP sweep; the EOD history updates after-hours.",
@@ -74,7 +80,7 @@ internal fun LargeCapResearchScreen(state: TraderUiState, onRefresh: () -> Unit)
             )
         }
         items(intraday, key={ "intraday_${it.symbol}" }) { row ->
-            LargeCapRow(row,"INTRADAY SHADOW")
+            LargeCapRow(row,"INTRADAY SHADOW",r.latestDay,r.largeWatchEvidence[row.symbol])
         }
         item {
             Text("Swing watch · ${swing.size}",style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.Bold)
@@ -85,15 +91,20 @@ internal fun LargeCapResearchScreen(state: TraderUiState, onRefresh: () -> Unit)
             )
         }
         items(swing,key={"swing_${it.symbol}"}) { row ->
-            LargeCapRow(row,"SWING SHADOW",r.latestDay)
+            LargeCapRow(row,"SWING SHADOW",r.latestDay,r.largeWatchEvidence[row.symbol])
         }
         item {
-            Text("Other monitored large caps · ${others.size}",style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.Bold)
-            Text("No entry signal; displayed to avoid selection-only reporting.",
+            Text("Daily shadow-learning ledger",style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.Bold)
+            Text("Existing SWING/INTRADAY candidates are captured once per symbol/day with ${r.largeWatchEvidence.values.firstOrNull()?.features?.size ?: 0} evidence fields; missing P/B or Nifty data stays missing. Outcome: 3rd future EOD close for Swing, same-day EOD close for Intraday; +0.50% is a research label, NOT a fill/target-before-stop claim.",
+                style=MaterialTheme.typography.bodySmall)
+            Text("Variants evolve by observed performance, not by changing Fixed. Shadow freeze eligibility requires ≥100 matured calls, ≥20 independent days, ≥90% observed success, ≥85% Wilson lower bound and separate chronological holdout evidence. Never automatically promote into trading.",
                 style=MaterialTheme.typography.labelSmall)
-        }
-        items(others,key={"monitor_${it.symbol}"}) { row ->
-            LargeCapRow(row,"MONITOR")
+            r.largeWatchLearning.take(10).forEach { m ->
+                Text("${m.type} / ${m.variant}: ${m.hits}/${m.matured} · ${String.format(Locale.US,"%.1f%%",m.hitRatePct)} observed · conservative ${String.format(Locale.US,"%.1f%%",m.wilsonLowerPct)} · ${m.independentDays} days · ${if(m.researchFreezeEligible)"RESEARCH FREEZE ELIGIBLE" else "LEARNING"}",
+                    style=MaterialTheme.typography.bodySmall)
+            }
+            if(r.largeWatchLearning.isEmpty()) Text("No matured forward-outcome observations yet; data collection starts as each next EOD becomes available.",
+                style=MaterialTheme.typography.bodySmall)
         }
         item {
             Text("These are research hypotheses, not broker instructions or verified profitable trading rules. No independent BUY, SELL, short or overnight-exit automation is enabled.",
@@ -103,7 +114,8 @@ internal fun LargeCapResearchScreen(state: TraderUiState, onRefresh: () -> Unit)
 }
 
 @Composable
-private fun LargeCapRow(r: LargeCapEquityObservation, label: String, eodDate: String = "") {
+private fun LargeCapRow(r: LargeCapEquityObservation, label: String, eodDate: String = "", evidence: LargeWatchEvidence? = null) {
+    var evidenceExpanded by rememberSaveable(r.symbol,label) { mutableStateOf(false) }
     Card(shape=RoundedCornerShape(12.dp)) {
         Column(Modifier.fillMaxWidth().padding(12.dp),verticalArrangement=Arrangement.spacedBy(3.dp)) {
             Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween) {
@@ -120,6 +132,28 @@ private fun LargeCapRow(r: LargeCapEquityObservation, label: String, eodDate: St
                 style=MaterialTheme.typography.labelSmall)
             if(r.intradayPct!=null) Text("Intraday pulse ${pc(r.intradayPct)} · vs ${if(r.comparisonBasis=="SECTOR_PEERS")"sector" else "broad"} peers ${pc(r.intradayRelativePct)}",
                 style=MaterialTheme.typography.bodySmall)
+            if(evidence!=null) {
+                val sectorDaily=evidence.features["sector_eod_move_pct"]
+                val niftyDaily=evidence.features["nifty_eod_move_pct"]
+                val ratio=evidence.features["stock_pe"]
+                Text("NIFTY EOD ${evidence.niftyRegime} ${pc(niftyDaily)} · NSE sector ${evidence.sectorIndex ?: "not mapped"}: ${evidence.sectorRegime} ${pc(sectorDaily)}",
+                    style=MaterialTheme.typography.bodySmall)
+                Text("Stock P/E ${ratio?.let{String.format(Locale.US,"%.2fx",it)} ?: "unavailable"} · Stock P/B unverified · ${evidence.features.size} tracked daily measures",
+                    style=MaterialTheme.typography.bodySmall)
+                Text("Sector index data: ${evidence.marketDate.ifBlank{"not yet imported"}} · no inferred live Nifty quote",
+                    style=MaterialTheme.typography.labelSmall)
+                OutlinedButton(onClick={ evidenceExpanded=!evidenceExpanded },modifier=Modifier.fillMaxWidth()) {
+                    Text(if(evidenceExpanded)"Hide daily evidence" else "Show all ${evidence.features.size} daily measures")
+                }
+                if(evidenceExpanded){
+                    evidence.features.forEach { (metric,value) ->
+                        Text("${metric.replace('_',' ')}: ${value?.takeIf{it.isFinite()}?.let { String.format(Locale.US,"%.3f",it) } ?: "MISSING"}",
+                            style=MaterialTheme.typography.labelSmall)
+                    }
+                    Text("Feature EOD: ${evidence.eodDate}; market index EOD: ${evidence.marketDate.ifBlank{"unavailable"}}. Stock P/B is missing until a sourced fundamentals feed exists. Snapshot only; no live execution authority.",
+                        style=MaterialTheme.typography.labelSmall)
+                }
+            }
             if(r.swingResearch && label == "SWING SHADOW") {
                 val zone = SwingPullbackResearchPolicy.evaluate(r.close,r.ema20,r.ema50)
                 if(zone != null) {
