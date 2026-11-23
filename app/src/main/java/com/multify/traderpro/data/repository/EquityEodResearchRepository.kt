@@ -193,6 +193,7 @@ class EquityEodResearchRepository @Inject constructor(
     private val db = Store(context)
     private val valuationStore = EquityLowValuationStore(context)
     private val largeWatchStore = LargeWatchLearningStore(context)
+    private var lastUniverseCapturedDay = ""
     private val prefs = context.getSharedPreferences("suhas_shree_eod_state", Context.MODE_PRIVATE)
     // AMFI classification is bundled as a build-time asset. No runtime market-cap
     // requests are added, and missing/unmatched symbols remain explicitly unclassified.
@@ -833,6 +834,18 @@ class EquityEodResearchRepository @Inject constructor(
                         "INTRADAY",livePrice,prefs.getLong("pulse_at_ms",0L),item)
                 }
             }
+        }
+        // Preserve ALL monitored large caps in a HIDDEN control cohort once per
+        // EOD day, even when they are not actionable. Without this denominator,
+        // precision-only learning cannot reveal false negatives and selection bias.
+        if(latest.isNotBlank() && lastUniverseCapturedDay != latest &&
+            !LocalDate.parse(latest).isBefore(today.minusDays(4))) {
+            for(row in result) {
+                val item=evidence[row.symbol] ?: continue
+                largeWatchStore.record(latest,row.symbol,"UNIVERSE",row.close,
+                    System.currentTimeMillis(),item)
+            }
+            lastUniverseCapturedDay=latest
         }
         // EOD-close learning is local-only. Events without the full horizon are
         // censored, never recorded as failures or simulated broker profits.
