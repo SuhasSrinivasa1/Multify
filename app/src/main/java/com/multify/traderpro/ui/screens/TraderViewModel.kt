@@ -115,6 +115,21 @@ class TraderViewModel @Inject constructor(
         }
     }
 
+    /** Does not call broker dashboard, quotes, holdings, or archive backfill. */
+    fun refreshInstitutionalResearch() {
+        viewModelScope.launch {
+            if(researchScanning.value)return@launch
+            researchScanning.value=true
+            try {
+                withContext(Dispatchers.IO){equityEodResearch.refreshInstitutionalOnly()}
+                equityResearch.value=withContext(Dispatchers.IO){equityEodResearch.snapshot()}
+            } catch(cancelled:CancellationException){throw cancelled}
+            catch(e:Exception){
+                remote.value=remote.value.copy(error="Institutional research: ${e.userMessage()}")
+            } finally{researchScanning.value=false}
+        }
+    }
+
     fun refreshResearchView() {
         viewModelScope.launch {
             runCatching { withContext(Dispatchers.IO) { equityEodResearch.snapshot() } }

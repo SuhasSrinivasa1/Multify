@@ -60,7 +60,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-internal enum class LitePage { FIXED, WORKING_RANGE, MANUAL, LARGE_CAP, SIX_MONTH_LOW, AVERAGES, SETTINGS }
+internal enum class LitePage { FIXED, WORKING_RANGE, MANUAL, LARGE_CAP, SIX_MONTH_LOW, INSTITUTIONAL, AVERAGES, SETTINGS }
 private enum class LiteTone { POSITIVE, WARNING, NEGATIVE, INFO, NEUTRAL }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -109,6 +109,7 @@ fun FixedLiteApp(viewModel: TraderViewModel = hiltViewModel()) {
                                     LitePage.MANUAL -> "Intraday MIS BUY / SELL"
                                     LitePage.LARGE_CAP -> "Large-cap research"
                                     LitePage.SIX_MONTH_LOW -> "3M / 6M lows"
+                                    LitePage.INSTITUTIONAL -> "Institutional intelligence"
                                     LitePage.AVERAGES -> "Observed Fixed outcomes"
                                     LitePage.SETTINGS -> "Accounts and controls"
                                 },
@@ -127,7 +128,7 @@ fun FixedLiteApp(viewModel: TraderViewModel = hiltViewModel()) {
                         IconButton(onClick = { page = LitePage.SETTINGS }) {
                             Icon(Icons.Default.Settings, contentDescription = "Open settings")
                         }
-                        IconButton(onClick = { viewModel.refresh() }, enabled = !state.loading) {
+                        IconButton(onClick = { if(page==LitePage.INSTITUTIONAL) viewModel.refreshInstitutionalResearch() else viewModel.refresh() }, enabled = !state.loading && (page!=LitePage.INSTITUTIONAL || !state.researchScanning)) {
                             Icon(Icons.Default.Refresh, contentDescription = "Refresh dashboard")
                         }
                     },
@@ -146,12 +147,13 @@ fun FixedLiteApp(viewModel: TraderViewModel = hiltViewModel()) {
                 LitePage.MANUAL -> LiteManualScreen(state, viewModel)
                 LitePage.LARGE_CAP -> LargeCapResearchScreen(state,viewModel::refreshResearchView)
                 LitePage.SIX_MONTH_LOW -> SixMonthLowResearchScreen(state,viewModel::scanLowRangeNow)
+                LitePage.INSTITUTIONAL -> InstitutionalResearchScreen(state,viewModel::refreshInstitutionalResearch)
                 LitePage.AVERAGES -> LiteAveragesScreen(state)
                 LitePage.SETTINGS -> LiteSettingsScreen(
                     state, viewModel,
                     onEnableRequested = { confirmEnable = it },
                     onResetRequested = { confirmHaltReset = true },
-                    onExport = { export.launch("Phayra-v9036-eod-largecap-diagnostics.zip") }
+                    onExport = { export.launch("Phayra-v9046-institutional-diagnostics.zip") }
                 )
             }
         }
@@ -246,6 +248,12 @@ internal fun LiteBottomBar(page: LitePage, onNavigate: (LitePage) -> Unit) {
             onClick = { onNavigate(LitePage.SIX_MONTH_LOW) },
             icon = { Icon(Icons.Default.Analytics, contentDescription = null) },
             label = { Text("Lows", maxLines = 1) }
+        )
+        NavigationBarItem(
+            selected = page == LitePage.INSTITUTIONAL,
+            onClick = { onNavigate(LitePage.INSTITUTIONAL) },
+            icon = { Icon(Icons.Default.Analytics, contentDescription = null) },
+            label = { Text("FII/DII", maxLines = 1, softWrap = false) }
         )
     }
 }
