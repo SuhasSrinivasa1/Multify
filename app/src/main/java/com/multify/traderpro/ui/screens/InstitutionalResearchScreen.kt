@@ -112,6 +112,17 @@ internal fun InstitutionalResearchScreen(state:TraderUiState,onRefresh:()->Unit)
             }
         }
         item{
+            var showSectorTotals by rememberSaveable{mutableStateOf(false)}
+            OutlinedButton(onClick={showSectorTotals=!showSectorTotals},modifier=Modifier.fillMaxWidth()){
+                Text(if(showSectorTotals)"Hide sector net flow" else "Show top sector net flow")
+            }
+            if(showSectorTotals){
+                val totals=remember(snapshot,source,filter,days){InstitutionalHistoryPolicy.sectorTotals(snapshot,source,filter,days)}
+                Text("Sector totals include all matched disclosures, not just the 20 displayed stocks. Unmapped is not a sector.",style=MaterialTheme.typography.labelSmall)
+                totals.forEach{v->Text("${v.sector}: net ${crores(v.net)} · buys ${crores(v.buys)} · sells ${crores(v.sells)}",style=MaterialTheme.typography.bodySmall)}
+            }
+        }
+        item{
             Text("Source: NSE ${source.lowercase(Locale.US)} deal disclosure. Client classification: selected named FPI issuer disclosures and AMFI fund directory. No complete stock-wise FII/DII flow or investment advice is claimed. Zero in a category means no matched rows in this report.",style=MaterialTheme.typography.labelSmall)
         }
     }
