@@ -84,6 +84,8 @@ internal fun InstitutionalResearchScreen(state:TraderUiState,onRefresh:()->Unit)
             Text("Bulk and block are separate: overlapping reports must not be summed. FII/DII means only exact named clients matched to issuer filings or AMFI directory, not all institutional trades.",style=MaterialTheme.typography.bodySmall)
             if(report!=null){
                 Text("Disclosure date: ${report.day} · ${report.source} · ${report.disclosedRows} reported rows; ${report.matchedRows} verified FII/DII, ${report.unmatchedRows} unclassified, ${report.duplicateRows} identical rows excluded; ${report.retainedRows} unique rows retained.",style=MaterialTheme.typography.bodySmall)
+                if(report.schemaVersion<2)
+                    Text("LEGACY CACHE: v9.0.47 did not retain unmatched rows. The same NSE report will be re-imported once during the next 18:30–08:00 IST refresh; all-disclosed rankings may remain incomplete until then.",color=MaterialTheme.colorScheme.error,style=MaterialTheme.typography.labelSmall)
                 if(report.day!=state.equityResearch.latestDay)
                     Text("Older cached disclosure — latest saved exchange EOD is ${state.equityResearch.latestDay.ifBlank{"unknown"}}.",color=MaterialTheme.colorScheme.error,style=MaterialTheme.typography.labelSmall)
             }else Text("No dated, validated ${source.lowercase(Locale.US)} disclosure cached. Empty or unavailable reports do not imply zero institutional activity.",style=MaterialTheme.typography.bodySmall)
