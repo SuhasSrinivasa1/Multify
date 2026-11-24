@@ -1149,6 +1149,170 @@ class EquityEodResearchRepository @Inject constructor(
             }?.let { row.substring(0,i) to it }
         }.toMap()
 
+    /**
+     * Portable, learning-only backup of the last six months of NSE EOD bars.
+     * Does not export credentials, broker orders, holdings, retry attempts or execution state.
+     */
+    fun appendPortableHistory(zip:ZipOutputStream):Int {
+        val gson=GsonBuilder().disableHtmlEscaping().create()
+        val cutoff=LocalDate.now(INDIA).minusMonths(6).minusDays(10).toString()
+        zip.putNextEntry(ZipEntry("eod_research_history.jsonl"))
+        val writer=BufferedWriter(OutputStreamWriter(zip,Charsets.UTF_8),32*1024)
+        var bars=0
+        writer.write(gson.toJson(mapOf("type" to "META","schema" to 1,"from_day" to cutoff,
+            "exported_at_ms" to System.currentTimeMillis())))
+        writer.newLine()
+        synchronized(lock) {
+            val sql=db.readableDatabase
+            sql.rawQuery("SELECT day,symbol,low,close,volume,open,high FROM eod WHERE day>=? ORDER BY day,symbol",
+                arrayOf(cutoff)).use{c->
+                while(c.moveToNext()) {
+                    val row=linkedMapOf<String,Any?>(
+                        "type" to "BAR","day" to c.getString(0),"symbol" to c.getString(1),
+                        "low" to c.getDouble(2),"close" to c.getDouble(3),"volume" to c.getLong(4),
+                        "open" to if(c.isNull(5))null else c.getDouble(5),
+                        "high" to if(c.isNull(6))null else c.getDouble(6))
+                    writer.write(gson.toJson(row));writer.newLine();bars++
+                }
+            }
+            sql.rawQuery("SELECT day,symbols,updated_ms FROM eod_days WHERE day>=? ORDER BY day",
+                arrayOf(cutoff)).use{c->
+                while(c.moveToNext()) {
+                    writer.write(gson.toJson(mapOf("type" to "DAY","day" to c.getString(0),
+                        "symbols" to c.getInt(1),"updated_ms" to c.getLong(2))))
+                    writer.newLine()
+                }
+            }
+            sql.rawQuery("SELECT symbol,sector FROM members ORDER BY symbol",null).use{c->
+                while(c.moveToNext()) {
+                    writer.write(gson.toJson(mapOf("type" to "MEMBER","symbol" to c.getString(0),
+                        "sector" to c.getString(1))))
+                    writer.newLine()
+                }
+            }
+        }
+        writer.flush()
+        zip.closeEntry()
+        audit.logAsync("MIGRATION","EOD_RESEARCH_HISTORY_EXPORTED",mapOf(
+            "bars" to bars,"from_day" to cutoff,"schema" to 1,
+            "credentials_exported" to false,"broker_state_exported" to false))
+        return bars
+    }
+
+    /** Idempotent research-only restore. A date is marked complete only after its row count validates. */
+    fun restorePortableHistory(jsonl:String):Int {
+        require(jsonl.length<=128*1024*1024){"EOD research restore entry too large"}
+        data class PendingBar(val day:String,val symbol:String,val values:ContentValues,
+            val open:Double?,val high:Double?)
+        val days=linkedMapOf<String,Pair<Int,Long>>()
+        val memberRows=linkedMapOf<String,String>()
+        val pending=ArrayList<PendingBar>(1_000)
+        var schemaSeen=false
+        var lineCount=0
+        var restored=0
+        fun flushBars() {
+            if(pending.isEmpty())return
+            synchronized(lock) {
+                val sql=db.writableDatabase
+                sql.beginTransaction()
+                try {
+                    for(bar in pending) {
+                        val inserted=sql.insertWithOnConflict("eod",null,bar.values,SQLiteDatabase.CONFLICT_IGNORE)
+                        if(inserted!=-1L) {
+                            restored++
+                        } else {
+                            sql.query("eod",arrayOf("open","high"),"day=? AND symbol=?",
+                                arrayOf(bar.day,bar.symbol),null,null,null).use{c->
+                                if(c.moveToFirst()) {
+                                    val patch=ContentValues()
+                                    if(c.isNull(0) && bar.open!=null)patch.put("open",bar.open)
+                                    if(c.isNull(1) && bar.high!=null)patch.put("high",bar.high)
+                                    if(patch.size()>0 && sql.update("eod",patch,"day=? AND symbol=?",
+                                        arrayOf(bar.day,bar.symbol))>0)restored++
+                                }
+                            }
+                        }
+                    }
+                    sql.setTransactionSuccessful()
+                } finally { sql.endTransaction() }
+            }
+            pending.clear()
+        }
+        for(line in jsonl.lineSequence()) {
+            if(line.isBlank())continue
+            lineCount++
+            require(lineCount<=500_000){"EOD research restore has too many rows"}
+            val row=JsonParser.parseString(line).asJsonObject
+            when(row.get("type")?.asString) {
+                "META" -> {
+                    require(row.get("schema")?.asInt==1){"Unsupported EOD research backup schema"}
+                    schemaSeen=true
+                }
+                "BAR" -> {
+                    val day=row.get("day")?.asString?:continue
+                    val symbol=row.get("symbol")?.asString?.uppercase(Locale.US)?:continue
+                    val low=row.get("low")?.asDouble?:continue
+                    val close=row.get("close")?.asDouble?:continue
+                    val volume=row.get("volume")?.asLong?:continue
+                    val open=row.get("open")?.takeUnless{it.isJsonNull}?.asDouble
+                    val high=row.get("high")?.takeUnless{it.isJsonNull}?.asDouble
+                    if(!SYMBOL_REGEX.matches(symbol) || !runCatching{LocalDate.parse(day)}.isSuccess ||
+                        !low.isFinite() || !close.isFinite() || low<=0.0 || close<low ||
+                        volume<0L || (open!=null && (!open.isFinite() || open<low)) ||
+                        (high!=null && (!high.isFinite() || high<maxOf(open?:low,close))))continue
+                    val values=ContentValues().apply {
+                        put("day",day);put("symbol",symbol);put("low",low);put("close",close);put("volume",volume)
+                        if(open!=null)put("open",open) else putNull("open")
+                        if(high!=null)put("high",high) else putNull("high")
+                    }
+                    pending+=PendingBar(day,symbol,values,open,high)
+                    if(pending.size>=1_000)flushBars()
+                }
+                "DAY" -> {
+                    val day=row.get("day")?.asString?:continue
+                    val symbols=row.get("symbols")?.asInt?:continue
+                    val updated=row.get("updated_ms")?.asLong?:0L
+                    if(runCatching{LocalDate.parse(day)}.isSuccess && symbols>=MIN_VALID_EQ_ROWS)
+                        days[day]=symbols to updated
+                }
+                "MEMBER" -> {
+                    val symbol=row.get("symbol")?.asString?.uppercase(Locale.US)?:continue
+                    val sector=row.get("sector")?.asString?.trim().orEmpty()
+                    if(SYMBOL_REGEX.matches(symbol) && sector.isNotBlank())memberRows[symbol]=sector
+                }
+            }
+        }
+        require(schemaSeen){"EOD research backup manifest missing or unsupported"}
+        flushBars()
+        var completedDays=0
+        synchronized(lock) {
+            val sql=db.writableDatabase
+            sql.beginTransaction()
+            try {
+                for((day,meta) in days) {
+                    val actual=sql.rawQuery("SELECT COUNT(*) FROM eod WHERE day=?",arrayOf(day)).use{c->
+                        if(c.moveToFirst())c.getInt(0)else 0
+                    }
+                    val required=maxOf(MIN_VALID_EQ_ROWS,kotlin.math.ceil(meta.first*0.85).toInt())
+                    if(actual>=required) {
+                        sql.insertWithOnConflict("eod_days",null,ContentValues().apply {
+                            put("day",day);put("symbols",actual);put("updated_ms",meta.second)
+                        },SQLiteDatabase.CONFLICT_REPLACE)
+                        completedDays++
+                    }
+                }
+                for((symbol,sector) in memberRows)sql.insertWithOnConflict("members",null,
+                    ContentValues().apply{put("symbol",symbol);put("sector",sector)},SQLiteDatabase.CONFLICT_REPLACE)
+                sql.setTransactionSuccessful()
+            } finally { sql.endTransaction() }
+        }
+        audit.logAsync("MIGRATION","EOD_RESEARCH_HISTORY_RESTORED",mapOf(
+            "rows_inserted_or_enriched" to restored,"completed_dates" to completedDays,
+            "members_restored" to memberRows.size,"schema" to 1,
+            "broker_state_restored" to false,"credentials_restored" to false))
+        return restored
+    }
+
     fun snapshot(): EquityResearchSnapshot = synchronized(lock) {
         val marketCaps = amfiMarketCapDataset
         val valuation = valuationStore.snapshot()
