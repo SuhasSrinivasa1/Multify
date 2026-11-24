@@ -75,6 +75,8 @@ internal fun InstitutionalResearchScreen(state:TraderUiState,onRefresh:()->Unit)
             Text("Nifty EOD ${snapshot.contextDay.ifBlank{"unknown"}}: ${snapshot.niftyEodPct?.let{String.format(Locale.US,"%+.2f%%",it)}?:"unavailable"} · not live index data.",style=MaterialTheme.typography.bodySmall)
             Text(if(hourly==null)"Hourly Groww price observation unavailable." else
                 "Groww sweep price snapshot: ${hourly.day} ${String.format(Locale.US,"%02d:00",hourly.hour)} slot · client receipt ${java.time.Instant.ofEpochMilli(hourly.receivedAtMs).atZone(java.time.ZoneId.of("Asia/Kolkata")).toLocalTime().toString().take(8)} IST · ${if(currentHour)"current hour" else "older observation"} · not live institutional flow.",style=MaterialTheme.typography.bodySmall)
+            val todaySlots=snapshot.hourlyHistory.filter{it.day==now.toLocalDate().toString()}.map{it.hour}.toSet()
+            Text("Today's captured hours: ${todaySlots.sorted().joinToString(", ").ifBlank{"none"}} · missing hours are not backfilled.",style=MaterialTheme.typography.labelSmall)
             Text("Bulk and block are separate: overlapping reports must not be summed. FII/DII means only exact named clients matched to issuer filings or AMFI directory, not all institutional trades.",style=MaterialTheme.typography.bodySmall)
             if(report!=null){
                 Text("Disclosure date: ${report.day} · ${report.source} · ${report.disclosedRows} reported rows; ${report.deals.size} matched, ${report.unmatchedRows} unmatched, ${report.duplicateRows} identical rows excluded.",style=MaterialTheme.typography.bodySmall)
