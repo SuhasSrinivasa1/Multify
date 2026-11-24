@@ -585,7 +585,7 @@ class EquityEodResearchRepository @Inject constructor(
                         prefs.getString("archive_latest_404_day","")==day.toString() &&
                         System.currentTimeMillis()>=prefs.getLong("archive_latest_404_retry_after_ms",Long.MAX_VALUE)
                     if(previous?.first==today.toString() && !latest404Due)continue
-                    if(previous?.second=="NSE_BHAVCOPY_HTTP_404" && day.isBefore(today.minusDays(7)) &&
+                    if(previous?.second=="NSE_BHAVCOPY_HTTP_404" && day!=last &&
                         LocalDate.parse(previous.first).isAfter(today.minusDays(7)))continue
                     wireRequests++
                     var failure=""
@@ -637,14 +637,14 @@ class EquityEodResearchRepository @Inject constructor(
             refreshAdaptiveLowsAfterHours()
             if(!blocked && afterHours(ZonedDateTime.now(INDIA)))refreshInstitutionalAfterHours()
             val progressMessage="Last archive pass: $imported imported · $wireRequests archive requests · "+
-                "${missing.size} weekdays still unfetched (includes exchange holidays)."
+                "${(missing.size-imported).coerceAtLeast(0)} weekdays still unfetched (includes exchange holidays)."
             if(failureMessage.isBlank())failureMessage=prefs.getString("archive_failure_message","").orEmpty()
             prefs.edit().putLong("last_eod_attempt_ms",System.currentTimeMillis())
                 .putString("last_eod_error",failureMessage).putString("archive_progress",progressMessage)
                 .putLong("archive_retry_after_ms",retryAfterMs)
                 .putString("archive_failure_code",failureCode.ifBlank{prefs.getString("archive_failure_code","").orEmpty()})
                 .putInt("archive_last_requests",wireRequests).putInt("archive_last_imported",imported)
-                .putInt("archive_last_missing_weekdays",missing.size).apply()
+                .putInt("archive_last_missing_weekdays",(missing.size-imported).coerceAtLeast(0)).apply()
             EquityEodRefreshProgress(imported,missing.size,blocked,wireRequests,retryAfterMs,failureMessage)
         } finally { refreshMutex.unlock() }
     }

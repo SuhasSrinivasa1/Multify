@@ -11,7 +11,7 @@ object NseArchiveRecoveryPolicy {
  private const val MAX_TRANSIENT_BACKOFF_MS=6L*60L*60L*1000L
  fun retryAfterAtMs(header:String?,nowMs:Long):Long? {
   val value=header?.trim()?.takeIf{it.isNotEmpty()}?:return null
-  value.toLongOrNull()?.let{return nowMs+it.coerceAtLeast(0L).coerceAtMost(86_400L)*1_000L}
+  value.toLongOrNull()?.let{return nowMs+it.coerceAtLeast(1L).coerceAtMost(86_400L)*1_000L}
   return runCatching{ZonedDateTime.parse(value,DateTimeFormatter.RFC_1123_DATE_TIME).toInstant().toEpochMilli().coerceAtLeast(nowMs)}.getOrNull()
  }
  fun transientBackoffMs(failureCount:Int):Long {
