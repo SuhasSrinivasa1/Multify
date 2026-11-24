@@ -22,7 +22,15 @@ data class AdaptiveLowMarketCapDiagnostics(
     val largeCapUniverseSymbols:List<String> = emptyList(),
     val largeCapEligibleSymbols:List<String> = emptyList(),
     val largeCapQualifiedSymbols:List<String> = emptyList()
-)
+) {
+    val largeCapCoverageStatus:String get()=when{
+        assetLarge<=0 -> "AMFI_LARGE_BUCKET_MISSING"
+        largeCapUniverseSymbols.isEmpty() -> "NO_AMFI_LARGE_SYMBOL_IN_LATEST_NSE_EOD"
+        largeCapEligibleSymbols.isEmpty() -> "LARGE_SYMBOLS_LACK_COMPLETE_HISTORY"
+        largeCapQualifiedSymbols.isEmpty() -> "LARGE_SYMBOLS_EVALUATED_NO_PATTERN_MATCH"
+        else -> "LARGE_CAP_PATTERN_MATCHES_FOUND"
+    }
+}
 
 data class AdaptiveLowRunState(
     val day: String,
