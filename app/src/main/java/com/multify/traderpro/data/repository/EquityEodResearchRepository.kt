@@ -119,6 +119,9 @@ data class EquityEodRefreshProgress(
     val lastFailure: String = ""
 )
 
+private class NseArchiveHttpException(val statusCode:Int,val retryAfterHeader:String?) :
+    IOException("NSE_BHAVCOPY_HTTP_$statusCode")
+
 /**
  * NSE cash equity research ONLY. Uses official daily CM-UDiFF bhavcopy archives (ONE
  * public file per session for all EQ symbols), never Groww historical/quote/order APIs.
@@ -319,7 +322,7 @@ class EquityEodResearchRepository @Inject constructor(
                 check(response.isSuccessful) { "NSE_REPORTS_HTTP_${response.code}" }
             }
             warmedNseDate=today
-            prefs.edit().putLong("nse_warm_retry_after_ms",Long.MAX_VALUE).apply()
+            prefs.edit().putLong("nse_warm_retry_after_ms",0L).apply()
         }.onFailure {
             audit.logAsync("EOD_RESEARCH","NSE_COOKIE_PREWARM_UNAVAILABLE",mapOf(
                 "reason" to (it.message ?: it.javaClass.simpleName).take(100),
@@ -345,7 +348,7 @@ class EquityEodResearchRepository @Inject constructor(
             raw.contains("ZIP_EMPTY") || raw.contains("HEADER_EMPTY") || raw.contains("TOO_MANY_ROWS")
         val network=status==null && error is IOException
         val failures=prefs.getInt("archive_transient_failure_count",0)+1
-        val code=NseArchiveRecoveryPolicy.failureCode(status,invalid,network)
+        val code=if(status==404 && day==latest) "HTTP_404_LATEST_NOT_PUBLISHED" else NseArchiveRecoveryPolicy.failureCode(status,invalid,network)
         val retryAt=when {
             status==404 && day==latest -> NseArchiveRecoveryPolicy.latestNotFoundRetryAtMs(now)
             status==404 -> 0L
@@ -590,6 +593,11 @@ class EquityEodResearchRepository @Inject constructor(
                         val rows=importArchive(day)
                         imported++
                         synchronized(lock){db.writableDatabase.delete("attempts","day=?",arrayOf(day.toString()))}
+                        val priorFailureCode=prefs.getString("archive_failure_code","").orEmpty()
+                        if(day==last || priorFailureCode!="HTTP_404_LATEST_NOT_PUBLISHED") {
+                            prefs.edit().putString("archive_failure_message","").putString("archive_failure_code","")
+                                .putString("archive_failure_date","").putLong("archive_retry_after_ms",0L).apply()
+                        }
                         if(day==last)prefs.edit().remove("archive_latest_404_day").remove("archive_latest_404_retry_after_ms").apply()
                         prefs.edit().putInt("archive_transient_failure_count",0).putLong("archive_cooldown_until_ms",0L).apply()
                         audit.logAsync("EOD_RESEARCH","BHAVCOPY_IMPORTED",mapOf(
