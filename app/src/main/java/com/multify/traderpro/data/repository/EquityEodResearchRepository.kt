@@ -13,6 +13,10 @@ import com.multify.traderpro.engine.LargeCapEquityResearchPolicy
 import com.multify.traderpro.engine.NseEquitySessionCalendar
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import okhttp3.OkHttpClient
@@ -262,6 +266,21 @@ class EquityEodResearchRepository @Inject constructor(
         .build()
     private val lock = Any()
     private val refreshMutex = Mutex()
+
+    private data class Pulse(val at:ZonedDateTime,val current:Map<String,Double>,val open:Map<String,Double>)
+    // Bounded and non-blocking: no research database lock or preference serialization
+    // may delay the Fixed discovery/Working Range evaluation path.
+    private val pulseQueue=Channel<Pulse>(capacity=2)
+    private val pulseScope=CoroutineScope(SupervisorJob()+Dispatchers.IO)
+    init {
+        pulseScope.launch {
+            for(pulse in pulseQueue) {
+                runCatching { persistFixedLivePulse(pulse) }.onFailure { err ->
+                    audit.logAsync("LARGE_CAP_SHADOW","PULSE_PERSIST_FAILED",mapOf("type" to err.javaClass.simpleName,"groww_api_calls" to 0))
+                }
+            }
+        }
+    }
 
     private fun request(url: String): Request = Request.Builder().url(url)
         .header("Accept", "text/csv,application/zip,application/octet-stream,*/*")
@@ -968,13 +987,24 @@ class EquityEodResearchRepository @Inject constructor(
                 audit.logAsync("INSTITUTIONAL_RESEARCH","HOURLY_SWEEP_NOT_QUALIFIED",mapOf("hour_ist" to at.hour,"reason" to "INCOMPLETE_OR_BASELINE_NOT_READY"))
             return
         }
+        if(pulseQueue.trySend(Pulse(at,current.toMap(),open.toMap())).isFailure) {
+            audit.logAsync("LARGE_CAP_SHADOW","PULSE_QUEUE_FULL",mapOf("hour_ist" to at.hour,"groww_api_calls" to 0,"fixed_selection_changed" to false))
+        }
+    }
+
+    private fun persistFixedLivePulse(pulse:Pulse) {
+        val at=pulse.at
+        val current=pulse.current
+        val open=pulse.open
         // Reuse the full Groww sweep BEFORE the Large-cap-only filter.
         // No new requests, no extra Alpha/Beta capacity, no execution authority.
         runCatching {
             if(institutionalStore.captureHourly(at,current,open))
                 audit.logAsync("INSTITUTIONAL_RESEARCH","HOURLY_SWEEP_REUSED",mapOf(
-                    "hour_ist" to at.hour,"received_at_ms" to System.currentTimeMillis(),
+                    "hour_ist" to at.hour,"received_at_ms" to at.toInstant().toEpochMilli(),
                     "groww_api_calls_added" to 0,"institutional_transactions_inferred" to false))
+            else if(com.multify.traderpro.engine.InstitutionalHistoryPolicy.slot(at)!=null && !institutionalStore.hasTrackedSymbols())
+                audit.logAsync("INSTITUTIONAL_RESEARCH","HOURLY_NO_TRACKED_DISCLOSURES",mapOf("hour_ist" to at.hour,"groww_api_calls_added" to 0))
         }
         val memberSet = members().keys
         val live = current.filter { (symbol,price) ->
@@ -987,7 +1017,7 @@ class EquityEodResearchRepository @Inject constructor(
         prefs.edit().putString("pulse_date",at.toLocalDate().toString())
             .putString("pulse_prices",live.entries.joinToString("|") { "${it.key}~${it.value}" })
             .putString("pulse_open",opens.entries.joinToString("|") { "${it.key}~${it.value}" })
-            .putLong("pulse_at_ms",System.currentTimeMillis()).apply()
+            .putLong("pulse_at_ms",at.toInstant().toEpochMilli()).apply()
     }
 
     private fun members(): Map<String,String> = synchronized(lock) {

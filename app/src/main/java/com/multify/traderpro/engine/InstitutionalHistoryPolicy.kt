@@ -17,7 +17,9 @@ data class InstitutionalWindow(val rows:List<InstitutionalAccumulation>,val requ
 object InstitutionalHistoryPolicy {
     fun slot(at:ZonedDateTime):String? {
         val t=at.withZoneSameInstant(ZoneId.of("Asia/Kolkata"))
-        if(t.hour !in 10..15 || t.minute>20)return null
+        // Use the first eligible completed sweep in each hour, even if the
+        // initial twenty minutes were lost to a broker cooldown. No backfill.
+        if(t.hour !in 10..15 || !NseEquitySessionCalendar.isFixedScanWindow(t))return null
         return t.toLocalDate().toString()+"-"+t.hour
     }
     fun window(snapshot:InstitutionalSnapshot,source:String,side:String,category:String,days:Int,sectorOnly:String?=null):InstitutionalWindow {

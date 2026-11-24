@@ -22,6 +22,7 @@ internal class InstitutionalDisclosureStore(context:Context) {
     private var tracked=(cached.history+listOfNotNull(cached.bulk,cached.block)).flatMap{it.deals}.map{it.symbol}.toSet()
     private var lastSlot=cached.hourly?.let{it.day+"-"+it.hour}.orEmpty()
     fun snapshot():InstitutionalSnapshot=synchronized(lock){cached}
+    fun hasTrackedSymbols():Boolean=synchronized(lock){tracked.isNotEmpty()}
     fun save(report:InstitutionalReport)=synchronized(lock){
         require(report.source in setOf("BULK","BLOCK") && report.disclosedRows>0)
         val old=if(report.source=="BULK")cached.bulk else cached.block
@@ -44,13 +45,13 @@ internal class InstitutionalDisclosureStore(context:Context) {
         if(slot==lastSlot || tracked.isEmpty())return@synchronized false
         val prices=current.filter{(s,p)->s in tracked && p.isFinite() && p>0}
         if(prices.isEmpty())return@synchronized false
-        val sample=InstitutionalHourly(at.toLocalDate().toString(),at.hour,System.currentTimeMillis(),
+        val sample=InstitutionalHourly(at.toLocalDate().toString(),at.hour,at.toInstant().toEpochMilli(),
             prices,open.filter{(s,p)->s in prices && p.isFinite() && p>0})
         lastSlot=slot
         val history=(cached.hourlyHistory+listOfNotNull(cached.hourly)+sample)
-            .associateBy{it.day+"-"+it.hour}.values.sortedByDescending{it.receivedAtMs}.take(12)
+            .associateBy{it.day+"-"+it.hour}.values.sortedByDescending{it.receivedAtMs}.take(60)
         cached=cached.copy(hourly=sample,hourlyHistory=history)
-        // Retain at most two full sessions of hourly snapshots; no unbounded quote archive.
+        // Retain at most ten full sessions of hourly snapshots; no unbounded quote archive.
         prefs.edit().putString("hourly",gson.toJson(sample))
             .putString("hourly_history",gson.toJson(history)).apply()
         true
