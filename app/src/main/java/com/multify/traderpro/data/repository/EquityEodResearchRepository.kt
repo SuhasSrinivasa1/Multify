@@ -1444,6 +1444,9 @@ class EquityEodResearchRepository @Inject constructor(
             liveLargeCapBreadthProxyPct=liveLargeBreadth,
             lowCapAudit3=prefs.getString("low_cap_audit_3_summary","").orEmpty().takeIf{prefs.getString("low_cap_audit_3_day","")==latest}.orEmpty(),
             lowCapAudit6=prefs.getString("low_cap_audit_6_summary","").orEmpty().takeIf{prefs.getString("low_cap_audit_6_day","")==latest}.orEmpty(),
+            archiveProgress=prefs.getString("archive_progress","").orEmpty(),
+            archiveRetryAfterMs=prefs.getLong("archive_retry_after_ms",0L),
+            archiveFailureCode=prefs.getString("archive_failure_code","").orEmpty(),
             institutional=institutionalStore.snapshot().copy(
                 sessions=sql.rawQuery("SELECT day FROM eod_days ORDER BY day DESC LIMIT 30",null).use{c->
                     val days=mutableListOf<String>()

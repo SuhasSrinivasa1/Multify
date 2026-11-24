@@ -259,8 +259,12 @@ internal fun SixMonthLowResearchScreen(state: TraderUiState, onScan: (Int) -> Un
                     Text("Recalculating…")
                 } else Text("Refresh research / Scan Now")
             }
+            if(research.archiveProgress.isNotBlank())
+                Text(research.archiveProgress,style=MaterialTheme.typography.labelSmall)
+            if(research.archiveRetryAfterMs>System.currentTimeMillis())
+                Text("Next NSE archive retry eligible: ${atIst(research.archiveRetryAfterMs)}",style=MaterialTheme.typography.labelSmall)
             if(research.lastError.isNotBlank())
-                Text("Exchange archive status: ${research.lastError}",
+                Text("Exchange archive status (${research.archiveFailureCode.ifBlank{"DETAIL"}}): ${research.lastError}",
                     style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.error)
             Text(
                 "CAUTION: Prices are corporate-action UNADJUSTED unless verified. Review splits, dividends, actual liquidity, earnings and live price before placing any MANUAL staged entry. Do not automatically average down through invalidated support.",
