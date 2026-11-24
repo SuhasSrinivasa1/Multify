@@ -528,15 +528,9 @@ class EquityEodResearchRepository @Inject constructor(
 
     private fun refreshInstitutionalAfterHours() {
         requireAfterHours()
-        val last=synchronized(lock) {
-            db.readableDatabase.rawQuery("SELECT MAX(day) FROM eod_days",null).use{c->
-                if(c.moveToFirst()) c.getString(0).orEmpty() else ""
-            }
-        }
-        if(last.isBlank())return
-        val day=LocalDate.parse(last)
         val now=ZonedDateTime.now(INDIA)
-        if(day>latestEligibleDate(now) || day<now.toLocalDate().minusDays(7))return
+        val day=latestEligibleDate(now)
+        val last=day.toString()
         val cached=institutionalStore.snapshot()
         for(source in listOf("BULK","BLOCK")){
             if(!afterHours(ZonedDateTime.now(INDIA)))break
@@ -558,11 +552,11 @@ class EquityEodResearchRepository @Inject constructor(
                     check(!input.request(2_000_001L)){"NSE_DEAL_OVERSIZE"}
                     input.readUtf8()
                 }
-                val report=com.multify.traderpro.engine.InstitutionalIntelligencePolicy.parse(
+                val report=com.multify.traderpro.engine.InstitutionalIntelligencePolicy.parseLatest(
                     csv,day,source,System.currentTimeMillis())
                 institutionalStore.save(report)
                 audit.logAsync("INSTITUTIONAL_RESEARCH","DISCLOSURES_IMPORTED",mapOf(
-                    "day" to last,"source" to source,"disclosed_rows" to report.disclosedRows,
+                    "day" to report.day,"source" to source,"disclosed_rows" to report.disclosedRows,
                     "matched_rows" to report.deals.count{it.category=="FII"||it.category=="DII"},"unmatched_rows" to report.unmatchedRows,
                     "retained_rows" to report.deals.size,"verification_coverage_pct" to (100.0*report.deals.count{it.category=="FII"||it.category=="DII"}/report.deals.size.coerceAtLeast(1)),
                     "duplicates" to report.duplicateRows,"groww_api_calls" to 0))
@@ -1298,7 +1292,9 @@ class EquityEodResearchRepository @Inject constructor(
                 sessions=sql.rawQuery("SELECT day FROM eod_days ORDER BY day DESC LIMIT 30",null).use{c->
                     val days=mutableListOf<String>()
                     while(c.moveToNext())days+=c.getString(0)
-                    days.sorted()
+                    val disclosure= institutionalStore.snapshot()
+                    (days+disclosure.history.map{it.day}+listOfNotNull(disclosure.bulk?.day,disclosure.block?.day))
+                        .distinct().sorted().takeLast(30)
                 },
                 sectors=memberMap + valuation.industryBySymbol,
                 swing=result.filter{it.swingResearch}.map{it.symbol}.toSet(),
