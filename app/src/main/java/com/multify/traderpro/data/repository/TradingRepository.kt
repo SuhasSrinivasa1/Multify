@@ -11490,6 +11490,8 @@ class TradingRepository @Inject constructor(
             else NONEMPTY_EXTERNAL_BROKER_RECHECK_MS
         val pendingEntry = fixedAutoBuyOrderStore.all().any { !ForecastAutoBuyPolicy.isTerminal(it.status) } ||
             forecastAutoBuyOrderStore.all().any { !ForecastAutoBuyPolicy.isTerminal(it.status) }
+        val pendingEntryIncludingWorkingRange = pendingEntry ||
+            workingRangeRecommendationStore.pendingAutoBuyIntents().isNotEmpty()
         // An external/manual holding or GTT must never become app-owned exposure.
         // Once both snapshots were obtained, skip repeat *idle* polls even when
         // they contain somebody else's positions/GTTs. The per-BUY guard independently
@@ -11498,7 +11500,7 @@ class TradingRepository @Inject constructor(
         if (IdleBrokerPollingPolicy.maySkip(
             marketOpen = marketOpen,
             localOpenRows = if (noTrackedPositions) 0 else 1,
-            pendingEntry = pendingEntry,
+            pendingEntry = pendingEntryIncludingWorkingRange,
             criticalTradeInFlight = marketCriticalTradeInFlight,
             inventoryObservedAtMs = brokerInventorySnapshot?.atMs,
             gttObservedAtMs = activeGttSnapshot?.atMs,
@@ -11809,7 +11811,12 @@ class TradingRepository @Inject constructor(
                 "hard_stop_pct" to -HardStopLossPolicy.MAX_LOSS_PCT,
                 "hard_stop_gtts" to marked.count { it.smartOrderMode == HoldingSmartOrderPolicy.MODE_HARD_STOP_GTT },
                 "armed_trailing_gtts" to marked.count { it.smartOrderMode == HoldingSmartOrderPolicy.MODE_TRAILING_GTT },
-                "legacy_recovery_rows" to marked.count { it.smartOrderMode == HoldingSmartOrderPolicy.MODE_RECOVERY_GTT }
+                "legacy_recovery_rows" to marked.count { it.smartOrderMode == HoldingSmartOrderPolicy.MODE_RECOVERY_GTT },
+                "broker_holdings_count" to inventory.holdings.size,
+                "broker_positions_count" to inventory.positions.size,
+                "broker_active_gtt_count" to (activeGttsResult.getOrNull()?.values?.sumOf { it.size } ?: -1),
+                "idle_broker_recheck_interval_ms" to idleRecheckIntervalMs,
+                "pending_entry_including_working_range" to pendingEntryIncludingWorkingRange
             ))
             return portfolioMonitorCount(inventory)
         }
@@ -15118,8 +15125,8 @@ class TradingRepository @Inject constructor(
         private const val BULK_MARKET_DATA_MIN_GAP_MS = 210L
         private const val BULK_MARKET_DATA_429_COOLDOWN_MS = 1_500L
         private const val BROKER_INVENTORY_REFRESH_MS = 5_000L
-        private const val EMPTY_PORTFOLIO_BROKER_RECHECK_MS = 180_000L
-        private const val NONEMPTY_EXTERNAL_BROKER_RECHECK_MS = 45_000L
+        private const val EMPTY_PORTFOLIO_BROKER_RECHECK_MS = 300_000L
+        private const val NONEMPTY_EXTERNAL_BROKER_RECHECK_MS = 300_000L
         private const val ACTIVE_GTT_REFRESH_MS = 30_000L
         private const val ACTIVE_GTT_PAGE_SIZE = 50
         private const val MAX_ACTIVE_GTT_PAGES = 20
