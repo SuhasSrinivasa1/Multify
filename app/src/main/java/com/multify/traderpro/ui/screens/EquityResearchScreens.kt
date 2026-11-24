@@ -281,12 +281,12 @@ internal fun SixMonthLowResearchScreen(state: TraderUiState, onScan: (Int) -> Un
             }
             FilterChip(selected=capFilter=="UNCLASSIFIED",onClick={capFilter="UNCLASSIFIED"},label={Text("Unclassified ${counts["UNCLASSIFIED"]?:0}")},modifier=Modifier.testTag("low-cap-unclassified"))
             val capAudit=scan?.marketCapDiagnostics
-            Text("AMFI dataset buckets: Large ${capAudit?.assetLarge?:0} · Mid ${capAudit?.assetMid?:0} · Small ${capAudit?.assetSmall?:0} (${capAudit?.assetPeriod?.ifBlank{"unknown"}?:"unknown vintage"}). These are universe labels, not candidate counts.",style=MaterialTheme.typography.labelSmall)
+            Text("AMFI dataset buckets: Large ${research.marketCapLargeCount} · Mid ${research.marketCapMidCount} · Small ${research.marketCapSmallCount} (${research.marketCapClassificationPeriod.ifBlank{"unknown vintage"}}). These are universe labels, not candidate counts.",style=MaterialTheme.typography.labelSmall)
             if(scanFresh && capAudit!=null && scan!!.schemaVersion>=2){
                 val largeUniverse=capAudit.universeByCategory["LARGE_CAP"]?:0
                 val largeEligible=capAudit.eligibleByCategory["LARGE_CAP"]?:0
                 val largeQualified=capAudit.qualifiedByCategory["LARGE_CAP"]?:0
-                Text("Large-cap audit: ${largeUniverse} AMFI large-cap symbols present in latest NSE EOD · ${largeEligible} had adequate ${selectedMonths}M history · ${largeQualified} passed the repeated-support pattern.",style=MaterialTheme.typography.bodySmall,fontWeight=FontWeight.SemiBold)
+                Text("Large-cap audit: ${largeUniverse} AMFI large-cap symbols present in latest NSE EOD · ${largeEligible} had adequate ${selectedMonths}M history · ${largeQualified} passed the repeated-support pattern · status ${capAudit.largeCapCoverageStatus}.",style=MaterialTheme.typography.bodySmall,fontWeight=FontWeight.SemiBold)
                 Text(when{
                     largeUniverse==0 -> "CLASSIFICATION COVERAGE WARNING: no AMFI large-cap labels matched the latest NSE EOD universe. Review symbol mapping before interpreting Large 0."
                     largeEligible==0 -> "HISTORY COVERAGE WARNING: large caps were present, but none met the minimum ${selectedMonths}M candle-history requirement."
