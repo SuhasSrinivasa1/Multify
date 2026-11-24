@@ -11,7 +11,8 @@ data class InstitutionalDeal(
 )
 data class InstitutionalStock(
     val symbol:String,val company:String,val shares:Long,val amountRupees:Double,
-    val fiiRupees:Double,val diiRupees:Double,val investors:List<String>
+    val fiiRupees:Double,val diiRupees:Double,val investors:List<String>,
+    val unclassifiedRupees:Double = 0.0
 )
 data class InstitutionalReport(
     val day:String="",val source:String="",val receivedAtMs:Long=0L,
@@ -153,8 +154,9 @@ object InstitutionalIntelligencePolicy {
             .groupBy{it.symbol}.map{(symbol,deals)->
                 val f=deals.filter{it.category=="FII"}.sumOf{it.shares*it.price}
                 val d=deals.filter{it.category=="DII"}.sumOf{it.shares*it.price}
-                InstitutionalStock(symbol,deals.first().company,deals.sumOf{it.shares},f+d,f,d,
-                    deals.map{it.investor}.distinct().sorted())
+                val u=deals.filter{it.category=="UNCLASSIFIED"}.sumOf{it.shares*it.price}
+                InstitutionalStock(symbol,deals.first().company,deals.sumOf{it.shares},
+                    deals.sumOf{it.shares*it.price},f,d,deals.map{it.investor}.distinct().sorted(),u)
             }.sortedWith(compareByDescending<InstitutionalStock>{it.amountRupees}.thenBy{it.symbol}).take(TOP)
     }
 }
