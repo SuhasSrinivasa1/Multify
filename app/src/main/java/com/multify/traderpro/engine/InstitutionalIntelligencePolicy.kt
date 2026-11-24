@@ -98,6 +98,19 @@ object InstitutionalIntelligencePolicy {
         result+=b.toString().trim()
         return result
     }
+    fun parseLatest(csv:String,latestAllowed:LocalDate,source:String,receivedAtMs:Long):InstitutionalReport {
+        require(csv.length in 20..2_000_000)
+        val lines=csv.lineSequence().filter{it.isNotBlank()}.iterator()
+        require(lines.hasNext())
+        val columns=cells(lines.next().removePrefix("\uFEFF")).map(::header)
+        val d=columns.indexOfFirst{it in setOf("DATE","TRADEDATE")}
+        require(d>=0 && lines.hasNext()){"NO_DATED_DISCLOSURES"}
+        val row=cells(lines.next())
+        require(row.size==columns.size){"BAD_ROW_WIDTH"}
+        val reported=date(row[d])?:error("BAD_TRADE_DATE")
+        require(reported<=latestAllowed && reported>=latestAllowed.minusDays(7)){"OUTSIDE_RECENT_DISCLOSURE_WINDOW"}
+        return parse(csv,reported,source,receivedAtMs)
+    }
     fun parse(csv:String,expected:LocalDate,source:String,receivedAtMs:Long):InstitutionalReport {
         require(source in setOf("BULK","BLOCK"))
         require(csv.length in 20..2_000_000)
