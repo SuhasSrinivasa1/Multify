@@ -165,6 +165,7 @@ jobs:
           assert "needsRetentionMigration" in equity
           assert "All disclosed" in inst_ui and "Unclassified" in inst_ui
           assert "unclassifiedSide" in inst_ui
+          history=(root/"engine/InstitutionalHistoryPolicy.kt").read_text()
           assert "UNCLASSIFIED" in history and "VERIFIED" in history
           cap_store=(root/"data/repository/AdaptiveLowResearchStore.kt").read_text()
           assert "AdaptiveLowMarketCapDiagnostics" in cap_store
@@ -173,7 +174,6 @@ jobs:
           assert "eligible_large_cap_three_month" in equity
           assert "qualified_large_cap_three_month" in equity
           assert "largeCapEligibleSymbols" in ui and "largeCapCoverageStatus" in cap_store
-          history=(root/"engine/InstitutionalHistoryPolicy.kt").read_text()
           assert "listOf(1,5,10,30)" in history and ".take(20)" in history
           assert "HOURLY_SWEEP_REUSED" in equity and '"groww_api_calls_added" to 0' in equity
           assert "matureInstitutionalOutcomes" in equity
