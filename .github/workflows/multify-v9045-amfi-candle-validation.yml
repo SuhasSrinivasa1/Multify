@@ -1,0 +1,239 @@
+name: Phayra v9.0.45 AMFI and Candle Validation TEST
+
+on:
+  push:
+    branches:
+      - v9045-amfi-candle-validation-20261124
+  pull_request:
+    branches:
+      - main
+      - v9044-adaptive-lows-support-20261123
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-and-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Android SDK
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
+      - name: Generate required official AMFI classification asset
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check openpyxl==3.1.5
+          python tools/fetch_amfi_market_cap.py --output app/src/main/assets/amfi_market_cap_categories.csv --metadata build/amfi-market-cap-source.txt
+          test -s app/src/main/assets/amfi_market_cap_categories.csv
+          cat build/amfi-market-cap-source.txt
+      - name: Frozen trading parity and research-only price/P-E sourcing
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import pathlib, subprocess
+          base="c07d10558d79d0b39ee9a2325e82973f3d0a9d15"
+          root=pathlib.Path("app/src/main/java/com/multify/traderpro")
+          # Frozen selection, confirmation, transport-research decision and trailing MUST be byte-identical.
+          locked=[
+            "data/repository/TradingRepository.kt", "engine/HardStopLossPolicy.kt",
+            "engine/GttProtectionReadinessPolicy.kt",
+                        "data/repository/LowPeResearchPolicy.kt", "data/repository/EquityLowValuationStore.kt",
+            "engine/SwingPullbackResearchPolicy.kt",
+            "engine/LargeCapEquityResearchPolicy.kt",
+            "data/repository/LargeWatchLearningStore.kt",
+            "data/repository/LargeWatchFeaturePolicy.kt",
+            "data/repository/LargeIndexResearchPolicy.kt",
+            "engine/FixedWorkingRangeShadowPolicy.kt",
+            "data/repository/AmfiMarketCapClassification.kt",
+            "engine/WorkingRangeCandidatePolicy.kt",
+            "engine/WorkingRangeEntryMomentumPolicy.kt",
+            "engine/WorkingRangeAutoBuyPolicy.kt",
+            "engine/WorkingRangeExitPolicy.kt",
+            "data/logging/WorkingRangeRecommendationStore.kt",
+            "engine/FixedFinalContract.kt", "engine/FixedLocalStrategyEngine.kt",
+            "engine/FixedForecastPublicationPolicy.kt", "engine/FixedForecastQualityPolicy.kt",
+            "engine/FixedMarketDiscoveryPolicy.kt", "engine/FixedRepeatQualificationPolicy.kt",
+            "engine/FixedCategoryAccountRoutingPolicy.kt", "engine/FixedBetaDetailCycleCapacityPolicy.kt",
+            "engine/SteppedTrailingPolicy.kt", "data/network/BetaReadOnlyInterceptor.kt",
+            "engine/FixedResearchCapacityPolicy.kt", "engine/FixedHistoricalWindowStore.kt",
+            "data/network/GrowwHistoricalThrottlePolicy.kt"
+          ]
+          for rel in locked:
+            path=root/rel
+            assert path.read_bytes()==subprocess.check_output(["git","show",f"{base}:{path.as_posix()}"]), "FROZEN_SOURCE_CHANGED "+rel
+          hard=(root/"engine/HardStopLossPolicy.kt").read_text()
+          integrity=(root/"engine/ReleaseIntegrityManifest.kt").read_text()
+          readiness=(root/"engine/GttProtectionReadinessPolicy.kt").read_text()
+          repo=(root/"data/repository/TradingRepository.kt").read_text()
+          build=pathlib.Path("app/build.gradle.kts").read_text()
+          assert "const val MAX_LOSS_PCT = 2.0" in hard
+          assert "const val HARD_STOP_LOSS_PCT = 2.0" in integrity
+          assert "brokerStatusOrUnverified(rawStatus: String?)" in readiness
+          assert '"UNVERIFIED"' in readiness
+          assert "GTT_CREATE_ACK_ID_MISSING_RECONCILE_ONLY" in repo
+          assert 'payload.status.ifBlank { "ACTIVE" }' not in repo
+          assert 'recovered.payload.status.ifBlank { "ACTIVE" }' not in repo
+          assert "versionCode = 9045" in build
+          assert 'applicationIdSuffix = ".v9045test"' in build
+          assert "fixed_auto_buy_enabled" not in build
+          equity=(root/"data/repository/EquityEodResearchRepository.kt").read_text()
+          pe=(root/"data/repository/LowPeResearchPolicy.kt").read_text()
+          swing=(root/"engine/SwingPullbackResearchPolicy.kt").read_text()
+          assert "refreshValuationAfterHours()" in equity
+          assert "NSE_PE_URL" in equity and "NSE_TOTAL_MARKET_INDUSTRIES_URL" in equity
+          assert "requireAfterHours()" in equity
+          assert "groww_api_calls" in equity
+          assert "marketIndustryCoverageComplete" in pe
+          assert "verifiedIndustryPeMinimum" in equity
+          assert "distantPullback" in swing and "ema20" in swing
+          large=(root/"data/repository/EquityEodResearchRepository.kt").read_text()
+          policy=(root/"data/repository/LargeWatchFeaturePolicy.kt").read_text()
+          learning=(root/"data/repository/LargeWatchLearningStore.kt").read_text()
+          ui=(root/"ui/screens/EquityResearchScreens.kt").read_text()
+          assert "refreshLargeIndexEodAfterHours()" in large
+          assert "requireAfterHours()" in large
+          assert "LargeWatchFeaturePolicy.build" in large
+          assert "largeWatchStore.record" in large
+          assert "largeWatchStore.resolveEvent" in large
+          assert "val METRICS = listOf" in policy
+          assert '"stock_pb" to null' in policy
+          assert "MIN_EVENTS = 100" in learning and "MIN_DAYS = 20" in learning
+          assert "wilsonLower" in learning
+          assert "Other monitored large caps" not in ui
+          assert "Live large-cap breadth PROXY" in ui
+          assert "Stock P/B unverified" in ui
+          low=(root/"engine/AdaptiveLowPatternPolicy.kt").read_text()
+          store=(root/"data/repository/AdaptiveLowResearchStore.kt").read_text()
+          assert "NEAR_SUPPORT_MAX_PCT = 5.0" in low
+          assert "MIN_PRIOR_REACTIONS = 2" in low
+          assert "FULL_REBOUND_HORIZON_SESSIONS = 10" in low
+          assert "distance >= NEAR_SUPPORT_MAX_PCT" in low
+          assert "return null" in low
+          assert "refreshAdaptiveLowsAfterHours()" in equity
+          assert "refreshExistingOhlcAfterHours" in equity
+          assert "requireAfterHours()" in equity
+          assert "NSE_BHAVCOPY_OFF_MARKET_ONLY" in equity
+          assert "adaptiveLowStore.saveDay" in equity
+          assert "adaptiveLowStore.resolve" in equity
+          assert "FULL_HORIZON_SESSIONS=10" in store
+          assert "MIN_MATURED=100" in store
+          assert "find previous support" in ui.lower() or "previous support levels" in ui.lower()
+          # Preserve existing trend/sector research formulas unchanged except
+          # the addition of optional OHLC fields on the source EOD bar.
+          large_new=(root/"engine/LargeCapEquityResearchPolicy.kt").read_text()
+          large_old=subprocess.check_output(["git","show",
+            f"{base}:app/src/main/java/com/multify/traderpro/engine/LargeCapEquityResearchPolicy.kt"]).decode()
+          assert large_new.split("data class SixMonthLowObservation(",1)[1] == large_old.split("data class SixMonthLowObservation(",1)[1]
+          # The old misleading near-low table is no longer rendered.
+          assert "AdaptiveLowOpportunityRow" in ui
+          assert "low-cap-large" in ui and "low-cap-mid" in ui and "low-cap-small" in ui
+          assert "CURRENT_BULLISH_CANDLE" in store
+          vm=(root/"ui/screens/TraderViewModel.kt").read_text()
+          assert "run.qualifiedPatterns" in vm
+          # Verify existing support detector qualification and price formulas have not changed.
+          old_low=subprocess.check_output(["git","show",f"{base}:app/src/main/java/com/multify/traderpro/engine/AdaptiveLowPatternPolicy.kt"]).decode()
+          def remove_evidence(s):
+              return s.replace(",\\n    val candlePattern: String? = null","").replace(",\\n    val currentCandlePattern: String? = null","").replace(",\\n                candlePattern=AdaptiveLowCandleEvidence.patternAt(bars,i)","").replace(",\\n            currentCandlePattern=AdaptiveLowCandleEvidence.patternAt(bars,lastIdx)","")
+          assert remove_evidence(low)==old_low, "Support baseline changed"
+          service=(root/"service/TradingEngineService.kt").read_text()
+          old_service=subprocess.check_output(["git","show",f"{base}:app/src/main/java/com/multify/traderpro/service/TradingEngineService.kt"]).decode()
+          a=service.index('                            "battery_optimization_exempt" to')
+          b=service.index('                            "external_signal_listener_enabled" to false',a)
+          assert service[:a]+service[b:]==old_service, "Service changes outside watchdog diagnostics"
+          print(f"PASS: {len(locked)} frozen source files identical; -2% invariant and broker-status fail-closed")
+          PY
+      - name: Backend regression tests
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check -r backend/requirements.txt
+          python -m pytest -q backend/tests | tee backend-tests-v9045.txt
+      - name: Android unit tests and assemble isolated TEST APK
+        run: |
+          set -euo pipefail
+          gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug
+          python - <<'PY'
+          import glob,xml.etree.ElementTree as ET,pathlib
+          fs=glob.glob("app/build/test-results/testDebugUnitTest/TEST-*.xml")
+          roots=[ET.parse(p).getroot() for p in fs]
+          n=sum(int(x.attrib.get("tests",0)) for x in roots)
+          errors=sum(int(x.attrib.get("failures",0))+int(x.attrib.get("errors",0)) for x in roots)
+          names=[x.attrib.get("name","") for x in roots]
+          essential=["HardStopLossPolicyTest","GttProtectionReadinessPolicyTest",
+                     "FixedFinalContractTest","FixedBetaDetailCycleCapacityPolicyTest",
+                     "BrokerOrderAcknowledgementPolicyTest",
+                     "LowPeResearchPolicyTest","SwingPullbackResearchPolicyTest",
+                     "LargeIndexResearchPolicyTest","LargeWatchFeaturePolicyTest",
+                     "LargeWatchLearningPolicyTest",
+                     "AdaptiveLowPatternPolicyTest","AdaptiveLowCandleEvidenceTest",
+                     "AmfiMarketCapClassificationParserTest"]
+          absent=[x for x in essential if not any(x in y for y in names)]
+          assert not absent, absent
+          assert n>=100 and errors==0,(n,errors)
+          pathlib.Path("android-tests-v9045.txt").write_text(f"{n} Android tests; {errors} failures; required suites present\n")
+          print(n,"Android unit tests passed")
+          PY
+      - name: Inspect debug APK identity and signer
+        run: |
+          set -euo pipefail
+          apk="app/build/outputs/apk/debug/app-debug.apk"
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$apk" > signer-v9045.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$apk" > package-v9045.txt
+          grep -F "name='com.multify.traderpro.vivoy73final.v9045test'" package-v9045.txt >/dev/null
+          python - <<'PY'
+          import csv,io,json,zipfile,collections,pathlib
+          asset="assets/amfi_market_cap_categories.csv"
+          path=pathlib.Path("app/src/main/assets/amfi_market_cap_categories.csv")
+          with zipfile.ZipFile("app/build/outputs/apk/debug/app-debug.apk") as z:
+              raw=z.read(asset)
+          assert raw==path.read_bytes()
+          txt=raw.decode("utf-8")
+          assert "#period=" in txt and "#source=https://" in txt
+          rows=list(csv.DictReader(io.StringIO("\\n".join(l for l in txt.splitlines() if not l.startswith("#")))))
+          counts=collections.Counter(r["category"] for r in rows)
+          assert len(rows)>=250 and len({r["symbol"] for r in rows})==len(rows)
+          assert all(counts[k]>0 for k in ("LARGE_CAP","MID_CAP","SMALL_CAP"))
+          for row in rows:
+              rank=int(row["rank"])
+              assert rank>0 and row["category"]==("LARGE_CAP" if rank<=100 else "MID_CAP" if rank<=250 else "SMALL_CAP")
+          meta=json.loads(pathlib.Path("build/amfi-market-cap-source.txt").read_text())
+          assert dict(counts)==meta["category_counts"]
+          print("AMFI APK ASSET VERIFIED",meta["period"],dict(counts))
+          PY
+          sha256sum "$apk" > SHA256-v9045.txt
+          stat -c "APK size (bytes): %s" "$apk" > size-v9045.txt
+          echo "TEST side-by-side only; never replace active trading app or infer broker protection from unit tests." > safety-v9045.txt
+      - name: Upload TEST APK and validation evidence
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Phayra-v9.0.45-amfi-candle-validation-TEST-APK
+          path: |
+            app/build/outputs/apk/debug/app-debug.apk
+            SHA256-v9045.txt
+            signer-v9045.txt
+            package-v9045.txt
+            size-v9045.txt
+            safety-v9045.txt
+            android-tests-v9045.txt
+            backend-tests-v9045.txt
+            app/src/main/assets/amfi_market_cap_categories.csv
+            build/amfi-market-cap-source.txt
+          if-no-files-found: error
+          retention-days: 30
