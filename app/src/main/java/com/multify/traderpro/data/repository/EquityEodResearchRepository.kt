@@ -215,7 +215,16 @@ class EquityEodResearchRepository @Inject constructor(
     private val amfiMarketCapDataset: AmfiMarketCapDataset by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         runCatching {
             context.assets.open("amfi_market_cap_categories.csv").bufferedReader().use {
-                AmfiMarketCapClassificationParser.parse(it.readText())
+                AmfiMarketCapClassificationParser.parse(it.readText()).also { data ->
+                    require(data.period.isNotBlank() && data.labels.size>=250 &&
+                        data.labels.values.map{it.category}.toSet().containsAll(
+                            listOf("LARGE_CAP","MID_CAP","SMALL_CAP"))) { "AMFI_INCOMPLETE_ASSET" }
+                    audit.logAsync("EOD_RESEARCH","AMFI_MARKET_CAP_ASSET_READY",mapOf(
+                        "period" to data.period,"symbols" to data.labels.size,
+                        "large" to data.labels.values.count{it.category=="LARGE_CAP"},
+                        "mid" to data.labels.values.count{it.category=="MID_CAP"},
+                        "small" to data.labels.values.count{it.category=="SMALL_CAP"}))
+                }
             }
         }.getOrElse { cause ->
             audit.logAsync("EOD_RESEARCH", "AMFI_MARKET_CAP_ASSET_UNAVAILABLE", mapOf(
@@ -971,10 +980,13 @@ class EquityEodResearchRepository @Inject constructor(
         val threeMonthRows: List<EquityLowObservation> = emptyList()
         val sixMonthRows: List<EquityLowObservation> = emptyList()
 
+        fun classifyCached(rows:List<AdaptiveLowCandidate>) = rows.map { row ->
+            row.copy(marketCapCategory=marketCaps.labels[row.symbol]?.category ?: "UNCLASSIFIED")
+        }
         val adaptive3 = if(threeMonthHistoryComplete)
-            adaptiveLowStore.rows(3,latest) else emptyList()
+            classifyCached(adaptiveLowStore.rows(3,latest)) else emptyList()
         val adaptive6 = if(spanComplete)
-            adaptiveLowStore.rows(6,latest) else emptyList()
+            classifyCached(adaptiveLowStore.rows(6,latest)) else emptyList()
         val adaptive3Run=adaptiveLowStore.latestRun(3)
         val adaptive6Run=adaptiveLowStore.latestRun(6)
         val adaptive3Learning=adaptiveLowStore.learning(3)

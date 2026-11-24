@@ -49,6 +49,13 @@ internal object AdaptiveLowLearningPolicy {
         if(c.volumeTo20Day!=null && c.volumeTo20Day>=1.0)v+="ELEVATED_VOLUME"
         if(c.reactions.size>=3 && c.sectorEodPct!=null && c.sectorEodPct>=0.0)
             v+="THREE_REBOUNDS_SECTOR_ALIGNED"
+        if(com.multify.traderpro.engine.AdaptiveLowCandleEvidence.bullish(c.currentCandlePattern))
+            v+="CURRENT_BULLISH_CANDLE"
+        if(c.reactions.count{com.multify.traderpro.engine.AdaptiveLowCandleEvidence.bullish(it.candlePattern)}>=2)
+            v+="TWO_PRIOR_BULLISH_CANDLES"
+        if(com.multify.traderpro.engine.AdaptiveLowCandleEvidence.bullish(c.currentCandlePattern) &&
+            c.niftyEodPct!=null && c.niftyEodPct>=0 && c.sectorEodPct!=null && c.sectorEodPct>=0)
+            v+="CANDLE_MARKET_SECTOR_ALIGNED"
         return v
     }
     fun wilsonLower(hits:Int,n:Int,z:Double=1.96):Double {
@@ -202,7 +209,8 @@ internal class AdaptiveLowResearchStore(context:Context) {
         }}
         val names=listOf("ALL_CONFIRMED_RETESTS","THREE_PRIOR_REBOUNDS",
             "NIFTY_NON_BEARISH_EOD","SECTOR_NON_BEARISH_EOD","ELEVATED_VOLUME",
-            "THREE_REBOUNDS_SECTOR_ALIGNED")
+            "THREE_REBOUNDS_SECTOR_ALIGNED","CURRENT_BULLISH_CANDLE",
+            "TWO_PRIOR_BULLISH_CANDLES","CANDLE_MARKET_SECTOR_ALIGNED")
         names.mapNotNull{variant->
             val rows=all.filter{variant in it.vs}
             if(rows.isEmpty())return@mapNotNull null
