@@ -16,8 +16,12 @@ data class InstitutionalStock(
 data class InstitutionalReport(
     val day:String="",val source:String="",val receivedAtMs:Long=0L,
     val disclosedRows:Int=0,val unmatchedRows:Int=0,val duplicateRows:Int=0,
-    val deals:List<InstitutionalDeal> = emptyList()
-)
+    val deals:List<InstitutionalDeal> = emptyList(),
+    val schemaVersion:Int = 1
+) {
+    val matchedRows:Int get()=deals.count{it.category=="FII" || it.category=="DII"}
+    val retainedRows:Int get()=deals.size
+}
 data class InstitutionalSnapshot(
     val bulk:InstitutionalReport?=null,val block:InstitutionalReport?=null,
     val history:List<InstitutionalReport> = emptyList(),
@@ -128,17 +132,22 @@ object InstitutionalIntelligencePolicy {
             val key=listOf(symbol,name,direction,q.toString(),p.stripTrailingZeros().toPlainString())
             // Identical disclosed sides are conservatively counted once within a file.
             if(!seen.add(key)){duplicates++;continue}
-            val cat=category(name)
-            if(cat==null){unknown++;continue}
+            val cat=category(name) ?: run { unknown++; "UNCLASSIFIED" }
+            // Preserve every valid, unique exchange-disclosed row. Identity confidence
+            // affects the category filter, never whether the transaction is visible.
             out+=InstitutionalDeal(expected.toString(),symbol,row[co],name,cat,direction,q,p.toDouble())
         }
         // Header-only files have no verifiable trade date; never overwrite a dated snapshot.
         require(rows>0){"NO_DATED_DISCLOSURES"}
-        return InstitutionalReport(expected.toString(),source,receivedAtMs,rows,unknown,duplicates,out)
+        return InstitutionalReport(expected.toString(),source,receivedAtMs,rows,unknown,duplicates,out,schemaVersion=2)
     }
     fun top(report:InstitutionalReport?,side:String,filter:String):List<InstitutionalStock> {
-        require(side in setOf("BUY","SELL") && filter in setOf("ALL","FII","DII"))
-        return report?.deals.orEmpty().filter{it.side==side && (filter=="ALL" || it.category==filter)}
+        require(side in setOf("BUY","SELL") && filter in setOf("ALL","VERIFIED","FII","DII","UNCLASSIFIED"))
+        return report?.deals.orEmpty().filter{it.side==side && when(filter){
+            "ALL"->true
+            "VERIFIED"->it.category=="FII" || it.category=="DII"
+            else->it.category==filter
+        }}
             .groupBy{it.symbol}.map{(symbol,deals)->
                 val f=deals.filter{it.category=="FII"}.sumOf{it.shares*it.price}
                 val d=deals.filter{it.category=="DII"}.sumOf{it.shares*it.price}
