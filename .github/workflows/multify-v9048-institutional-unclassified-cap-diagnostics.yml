@@ -95,7 +95,7 @@ jobs:
           assert 'payload.status.ifBlank { "ACTIVE" }' not in repo
           assert 'recovered.payload.status.ifBlank { "ACTIVE" }' not in repo
           assert "versionCode = 9048" in build
-          assert 'applicationIdSuffix = ".v9048test"' in build
+          assert 'applicationIdSuffix = ".v9047test"' in build
           assert "fixed_auto_buy_enabled" not in build
           equity=(root/"data/repository/EquityEodResearchRepository.kt").read_text()
           pe=(root/"data/repository/LowPeResearchPolicy.kt").read_text()
@@ -218,7 +218,7 @@ jobs:
           apk="app/build/outputs/apk/debug/app-debug.apk"
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$apk" > signer-v9048.txt
           "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$apk" > package-v9048.txt
-          grep -F "name='com.multify.traderpro.vivoy73final.v9048test'" package-v9048.txt >/dev/null
+          grep -F "name='com.multify.traderpro.vivoy73final.v9047test'" package-v9048.txt >/dev/null
           python - <<'PY'
           import csv,io,json,zipfile,collections,pathlib
           asset="assets/amfi_market_cap_categories.csv"
