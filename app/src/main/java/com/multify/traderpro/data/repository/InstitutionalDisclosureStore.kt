@@ -17,6 +17,7 @@ internal class InstitutionalDisclosureStore(context:Context) {
     private var cached=InstitutionalSnapshot(read("BULK"),read("BLOCK"),
         history=runCatching{gson.fromJson(prefs.getString("history",null),Array<InstitutionalReport>::class.java)?.toList().orEmpty()}.getOrDefault(emptyList()),
         hourly=runCatching{gson.fromJson(prefs.getString("hourly",null),InstitutionalHourly::class.java)}.getOrNull(),
+        hourlyHistory=runCatching{gson.fromJson(prefs.getString("hourly_history",null),Array<InstitutionalHourly>::class.java)?.toList().orEmpty()}.getOrDefault(emptyList()),
         outcomes=runCatching{gson.fromJson(prefs.getString("outcomes",null),Array<InstitutionalOutcome>::class.java)?.toList().orEmpty()}.getOrDefault(emptyList()))
     private var tracked=(cached.history+listOfNotNull(cached.bulk,cached.block)).flatMap{it.deals}.map{it.symbol}.toSet()
     private var lastSlot=cached.hourly?.let{it.day+"-"+it.hour}.orEmpty()
@@ -46,8 +47,12 @@ internal class InstitutionalDisclosureStore(context:Context) {
         val sample=InstitutionalHourly(at.toLocalDate().toString(),at.hour,System.currentTimeMillis(),
             prices,open.filter{(s,p)->s in prices && p.isFinite() && p>0})
         lastSlot=slot
-        cached=cached.copy(hourly=sample)
-        prefs.edit().putString("hourly",gson.toJson(sample)).apply()
+        val history=(cached.hourlyHistory+listOfNotNull(cached.hourly)+sample)
+            .associateBy{it.day+"-"+it.hour}.values.sortedByDescending{it.receivedAtMs}.take(12)
+        cached=cached.copy(hourly=sample,hourlyHistory=history)
+        // Retain at most two full sessions of hourly snapshots; no unbounded quote archive.
+        prefs.edit().putString("hourly",gson.toJson(sample))
+            .putString("hourly_history",gson.toJson(history)).apply()
         true
     }
     fun saveOutcomes(rows:List<InstitutionalOutcome>)=synchronized(lock){
