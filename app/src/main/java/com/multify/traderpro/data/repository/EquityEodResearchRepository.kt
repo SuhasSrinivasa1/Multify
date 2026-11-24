@@ -4,6 +4,15 @@ import android.content.ContentValues
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import com.google.gson.GsonBuilder
+import com.google.gson.JsonParser
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
+import java.io.BufferedWriter
+import java.io.IOException
+import java.io.OutputStreamWriter
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 import com.multify.traderpro.data.logging.AuditLogger
 import com.multify.traderpro.engine.EquityEodBar
 import com.multify.traderpro.engine.AdaptiveLowPatternPolicy
@@ -96,13 +105,18 @@ data class EquityResearchSnapshot(
     val liveLargeCapBreadthProxyPct: Double? = null,
     val institutional: com.multify.traderpro.engine.InstitutionalSnapshot = com.multify.traderpro.engine.InstitutionalSnapshot(),
     val lowCapAudit3: String = "",
-    val lowCapAudit6: String = ""
+    val lowCapAudit6: String = "",
+    val archiveProgress: String = "",
+    val archiveRetryAfterMs: Long = 0L,
+    val archiveFailureCode: String = ""
 )
 data class EquityEodRefreshProgress(
     val importedDays: Int,
     val missingWeekdays: Int,
     val sourceFailure: Boolean,
-    val requestedDays: Int = 0
+    val requestedDays: Int = 0,
+    val retryAfterMs: Long = 0L,
+    val lastFailure: String = ""
 )
 
 /**
@@ -284,34 +298,101 @@ class EquityEodResearchRepository @Inject constructor(
 
     private fun request(url: String): Request = Request.Builder().url(url)
         .header("Accept", "text/csv,application/zip,application/octet-stream,*/*")
-        .header("Referer", if(url.contains("niftyindices.com")) "https://www.niftyindices.com/" else "https://www.nseindia.com/")
-        .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36")
+        .header("Referer", if(url.contains("niftyindices.com")) "https://www.niftyindices.com/" else "https://www.nseindia.com/all-reports")
+        .header("Accept-Language", "en-US,en;q=0.9")
+        .header("Cache-Control", "no-cache")
+        .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36")
         .build()
 
     private fun warmNseSession() {
         requireAfterHours()
+        val now=System.currentTimeMillis()
         val today=LocalDate.now(INDIA).toString()
-        if(warmedNseDate==today) return
-        warmedNseDate=today
+        if(warmedNseDate==today)return
+        val attemptDay=prefs.getString("nse_warm_attempt_day","").orEmpty()
+        val attempts=if(attemptDay==today)prefs.getInt("nse_warm_attempts",0) else 0
+        if(attempts>=2 || now<prefs.getLong("nse_warm_retry_after_ms",0L))return
+        prefs.edit().putString("nse_warm_attempt_day",today).putInt("nse_warm_attempts",attempts+1)
+            .putLong("nse_warm_retry_after_ms",now+60L*60L*1000L).apply()
         runCatching {
-            client.newCall(request("https://www.nseindia.com/")).execute().use { response ->
-                check(response.isSuccessful) { "NSE_HOME_HTTP_${response.code}" }
+            client.newCall(request("https://www.nseindia.com/all-reports")).execute().use { response ->
+                check(response.isSuccessful) { "NSE_REPORTS_HTTP_${response.code}" }
             }
-        }.onFailure { audit.logAsync("EOD_RESEARCH","NSE_COOKIE_PREWARM_UNAVAILABLE",mapOf(
-            "reason" to (it.message ?: it.javaClass.simpleName).take(80),
-            "archives_still_attempted" to true, "groww_requests" to 0
-        )) }
+            warmedNseDate=today
+            prefs.edit().putLong("nse_warm_retry_after_ms",Long.MAX_VALUE).apply()
+        }.onFailure {
+            audit.logAsync("EOD_RESEARCH","NSE_COOKIE_PREWARM_UNAVAILABLE",mapOf(
+                "reason" to (it.message ?: it.javaClass.simpleName).take(100),
+                "attempt" to attempts+1,"max_attempts_per_day" to 2,
+                "retry_after_ms" to prefs.getLong("nse_warm_retry_after_ms",0L),
+                "archives_still_attempted" to true,"groww_requests" to 0))
+        }
+    }
+    private suspend fun paceArchiveRequest() {
+        val now=System.currentTimeMillis()
+        val previous=prefs.getLong("last_archive_request_ms",0L)
+        val wait=NseArchiveRecoveryPolicy.REQUEST_MIN_GAP_MS-(now-previous)
+        if(wait>0L)delay(wait)
+        prefs.edit().putLong("last_archive_request_ms",System.currentTimeMillis()).apply()
+    }
+    private data class ArchiveFailureResult(val code:String,val message:String,val retryAtMs:Long,val pauseBatch:Boolean)
+    private fun recordArchiveFailure(day:LocalDate,error:Exception,latest:LocalDate):ArchiveFailureResult {
+        val now=System.currentTimeMillis()
+        val http=error as? NseArchiveHttpException
+        val status=http?.statusCode
+        val raw=(error.message?:error.javaClass.simpleName).take(120)
+        val invalid=raw.contains("INVALID") || raw.contains("MISSING_COLUMN") || raw.contains("INCOMPLETE") ||
+            raw.contains("ZIP_EMPTY") || raw.contains("HEADER_EMPTY") || raw.contains("TOO_MANY_ROWS")
+        val network=status==null && error is IOException
+        val failures=prefs.getInt("archive_transient_failure_count",0)+1
+        val code=NseArchiveRecoveryPolicy.failureCode(status,invalid,network)
+        val retryAt=when {
+            status==404 && day==latest -> NseArchiveRecoveryPolicy.latestNotFoundRetryAtMs(now)
+            status==404 -> 0L
+            invalid -> now+NseArchiveRecoveryPolicy.INVALID_ARCHIVE_COOLDOWN_MS
+            status!=null -> NseArchiveRecoveryPolicy.cooldownUntilMs(status,http?.retryAfterHeader,now,failures)?:0L
+            network -> now+NseArchiveRecoveryPolicy.transientBackoffMs(failures)
+            else -> now+15L*60L*1000L
+        }
+        val pause=when {
+            status==404 -> false
+            status!=null -> NseArchiveRecoveryPolicy.shouldPauseBatch(status,invalid)
+            else -> true
+        }
+        val retryText=if(retryAt>now) " Next retry eligible after "+
+            ZonedDateTime.ofInstant(java.time.Instant.ofEpochMilli(retryAt),INDIA)
+                .format(DateTimeFormatter.ofPattern("dd MMM HH:mm 'IST'"))+"." else ""
+        val message=when(status) {
+            403 -> "NSE denied the archive request (HTTP 403) for $day. Archive downloads paused; this is an access denial, not a confirmed rate limit.$retryText Existing history retained."
+            429 -> "NSE rate-limited the archive request (HTTP 429) for $day. Retry-After was honoured.$retryText Existing history retained."
+            404 -> if(day==latest) "Latest EOD archive is not published/available yet (HTTP 404) for $day.$retryText Earlier history retained."
+                else "No archive found for $day (HTTP 404); may be an exchange holiday or unavailable report. Earlier history retained."
+            else -> "NSE archive failure for $day ($code): $raw.$retryText Existing history retained."
+        }
+        val edit=prefs.edit().putString("archive_failure_code",code).putString("archive_failure_date",day.toString())
+            .putString("archive_failure_message",message).putLong("archive_retry_after_ms",retryAt)
+        if(pause)edit.putLong("archive_cooldown_until_ms",retryAt).putInt("archive_transient_failure_count",failures)
+        else if(status==404 && day==latest)edit.putString("archive_latest_404_day",day.toString())
+            .putLong("archive_latest_404_retry_after_ms",retryAt)
+        edit.apply()
+        audit.logAsync("EOD_RESEARCH","BHAVCOPY_UNAVAILABLE",mapOf(
+            "date" to day.toString(),"reason" to raw,"failure_code" to code,"http_status" to (status?:0),
+            "retry_after_header" to (http?.retryAfterHeader?:""),"retry_after_ms" to retryAt,
+            "batch_paused" to pause,"groww_api_calls" to 0,"existing_history_retained" to true))
+        return ArchiveFailureResult(code,message,retryAt,pause)
     }
 
     private fun requireAfterHours() = check(afterHours(ZonedDateTime.now(INDIA))) {
         "EOD research network fetch is forbidden during NSE market or pre-close hours"
     }
 
-    private fun importArchive(date: LocalDate): Int {
+    private suspend fun importArchive(date: LocalDate): Int {
         requireAfterHours()
+        check(prefs.getLong("archive_cooldown_until_ms",0L)<=System.currentTimeMillis()) { "NSE_ARCHIVE_COOLDOWN_ACTIVE" }
+        paceArchiveRequest()
         val url = SOURCE_URL.format(date.format(BASIC))
         val rows = client.newCall(request(url)).execute().use { response ->
-            if (!response.isSuccessful) error("NSE_BHAVCOPY_HTTP_${response.code}")
+            if (!response.isSuccessful) throw NseArchiveHttpException(response.code,response.header("Retry-After"))
             val body = response.body ?: error("NSE_BHAVCOPY_EMPTY")
             val zip = ZipInputStream(body.byteStream())
             zip.use { stream ->
@@ -442,100 +523,122 @@ class EquityEodResearchRepository @Inject constructor(
         }
     }
 
-    /** WorkManager and manual taps share one serialized importer; every request is still time-guarded. */
+    /** Serialized after-hours importer with paced requests, Retry-After handling and a source-wide cooldown. */
     suspend fun refreshAfterHours(maxFiles: Int = 25): EquityEodRefreshProgress = withContext(Dispatchers.IO) {
         refreshMutex.lock()
         try {
-            if (!afterHours(ZonedDateTime.now(INDIA))) return@withContext EquityEodRefreshProgress(0,0,false)
-        // NSE's archive domain sometimes needs an NSE homepage cookie session.
-        // Warm once nightly, not for every requested day, and never during the market.
-        warmNseSession()
-        refreshMembers()
-        val today = LocalDate.now(INDIA)
-        val last = latestEligibleDate(ZonedDateTime.now(INDIA))
-        val first = today.minusMonths(6)
-        val valid = buildList {
-            var day = last
-            while (!day.isBefore(first)) {
-                if (day.dayOfWeek != DayOfWeek.SATURDAY && day.dayOfWeek != DayOfWeek.SUNDAY) add(day)
-                day = day.minusDays(1)
+            if(!afterHours(ZonedDateTime.now(INDIA)))return@withContext EquityEodRefreshProgress(0,0,false)
+            val today=LocalDate.now(INDIA)
+            val last=latestEligibleDate(ZonedDateTime.now(INDIA))
+            val first=today.minusMonths(6)
+            val valid=buildList {
+                var day=last
+                while(!day.isBefore(first)) {
+                    if(day.dayOfWeek!=DayOfWeek.SATURDAY && day.dayOfWeek!=DayOfWeek.SUNDAY)add(day)
+                    day=day.minusDays(1)
+                }
             }
-        }
-        val present = synchronized(lock) {
-            val dates = mutableSetOf<String>()
-            db.readableDatabase.rawQuery("SELECT day FROM eod_days WHERE day >= ?",arrayOf(first.toString())).use { c ->
-                while (c.moveToNext()) dates += c.getString(0)
+            val present=synchronized(lock) {
+                val dates=mutableSetOf<String>()
+                db.readableDatabase.rawQuery("SELECT day FROM eod_days WHERE day>=?",arrayOf(first.toString())).use{c->
+                    while(c.moveToNext())dates+=c.getString(0)
+                }
+                dates
             }
-            dates
-        }
-        val attempts = synchronized(lock) {
-            val statuses = mutableMapOf<String,Pair<String,String>>()
-            db.readableDatabase.rawQuery("SELECT day,attempt_day,failure FROM attempts",null).use { c ->
-                while (c.moveToNext()) statuses[c.getString(0)] = c.getString(1) to c.getString(2)
+            val attempts=synchronized(lock) {
+                val statuses=mutableMapOf<String,Pair<String,String>>()
+                db.readableDatabase.rawQuery("SELECT day,attempt_day,failure FROM attempts",null).use{c->
+                    while(c.moveToNext())statuses[c.getString(0)]=c.getString(1) to c.getString(2)
+                }
+                statuses
             }
-            statuses
-        }
-        val missing = valid.filter { it.toString() !in present }
-        var imported = 0
-        var wireRequests = 0
-        var consecutiveNotFound = 0
-        var blocked = false
-        for (day in missing) {
-            if (wireRequests >= maxFiles || !afterHours(ZonedDateTime.now(INDIA))) break
-            val previous = attempts[day.toString()]
-            // One attempt per date per calendar day: avoids 403/holiday retry storms.
-            if (previous?.first == today.toString()) continue
-            // Absent files older than seven days are likely exchange holidays. Retest
-            // weekly rather than refetching the same missing archive every evening.
-            if (previous?.second == "NSE_BHAVCOPY_HTTP_404" &&
-                day.isBefore(today.minusDays(7)) &&
-                (previous.first.let { LocalDate.parse(it) }).isAfter(today.minusDays(7))) continue
-            var failure = ""
-            wireRequests++
-            try {
-                val rows=importArchive(day)
-                imported++
-                consecutiveNotFound = 0
-                audit.logAsync("EOD_RESEARCH","BHAVCOPY_IMPORTED",mapOf(
-                    "date" to day.toString(),"equity_rows" to rows,"groww_api_calls" to 0
-                ))
-            } catch (e:Exception) {
-                failure=(e.message ?: e.javaClass.simpleName).take(90)
-                consecutiveNotFound = if(failure=="NSE_BHAVCOPY_HTTP_404") consecutiveNotFound+1 else 0
-                if(consecutiveNotFound>=3) blocked=true
-                if (failure.contains("403") || failure.contains("429") ||
-                    failure.contains("INVALID") || failure.contains("MISSING_COLUMN") ||
-                    failure.contains("INCOMPLETE")) blocked = true
-                audit.logAsync("EOD_RESEARCH","BHAVCOPY_UNAVAILABLE",mapOf(
-                    "date" to day.toString(),"reason" to failure,"groww_api_calls" to 0
-                ))
+            val missing=valid.filter{it.toString() !in present}
+            var imported=0
+            var wireRequests=0
+            var blocked=false
+            var failureMessage=""
+            var failureCode=""
+            var retryAfterMs=0L
+            val activeCooldown=prefs.getLong("archive_cooldown_until_ms",0L)
+            if(activeCooldown>System.currentTimeMillis()) {
+                blocked=true
+                retryAfterMs=activeCooldown
+                failureCode=prefs.getString("archive_failure_code","SOURCE_COOLDOWN").orEmpty()
+                failureMessage=prefs.getString("archive_failure_message","NSE archive source is cooling down. Existing history retained.").orEmpty()
+            } else {
+                warmNseSession()
+                refreshMembers()
+                for(day in missing) {
+                    if(wireRequests>=maxFiles.coerceAtLeast(1) || !afterHours(ZonedDateTime.now(INDIA)))break
+                    val cooldown=prefs.getLong("archive_cooldown_until_ms",0L)
+                    if(cooldown>System.currentTimeMillis()) {
+                        blocked=true;retryAfterMs=cooldown
+                        failureCode=prefs.getString("archive_failure_code","SOURCE_COOLDOWN").orEmpty()
+                        failureMessage=prefs.getString("archive_failure_message","NSE archive source is cooling down.").orEmpty()
+                        break
+                    }
+                    val previous=attempts[day.toString()]
+                    val latest404Due=day==last && previous?.second=="NSE_BHAVCOPY_HTTP_404" &&
+                        prefs.getString("archive_latest_404_day","")==day.toString() &&
+                        System.currentTimeMillis()>=prefs.getLong("archive_latest_404_retry_after_ms",Long.MAX_VALUE)
+                    if(previous?.first==today.toString() && !latest404Due)continue
+                    if(previous?.second=="NSE_BHAVCOPY_HTTP_404" && day.isBefore(today.minusDays(7)) &&
+                        LocalDate.parse(previous.first).isAfter(today.minusDays(7)))continue
+                    wireRequests++
+                    var failure=""
+                    try {
+                        val rows=importArchive(day)
+                        imported++
+                        synchronized(lock){db.writableDatabase.delete("attempts","day=?",arrayOf(day.toString()))}
+                        if(day==last)prefs.edit().remove("archive_latest_404_day").remove("archive_latest_404_retry_after_ms").apply()
+                        prefs.edit().putInt("archive_transient_failure_count",0).putLong("archive_cooldown_until_ms",0L).apply()
+                        audit.logAsync("EOD_RESEARCH","BHAVCOPY_IMPORTED",mapOf(
+                            "date" to day.toString(),"equity_rows" to rows,
+                            "archive_request_min_gap_ms" to NseArchiveRecoveryPolicy.REQUEST_MIN_GAP_MS,
+                            "groww_api_calls" to 0))
+                    } catch(e:Exception) {
+                        if(e is CancellationException)throw e
+                        failure=(e.message?:e.javaClass.simpleName).take(120)
+                        val f=recordArchiveFailure(day,e,last)
+                        failureMessage=f.message;failureCode=f.code;retryAfterMs=f.retryAtMs
+                        if(f.pauseBatch)blocked=true
+                    }
+                    if(failure.isNotBlank())synchronized(lock) {
+                        db.writableDatabase.insertWithOnConflict("attempts",null,ContentValues().apply {
+                            put("day",day.toString());put("attempt_day",today.toString());put("failure",failure)
+                        },SQLiteDatabase.CONFLICT_REPLACE)
+                    }
+                    if(blocked)break
+                }
             }
-            synchronized(lock) {
-                db.writableDatabase.insertWithOnConflict("attempts",null,ContentValues().apply {
-                    put("day",day.toString());put("attempt_day",today.toString());put("failure",failure)
-                },SQLiteDatabase.CONFLICT_REPLACE)
-            }
-            if (blocked) break
-        }
-        // Read-only NSE PE and index-industry imports, after hours only, independent of Groww.
-        // Neither data source changes the frozen Fixed selection/BUY path.
-        refreshValuationAfterHours()
-        refreshLargeIndexEodAfterHours()
-        // Daily support-retest research is sourced from COMPLETE, saved NSE EQ
-        // day files. The Lows screen never issues a trading-hours market request.
-        refreshExistingOhlcAfterHours(maxDays = 6)
-        refreshAdaptiveLowsAfterHours()
-        // Missing bhavcopy files (404) are not a disclosure outage; keep the bounded independent import.
-        // Last, isolated research task: never delay the existing archive/scan work
-        // and never make a broker call.
-        if((!blocked || consecutiveNotFound>=3) && afterHours(ZonedDateTime.now(INDIA))) refreshInstitutionalAfterHours()
-        prefs.edit().putLong("last_eod_attempt_ms",System.currentTimeMillis())
-            .putString("last_eod_error",if(blocked) "Exchange archive temporarily unavailable" else "")
-            .apply()
-            EquityEodRefreshProgress(imported,missing.size,blocked,wireRequests)
-        } finally {
-            refreshMutex.unlock()
-        }
+            if(!blocked) {
+                refreshValuationAfterHours()
+                refreshLargeIndexEodAfterHours()
+                if(wireRequests<maxFiles.coerceAtLeast(1)) {
+                    wireRequests+=refreshExistingOhlcAfterHours(minOf(6,maxFiles.coerceAtLeast(1)-wireRequests))
+                    val cooldown=prefs.getLong("archive_cooldown_until_ms",0L)
+                    if(cooldown>System.currentTimeMillis()) {
+                        blocked=true;retryAfterMs=cooldown
+                        failureCode=prefs.getString("archive_failure_code","SOURCE_COOLDOWN").orEmpty()
+                        failureMessage=prefs.getString("archive_failure_message","NSE archive source is cooling down.").orEmpty()
+                    }
+                }
+            } else audit.logAsync("EOD_RESEARCH","REMOTE_RESEARCH_SKIPPED_SOURCE_COOLDOWN",mapOf(
+                "failure_code" to failureCode,"archive_requests" to wireRequests,
+                "groww_api_calls" to 0,"cached_history_retained" to true))
+            refreshAdaptiveLowsAfterHours()
+            if(!blocked && afterHours(ZonedDateTime.now(INDIA)))refreshInstitutionalAfterHours()
+            val progressMessage="Last archive pass: $imported imported · $wireRequests archive requests · "+
+                "${missing.size} weekdays still unfetched (includes exchange holidays)."
+            if(failureMessage.isBlank())failureMessage=prefs.getString("archive_failure_message","").orEmpty()
+            prefs.edit().putLong("last_eod_attempt_ms",System.currentTimeMillis())
+                .putString("last_eod_error",failureMessage).putString("archive_progress",progressMessage)
+                .putLong("archive_retry_after_ms",retryAfterMs)
+                .putString("archive_failure_code",failureCode.ifBlank{prefs.getString("archive_failure_code","").orEmpty()})
+                .putInt("archive_last_requests",wireRequests).putInt("archive_last_imported",imported)
+                .putInt("archive_last_missing_weekdays",missing.size).apply()
+            EquityEodRefreshProgress(imported,missing.size,blocked,wireRequests,retryAfterMs,failureMessage)
+        } finally { refreshMutex.unlock() }
     }
 
     /** Manual research refresh shares the same mutex and off-hours guard. */
@@ -630,7 +733,7 @@ class EquityEodResearchRepository @Inject constructor(
      * batches. No existing daily EOD file is discarded until a full replacement
      * passes size and exchange-column validation in a database transaction.
      */
-    private fun refreshExistingOhlcAfterHours(maxDays:Int) {
+    private suspend fun refreshExistingOhlcAfterHours(maxDays:Int):Int {
         requireAfterHours()
         val today=LocalDate.now(INDIA).toString()
         val days=synchronized(lock) {
@@ -648,17 +751,25 @@ class EquityEodResearchRepository @Inject constructor(
         var performed=0
         for(day in days) {
             if(performed>=maxDays || !afterHours(ZonedDateTime.now(INDIA)))break
+            if(prefs.getLong("archive_cooldown_until_ms",0L)>System.currentTimeMillis())break
             val key="ohlc_backfill_attempt_$day"
             if(prefs.getString(key,"")==today)continue
             performed++
             prefs.edit().putString(key,today).apply()
-            runCatching{importArchive(LocalDate.parse(day))}
-                .onSuccess{count->audit.logAsync("ADAPTIVE_LOWS","NSE_OHLC_BACKFILL",mapOf(
-                    "day" to day,"symbols" to count,"groww_api_calls" to 0))}
-                .onFailure{err->audit.logAsync("ADAPTIVE_LOWS","NSE_OHLC_BACKFILL_FAILED",mapOf(
+            try {
+                val count=importArchive(LocalDate.parse(day))
+                audit.logAsync("ADAPTIVE_LOWS","NSE_OHLC_BACKFILL",mapOf("day" to day,"symbols" to count,"groww_api_calls" to 0))
+            } catch(err:Exception) {
+                if(err is CancellationException)throw err
+                val f=recordArchiveFailure(LocalDate.parse(day),err,latestEligibleDate(ZonedDateTime.now(INDIA)))
+                audit.logAsync("ADAPTIVE_LOWS","NSE_OHLC_BACKFILL_FAILED",mapOf(
                     "day" to day,"reason" to (err.message?:err.javaClass.simpleName).take(120),
-                    "existing_archive_preserved" to true,"groww_api_calls" to 0))}
+                    "failure_code" to f.code,"retry_after_ms" to f.retryAtMs,
+                    "existing_archive_preserved" to true,"groww_api_calls" to 0))
+                if(f.pauseBatch)break
+            }
         }
+        return performed
     }
 
     /**
