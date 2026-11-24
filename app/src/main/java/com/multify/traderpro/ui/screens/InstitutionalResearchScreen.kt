@@ -10,7 +10,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import com.multify.traderpro.engine.InstitutionalIntelligencePolicy
+import com.multify.traderpro.engine.InstitutionalHistoryPolicy
+import com.multify.traderpro.data.repository.LargeIndexResearchPolicy
 import java.util.Locale
 
 private fun crores(value:Double):String = String.format(Locale.US,"₹%,.2f Cr",value/10_000_000.0)
@@ -22,7 +23,18 @@ internal fun InstitutionalResearchScreen(state:TraderUiState,onRefresh:()->Unit)
     var source by rememberSaveable { mutableStateOf("BULK") }
     val snapshot=state.equityResearch.institutional
     val report=if(source=="BULK")snapshot.bulk else snapshot.block
-    val rows=remember(report,side,filter){InstitutionalIntelligencePolicy.top(report,side,filter)}
+    var days by rememberSaveable { mutableStateOf(1) }
+    var sector by rememberSaveable { mutableStateOf("") }
+    val sectors=remember(snapshot.sectors){snapshot.sectors.values.filter{it.isNotBlank()}.distinct().sorted()}
+    val ranked=remember(snapshot,source,side,filter,days,sector){
+        InstitutionalHistoryPolicy.window(snapshot,source,side,filter,days,sector.takeIf{it.isNotBlank()})
+    }
+    val rows=ranked.rows
+    val hourly=snapshot.hourly
+    val now=java.time.ZonedDateTime.now(java.time.ZoneId.of("Asia/Kolkata"))
+    val ageMinutes=hourly?.let{(System.currentTimeMillis()-it.receivedAtMs)/60000}
+    val currentHour=hourly!=null && hourly.day==now.toLocalDate().toString() &&
+        hourly.hour==now.hour && ageMinutes!=null && ageMinutes in 0..60 && now.hour in 10..15
     LazyColumn(
         modifier=Modifier.fillMaxSize().testTag("institutional-screen"),
         contentPadding=PaddingValues(14.dp),
@@ -46,6 +58,23 @@ internal fun InstitutionalResearchScreen(state:TraderUiState,onRefresh:()->Unit)
                 FilterChip(selected=source=="BULK",onClick={source="BULK"},label={Text("Bulk deals")})
                 FilterChip(selected=source=="BLOCK",onClick={source="BLOCK"},label={Text("Block deals")})
             }
+            Row(horizontalArrangement=Arrangement.spacedBy(6.dp)){
+                for(n in listOf(1,5,10,30)){
+                    FilterChip(selected=days==n,onClick={days=n},label={Text("${n}D")})
+                }
+            }
+            var chooseSector by remember{mutableStateOf(false)}
+            Box {
+                OutlinedButton(onClick={chooseSector=true}){Text(sector.ifBlank{"All sectors"})}
+                DropdownMenu(expanded=chooseSector,onDismissRequest={chooseSector=false}){
+                    DropdownMenuItem(text={Text("All sectors")},onClick={sector="";chooseSector=false})
+                    for(name in sectors)DropdownMenuItem(text={Text(name)},onClick={sector=name;chooseSector=false})
+                }
+            }
+            Text("Coverage: ${ranked.reports}/${ranked.requested} requested session disclosures · through ${ranked.through.ifBlank{"unknown"}}. Missing/undated reports are not zero-flow days.",style=MaterialTheme.typography.bodySmall)
+            Text("Nifty EOD ${snapshot.contextDay.ifBlank{"unknown"}}: ${snapshot.niftyEodPct?.let{String.format(Locale.US,"%+.2f%%",it)}?:"unavailable"} · not live index data.",style=MaterialTheme.typography.bodySmall)
+            Text(if(hourly==null)"Hourly Groww price observation unavailable." else
+                "Groww sweep price snapshot: ${hourly.day} ${String.format(Locale.US,"%02d:00",hourly.hour)} slot · client receipt ${java.time.Instant.ofEpochMilli(hourly.receivedAtMs).atZone(java.time.ZoneId.of("Asia/Kolkata")).toLocalTime().toString().take(8)} IST · ${if(currentHour)"current hour" else "older observation"} · not live institutional flow.",style=MaterialTheme.typography.bodySmall)
             Text("Bulk and block are separate: overlapping reports must not be summed. FII/DII means only exact named clients matched to issuer filings or AMFI directory, not all institutional trades.",style=MaterialTheme.typography.bodySmall)
             if(report!=null){
                 Text("Disclosure date: ${report.day} · ${report.source} · ${report.disclosedRows} reported rows; ${report.deals.size} matched, ${report.unmatchedRows} unmatched, ${report.duplicateRows} identical rows excluded.",style=MaterialTheme.typography.bodySmall)
@@ -55,7 +84,7 @@ internal fun InstitutionalResearchScreen(state:TraderUiState,onRefresh:()->Unit)
             Button(onClick=onRefresh,enabled=!state.researchScanning,modifier=Modifier.fillMaxWidth()){
                 Text(if(state.researchScanning)"Refreshing…" else "Refresh institutional research")
             }
-            Text("NSE imports only 18:30–08:00 IST; daytime refresh is local. No additional Groww calls. Investor identity coverage is partial; unknown clients are excluded, never guessed.",style=MaterialTheme.typography.labelSmall)
+            Text("NSE imports only 18:30–08:00 IST; hourly prices reuse the first completed Fixed sweep in the first 20 minutes of each 10–15 IST clock hour. Missed hours remain missing; no extra Groww requests. Investor identity coverage is partial.",style=MaterialTheme.typography.labelSmall)
             Text("Top ${rows.size} of 20 · ${if(side=="BUY")"purchases" else "sales"}",style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.Bold)
             if(rows.isEmpty())Text("No matched disclosed stocks in this selection. This is not evidence of no market buying or selling.",style=MaterialTheme.typography.bodySmall)
         }
@@ -64,9 +93,20 @@ internal fun InstitutionalResearchScreen(state:TraderUiState,onRefresh:()->Unit)
                 Column(Modifier.padding(12.dp),verticalArrangement=Arrangement.spacedBy(4.dp)){
                     Text("${index+1}. ${row.symbol}",style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.Bold)
                     if(row.company.isNotBlank())Text(row.company,style=MaterialTheme.typography.bodySmall)
-                    Text(crores(row.amountRupees),style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold)
-                    Text("FII ${crores(row.fiiRupees)} · DII ${crores(row.diiRupees)}",style=MaterialTheme.typography.bodySmall)
-                    Text("${String.format(Locale.US,"%,d",row.shares)} disclosed shares · ${row.investors.size} matched names",style=MaterialTheme.typography.bodySmall)
+                    Text(crores(if(side=="BUY")row.grossBuy else row.grossSell),style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold)
+                    Text("FII ${crores(row.fiiSide)} · DII ${crores(row.diiSide)}",style=MaterialTheme.typography.bodySmall)
+                    Text("Gross buys ${crores(row.grossBuy)} · gross sells ${crores(row.grossSell)} · net ${crores(row.net)}",style=MaterialTheme.typography.bodySmall)
+                    Text("${String.format(Locale.US,"%,d",row.sideShares)} disclosed shares · ${row.investors.size} matched names · ${row.buyDays} buy dates · ${row.repeatedBuyers} repeated buyers",style=MaterialTheme.typography.bodySmall)
+                    val ref=if(side=="BUY")row.weightedBuy else row.weightedSell
+                    val price=hourly?.prices?.get(row.symbol)
+                    val change=InstitutionalHistoryPolicy.movement(price,ref)
+                    Text("Weighted disclosed ${if(side=="BUY")"buy" else "sell"} price: ${ref?.let{String.format(Locale.US,"₹%.2f",it)}?:"unavailable"} · sweep price: ${price?.let{String.format(Locale.US,"₹%.2f",it)}?:"unavailable"} · difference ${change?.let{String.format(Locale.US,"%+.2f%%",it)}?:"unavailable"}",style=MaterialTheme.typography.bodySmall)
+                    val industry=snapshot.sectors[row.symbol]
+                    val index=industry?.let{LargeIndexResearchPolicy.sectorIndex(it)}
+                    val sectorMove=index?.let{snapshot.sectorMoves[it]}
+                    Text("Sector: ${industry?:"unmapped"} · EOD ${sectorMove?.let{String.format(Locale.US,"%+.2f%%",it)}?:"unavailable"} · ${if(row.symbol in snapshot.swing)"Swing Watch · " else ""}${if(row.symbol in snapshot.lows)"Adaptive Lows" else "No Lows overlap"}",style=MaterialTheme.typography.labelSmall)
+                    val outcome=snapshot.outcomes.filter{it.source==source&&it.symbol==row.symbol}.maxByOrNull{it.day}
+                    if(outcome!=null)Text("Prior disclosure ${outcome.day}: subsequent 5-session close return ${String.format(Locale.US,"%+.2f%%",outcome.returnPct)} (${outcome.baselineDay}–${outcome.outcomeDay}); unadjusted research only.",style=MaterialTheme.typography.labelSmall)
                     Text(row.investors.take(3).joinToString(" · ")+(if(row.investors.size>3)" · +${row.investors.size-3} more" else ""),style=MaterialTheme.typography.labelSmall)
                 }
             }
