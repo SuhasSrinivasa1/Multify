@@ -171,6 +171,7 @@ internal fun SixMonthLowResearchScreen(state: TraderUiState, onScan: (Int) -> Un
     val research=state.equityResearch
     var selectedMonths by rememberSaveable { mutableStateOf(3) }
     var search by rememberSaveable { mutableStateOf("") }
+    var capFilter by rememberSaveable { mutableStateOf("ALL") }
     val isThree=selectedMonths==3
     val historyReady=if(isThree)research.threeMonthHistoryComplete else research.sixMonthHistoryComplete
     val result=if(isThree)research.adaptiveLowThreeRows else research.adaptiveLowSixRows
@@ -179,11 +180,15 @@ internal fun SixMonthLowResearchScreen(state: TraderUiState, onScan: (Int) -> Un
     val scanFresh=historyReady && scan!=null && scan.day==research.latestDay
     // Closest confirmed approaches first. No "hot" API request or dynamic
     // eligibility change occurs on this UI thread.
-    val visible=remember(result,scanFresh,search) {
+    val counts=remember(result,scanFresh) {
+        if(scanFresh) result.groupingBy{it.marketCapCategory}.eachCount() else emptyMap()
+    }
+    val visible=remember(result,scanFresh,search,capFilter) {
         if(!scanFresh) emptyList() else result.filter {
-            search.isBlank() || it.symbol.contains(search.trim(),true) ||
+            (capFilter=="ALL" || it.marketCapCategory==capFilter) &&
+                (search.isBlank() || it.symbol.contains(search.trim(),true) ||
                 it.companyName.contains(search.trim(),true) ||
-                (it.sector?.contains(search.trim(),true)==true)
+                (it.sector?.contains(search.trim(),true)==true))
         }.sortedWith(
             compareBy<com.multify.traderpro.engine.AdaptiveLowCandidate> {
                 if(it.phase=="IN_ENTRY_ZONE")0 else 1
@@ -262,13 +267,28 @@ internal fun SixMonthLowResearchScreen(state: TraderUiState, onScan: (Int) -> Un
             )
         }
         item {
+            Text("Market cap · AMFI ${research.marketCapClassificationPeriod.ifBlank{"dataset unavailable"}} · ${research.marketCapClassificationCount} NSE symbols in asset",
+                style=MaterialTheme.typography.bodySmall)
+            if(research.marketCapClassificationCount==0)
+                Text("Classification asset unavailable — no size is guessed.",color=MaterialTheme.colorScheme.error)
+            Row(horizontalArrangement=Arrangement.spacedBy(6.dp)) {
+                FilterChip(selected=capFilter=="ALL",onClick={capFilter="ALL"},label={Text("All ${if(scanFresh)result.size else 0}")},modifier=Modifier.testTag("low-cap-all"))
+                FilterChip(selected=capFilter=="LARGE_CAP",onClick={capFilter="LARGE_CAP"},label={Text("Large ${counts["LARGE_CAP"]?:0}")},modifier=Modifier.testTag("low-cap-large"))
+            }
+            Row(horizontalArrangement=Arrangement.spacedBy(6.dp)) {
+                FilterChip(selected=capFilter=="MID_CAP",onClick={capFilter="MID_CAP"},label={Text("Mid ${counts["MID_CAP"]?:0}")},modifier=Modifier.testTag("low-cap-mid"))
+                FilterChip(selected=capFilter=="SMALL_CAP",onClick={capFilter="SMALL_CAP"},label={Text("Small ${counts["SMALL_CAP"]?:0}")},modifier=Modifier.testTag("low-cap-small"))
+            }
+            FilterChip(selected=capFilter=="UNCLASSIFIED",onClick={capFilter="UNCLASSIFIED"},label={Text("Unclassified ${counts["UNCLASSIFIED"]?:0}")},modifier=Modifier.testTag("low-cap-unclassified"))
             Text("Approaching historical rebound zones · ${visible.size}",
                 style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.Bold)
             OutlinedTextField(value=search,onValueChange={search=it},singleLine=true,
                 label={Text("Filter ticker, company or mapped sector")},
                 modifier=Modifier.fillMaxWidth())
             if(visible.isEmpty()) Text(
-                if(scanFresh)
+                if(scanFresh && (capFilter!="ALL" || search.isNotBlank()))
+                    "No candidates match the selected filters. Choose All or clear the search."
+                else if(scanFresh)
                     "No NSE EQ shares meet the full repeated-rebound, falling-toward-support and STRICTLY under-5% criteria today. An empty list is a valid outcome."
                 else "No eligible list until the local after-hours scan completes.",
                 style=MaterialTheme.typography.bodySmall
@@ -310,6 +330,9 @@ private fun AdaptiveLowOpportunityRow(c: com.multify.traderpro.engine.AdaptiveLo
             if(c.companyName.isNotBlank() && !c.companyName.equals(c.symbol,true))
                 Text(c.companyName,style=MaterialTheme.typography.bodySmall)
             MarketCapBadge(c.marketCapCategory,null)
+            Text("Latest candle: ${c.currentCandlePattern?.replace('_',' ') ?: "OHLC evidence unavailable"} · prior bullish shapes: ${c.reactions.count{com.multify.traderpro.engine.AdaptiveLowCandleEvidence.bullish(it.candlePattern)}}/${c.reactions.size}",
+                style=MaterialTheme.typography.bodySmall)
+            Text("Candle patterns are shadow evidence, not an entry trigger or a new veto.",style=MaterialTheme.typography.labelSmall)
             Text(
                 "${if(c.phase=="IN_ENTRY_ZONE")"IN HISTORICAL WATCH ZONE" else "APPROACHING SUPPORT — NOT IN ENTRY ZONE"} · ${c.months}M",
                 style=MaterialTheme.typography.labelMedium,
@@ -353,7 +376,7 @@ private fun AdaptiveLowOpportunityRow(c: com.multify.traderpro.engine.AdaptiveLo
                     style=MaterialTheme.typography.labelSmall)
                 c.reactions.forEach{touch->
                     Text(
-                        "${touch.lowDay} · support ${price(touch.supportLow)} · subsequent max EOD close +${String.format(Locale.US,"%.2f%%",touch.reboundPctFromLow)} · first +5% close ${touch.sessionsToRebound} sessions later · P/E at time unavailable · RSI ${touch.rsi14AtLow?.let{String.format(Locale.US,"%.1f",it)}?:"—"} · volume ${touch.volumeToPrior20?.let{String.format(Locale.US,"%.2fx",it)}?:"—"}",
+                        "${touch.lowDay} · support ${price(touch.supportLow)} · subsequent max EOD close +${String.format(Locale.US,"%.2f%%",touch.reboundPctFromLow)} · first +5% close ${touch.sessionsToRebound} sessions later · candle ${touch.candlePattern?.replace('_',' ') ?: "unavailable"} · P/E at time unavailable · RSI ${touch.rsi14AtLow?.let{String.format(Locale.US,"%.1f",it)}?:"—"} · volume ${touch.volumeToPrior20?.let{String.format(Locale.US,"%.2fx",it)}?:"—"}",
                         style=MaterialTheme.typography.labelSmall
                     )
                 }
