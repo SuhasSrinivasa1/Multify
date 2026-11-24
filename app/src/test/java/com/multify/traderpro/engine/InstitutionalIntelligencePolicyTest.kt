@@ -28,6 +28,7 @@ class InstitutionalIntelligencePolicyTest {
         assertEquals(5000L,all.shares)
         assertEquals(600000.0,InstitutionalIntelligencePolicy.top(r,"BUY","VERIFIED").single().amountRupees,0.01)
         assertEquals(400000.0,InstitutionalIntelligencePolicy.top(r,"BUY","UNCLASSIFIED").single().amountRupees,0.01)
+        assertEquals(400000.0,all.unclassifiedRupees,0.01)
         assertEquals(2,r.deals.count{it.category=="UNCLASSIFIED"})
         assertEquals(60000.0,InstitutionalIntelligencePolicy.top(r,"SELL","DII").single().amountRupees,0.01)
         assertTrue(InstitutionalIntelligencePolicy.top(r,"SELL","FII").isEmpty())
