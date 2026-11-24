@@ -569,6 +569,43 @@ class EquityEodResearchRepository @Inject constructor(
                     "cached_report_preserved" to true,"groww_api_calls" to 0))
             }
         }
+        if(afterHours(ZonedDateTime.now(INDIA))) matureInstitutionalOutcomes()
+    }
+
+    /** Conservative forward close study: use only observations after disclosure receipt.
+     * Five-session result is not a fill, adjusted return or executable trade. */
+    private fun matureInstitutionalOutcomes() {
+        requireAfterHours()
+        val snap=institutionalStore.snapshot()
+        val done=snap.outcomes.map{it.source+"|"+it.day+"|"+it.symbol}.toHashSet()
+        val observations=mutableListOf<com.multify.traderpro.engine.InstitutionalOutcome>()
+        synchronized(lock) {
+            val dbRead=db.readableDatabase
+            for(report in snap.history.sortedByDescending{it.day}.take(60)) {
+                if(report.receivedAtMs<=0)continue
+                val received=java.time.Instant.ofEpochMilli(report.receivedAtMs).atZone(INDIA).toLocalDate().toString()
+                val start=maxOf(report.day,received)
+                val dates=mutableListOf<String>()
+                dbRead.rawQuery("SELECT day FROM eod_days WHERE day>? ORDER BY day LIMIT 6",arrayOf(start)).use{c->
+                    while(c.moveToNext())dates+=c.getString(0)
+                }
+                if(dates.size!=6)continue
+                val symbols=com.multify.traderpro.engine.InstitutionalIntelligencePolicy.top(report,"BUY","ALL").map{it.symbol}
+                for(symbol in symbols){
+                    if(report.source+"|"+report.day+"|"+symbol in done)continue
+                    val closes=mutableListOf<Pair<String,Double>>()
+                    dbRead.rawQuery("SELECT day,close FROM eod WHERE symbol=? AND day>=? AND day<=? ORDER BY day",
+                        arrayOf(symbol,dates.first(),dates.last())).use{c->
+                        while(c.moveToNext())closes+=c.getString(0) to c.getDouble(1)
+                    }
+                    if(closes.map{it.first}!=dates || closes.any{!it.second.isFinite()||it.second<=0})continue
+                    if(closes.zipWithNext().any{(a,b)->kotlin.math.abs(b.second/a.second-1)>=0.38})continue
+                    val ret=(closes.last().second/closes.first().second-1)*100
+                    observations+=com.multify.traderpro.engine.InstitutionalOutcome(report.source,report.day,symbol,dates.first(),dates.last(),ret)
+                }
+            }
+        }
+        if(observations.isNotEmpty())institutionalStore.saveOutcomes(observations)
     }
 
     /**
@@ -891,6 +928,14 @@ class EquityEodResearchRepository @Inject constructor(
     ) {
         val at = ZonedDateTime.now(INDIA)
         if (!NseEquitySessionCalendar.isFixedScanWindow(at) || !completedSweep) return
+        // Reuse the full Groww sweep BEFORE the Large-cap-only filter.
+        // No new requests, no extra Alpha/Beta capacity, no execution authority.
+        runCatching {
+            if(institutionalStore.captureHourly(at,current,open))
+                audit.logAsync("INSTITUTIONAL_RESEARCH","HOURLY_SWEEP_REUSED",mapOf(
+                    "hour_ist" to at.hour,"received_at_ms" to System.currentTimeMillis(),
+                    "groww_api_calls_added" to 0,"institutional_transactions_inferred" to false))
+        }
         val memberSet = members().keys
         val live = current.filter { (symbol,price) ->
             symbol in memberSet && price.isFinite() && price > 0.0
@@ -1216,7 +1261,20 @@ class EquityEodResearchRepository @Inject constructor(
             niftyIndexPe=niftyToday?.pe,
             niftyIndexPb=niftyToday?.pb,
             liveLargeCapBreadthProxyPct=liveLargeBreadth,
-            institutional=institutionalStore.snapshot()
+            institutional=institutionalStore.snapshot().copy(
+                sessions=sql.rawQuery("SELECT day FROM eod_days ORDER BY day DESC LIMIT 30",null).use{c->
+                    val days=mutableListOf<String>()
+                    while(c.moveToNext())days+=c.getString(0)
+                    days.sorted()
+                },
+                sectors=memberMap + valuation.industryBySymbol,
+                swing=result.filter{it.swingResearch}.map{it.symbol}.toSet(),
+                lows=(adaptive3+adaptive6).map{it.symbol}.toSet(),
+                sectorMoves=indexHistories.mapNotNull{(name,series)->
+                    series.lastOrNull()?.takeIf{it.day.toString()==latest}?.changePct?.let{name to it}
+                }.toMap(),
+                niftyEodPct=niftyToday?.changePct,contextDay=latest
+            )
         )
     }
 }

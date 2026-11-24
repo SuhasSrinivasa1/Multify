@@ -19,7 +19,18 @@ data class InstitutionalReport(
     val deals:List<InstitutionalDeal> = emptyList()
 )
 data class InstitutionalSnapshot(
-    val bulk:InstitutionalReport?=null,val block:InstitutionalReport?=null
+    val bulk:InstitutionalReport?=null,val block:InstitutionalReport?=null,
+    val history:List<InstitutionalReport> = emptyList(),
+    val sessions:List<String> = emptyList(),
+    val hourly:InstitutionalHourly? = null,
+    val hourlyHistory:List<InstitutionalHourly> = emptyList(),
+    val sectors:Map<String,String> = emptyMap(),
+    val swing:Set<String> = emptySet(),
+    val lows:Set<String> = emptySet(),
+    val sectorMoves:Map<String,Double> = emptyMap(),
+    val niftyEodPct:Double? = null,
+    val contextDay:String = "",
+    val outcomes:List<InstitutionalOutcome> = emptyList()
 )
 
 /**
