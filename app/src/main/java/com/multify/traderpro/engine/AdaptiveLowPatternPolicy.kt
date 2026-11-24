@@ -15,7 +15,8 @@ data class AdaptiveLowReaction(
     val volumeToPrior20: Double?,
     val rsi14AtLow: Double?,
     val ema20AtLow: Double?,
-    val lowerWickReversal: Boolean?
+    val lowerWickReversal: Boolean?,
+    val candlePattern: String? = null
 )
 
 /**
@@ -64,7 +65,8 @@ data class AdaptiveLowCandidate(
     val sectorRegime: String = "UNKNOWN",
     val marketEvidenceDay: String = "",
     val valuationEvidenceDay: String = "",
-    val coverageNote: String = "NSE EQ EOD; unadjusted corporate-action history"
+    val coverageNote: String = "NSE EQ EOD; unadjusted corporate-action history",
+    val currentCandlePattern: String? = null
 )
 
 /** Frozen scanner version v1. This object has no Groww access and no order authority. */
@@ -173,7 +175,8 @@ object AdaptiveLowPatternPolicy {
                 volumeToPrior20=vol,
                 rsi14AtLow=rsi(closes.take(i+1)),
                 ema20AtLow=ema(closes.take(i+1),20),
-                lowerWickReversal=hammer(bars[i])
+                lowerWickReversal=hammer(bars[i]),
+                candlePattern=AdaptiveLowCandleEvidence.patternAt(bars,i)
             )
         }
         if(episodes.size<MIN_PRIOR_REACTIONS)return null
@@ -244,7 +247,8 @@ object AdaptiveLowPatternPolicy {
             lastCloseAboveEma20=e20?.let{close>it},
             candleCoverage=cluster.count{it.second.lowerWickReversal!=null},
             phase=if(close<=high)"IN_ENTRY_ZONE" else "APPROACHING_FROM_ABOVE",
-            patternScore=best.third
+            patternScore=best.third,
+            currentCandlePattern=AdaptiveLowCandleEvidence.patternAt(bars,lastIdx)
         )
     }
 }
