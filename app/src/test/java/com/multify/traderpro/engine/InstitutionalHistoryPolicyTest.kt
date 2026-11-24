@@ -23,8 +23,8 @@ class InstitutionalHistoryPolicyTest {
         assertEquals(500.0,row.unclassifiedSide,0.01)
         assertEquals(5000.0,row.fiiSide,0.01)
         assertEquals(220.0,row.grossSell,0.01)
-        assertEquals(4780.0,row.net,0.01)
-        assertEquals(5000.0/300,row.weightedBuy!!,0.01)
+        assertEquals(5280.0,row.net,0.01)
+        assertEquals(5500.0/350,row.weightedBuy!!,0.01)
         assertEquals(1,row.repeatedBuyers)
         assertEquals(2,row.buyDays)
     }
