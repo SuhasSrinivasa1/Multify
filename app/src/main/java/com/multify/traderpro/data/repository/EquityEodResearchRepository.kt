@@ -19,11 +19,15 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
+import com.multify.traderpro.engine.NseArchiveRecoveryPolicy
+import android.os.SystemClock
+import java.io.IOException
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Cookie
 import okhttp3.CookieJar
 import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.time.DayOfWeek
@@ -68,6 +72,7 @@ data class EquityResearchSnapshot(
     val threeMonthHistoryComplete: Boolean = false,
     val sixMonthHistoryComplete: Boolean = false,
     val lastError: String = "",
+    val archiveProgress: String = "",
     val memberSource: String = "",
     val currentPulseAtMs: Long = 0L,
     val refreshAtMs: Long = 0L,
@@ -102,7 +107,8 @@ data class EquityEodRefreshProgress(
     val importedDays: Int,
     val missingWeekdays: Int,
     val sourceFailure: Boolean,
-    val requestedDays: Int = 0
+    val requestedDays: Int = 0,
+    val retryPending: Boolean = false
 )
 
 /**
@@ -263,6 +269,7 @@ class EquityEodResearchRepository @Inject constructor(
         .connectTimeout(Duration.ofSeconds(8))
         .readTimeout(Duration.ofSeconds(18))
         .followRedirects(true)
+        .retryOnConnectionFailure(false)
         .build()
     private val lock = Any()
     private val refreshMutex = Mutex()
@@ -288,13 +295,48 @@ class EquityEodResearchRepository @Inject constructor(
         .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36")
         .build()
 
+    private val archiveHost="nsearchives.nseindia.com"
+    private val lastWire=mutableMapOf<String,Long>()
+    private fun cooldownUntil(host:String)=prefs.getLong("nse_cooldown_until_"+host,0L)
+    private fun cooldownReason(host:String)=prefs.getString("nse_cooldown_reason_"+host,"").orEmpty()
+    private fun cooldownText(host:String):String {
+        val until=cooldownUntil(host)
+        val time=java.time.Instant.ofEpochMilli(until).atZone(INDIA).toLocalDateTime().toString().replace('T',' ')
+        return "${cooldownReason(host)} · retry after $time IST"
+    }
+    private fun recordSourceFailure(host:String,code:Int,retryAfter:String?,reason:String) {
+        val now=System.currentTimeMillis()
+        val wait=NseArchiveRecoveryPolicy.cooldownMs(code,retryAfter,now)
+        if(wait<=0)return
+        val until=maxOf(cooldownUntil(host),NseArchiveRecoveryPolicy.deadline(now,wait))
+        val saved=prefs.edit().putLong("nse_cooldown_until_"+host,until)
+            .putString("nse_cooldown_reason_"+host,reason).commit()
+        audit.logAsync("EOD_RESEARCH","SOURCE_COOLDOWN",mapOf("host" to host,"reason" to reason,
+            "retry_after" to retryAfter,"until_ms" to until,"persisted" to saved,"groww_requests" to 0))
+    }
+    private fun sourceGet(url:String):okhttp3.Response {
+        requireAfterHours()
+        val host=url.toHttpUrl().host
+        if(!NseArchiveRecoveryPolicy.allowed(System.currentTimeMillis(),cooldownUntil(host)))
+            throw IOException("NSE_SOURCE_COOLDOWN "+cooldownText(host))
+        val gap=(NseArchiveRecoveryPolicy.MIN_GAP_MS-(SystemClock.elapsedRealtime()-(lastWire[host]?:0L))).coerceAtLeast(0L)
+        if(gap>0)Thread.sleep(gap)
+        requireAfterHours()
+        lastWire[host]=SystemClock.elapsedRealtime()
+        val response=try{client.newCall(request(url)).execute()}catch(e:IOException){
+            recordSourceFailure(host,0,null,"NETWORK "+e.javaClass.simpleName)
+            throw e
+        }
+        if(!response.isSuccessful)recordSourceFailure(host,response.code,response.header("Retry-After"),"HTTP "+response.code)
+        return response
+    }
     private fun warmNseSession() {
         requireAfterHours()
         val today=LocalDate.now(INDIA).toString()
         if(warmedNseDate==today) return
         warmedNseDate=today
         runCatching {
-            client.newCall(request("https://www.nseindia.com/")).execute().use { response ->
+            sourceGet("https://www.nseindia.com/").use { response ->
                 check(response.isSuccessful) { "NSE_HOME_HTTP_${response.code}" }
             }
         }.onFailure { audit.logAsync("EOD_RESEARCH","NSE_COOKIE_PREWARM_UNAVAILABLE",mapOf(
@@ -310,18 +352,19 @@ class EquityEodResearchRepository @Inject constructor(
     private fun importArchive(date: LocalDate): Int {
         requireAfterHours()
         val url = SOURCE_URL.format(date.format(BASIC))
-        val rows = client.newCall(request(url)).execute().use { response ->
+        val rows = sourceGet(url).use { response ->
             if (!response.isSuccessful) error("NSE_BHAVCOPY_HTTP_${response.code}")
             val body = response.body ?: error("NSE_BHAVCOPY_EMPTY")
             val zip = ZipInputStream(body.byteStream())
             zip.use { stream ->
                 val entry = stream.nextEntry ?: error("NSE_BHAVCOPY_ZIP_EMPTY")
-                check(entry.name.endsWith(".csv", true) && !entry.name.contains("..")) {
+                check(entry.name.endsWith(".csv", true) && !entry.name.contains("..") && entry.name.contains(date.format(BASIC))) {
                     "NSE_BHAVCOPY_ZIP_ENTRY_INVALID"
                 }
                 val reader = BufferedReader(InputStreamReader(stream, Charsets.UTF_8))
                 val headings = csvCells(reader.readLine() ?: error("NSE_BHAVCOPY_HEADER_EMPTY"))
                     .map { it.removePrefix("\uFEFF").trim() }
+                val dateIndex=headings.indexOf("TradDt")
                 val indices = listOf("TckrSymb", "SctySrs", "OpnPric", "HghPric", "LwPric", "ClsPric", "TtlTradgVol")
                     .associateWith { field ->
                         headings.indexOf(field).takeIf { it >= 0 }
@@ -343,6 +386,7 @@ class EquityEodResearchRepository @Inject constructor(
                     val values = csvCells(line)
                     if (values.size <= maxOf(sym,series,open,high,low,close,vol)) continue
                     if (values[series] != "EQ") continue
+                    if(dateIndex>=0)check(values.getOrNull(dateIndex)==date.toString()){"NSE_BHAVCOPY_DATE_MISMATCH"}
                     val symbol = values[sym].uppercase(Locale.US)
                     if (!SYMBOL_REGEX.matches(symbol)) continue
                     val o = values[open].toDoubleOrNull() ?: continue
@@ -352,8 +396,10 @@ class EquityEodResearchRepository @Inject constructor(
                     val v = values[vol].toLongOrNull() ?: 0L
                     if (!l.isFinite() || !c.isFinite() || !o.isFinite() || !h.isFinite() ||
                         l <= 0.0 || o < l || h < maxOf(o,c) || c < l || v < 0L) continue
+                    check(symbol !in map){"NSE_BHAVCOPY_DUPLICATE_EQ_SYMBOL"}
                     map[symbol] = EquityEodBar(date, symbol, l, c, v, open=o, high=h)
                 }
+                stream.closeEntry() // finish CRC validation before committing any rows
                 check(map.size >= MIN_VALID_EQ_ROWS) { "NSE_BHAVCOPY_INCOMPLETE_EQ_${map.size}" }
                 map.values.toList()
             }
@@ -383,7 +429,7 @@ class EquityEodResearchRepository @Inject constructor(
 
     private fun symbolsFromIndex(url: String): Map<String,String> {
         requireAfterHours()
-        return client.newCall(request(url)).execute().use { r ->
+        return sourceGet(url).use { r ->
             check(r.isSuccessful) { "NIFTY_INDEX_HTTP_${r.code}" }
             val raw = r.body?.string().orEmpty()
             check(raw.length in 100..100_000) { "NIFTY_INDEX_INVALID_SIZE" }
@@ -449,6 +495,10 @@ class EquityEodResearchRepository @Inject constructor(
             if (!afterHours(ZonedDateTime.now(INDIA))) return@withContext EquityEodRefreshProgress(0,0,false)
         // NSE's archive domain sometimes needs an NSE homepage cookie session.
         // Warm once nightly, not for every requested day, and never during the market.
+        if(!NseArchiveRecoveryPolicy.allowed(System.currentTimeMillis(),cooldownUntil(archiveHost))) {
+            prefs.edit().putString("last_eod_error",cooldownText(archiveHost)).apply()
+            return@withContext EquityEodRefreshProgress(0,0,true,0,true)
+        }
         warmNseSession()
         refreshMembers()
         val today = LocalDate.now(INDIA)
@@ -478,34 +528,54 @@ class EquityEodResearchRepository @Inject constructor(
         val missing = valid.filter { it.toString() !in present }
         var imported = 0
         var wireRequests = 0
-        var consecutiveNotFound = 0
         var blocked = false
+        var lastFailure = ""
+        var retryPending = false
+        var missingFiles = 0
+        var skipped = 0
         for (day in missing) {
             if (wireRequests >= maxFiles || !afterHours(ZonedDateTime.now(INDIA))) break
             val previous = attempts[day.toString()]
-            // One attempt per date per calendar day: avoids 403/holiday retry storms.
-            if (previous?.first == today.toString()) continue
-            // Absent files older than seven days are likely exchange holidays. Retest
-            // weekly rather than refetching the same missing archive every evening.
-            if (previous?.second == "NSE_BHAVCOPY_HTTP_404" &&
-                day.isBefore(today.minusDays(7)) &&
-                (previous.first.let { LocalDate.parse(it) }).isAfter(today.minusDays(7))) continue
+            if(!NseArchiveRecoveryPolicy.allowed(System.currentTimeMillis(),cooldownUntil(archiveHost))) {
+                blocked=true; retryPending=true; lastFailure=cooldownText(archiveHost);break
+            }
+            val retryKey="nse_day_retry_"+day
+            val next=prefs.getLong(retryKey,0L)
+            if(next>System.currentTimeMillis()) {
+                skipped++
+                if(!day.isBefore(today.minusDays(2)))retryPending=true
+                continue
+            }
+            if(next==0L && previous?.first==today.toString()){skipped++;continue}
+            if(next==0L && previous?.second=="NSE_BHAVCOPY_HTTP_404" && day.isBefore(today.minusDays(7)) &&
+                LocalDate.parse(previous.first).isAfter(today.minusDays(7))){skipped++;continue}
             var failure = ""
             wireRequests++
             try {
                 val rows=importArchive(day)
                 imported++
-                consecutiveNotFound = 0
+                prefs.edit().remove(retryKey).apply()
                 audit.logAsync("EOD_RESEARCH","BHAVCOPY_IMPORTED",mapOf(
                     "date" to day.toString(),"equity_rows" to rows,"groww_api_calls" to 0
                 ))
             } catch (e:Exception) {
                 failure=(e.message ?: e.javaClass.simpleName).take(90)
-                consecutiveNotFound = if(failure=="NSE_BHAVCOPY_HTTP_404") consecutiveNotFound+1 else 0
-                if(consecutiveNotFound>=3) blocked=true
-                if (failure.contains("403") || failure.contains("429") ||
-                    failure.contains("INVALID") || failure.contains("MISSING_COLUMN") ||
-                    failure.contains("INCOMPLETE")) blocked = true
+                val recent=!day.isBefore(today.minusDays(2))
+                val missingFile=failure=="NSE_BHAVCOPY_HTTP_404"
+                if(missingFile)missingFiles++
+                val now=System.currentTimeMillis()
+                val wait=if(missingFile)NseArchiveRecoveryPolicy.missingRetryMs(recent)
+                    else if(cooldownUntil(archiveHost)>now)cooldownUntil(archiveHost)-now
+                    else NseArchiveRecoveryPolicy.TRANSIENT_COOLDOWN_MS
+                prefs.edit().putLong(retryKey,NseArchiveRecoveryPolicy.deadline(now,wait)).apply()
+                lastFailure="$day · $failure"
+                if(!missingFile || recent)retryPending=true
+                if(!missingFile) {
+                    blocked=true
+                    if(cooldownUntil(archiveHost)<=now)
+                        recordSourceFailure(archiveHost,0,null,lastFailure)
+                    lastFailure="$lastFailure · "+cooldownText(archiveHost)
+                }
                 audit.logAsync("EOD_RESEARCH","BHAVCOPY_UNAVAILABLE",mapOf(
                     "date" to day.toString(),"reason" to failure,"groww_api_calls" to 0
                 ))
@@ -519,20 +589,27 @@ class EquityEodResearchRepository @Inject constructor(
         }
         // Read-only NSE PE and index-industry imports, after hours only, independent of Groww.
         // Neither data source changes the frozen Fixed selection/BUY path.
-        refreshValuationAfterHours()
-        refreshLargeIndexEodAfterHours()
-        // Daily support-retest research is sourced from COMPLETE, saved NSE EQ
-        // day files. The Lows screen never issues a trading-hours market request.
-        refreshExistingOhlcAfterHours(maxDays = 6)
-        refreshAdaptiveLowsAfterHours()
-        // Missing bhavcopy files (404) are not a disclosure outage; keep the bounded independent import.
-        // Last, isolated research task: never delay the existing archive/scan work
-        // and never make a broker call.
-        if((!blocked || consecutiveNotFound>=3) && afterHours(ZonedDateTime.now(INDIA))) refreshInstitutionalAfterHours()
+        fun offHoursStep(name:String,task:()->Unit) {
+            if(!afterHours(ZonedDateTime.now(INDIA)))return
+            runCatching{task()}.onFailure{err->audit.logAsync("EOD_RESEARCH","RESEARCH_STAGE_FAILED",
+                mapOf("stage" to name,"reason" to (err.message?:err.javaClass.simpleName).take(180),"groww_requests" to 0))}
+        }
+        if(!blocked) {
+            offHoursStep("VALUATION"){refreshValuationAfterHours()}
+            offHoursStep("INDEX"){refreshLargeIndexEodAfterHours()}
+            offHoursStep("OHLC"){refreshExistingOhlcAfterHours(maxDays = 6)}
+            if(cooldownUntil(archiveHost)<=System.currentTimeMillis())
+                offHoursStep("INSTITUTIONAL"){refreshInstitutionalAfterHours()}
+        }
+        offHoursStep("SUPPORT_RETEST"){refreshAdaptiveLowsAfterHours()}
+        val summary="Imported $imported · archive attempts $wireRequests · missing files $missingFiles · deferred $skipped"
         prefs.edit().putLong("last_eod_attempt_ms",System.currentTimeMillis())
-            .putString("last_eod_error",if(blocked) "Exchange archive temporarily unavailable" else "")
-            .apply()
-            EquityEodRefreshProgress(imported,missing.size,blocked,wireRequests)
+            .putString("last_eod_error",lastFailure)
+            .putString("last_eod_progress",summary).apply()
+        audit.logAsync("EOD_RESEARCH","ARCHIVE_PASS_SUMMARY",mapOf("imported" to imported,"attempts" to wireRequests,
+            "missing_files" to missingFiles,"deferred" to skipped,"source_failure" to blocked,"retry_pending" to retryPending,
+            "last_failure" to lastFailure,"groww_requests" to 0))
+        EquityEodRefreshProgress(imported,missing.size,blocked,wireRequests,retryPending)
         } finally {
             refreshMutex.unlock()
         }
@@ -565,7 +642,7 @@ class EquityEodResearchRepository @Inject constructor(
             val file=source.lowercase(Locale.US)
             runCatching {
                 val url="https://nsearchives.nseindia.com/content/equities/$file.csv"
-                val csv=client.newCall(request(url)).execute().use{resp->
+                val csv=sourceGet(url).use{resp->
                     check(resp.isSuccessful){"NSE_DEAL_HTTP_${resp.code}"}
                     val body=resp.body?:error("NSE_DEAL_EMPTY_BODY")
                     val input=body.source()
@@ -879,7 +956,7 @@ class EquityEodResearchRepository @Inject constructor(
             runCatching {
                 val date = LocalDate.parse(latestDay)
                 val path = NSE_PE_URL.format(date.format(DateTimeFormatter.ofPattern("ddMMyy")))
-                val csv = client.newCall(request(path)).execute().use { r ->
+                val csv = sourceGet(path).use { r ->
                     check(r.isSuccessful) { "NSE_PE_HTTP_${r.code}" }
                     r.body?.string()?.takeIf { it.length in 5_000..500_000 }
                         ?: error("NSE_PE_EMPTY_OR_OVERSIZE")
@@ -902,7 +979,7 @@ class EquityEodResearchRepository @Inject constructor(
         if (System.currentTimeMillis() - industryAttempt < 7L * 24L * 60L * 60_000L) return
         prefs.edit().putLong("nse_industry_last_attempt_ms", System.currentTimeMillis()).apply()
         runCatching {
-            val raw = client.newCall(request(NSE_TOTAL_MARKET_INDUSTRIES_URL)).execute().use { r ->
+            val raw = sourceGet(NSE_TOTAL_MARKET_INDUSTRIES_URL).use { r ->
                 check(r.isSuccessful) { "NSE_INDUSTRY_HTTP_${r.code}" }
                 r.body?.string()?.takeIf { it.length in 10_000..500_000 }
                     ?: error("NSE_INDUSTRY_EMPTY_OR_OVERSIZE")
@@ -952,7 +1029,7 @@ class EquityEodResearchRepository @Inject constructor(
                 val localDate=LocalDate.parse(day)
                 val url=NSE_INDICES_EOD_URL.format(
                     localDate.format(DateTimeFormatter.ofPattern("ddMMyyyy",Locale.US)))
-                val csv=client.newCall(request(url)).execute().use{resp->
+                val csv=sourceGet(url).use{resp->
                     check(resp.isSuccessful){"NSE_INDEX_EOD_HTTP_${resp.code}"}
                     resp.body?.string()?.takeIf{it.length in 1_500..500_000}
                         ?: error("NSE_INDEX_EOD_PAYLOAD_MISSING")
@@ -1304,6 +1381,7 @@ class EquityEodResearchRepository @Inject constructor(
             threeMonthHistoryComplete=threeMonthHistoryComplete,
             sixMonthHistoryComplete=spanComplete,
             lastError=prefs.getString("last_eod_error","").orEmpty(),
+            archiveProgress=prefs.getString("last_eod_progress","").orEmpty(),
             memberSource=prefs.getString("members_source","CURATED_SEEDS_UNVERIFIED").orEmpty(),
             currentPulseAtMs=if(fresh)prefs.getLong("pulse_at_ms",0L) else 0L,
             refreshAtMs=prefs.getLong("last_eod_attempt_ms",0L),

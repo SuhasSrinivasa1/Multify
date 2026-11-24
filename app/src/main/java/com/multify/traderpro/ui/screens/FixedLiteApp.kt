@@ -153,7 +153,7 @@ fun FixedLiteApp(viewModel: TraderViewModel = hiltViewModel()) {
                     state, viewModel,
                     onEnableRequested = { confirmEnable = it },
                     onResetRequested = { confirmHaltReset = true },
-                    onExport = { export.launch("Phayra-v9046-institutional-diagnostics.zip") }
+                    onExport = { export.launch("Phayra-v9051-archive-diagnostics.zip") }
                 )
             }
         }

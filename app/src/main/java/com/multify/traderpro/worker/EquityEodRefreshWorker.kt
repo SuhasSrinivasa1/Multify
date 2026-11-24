@@ -32,10 +32,11 @@ class EquityEodRefreshWorker @AssistedInject constructor(
                 "actual_archive_requests" to done.requestedDays,
                 "missing_weekdays_before_pass" to done.missingWeekdays,
                 "source_failure" to done.sourceFailure,
+                "retry_pending" to done.retryPending,
                 "groww_requests" to 0,
                 "attempt" to runAttemptCount
             ))
-            if(!done.sourceFailure && done.requestedDays >= 25 && done.importedDays > 0 && runAttemptCount < 7)
+            if(runAttemptCount < 7 && (done.retryPending || (!done.sourceFailure && done.requestedDays >= 25 && done.importedDays > 0)))
                 Result.retry() else Result.success()
         }, { e ->
             audit.logAsync("EOD_RESEARCH","WORK_FAILED",mapOf(
