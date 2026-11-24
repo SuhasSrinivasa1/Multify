@@ -11,14 +11,17 @@ class InstitutionalHistoryPolicyTest {
         InstitutionalReport(day,source,1L,deals.size,0,0,deals.toList())
     @Test fun sourceSeparatedDeduplicatedGrossNetAndRepeatBuyer() {
         val a=report("2026-11-23",d("2026-11-23","BUY",100,10.0),d("2026-11-23","SELL",20,11.0))
-        val b=report("2026-11-24",d("2026-11-24","BUY",200,20.0))
+        val b=report("2026-11-24",d("2026-11-24","BUY",200,20.0),
+            d("2026-11-24","BUY",50,10.0,"ABC","UNCLASSIFIED","UNKNOWN CLIENT"))
         val other=report("2026-11-24",d("2026-11-24","BUY",900,99.0),source="BLOCK")
         val s=InstitutionalSnapshot(b,other,listOf(a,b,other),listOf("2026-11-23","2026-11-24"))
         val w=InstitutionalHistoryPolicy.window(s,"BULK","BUY","ALL",5)
         assertEquals(2,w.reports)
         assertEquals(5,w.requested)
         val row=w.rows.single()
-        assertEquals(5000.0,row.grossBuy,0.01)
+        assertEquals(5500.0,row.grossBuy,0.01)
+        assertEquals(500.0,row.unclassifiedSide,0.01)
+        assertEquals(5000.0,row.fiiSide,0.01)
         assertEquals(220.0,row.grossSell,0.01)
         assertEquals(4780.0,row.net,0.01)
         assertEquals(5000.0/300,row.weightedBuy!!,0.01)
@@ -42,6 +45,7 @@ class InstitutionalHistoryPolicyTest {
         assertEquals(20,w.rows.size)
         assertEquals("S24",w.rows.first().symbol)
         assertEquals(32500.0,InstitutionalHistoryPolicy.sectorTotals(s,"BULK","ALL",1).single().buys,0.01)
+        assertEquals(32500.0,InstitutionalHistoryPolicy.sectorTotals(s,"BULK","VERIFIED",1).single().buys,0.01)
         assertTrue(InstitutionalHistoryPolicy.window(s,"BULK","BUY","DII",1).rows.isEmpty())
     }
     @Test fun hourlySlotUsesIstAndNeverCatchesUpMissedHours() {
