@@ -13825,6 +13825,15 @@ class TradingRepository @Inject constructor(
         } ?: error("Unable to open restore ZIP")
 
         require(entries.isNotEmpty()) { "This ZIP does not contain Multify learning files" }
+        restoreStage = "NSE EOD research history"
+        val restoredEodRows = entries["eod_research_history.jsonl"]?.let {
+            equityEodResearch.restorePortableHistory(it)
+        } ?: 0
+        auditLogger.logAsync("MIGRATION","EOD_RESEARCH_HISTORY_RESTORED",mapOf(
+            "rows_inserted_or_enriched" to restoredEodRows,
+            "backup_present" to entries.containsKey("eod_research_history.jsonl"),
+            "broker_state_restored" to false,"credentials_restored" to false
+        ))
         val gson = GsonBuilder().disableHtmlEscaping().create()
         restoreStage = "Fixed baseline snapshot"
         var restoredFixedSnapshot = false
@@ -14242,6 +14251,8 @@ class TradingRepository @Inject constructor(
                     written(name)
                 }
                 add("settings.json", safeSettings)
+                equityEodResearch.appendPortableHistory(zip)
+                written("eod_research_history.jsonl")
                 add("signals.json", signals)
                 add("holdings.json", positions)
                 add("closed_long_trades.json", trades)
@@ -15068,6 +15079,7 @@ class TradingRepository @Inject constructor(
         private const val UNIVERSAL_EVIDENCE_REPLAY_SYMBOL_PACING_MS = 400L
         private const val UNIVERSAL_EVIDENCE_FIXED_REPLAY_BATCH = 12
         private val LEARNING_RESTORE_FILES = setOf(
+            "eod_research_history.jsonl",
             "long_learning.json",
             "forecast_research_snapshots.json",
             "long_forecasts.json",
