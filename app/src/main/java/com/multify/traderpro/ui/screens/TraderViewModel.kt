@@ -169,7 +169,7 @@ class TraderViewModel @Inject constructor(
                         "$prefix support scan complete · ${run.qualifiedPatterns} confirmed patterns · $sessions sessions · no Groww calls." +
                             (if(progress!=null) " Imported ${progress.importedDays} NSE sessions." else " Local cached results.")
                     progress?.sourceFailure==true ->
-                        "$prefix NSE archive source unavailable · $sessions sessions stored. Existing evidence retained."
+                        "$prefix archive paused · $sessions sessions stored. ${snapshot.lastError.take(180)}. Existing evidence retained."
                     ready ->
                         "$prefix archive ready · support scan pending after hours; no candidate count claimed."
                     else ->

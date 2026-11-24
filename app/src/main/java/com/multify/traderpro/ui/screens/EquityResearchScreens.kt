@@ -259,6 +259,11 @@ internal fun SixMonthLowResearchScreen(state: TraderUiState, onScan: (Int) -> Un
                     Text("Recalculating…")
                 } else Text("Refresh research / Scan Now")
             }
+            val storedSessions=if(isThree)research.threeMonthCompletedDays else research.completedDays
+            val requiredSessions=if(isThree)55 else 105
+            Text("Validated sessions: $storedSessions / $requiredSessions minimum · date span also required",style=MaterialTheme.typography.labelSmall)
+            LinearProgressIndicator(progress={ (storedSessions.toFloat()/requiredSessions).coerceIn(0f,1f) },modifier=Modifier.fillMaxWidth())
+            if(research.archiveProgress.isNotBlank())Text(research.archiveProgress,style=MaterialTheme.typography.labelSmall)
             if(research.lastError.isNotBlank())
                 Text("Exchange archive status: ${research.lastError}",
                     style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.error)
