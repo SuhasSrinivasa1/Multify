@@ -19,7 +19,7 @@ private fun crores(value:Double):String = String.format(Locale.US,"₹%,.2f Cr",
 @Composable
 internal fun InstitutionalResearchScreen(state:TraderUiState,onRefresh:()->Unit) {
     var side by rememberSaveable { mutableStateOf("BUY") }
-    var filter by rememberSaveable { mutableStateOf("ALL") }
+    var filter by rememberSaveable { mutableStateOf("DISCLOSED") }
     var source by rememberSaveable { mutableStateOf("BULK") }
     val snapshot=state.equityResearch.institutional
     val report=if(source=="BULK")snapshot.bulk else snapshot.block
@@ -50,7 +50,11 @@ internal fun InstitutionalResearchScreen(state:TraderUiState,onRefresh:()->Unit)
                 else OutlinedButton(onClick={side="SELL"},modifier=Modifier.weight(1f).testTag("institutional-sells")){Text("Sells")}
             }
             Row(horizontalArrangement=Arrangement.spacedBy(6.dp)){
-                FilterChip(selected=filter=="ALL",onClick={filter="ALL"},label={Text("FII + DII")})
+                FilterChip(selected=filter=="DISCLOSED",onClick={filter="DISCLOSED"},label={Text("All disclosures")})
+                FilterChip(selected=filter=="UNCLASSIFIED",onClick={filter="UNCLASSIFIED"},label={Text("Unclassified")})
+            }
+            Row(horizontalArrangement=Arrangement.spacedBy(6.dp)){
+                FilterChip(selected=filter=="ALL",onClick={filter="ALL"},label={Text("Verified FII+DII")})
                 FilterChip(selected=filter=="FII",onClick={filter="FII"},label={Text("FII")})
                 FilterChip(selected=filter=="DII",onClick={filter="DII"},label={Text("DII")})
             }
@@ -77,18 +81,21 @@ internal fun InstitutionalResearchScreen(state:TraderUiState,onRefresh:()->Unit)
                 "Groww sweep price snapshot: ${hourly.day} ${String.format(Locale.US,"%02d:00",hourly.hour)} slot · client receipt ${java.time.Instant.ofEpochMilli(hourly.receivedAtMs).atZone(java.time.ZoneId.of("Asia/Kolkata")).toLocalTime().toString().take(8)} IST · ${if(currentHour)"current hour" else "older observation"} · not live institutional flow.",style=MaterialTheme.typography.bodySmall)
             val todaySlots=snapshot.hourlyHistory.filter{it.day==now.toLocalDate().toString()}.map{it.hour}.toSet()
             Text("Today's captured hours: ${todaySlots.sorted().joinToString(", ").ifBlank{"none"}} · missing hours are not backfilled.",style=MaterialTheme.typography.labelSmall)
-            Text("Bulk and block are separate: overlapping reports must not be summed. FII/DII means only exact named clients matched to issuer filings or AMFI directory, not all institutional trades.",style=MaterialTheme.typography.bodySmall)
+            Text("Bulk and block are separate: overlapping reports must not be summed. FII/DII means only verified named clients matched to issuer filings or AMFI directory. All disclosures includes individuals and other unclassified clients; not all are institutions.",style=MaterialTheme.typography.bodySmall)
             if(report!=null){
-                Text("Disclosure date: ${report.day} · ${report.source} · ${report.disclosedRows} reported rows; ${report.deals.size} matched, ${report.unmatchedRows} unmatched, ${report.duplicateRows} identical rows excluded.",style=MaterialTheme.typography.bodySmall)
+                Text("Disclosure date: ${report.day} · ${report.source} · ${report.disclosedRows} reported rows; ${report.deals.count{it.category=="FII"||it.category=="DII"}} verified, ${report.unmatchedRows} unclassified, ${report.duplicateRows} identical rows excluded.",style=MaterialTheme.typography.bodySmall)
+                val verified=report.deals.count{it.category=="FII"||it.category=="DII"}
+                val denominator=(report.disclosedRows-report.duplicateRows).coerceAtLeast(1)
+                Text("Investor verification coverage: ${String.format(Locale.US,"%.1f%%",100.0*verified/denominator)} · ${if(report.retainedAllRows)"all unique rows retained" else "legacy incomplete cache — reimport required"}",style=MaterialTheme.typography.bodySmall)
                 if(report.day!=state.equityResearch.latestDay)
                     Text("Older cached disclosure — latest saved exchange EOD is ${state.equityResearch.latestDay.ifBlank{"unknown"}}.",color=MaterialTheme.colorScheme.error,style=MaterialTheme.typography.labelSmall)
             }else Text("No dated, validated ${source.lowercase(Locale.US)} disclosure cached. Empty or unavailable reports do not imply zero institutional activity.",style=MaterialTheme.typography.bodySmall)
             Button(onClick=onRefresh,enabled=!state.researchScanning,modifier=Modifier.fillMaxWidth()){
                 Text(if(state.researchScanning)"Refreshing…" else "Refresh institutional research")
             }
-            Text("NSE imports only 18:30–08:00 IST; hourly prices reuse the first completed Fixed sweep in the first 20 minutes of each 10–15 IST clock hour. Missed hours remain missing; no extra Groww requests. Investor identity coverage is partial.",style=MaterialTheme.typography.labelSmall)
+            Text("NSE imports only 18:30–08:00 IST; hourly prices reuse the first completed Fixed sweep in the first 20 minutes of each 10–15 IST clock hour. Missed hours remain missing; no extra Groww requests. Investor identity coverage is partial; all unique disclosures are retained regardless of identity.",style=MaterialTheme.typography.labelSmall)
             Text("Top ${rows.size} of 20 · ${if(side=="BUY")"purchases" else "sales"}",style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.Bold)
-            if(rows.isEmpty())Text("No matched disclosed stocks in this selection. This is not evidence of no market buying or selling.",style=MaterialTheme.typography.bodySmall)
+            if(rows.isEmpty())Text("No disclosed stocks match this selection. Try All disclosures; an empty verified filter does not mean no institutional activity.",style=MaterialTheme.typography.bodySmall)
         }
         itemsIndexed(rows,key={_,r->r.symbol}){index,row->
             Card(Modifier.fillMaxWidth()){
@@ -96,9 +103,9 @@ internal fun InstitutionalResearchScreen(state:TraderUiState,onRefresh:()->Unit)
                     Text("${index+1}. ${row.symbol}",style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.Bold)
                     if(row.company.isNotBlank())Text(row.company,style=MaterialTheme.typography.bodySmall)
                     Text(crores(if(side=="BUY")row.grossBuy else row.grossSell),style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold)
-                    Text("FII ${crores(row.fiiSide)} · DII ${crores(row.diiSide)}",style=MaterialTheme.typography.bodySmall)
+                    Text("Verified FII ${crores(row.fiiSide)} · Verified DII ${crores(row.diiSide)} · Unclassified ${crores(((if(side=="BUY")row.grossBuy else row.grossSell)-row.fiiSide-row.diiSide).coerceAtLeast(0.0))}",style=MaterialTheme.typography.bodySmall)
                     Text("Gross buys ${crores(row.grossBuy)} · gross sells ${crores(row.grossSell)} · net ${crores(row.net)}",style=MaterialTheme.typography.bodySmall)
-                    Text("${String.format(Locale.US,"%,d",row.sideShares)} disclosed shares · ${row.investors.size} matched names · ${row.buyDays} buy dates · ${row.repeatedBuyers} repeated buyers",style=MaterialTheme.typography.bodySmall)
+                    Text("${String.format(Locale.US,"%,d",row.sideShares)} disclosed shares · ${row.investors.size} named clients · ${row.buyDays} buy dates · ${row.repeatedBuyers} repeated buyers",style=MaterialTheme.typography.bodySmall)
                     val ref=if(side=="BUY")row.weightedBuy else row.weightedSell
                     val price=hourly?.prices?.get(row.symbol)
                     val change=InstitutionalHistoryPolicy.movement(price,ref)
@@ -120,12 +127,12 @@ internal fun InstitutionalResearchScreen(state:TraderUiState,onRefresh:()->Unit)
             }
             if(showSectorTotals){
                 val totals=remember(snapshot,source,filter,days){InstitutionalHistoryPolicy.sectorTotals(snapshot,source,filter,days)}
-                Text("Sector totals include all matched disclosures, not just the 20 displayed stocks. Unmapped is not a sector.",style=MaterialTheme.typography.labelSmall)
+                Text("Sector totals include all disclosures matching the chosen investor filter, not just the 20 displayed stocks. Unmapped is not a sector.",style=MaterialTheme.typography.labelSmall)
                 totals.forEach{v->Text("${v.sector}: net ${crores(v.net)} · buys ${crores(v.buys)} · sells ${crores(v.sells)}",style=MaterialTheme.typography.bodySmall)}
             }
         }
         item{
-            Text("Source: NSE ${source.lowercase(Locale.US)} deal disclosure. Client classification: selected named FPI issuer disclosures and AMFI fund directory. No complete stock-wise FII/DII flow or investment advice is claimed. Zero in a category means no matched rows in this report.",style=MaterialTheme.typography.labelSmall)
+            Text("Source: NSE ${source.lowercase(Locale.US)} deal disclosure. Client classification: selected named FPI issuer disclosures and AMFI fund directory. No complete stock-wise FII/DII flow or investment advice is claimed. Zero in a category means no verified rows in this report. Unclassified clients may include individuals, firms or institutions.",style=MaterialTheme.typography.labelSmall)
         }
     }
 }
