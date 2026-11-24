@@ -164,7 +164,7 @@ jobs:
           assert "schemaVersion=2" in inst and "matchedRows" in inst
           assert "needsRetentionMigration" in equity
           assert "All disclosed" in inst_ui and "Unclassified" in inst_ui
-          assert "unclassifiedSide" in inst_ui
+          assert "unclassifiedSide" in inst_ui and "report.schemaVersion<2" in inst_ui
           history=(root/"engine/InstitutionalHistoryPolicy.kt").read_text()
           assert "UNCLASSIFIED" in history and "VERIFIED" in history
           cap_store=(root/"data/repository/AdaptiveLowResearchStore.kt").read_text()
