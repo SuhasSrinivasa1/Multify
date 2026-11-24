@@ -702,6 +702,17 @@ class EquityEodResearchRepository @Inject constructor(
         var eligible3=0
         var eligible6=0
         var processed=0
+        val categories=listOf("LARGE_CAP","MID_CAP","SMALL_CAP","UNCLASSIFIED")
+        val universeByCategory=categories.associateWith{0}.toMutableMap()
+        val eligible3ByCategory=categories.associateWith{0}.toMutableMap()
+        val qualified3ByCategory=categories.associateWith{0}.toMutableMap()
+        val eligible6ByCategory=categories.associateWith{0}.toMutableMap()
+        val qualified6ByCategory=categories.associateWith{0}.toMutableMap()
+        val largeUniverse=mutableListOf<String>()
+        val largeEligible3=mutableListOf<String>()
+        val largeQualified3=mutableListOf<String>()
+        val largeEligible6=mutableListOf<String>()
+        val largeQualified6=mutableListOf<String>()
         val runStart=System.currentTimeMillis()
         fun enrich(c:AdaptiveLowCandidate):AdaptiveLowCandidate {
             val sector=valData.industryBySymbol[c.symbol]
@@ -726,19 +737,32 @@ class EquityEodResearchRepository @Inject constructor(
         fun process(symbol:String,bars:List<EquityEodBar>) {
             if(symbol.isBlank() || bars.lastOrNull()?.date!=day)return
             processed++
+            val category=capData.labels[symbol]?.category ?: "UNCLASSIFIED"
+            universeByCategory[category]=(universeByCategory[category]?:0)+1
+            if(category=="LARGE_CAP")largeUniverse+=symbol
             if(do3) {
                 val subset=bars.filter{!it.date.isBefore(today.minusMonths(3))}
                 if(subset.size>=min3) {
                     eligible3++
-                    AdaptiveLowPatternPolicy.evaluate(symbol,3,day,subset)?.let{
-                        rows3+=enrich(it)
+                    eligible3ByCategory[category]=(eligible3ByCategory[category]?:0)+1
+                    if(category=="LARGE_CAP")largeEligible3+=symbol
+                    val candidate=AdaptiveLowPatternPolicy.evaluate(symbol,3,day,subset)
+                    if(candidate!=null){
+                        rows3+=enrich(candidate)
+                        qualified3ByCategory[category]=(qualified3ByCategory[category]?:0)+1
+                        if(category=="LARGE_CAP")largeQualified3+=symbol
                     }
                 }
             }
             if(do6 && bars.size>=min6) {
                 eligible6++
-                AdaptiveLowPatternPolicy.evaluate(symbol,6,day,bars)?.let{
-                    rows6+=enrich(it)
+                eligible6ByCategory[category]=(eligible6ByCategory[category]?:0)+1
+                if(category=="LARGE_CAP")largeEligible6+=symbol
+                val candidate=AdaptiveLowPatternPolicy.evaluate(symbol,6,day,bars)
+                if(candidate!=null){
+                    rows6+=enrich(candidate)
+                    qualified6ByCategory[category]=(qualified6ByCategory[category]?:0)+1
+                    if(category=="LARGE_CAP")largeQualified6+=symbol
                 }
             }
         }
@@ -780,14 +804,44 @@ class EquityEodResearchRepository @Inject constructor(
                 "market_hours_fetch" to false))
             return
         }
-        if(do3)adaptiveLowStore.saveDay(latest,3,exchangeUniverse,eligible3,rows3)
-        if(do6)adaptiveLowStore.saveDay(latest,6,exchangeUniverse,eligible6,rows6)
+        val assetCounts=capData.labels.values.groupingBy{it.category}.eachCount()
+        fun capDiagnostics(eligible:Map<String,Int>,qualified:Map<String,Int>,
+                           eligibleLarge:List<String>,qualifiedLarge:List<String>) =
+            AdaptiveLowMarketCapDiagnostics(
+                assetPeriod=capData.period,
+                assetLarge=assetCounts["LARGE_CAP"]?:0,
+                assetMid=assetCounts["MID_CAP"]?:0,
+                assetSmall=assetCounts["SMALL_CAP"]?:0,
+                latestUniverseSymbols=processed,
+                labelsMatchedUniverse=(universeByCategory["LARGE_CAP"]?:0)+
+                    (universeByCategory["MID_CAP"]?:0)+(universeByCategory["SMALL_CAP"]?:0),
+                universeByCategory=universeByCategory.toMap(),
+                eligibleByCategory=eligible.toMap(),
+                qualifiedByCategory=qualified.toMap(),
+                largeCapUniverseSymbols=largeUniverse.sorted(),
+                largeCapEligibleSymbols=eligibleLarge.sorted(),
+                largeCapQualifiedSymbols=qualifiedLarge.sorted()
+            )
+        if(do3)adaptiveLowStore.saveDay(latest,3,exchangeUniverse,eligible3,rows3,
+            capDiagnostics(eligible3ByCategory,qualified3ByCategory,largeEligible3,largeQualified3))
+        if(do6)adaptiveLowStore.saveDay(latest,6,exchangeUniverse,eligible6,rows6,
+            capDiagnostics(eligible6ByCategory,qualified6ByCategory,largeEligible6,largeQualified6))
         resolveMaturedAdaptiveLowOutcomes()
         audit.logAsync("ADAPTIVE_LOWS","FULL_NSE_EOD_SUPPORT_SCAN_COMPLETE",mapOf(
             "day" to latest,"nse_eq_universe" to exchangeUniverse,
             "symbols_with_latest_eod" to processed,
             "eligible_three_month" to eligible3,"matches_three_month" to rows3.size,
+            "eligible_three_month_by_cap" to eligible3ByCategory.toMap(),
+            "matches_three_month_by_cap" to qualified3ByCategory.toMap(),
+            "eligible_large_cap_three_month" to largeEligible3.size,
+            "qualified_large_cap_three_month" to largeQualified3.size,
             "eligible_six_month" to eligible6,"matches_six_month" to rows6.size,
+            "eligible_six_month_by_cap" to eligible6ByCategory.toMap(),
+            "matches_six_month_by_cap" to qualified6ByCategory.toMap(),
+            "large_cap_amfi_symbols" to (assetCounts["LARGE_CAP"]?:0),
+            "large_cap_symbols_in_latest_eod" to largeUniverse.size,
+            "amfi_label_matched_latest_eod" to ((universeByCategory["LARGE_CAP"]?:0)+
+                (universeByCategory["MID_CAP"]?:0)+(universeByCategory["SMALL_CAP"]?:0)),
             "elapsed_ms" to (System.currentTimeMillis()-runStart),
             "source" to "NSE_BHAVCOPY_OFF_MARKET_ONLY",
             "groww_api_calls" to 0,
