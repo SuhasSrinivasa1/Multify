@@ -90,7 +90,9 @@ data class EquityResearchSnapshot(
     val niftyIndexPe: Double? = null,
     val niftyIndexPb: Double? = null,
     val liveLargeCapBreadthProxyPct: Double? = null,
-    val institutional: com.multify.traderpro.engine.InstitutionalSnapshot = com.multify.traderpro.engine.InstitutionalSnapshot()
+    val institutional: com.multify.traderpro.engine.InstitutionalSnapshot = com.multify.traderpro.engine.InstitutionalSnapshot(),
+    val lowCapAudit3: String = "",
+    val lowCapAudit6: String = ""
 )
 data class EquityEodRefreshProgress(
     val importedDays: Int,
@@ -541,10 +543,10 @@ class EquityEodResearchRepository @Inject constructor(
             val prior=if(source=="BULK")cached.bulk else cached.block
             // One attempt per source per calendar date; an early-morning retry can
             // recover a failed previous evening without creating an HTTP retry loop.
-            val attempt="institutional_attempt_"+source
+            val attempt="institutional_attempt_v2_"+source
             val key=now.toLocalDate().toString()+"|"+last
             if(prefs.getString(attempt,"")==key)continue
-            if(prior!=null && prior.day>=last && prior.receivedAtMs>0)continue
+            if(prior!=null && prior.day>=last && prior.receivedAtMs>0 && prior.retainedAllRows)continue
             prefs.edit().putString(attempt,key).apply()
             val file=source.lowercase(Locale.US)
             runCatching {
@@ -561,7 +563,8 @@ class EquityEodResearchRepository @Inject constructor(
                 institutionalStore.save(report)
                 audit.logAsync("INSTITUTIONAL_RESEARCH","DISCLOSURES_IMPORTED",mapOf(
                     "day" to last,"source" to source,"disclosed_rows" to report.disclosedRows,
-                    "matched_rows" to report.deals.size,"unmatched_rows" to report.unmatchedRows,
+                    "matched_rows" to report.deals.count{it.category=="FII"||it.category=="DII"},"unmatched_rows" to report.unmatchedRows,
+                    "retained_rows" to report.deals.size,"verification_coverage_pct" to (100.0*report.deals.count{it.category=="FII"||it.category=="DII"}/report.deals.size.coerceAtLeast(1)),
                     "duplicates" to report.duplicateRows,"groww_api_calls" to 0))
             }.onFailure{err->
                 audit.logAsync("INSTITUTIONAL_RESEARCH","DISCLOSURES_UNAVAILABLE",mapOf(
@@ -678,8 +681,8 @@ class EquityEodResearchRepository @Inject constructor(
             three.first,three.second.takeIf{it.isNotBlank()}?.let(LocalDate::parse),today)
         val sixReady=meta.first>=105 && meta.second.isNotBlank() &&
             LocalDate.parse(meta.second).isBefore(today.minusMonths(5).plusDays(14))
-        val do3=threeReady && !adaptiveLowStore.hasRun(latest,3)
-        val do6=sixReady && !adaptiveLowStore.hasRun(latest,6)
+        val do3=threeReady && (!adaptiveLowStore.hasRun(latest,3) || prefs.getString("low_cap_audit_3_day","")!=latest)
+        val do6=sixReady && (!adaptiveLowStore.hasRun(latest,6) || prefs.getString("low_cap_audit_6_day","")!=latest)
         if(!do3 && !do6) {
             resolveMaturedAdaptiveLowOutcomes()
             return
@@ -697,6 +700,12 @@ class EquityEodResearchRepository @Inject constructor(
         var eligible3=0
         var eligible6=0
         var processed=0
+        val audit3=linkedMapOf<String,MutableMap<String,Int>>()
+        val audit6=linkedMapOf<String,MutableMap<String,Int>>()
+        fun mark(m:MutableMap<String,MutableMap<String,Int>>,cap:String,reason:String) {
+            val group=m.getOrPut(cap){linkedMapOf()}
+            group[reason]=(group[reason]?:0)+1
+        }
         val runStart=System.currentTimeMillis()
         fun enrich(c:AdaptiveLowCandidate):AdaptiveLowCandidate {
             val sector=valData.industryBySymbol[c.symbol]
@@ -721,20 +730,27 @@ class EquityEodResearchRepository @Inject constructor(
         fun process(symbol:String,bars:List<EquityEodBar>) {
             if(symbol.isBlank() || bars.lastOrNull()?.date!=day)return
             processed++
+            val cap=capData.labels[symbol]?.category?:"UNCLASSIFIED"
             if(do3) {
                 val subset=bars.filter{!it.date.isBefore(today.minusMonths(3))}
+                mark(audit3,cap,"UNIVERSE")
                 if(subset.size>=min3) {
                     eligible3++
-                    AdaptiveLowPatternPolicy.evaluate(symbol,3,day,subset)?.let{
-                        rows3+=enrich(it)
-                    }
-                }
+                    mark(audit3,cap,"HISTORY_ELIGIBLE")
+                    AdaptiveLowPatternPolicy.evaluate(symbol,3,day,subset){reason->
+                        mark(audit3,cap,reason)
+                    }?.let{rows3+=enrich(it);mark(audit3,cap,"MATCH")}
+                } else mark(audit3,cap,"INSUFFICIENT_VALID_HISTORY")
             }
-            if(do6 && bars.size>=min6) {
-                eligible6++
-                AdaptiveLowPatternPolicy.evaluate(symbol,6,day,bars)?.let{
-                    rows6+=enrich(it)
-                }
+            if(do6) {
+                mark(audit6,cap,"UNIVERSE")
+                if(bars.size>=min6) {
+                    eligible6++
+                    mark(audit6,cap,"HISTORY_ELIGIBLE")
+                    AdaptiveLowPatternPolicy.evaluate(symbol,6,day,bars){reason->
+                        mark(audit6,cap,reason)
+                    }?.let{rows6+=enrich(it);mark(audit6,cap,"MATCH")}
+                } else mark(audit6,cap,"INSUFFICIENT_VALID_HISTORY")
             }
         }
         synchronized(lock) {
@@ -775,8 +791,18 @@ class EquityEodResearchRepository @Inject constructor(
                 "market_hours_fetch" to false))
             return
         }
-        if(do3)adaptiveLowStore.saveDay(latest,3,exchangeUniverse,eligible3,rows3)
-        if(do6)adaptiveLowStore.saveDay(latest,6,exchangeUniverse,eligible6,rows6)
+        fun persistCapAudit(months:Int,stats:Map<String,Map<String,Int>>) {
+            val large=stats["LARGE_CAP"].orEmpty()
+            val reasons=large.filterKeys{it !in setOf("UNIVERSE","HISTORY_ELIGIBLE","MATCH")}
+                .entries.sortedByDescending{it.value}.joinToString("; "){it.key.replace('_',' ').lowercase(Locale.US)+": "+it.value}
+            val summary="Large-cap coverage: ${large["UNIVERSE"]?:0} of 100 AMFI names present; ${large["HISTORY_ELIGIBLE"]?:0} with history; ${large["MATCH"]?:0} matches. First rejection: "+reasons.ifBlank{"none"}
+            prefs.edit().putString("low_cap_audit_${months}_day",latest)
+                .putString("low_cap_audit_${months}_summary",summary).apply()
+            audit.logAsync("ADAPTIVE_LOWS","CAP_REJECTION_FUNNEL",mapOf(
+                "day" to latest,"months" to months,"by_cap" to stats,"groww_api_calls" to 0))
+        }
+        if(do3){adaptiveLowStore.saveDay(latest,3,exchangeUniverse,eligible3,rows3);persistCapAudit(3,audit3)}
+        if(do6){adaptiveLowStore.saveDay(latest,6,exchangeUniverse,eligible6,rows6);persistCapAudit(6,audit6)}
         resolveMaturedAdaptiveLowOutcomes()
         audit.logAsync("ADAPTIVE_LOWS","FULL_NSE_EOD_SUPPORT_SCAN_COMPLETE",mapOf(
             "day" to latest,"nse_eq_universe" to exchangeUniverse,
@@ -927,7 +953,12 @@ class EquityEodResearchRepository @Inject constructor(
         completedSweep: Boolean
     ) {
         val at = ZonedDateTime.now(INDIA)
-        if (!NseEquitySessionCalendar.isFixedScanWindow(at) || !completedSweep) return
+        if (!NseEquitySessionCalendar.isFixedScanWindow(at)) return
+        if(!completedSweep) {
+            if(com.multify.traderpro.engine.InstitutionalHistoryPolicy.slot(at)!=null)
+                audit.logAsync("INSTITUTIONAL_RESEARCH","HOURLY_SWEEP_NOT_QUALIFIED",mapOf("hour_ist" to at.hour,"reason" to "INCOMPLETE_OR_BASELINE_NOT_READY"))
+            return
+        }
         // Reuse the full Groww sweep BEFORE the Large-cap-only filter.
         // No new requests, no extra Alpha/Beta capacity, no execution authority.
         runCatching {
@@ -1261,6 +1292,8 @@ class EquityEodResearchRepository @Inject constructor(
             niftyIndexPe=niftyToday?.pe,
             niftyIndexPb=niftyToday?.pb,
             liveLargeCapBreadthProxyPct=liveLargeBreadth,
+            lowCapAudit3=prefs.getString("low_cap_audit_3_summary","").orEmpty().takeIf{prefs.getString("low_cap_audit_3_day","")==latest}.orEmpty(),
+            lowCapAudit6=prefs.getString("low_cap_audit_6_summary","").orEmpty().takeIf{prefs.getString("low_cap_audit_6_day","")==latest}.orEmpty(),
             institutional=institutionalStore.snapshot().copy(
                 sessions=sql.rawQuery("SELECT day FROM eod_days ORDER BY day DESC LIMIT 30",null).use{c->
                     val days=mutableListOf<String>()
