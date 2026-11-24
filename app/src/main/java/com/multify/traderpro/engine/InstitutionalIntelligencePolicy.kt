@@ -16,7 +16,8 @@ data class InstitutionalStock(
 data class InstitutionalReport(
     val day:String="",val source:String="",val receivedAtMs:Long=0L,
     val disclosedRows:Int=0,val unmatchedRows:Int=0,val duplicateRows:Int=0,
-    val deals:List<InstitutionalDeal> = emptyList()
+    val deals:List<InstitutionalDeal> = emptyList(),
+    val retainedAllRows:Boolean = false
 )
 data class InstitutionalSnapshot(
     val bulk:InstitutionalReport?=null,val block:InstitutionalReport?=null,
@@ -128,21 +129,26 @@ object InstitutionalIntelligencePolicy {
             val key=listOf(symbol,name,direction,q.toString(),p.stripTrailingZeros().toPlainString())
             // Identical disclosed sides are conservatively counted once within a file.
             if(!seen.add(key)){duplicates++;continue}
-            val cat=category(name)
-            if(cat==null){unknown++;continue}
+            val cat=category(name) ?: "UNCLASSIFIED"
+            if(cat=="UNCLASSIFIED")unknown++
             out+=InstitutionalDeal(expected.toString(),symbol,row[co],name,cat,direction,q,p.toDouble())
         }
         // Header-only files have no verifiable trade date; never overwrite a dated snapshot.
         require(rows>0){"NO_DATED_DISCLOSURES"}
-        return InstitutionalReport(expected.toString(),source,receivedAtMs,rows,unknown,duplicates,out)
+        return InstitutionalReport(expected.toString(),source,receivedAtMs,rows,unknown,duplicates,out,true)
+    }
+    fun includes(filter:String,category:String):Boolean = when(filter){
+        "DISCLOSED" -> true
+        "ALL" -> category=="FII" || category=="DII"
+        else -> filter==category
     }
     fun top(report:InstitutionalReport?,side:String,filter:String):List<InstitutionalStock> {
-        require(side in setOf("BUY","SELL") && filter in setOf("ALL","FII","DII"))
-        return report?.deals.orEmpty().filter{it.side==side && (filter=="ALL" || it.category==filter)}
+        require(side in setOf("BUY","SELL") && filter in setOf("ALL","FII","DII","DISCLOSED","UNCLASSIFIED"))
+        return report?.deals.orEmpty().filter{it.side==side && includes(filter,it.category)}
             .groupBy{it.symbol}.map{(symbol,deals)->
                 val f=deals.filter{it.category=="FII"}.sumOf{it.shares*it.price}
                 val d=deals.filter{it.category=="DII"}.sumOf{it.shares*it.price}
-                InstitutionalStock(symbol,deals.first().company,deals.sumOf{it.shares},f+d,f,d,
+                InstitutionalStock(symbol,deals.first().company,deals.sumOf{it.shares},deals.sumOf{it.shares*it.price},f,d,
                     deals.map{it.investor}.distinct().sorted())
             }.sortedWith(compareByDescending<InstitutionalStock>{it.amountRupees}.thenBy{it.symbol}).take(TOP)
     }
