@@ -506,9 +506,10 @@ class EquityEodResearchRepository @Inject constructor(
         // day files. The Lows screen never issues a trading-hours market request.
         refreshExistingOhlcAfterHours(maxDays = 6)
         refreshAdaptiveLowsAfterHours()
+        // Missing bhavcopy files (404) are not a disclosure outage; keep the bounded independent import.
         // Last, isolated research task: never delay the existing archive/scan work
         // and never make a broker call.
-        if(!blocked && afterHours(ZonedDateTime.now(INDIA))) refreshInstitutionalAfterHours()
+        if((!blocked || consecutiveNotFound>=3) && afterHours(ZonedDateTime.now(INDIA))) refreshInstitutionalAfterHours()
         prefs.edit().putLong("last_eod_attempt_ms",System.currentTimeMillis())
             .putString("last_eod_error",if(blocked) "Exchange archive temporarily unavailable" else "")
             .apply()
@@ -675,8 +676,8 @@ class EquityEodResearchRepository @Inject constructor(
             three.first,three.second.takeIf{it.isNotBlank()}?.let(LocalDate::parse),today)
         val sixReady=meta.first>=105 && meta.second.isNotBlank() &&
             LocalDate.parse(meta.second).isBefore(today.minusMonths(5).plusDays(14))
-        val do3=threeReady && (!adaptiveLowStore.hasRun(latest,3) || prefs.getString("low_cap_audit_3_day","")!=latest)
-        val do6=sixReady && (!adaptiveLowStore.hasRun(latest,6) || prefs.getString("low_cap_audit_6_day","")!=latest)
+        val do3=threeReady && (!adaptiveLowStore.hasRun(latest,3) || prefs.getString("low_cap_audit_3_day","")!=latest || prefs.getInt("low_cap_audit_3_version",0)!=2)
+        val do6=sixReady && (!adaptiveLowStore.hasRun(latest,6) || prefs.getString("low_cap_audit_6_day","")!=latest || prefs.getInt("low_cap_audit_6_version",0)!=2)
         if(!do3 && !do6) {
             resolveMaturedAdaptiveLowOutcomes()
             return
@@ -696,6 +697,9 @@ class EquityEodResearchRepository @Inject constructor(
         var processed=0
         val audit3=linkedMapOf<String,MutableMap<String,Int>>()
         val audit6=linkedMapOf<String,MutableMap<String,Int>>()
+        val large3=linkedMapOf<String,String>()
+        val large6=linkedMapOf<String,String>()
+        val classifiedLarge=capData.labels.filterValues{it.category=="LARGE_CAP"}.keys
         fun mark(m:MutableMap<String,MutableMap<String,Int>>,cap:String,reason:String) {
             val group=m.getOrPut(cap){linkedMapOf()}
             group[reason]=(group[reason]?:0)+1
@@ -733,8 +737,12 @@ class EquityEodResearchRepository @Inject constructor(
                     mark(audit3,cap,"HISTORY_ELIGIBLE")
                     AdaptiveLowPatternPolicy.evaluate(symbol,3,day,subset){reason->
                         mark(audit3,cap,reason)
-                    }?.let{rows3+=enrich(it);mark(audit3,cap,"MATCH")}
-                } else mark(audit3,cap,"INSUFFICIENT_VALID_HISTORY")
+                        if(cap=="LARGE_CAP")large3[symbol]=reason
+                    }?.let{rows3+=enrich(it);mark(audit3,cap,"MATCH");if(cap=="LARGE_CAP")large3[symbol]="MATCH"}
+                } else {
+                    mark(audit3,cap,"INSUFFICIENT_VALID_HISTORY")
+                    if(cap=="LARGE_CAP")large3[symbol]="INSUFFICIENT_VALID_HISTORY"
+                }
             }
             if(do6) {
                 mark(audit6,cap,"UNIVERSE")
@@ -743,8 +751,12 @@ class EquityEodResearchRepository @Inject constructor(
                     mark(audit6,cap,"HISTORY_ELIGIBLE")
                     AdaptiveLowPatternPolicy.evaluate(symbol,6,day,bars){reason->
                         mark(audit6,cap,reason)
-                    }?.let{rows6+=enrich(it);mark(audit6,cap,"MATCH")}
-                } else mark(audit6,cap,"INSUFFICIENT_VALID_HISTORY")
+                        if(cap=="LARGE_CAP")large6[symbol]=reason
+                    }?.let{rows6+=enrich(it);mark(audit6,cap,"MATCH");if(cap=="LARGE_CAP")large6[symbol]="MATCH"}
+                } else {
+                    mark(audit6,cap,"INSUFFICIENT_VALID_HISTORY")
+                    if(cap=="LARGE_CAP")large6[symbol]="INSUFFICIENT_VALID_HISTORY"
+                }
             }
         }
         synchronized(lock) {
@@ -785,18 +797,21 @@ class EquityEodResearchRepository @Inject constructor(
                 "market_hours_fetch" to false))
             return
         }
-        fun persistCapAudit(months:Int,stats:Map<String,Map<String,Int>>) {
+        fun persistCapAudit(months:Int,stats:Map<String,Map<String,Int>>,details:Map<String,String>) {
             val large=stats["LARGE_CAP"].orEmpty()
             val reasons=large.filterKeys{it !in setOf("UNIVERSE","HISTORY_ELIGIBLE","MATCH")}
                 .entries.sortedByDescending{it.value}.joinToString("; "){it.key.replace('_',' ').lowercase(Locale.US)+": "+it.value}
-            val summary="Large-cap coverage: ${large["UNIVERSE"]?:0} of 100 AMFI names present; ${large["HISTORY_ELIGIBLE"]?:0} with history; ${large["MATCH"]?:0} matches. First rejection: "+reasons.ifBlank{"none"}
+            val missing=classifiedLarge-details.keys
+            val completeDetails=details+missing.associateWith{"NO_LATEST_EOD"}
+            val groups=completeDetails.entries.groupBy{it.value}.toSortedMap()
+            val summary="Large-cap audit · ${latest} · ${months}M\n${large["UNIVERSE"]?:0} of ${classifiedLarge.size} classified names present; ${large["HISTORY_ELIGIBLE"]?:0} pass archive history check; ${large["MATCH"]?:0} matches. Missing latest EOD: ${missing.size}.\nFirst rejection: "+reasons.ifBlank{"none"}+"\n"+groups.entries.joinToString("\n"){(reason,entries)->reason.replace('_',' ').lowercase(Locale.US)+" ("+entries.size+"): "+entries.map{it.key}.sorted().joinToString(", ")}
             prefs.edit().putString("low_cap_audit_${months}_day",latest)
-                .putString("low_cap_audit_${months}_summary",summary).apply()
+                .putString("low_cap_audit_${months}_summary",summary).putInt("low_cap_audit_${months}_version",2).apply()
             audit.logAsync("ADAPTIVE_LOWS","CAP_REJECTION_FUNNEL",mapOf(
-                "day" to latest,"months" to months,"by_cap" to stats,"groww_api_calls" to 0))
+                "day" to latest,"months" to months,"by_cap" to stats,"large_cap_by_symbol" to completeDetails,"groww_api_calls" to 0))
         }
-        if(do3){adaptiveLowStore.saveDay(latest,3,exchangeUniverse,eligible3,rows3);persistCapAudit(3,audit3)}
-        if(do6){adaptiveLowStore.saveDay(latest,6,exchangeUniverse,eligible6,rows6);persistCapAudit(6,audit6)}
+        if(do3){adaptiveLowStore.saveDay(latest,3,exchangeUniverse,eligible3,rows3);persistCapAudit(3,audit3,large3)}
+        if(do6){adaptiveLowStore.saveDay(latest,6,exchangeUniverse,eligible6,rows6);persistCapAudit(6,audit6,large6)}
         resolveMaturedAdaptiveLowOutcomes()
         audit.logAsync("ADAPTIVE_LOWS","FULL_NSE_EOD_SUPPORT_SCAN_COMPLETE",mapOf(
             "day" to latest,"nse_eq_universe" to exchangeUniverse,

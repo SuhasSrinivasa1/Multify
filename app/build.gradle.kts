@@ -30,8 +30,8 @@ android {
         applicationId = "com.multify.traderpro.vivoy73final"
         minSdk = 26
         targetSdk = 35
-        versionCode = 9048
-        versionName = "9.0.48-disclosure-coverage-low-audit-TEST"
+        versionCode = 9049
+        versionName = "9.0.49-research-clarity-audit-TEST"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
     }
@@ -40,7 +40,7 @@ android {
         debug {
             // Side-by-side Monday TEST: never overwrite the existing trading package
             // when CI uses an ephemeral debug signing identity.
-            applicationIdSuffix = ".v9048test"
+            applicationIdSuffix = ".v9049test"
             if (stableSigningReady) signingConfig = signingConfigs.getByName("stableDebug")
             versionNameSuffix = "-debug"
             isMinifyEnabled = false
