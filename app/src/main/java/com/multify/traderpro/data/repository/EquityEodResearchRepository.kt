@@ -89,7 +89,8 @@ data class EquityResearchSnapshot(
     val niftyEodRegime: String = "UNKNOWN",
     val niftyIndexPe: Double? = null,
     val niftyIndexPb: Double? = null,
-    val liveLargeCapBreadthProxyPct: Double? = null
+    val liveLargeCapBreadthProxyPct: Double? = null,
+    val institutional: com.multify.traderpro.engine.InstitutionalSnapshot = com.multify.traderpro.engine.InstitutionalSnapshot()
 )
 data class EquityEodRefreshProgress(
     val importedDays: Int,
@@ -208,6 +209,7 @@ class EquityEodResearchRepository @Inject constructor(
     private val valuationStore = EquityLowValuationStore(context)
     private val largeWatchStore = LargeWatchLearningStore(context)
     private val adaptiveLowStore = AdaptiveLowResearchStore(context)
+    private val institutionalStore = InstitutionalDisclosureStore(context)
     private var lastUniverseCapturedDay = ""
     private val prefs = context.getSharedPreferences("suhas_shree_eod_state", Context.MODE_PRIVATE)
     // AMFI classification is bundled as a build-time asset. No runtime market-cap
@@ -502,12 +504,62 @@ class EquityEodResearchRepository @Inject constructor(
         // day files. The Lows screen never issues a trading-hours market request.
         refreshExistingOhlcAfterHours(maxDays = 6)
         refreshAdaptiveLowsAfterHours()
+        // Last, isolated research task: never delay the existing archive/scan work
+        // and never make a broker call.
+        if(!blocked && afterHours(ZonedDateTime.now(INDIA))) refreshInstitutionalAfterHours()
         prefs.edit().putLong("last_eod_attempt_ms",System.currentTimeMillis())
             .putString("last_eod_error",if(blocked) "Exchange archive temporarily unavailable" else "")
             .apply()
             EquityEodRefreshProgress(imported,missing.size,blocked,wireRequests)
         } finally {
             refreshMutex.unlock()
+        }
+    }
+
+    private fun refreshInstitutionalAfterHours() {
+        requireAfterHours()
+        val last=synchronized(lock) {
+            db.readableDatabase.rawQuery("SELECT MAX(day) FROM eod_days",null).use{c->
+                if(c.moveToFirst()) c.getString(0).orEmpty() else ""
+            }
+        }
+        if(last.isBlank())return
+        val day=LocalDate.parse(last)
+        val now=ZonedDateTime.now(INDIA)
+        if(day>latestEligibleDate(now) || day<now.toLocalDate().minusDays(7))return
+        val cached=institutionalStore.snapshot()
+        for(source in listOf("BULK","BLOCK")){
+            if(!afterHours(ZonedDateTime.now(INDIA)))break
+            val prior=if(source=="BULK")cached.bulk else cached.block
+            // One attempt per source per calendar date; an early-morning retry can
+            // recover a failed previous evening without creating an HTTP retry loop.
+            val attempt="institutional_attempt_"+source
+            val key=now.toLocalDate().toString()+"|"+last
+            if(prefs.getString(attempt,"")==key)continue
+            if(prior!=null && prior.day>=last && prior.receivedAtMs>0)continue
+            prefs.edit().putString(attempt,key).apply()
+            val file=source.lowercase(Locale.US)
+            runCatching {
+                val url="https://nsearchives.nseindia.com/content/equities/$file.csv"
+                val csv=client.newCall(request(url)).execute().use{resp->
+                    check(resp.isSuccessful){"NSE_DEAL_HTTP_${resp.code}"}
+                    val body=resp.body?:error("NSE_DEAL_EMPTY_BODY")
+                    val input=body.source()
+                    check(!input.request(2_000_001L)){"NSE_DEAL_OVERSIZE"}
+                    input.readUtf8()
+                }
+                val report=com.multify.traderpro.engine.InstitutionalIntelligencePolicy.parse(
+                    csv,day,source,System.currentTimeMillis())
+                institutionalStore.save(report)
+                audit.logAsync("INSTITUTIONAL_RESEARCH","DISCLOSURES_IMPORTED",mapOf(
+                    "day" to last,"source" to source,"disclosed_rows" to report.disclosedRows,
+                    "matched_rows" to report.deals.size,"unmatched_rows" to report.unmatchedRows,
+                    "duplicates" to report.duplicateRows,"groww_api_calls" to 0))
+            }.onFailure{err->
+                audit.logAsync("INSTITUTIONAL_RESEARCH","DISCLOSURES_UNAVAILABLE",mapOf(
+                    "day" to last,"source" to source,"reason" to (err.message?:err.javaClass.simpleName).take(100),
+                    "cached_report_preserved" to true,"groww_api_calls" to 0))
+            }
         }
     }
 
@@ -1155,7 +1207,8 @@ class EquityEodResearchRepository @Inject constructor(
             niftyEodRegime=LargeIndexResearchPolicy.regime(niftyToday?.changePct),
             niftyIndexPe=niftyToday?.pe,
             niftyIndexPb=niftyToday?.pb,
-            liveLargeCapBreadthProxyPct=liveLargeBreadth
+            liveLargeCapBreadthProxyPct=liveLargeBreadth,
+            institutional=institutionalStore.snapshot()
         )
     }
 }
