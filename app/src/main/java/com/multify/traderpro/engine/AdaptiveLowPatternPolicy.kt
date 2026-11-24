@@ -129,8 +129,9 @@ object AdaptiveLowPatternPolicy {
             (h-b.close)/span<=0.50
     }
 
-    fun evaluate(symbol:String, months:Int, asOf:LocalDate, rawBars:List<EquityEodBar>):AdaptiveLowCandidate? {
-        if(months!=3 && months!=6)return null
+    fun evaluate(symbol:String, months:Int, asOf:LocalDate, rawBars:List<EquityEodBar>, onReject:(String)->Unit = {}):AdaptiveLowCandidate? {
+        fun rejected(reason:String):AdaptiveLowCandidate? { onReject(reason); return null }
+        if(months!=3 && months!=6)return rejected("INVALID_WINDOW")
         val start=asOf.minusMonths(months.toLong())
         val bars=rawBars.asSequence().filter{b->
             b.date>=start && b.date<=asOf &&
@@ -138,13 +139,13 @@ object AdaptiveLowPatternPolicy {
             b.close>=b.low && b.volume>=0
         }.sortedBy{it.date}.toList()
         val minimum=if(months==3)MIN_3M_SESSIONS else MIN_6M_SESSIONS
-        if(bars.size<minimum || bars.lastOrNull()?.date!=asOf)return null
+        if(bars.size<minimum || bars.lastOrNull()?.date!=asOf)return rejected("INSUFFICIENT_VALID_HISTORY")
         // Unadjusted corporate actions may produce fake rebound shapes: fail closed
         // on extreme discontinuities until an adjusted-history feed is available.
-        if(bars.zipWithNext().any{(a,b)->abs(pct(b.close,a.close))>=38.0})return null
+        if(bars.zipWithNext().any{(a,b)->abs(pct(b.close,a.close))>=38.0})return rejected("LARGE_PRICE_DISCONTINUITY")
         val close=bars.last().close
         val lastIdx=bars.lastIndex
-        if(lastIdx<18)return null
+        if(lastIdx<18)return rejected("INSUFFICIENT_VALID_HISTORY")
         val closes=bars.map{it.close}
         val episodes=mutableListOf<Pair<Int,AdaptiveLowReaction>>()
         // At least ten COMPLETED sessions after a historical trough are needed.
@@ -179,7 +180,7 @@ object AdaptiveLowPatternPolicy {
                 candlePattern=AdaptiveLowCandleEvidence.patternAt(bars,i)
             )
         }
-        if(episodes.size<MIN_PRIOR_REACTIONS)return null
+        if(episodes.size<MIN_PRIOR_REACTIONS)return rejected("FEWER_THAN_TWO_QUALIFYING_REBOUNDS")
         val clusters=mutableListOf<List<Pair<Int,AdaptiveLowReaction>>>()
         for((_,anchor) in episodes){
             val raw=episodes.filter { (_,r)->
@@ -193,12 +194,12 @@ object AdaptiveLowPatternPolicy {
             }
             if(selected.size>=MIN_PRIOR_REACTIONS)clusters+=selected
         }
-        if(clusters.isEmpty())return null
-        val latest10=closes.takeLast(10).maxOrNull()?:return null
+        if(clusters.isEmpty())return rejected("NO_REPEAT_SUPPORT_CLUSTER")
+        val latest10=closes.takeLast(10).maxOrNull()?:return rejected("INSUFFICIENT_VALID_HISTORY")
         val approachDrawdown=pct(latest10,close)
-        val threeBack=closes.getOrNull(lastIdx-3)?:return null
+        val threeBack=closes.getOrNull(lastIdx-3)?:return rejected("INSUFFICIENT_VALID_HISTORY")
         val falling=pct(close,threeBack)<=-0.35
-        if(approachDrawdown<MIN_TREND_APPROACH_DRAWDOWN_PCT || !falling)return null
+        if(approachDrawdown<MIN_TREND_APPROACH_DRAWDOWN_PCT || !falling)return rejected("NOT_DECLINING_TOWARD_SUPPORT")
         val eligible=clusters.mapNotNull { group ->
             val support=median(group.map{it.second.supportLow})
             val distance=pct(close,support)
@@ -212,8 +213,8 @@ object AdaptiveLowPatternPolicy {
                 distance*2.0 + (recentSession.toDouble()/lastIdx)*5.0
             Triple(group,support,quality)
         }
-        if(eligible.isEmpty())return null
-        val best=eligible.maxByOrNull{it.third}?:return null
+        if(eligible.isEmpty())return rejected("OUTSIDE_SUPPORT_DISTANCE_OR_CLUSTER_TOLERANCE")
+        val best=eligible.maxByOrNull{it.third}?:return rejected("NO_ELIGIBLE_CLUSTER")
         val cluster=best.first
         val support=best.second
         val dist=pct(close,support)
