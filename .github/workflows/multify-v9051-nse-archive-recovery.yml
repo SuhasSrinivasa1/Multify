@@ -81,11 +81,11 @@ jobs:
           ]
           def normalize_eod_backup_only(raw):
             text=raw.decode()
-            text=text.replace('            "eod_research_history.jsonl",\\n','')
-            restore_start=text.index('        restoreStage = "NSE EOD research history"\\n')
+            text=text.replace('            "eod_research_history.jsonl",\n','')
+            restore_start=text.index('        restoreStage = "NSE EOD research history"\n')
             restore_end=text.index('        val gson = GsonBuilder().disableHtmlEscaping().create()',restore_start)
             text=text[:restore_start]+text[restore_end:]
-            text=text.replace('                equityEodResearch.appendPortableHistory(zip)\\n                written("eod_research_history.jsonl")\\n','')
+            text=text.replace('                equityEodResearch.appendPortableHistory(zip)\n                written("eod_research_history.jsonl")\n','')
             return text.encode()
           for rel in locked:
             path=root/rel
