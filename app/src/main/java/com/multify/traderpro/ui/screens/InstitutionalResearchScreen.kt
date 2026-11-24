@@ -95,7 +95,7 @@ internal fun InstitutionalResearchScreen(state:TraderUiState,onRefresh:()->Unit)
             }
             Text("NSE imports only 18:30–08:00 IST; hourly prices reuse the first completed Fixed sweep in the first 20 minutes of each 10–15 IST clock hour. Missed hours remain missing; no extra Groww requests. Investor identity coverage is partial; all unique disclosures are retained regardless of identity.",style=MaterialTheme.typography.labelSmall)
             Text("Top ${rows.size} of 20 · ${if(side=="BUY")"purchases" else "sales"}",style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.Bold)
-            if(rows.isEmpty())Text("No disclosed stocks match this selection. Try All disclosures; an empty verified filter does not mean no institutional activity.",style=MaterialTheme.typography.bodySmall)
+            if(rows.isEmpty())Text("No disclosed stocks match this selection. If report coverage is incomplete, missing reports are not zero activity. Try All disclosures.",style=MaterialTheme.typography.bodySmall)
         }
         itemsIndexed(rows,key={_,r->r.symbol}){index,row->
             Card(Modifier.fillMaxWidth()){

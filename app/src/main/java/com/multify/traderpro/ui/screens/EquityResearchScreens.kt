@@ -180,6 +180,7 @@ internal fun SixMonthLowResearchScreen(state: TraderUiState, onScan: (Int) -> Un
     val scanFresh=historyReady && scan!=null && scan.day==research.latestDay
     // Closest confirmed approaches first. No "hot" API request or dynamic
     // eligibility change occurs on this UI thread.
+    fun countLabel(category:String):String = if(!scanFresh) "—" else (result.count{it.marketCapCategory==category}).toString()
     val counts=remember(result,scanFresh) {
         if(scanFresh) result.groupingBy{it.marketCapCategory}.eachCount() else emptyMap()
     }
@@ -272,17 +273,25 @@ internal fun SixMonthLowResearchScreen(state: TraderUiState, onScan: (Int) -> Un
             if(research.marketCapClassificationCount==0)
                 Text("Classification asset unavailable — no size is guessed.",color=MaterialTheme.colorScheme.error)
             Row(horizontalArrangement=Arrangement.spacedBy(6.dp)) {
-                FilterChip(selected=capFilter=="ALL",onClick={capFilter="ALL"},label={Text("All ${if(scanFresh)result.size else 0}")},modifier=Modifier.testTag("low-cap-all"))
-                FilterChip(selected=capFilter=="LARGE_CAP",onClick={capFilter="LARGE_CAP"},label={Text("Large ${counts["LARGE_CAP"]?:0}")},modifier=Modifier.testTag("low-cap-large"))
+                FilterChip(selected=capFilter=="ALL",onClick={capFilter="ALL"},label={Text("All ${if(scanFresh)result.size.toString() else "—"}")},modifier=Modifier.testTag("low-cap-all"))
+                FilterChip(selected=capFilter=="LARGE_CAP",onClick={capFilter="LARGE_CAP"},label={Text("Large ${countLabel("LARGE_CAP")}")},modifier=Modifier.testTag("low-cap-large"))
             }
             Row(horizontalArrangement=Arrangement.spacedBy(6.dp)) {
-                FilterChip(selected=capFilter=="MID_CAP",onClick={capFilter="MID_CAP"},label={Text("Mid ${counts["MID_CAP"]?:0}")},modifier=Modifier.testTag("low-cap-mid"))
-                FilterChip(selected=capFilter=="SMALL_CAP",onClick={capFilter="SMALL_CAP"},label={Text("Small ${counts["SMALL_CAP"]?:0}")},modifier=Modifier.testTag("low-cap-small"))
+                FilterChip(selected=capFilter=="MID_CAP",onClick={capFilter="MID_CAP"},label={Text("Mid ${countLabel("MID_CAP")}")},modifier=Modifier.testTag("low-cap-mid"))
+                FilterChip(selected=capFilter=="SMALL_CAP",onClick={capFilter="SMALL_CAP"},label={Text("Small ${countLabel("SMALL_CAP")}")},modifier=Modifier.testTag("low-cap-small"))
             }
-            FilterChip(selected=capFilter=="UNCLASSIFIED",onClick={capFilter="UNCLASSIFIED"},label={Text("Unclassified ${counts["UNCLASSIFIED"]?:0}")},modifier=Modifier.testTag("low-cap-unclassified"))
+            FilterChip(selected=capFilter=="UNCLASSIFIED",onClick={capFilter="UNCLASSIFIED"},label={Text("Unclassified ${countLabel("UNCLASSIFIED")}")},modifier=Modifier.testTag("low-cap-unclassified"))
             val capAudit=if(isThree)research.lowCapAudit3 else research.lowCapAudit6
-            if(capAudit.isNotBlank())Text(capAudit,style=MaterialTheme.typography.labelSmall)
-            else Text("Market-cap rejection audit pending after-hours scan.",style=MaterialTheme.typography.labelSmall)
+            var expandedAudit by rememberSaveable { mutableStateOf(false) }
+            if(scanFresh && capFilter=="LARGE_CAP" && counts["LARGE_CAP"]==null) {
+                Text("Large Cap: zero confirmed support-retest matches, not zero large-cap stocks.",fontWeight=FontWeight.SemiBold)
+                Text("Requires two prior 5% rebounds within 10 sessions, rapid 2% rebounds, a repeated support cluster and a fresh decline to within 5% above support.",style=MaterialTheme.typography.bodySmall)
+            }
+            if(scanFresh && capAudit.isNotBlank()) {
+                Text(capAudit.substringBefore("\nFirst rejection:"),style=MaterialTheme.typography.bodySmall)
+                OutlinedButton(onClick={expandedAudit=!expandedAudit}){Text(if(expandedAudit)"Hide rejection details" else "Why stocks failed · view rejection details")}
+                if(expandedAudit)Text(capAudit.substringAfter("\nFirst rejection:",capAudit),style=MaterialTheme.typography.bodySmall)
+            } else Text("Market-cap rejection audit pending after-hours scan. Missing data is not zero matches.",style=MaterialTheme.typography.bodySmall)
             Text("Price evidence date: ${research.latestDay.ifBlank{"unknown"}} · calculation time is not a newer market close.",style=MaterialTheme.typography.labelSmall)
             Text("Approaching historical rebound zones · ${visible.size}",
                 style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.Bold)
@@ -290,7 +299,9 @@ internal fun SixMonthLowResearchScreen(state: TraderUiState, onScan: (Int) -> Un
                 label={Text("Filter ticker, company or mapped sector")},
                 modifier=Modifier.fillMaxWidth())
             if(visible.isEmpty()) Text(
-                if(scanFresh && (capFilter!="ALL" || search.isNotBlank()))
+                if(scanFresh && capFilter=="LARGE_CAP" && counts["LARGE_CAP"]==null)
+                    "No qualifying large-cap support retests. See the rejection audit above."
+                else if(scanFresh && (capFilter!="ALL" || search.isNotBlank()))
                     "No candidates match the selected filters. Choose All or clear the search."
                 else if(scanFresh)
                     "No NSE EQ shares meet the full repeated-rebound, falling-toward-support and STRICTLY under-5% criteria today. An empty list is a valid outcome."
