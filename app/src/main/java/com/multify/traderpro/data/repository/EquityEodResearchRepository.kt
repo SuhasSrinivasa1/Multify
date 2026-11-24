@@ -543,8 +543,12 @@ class EquityEodResearchRepository @Inject constructor(
             // recover a failed previous evening without creating an HTTP retry loop.
             val attempt="institutional_attempt_"+source
             val key=now.toLocalDate().toString()+"|"+last
-            if(prefs.getString(attempt,"")==key)continue
-            if(prior!=null && prior.day>=last && prior.receivedAtMs>0)continue
+            // v9.0.47 stored only matched identities and discarded the rest.
+            // Re-fetch the same dated NSE report once under schema v2 so every
+            // valid unique transaction is retained without losing cached history.
+            val needsRetentionMigration=prior!=null && prior.day>=last && prior.schemaVersion<2
+            if(prefs.getString(attempt,"")==key && !needsRetentionMigration)continue
+            if(prior!=null && prior.day>=last && prior.receivedAtMs>0 && !needsRetentionMigration)continue
             prefs.edit().putString(attempt,key).apply()
             val file=source.lowercase(Locale.US)
             runCatching {
@@ -560,8 +564,9 @@ class EquityEodResearchRepository @Inject constructor(
                     csv,day,source,System.currentTimeMillis())
                 institutionalStore.save(report)
                 audit.logAsync("INSTITUTIONAL_RESEARCH","DISCLOSURES_IMPORTED",mapOf(
-                    "day" to last,"source" to source,"disclosed_rows" to report.disclosedRows,
-                    "matched_rows" to report.deals.size,"unmatched_rows" to report.unmatchedRows,
+                    "day" to last,"source" to source,"schema_version" to report.schemaVersion,
+                    "disclosed_rows" to report.disclosedRows,"retained_unique_rows" to report.retainedRows,
+                    "matched_rows" to report.matchedRows,"unmatched_rows" to report.unmatchedRows,
                     "duplicates" to report.duplicateRows,"groww_api_calls" to 0))
             }.onFailure{err->
                 audit.logAsync("INSTITUTIONAL_RESEARCH","DISCLOSURES_UNAVAILABLE",mapOf(
