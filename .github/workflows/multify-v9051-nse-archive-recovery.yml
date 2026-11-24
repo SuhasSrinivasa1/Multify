@@ -206,6 +206,11 @@ jobs:
           assert "appendPortableHistory(zip)" in repo and "restorePortableHistory(it)" in repo
           assert "eod_research_history.jsonl" in repo
           assert "archive_request_min_gap_ms" in equity
+          idle=(root/"engine/IdleBrokerPollingPolicy.kt").read_text()
+          assert "localOpenRows != 0 || pendingEntry || criticalTradeInFlight" in idle
+          assert "NONEMPTY_EXTERNAL_BROKER_RECHECK_MS = 300_000L" in repo
+          assert "pendingAutoBuyIntents().isNotEmpty()" in repo
+          assert "broker_active_gtt_count" in repo
           old_low=subprocess.check_output(["git","show",f"{base}:app/src/main/java/com/multify/traderpro/engine/AdaptiveLowPatternPolicy.kt"]).decode()
           import re
           normalized=low.replace(", onReject:(String)->Unit = {}","").replace("        fun rejected(reason:String):AdaptiveLowCandidate? { onReject(reason); return null }\n","")
@@ -240,12 +245,12 @@ jobs:
                      "BrokerOrderAcknowledgementPolicyTest",
                      "LowPeResearchPolicyTest","SwingPullbackResearchPolicyTest",
                      "LargeIndexResearchPolicyTest","LargeWatchFeaturePolicyTest",
-                     "LargeWatchLearningPolicyTest","NseArchiveRecoveryPolicyTest",
+                     "LargeWatchLearningPolicyTest","NseArchiveRecoveryPolicyTest","IdleBrokerPollingPolicyTest",
                      "AdaptiveLowPatternPolicyTest","AdaptiveLowCandleEvidenceTest",
                      "AmfiMarketCapClassificationParserTest","InstitutionalIntelligencePolicyTest","InstitutionalHistoryPolicyTest","InstitutionalDisclosureCoverageTest"]
           absent=[x for x in essential if not any(x in y for y in names)]
           assert not absent, absent
-          assert n>=611 and errors==0,(n,errors)
+          assert n>=612 and errors==0,(n,errors)
           pathlib.Path("android-tests-v9051.txt").write_text(f"{n} Android tests; {errors} failures; required suites present\n")
           print(n,"Android unit tests passed")
           PY
