@@ -23,6 +23,7 @@ data class InstitutionalSnapshot(
     val history:List<InstitutionalReport> = emptyList(),
     val sessions:List<String> = emptyList(),
     val hourly:InstitutionalHourly? = null,
+    val hourlyHistory:List<InstitutionalHourly> = emptyList(),
     val sectors:Map<String,String> = emptyMap(),
     val swing:Set<String> = emptySet(),
     val lows:Set<String> = emptySet(),
