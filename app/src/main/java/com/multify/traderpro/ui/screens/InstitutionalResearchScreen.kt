@@ -32,6 +32,11 @@ internal fun InstitutionalResearchScreen(state:TraderUiState,onRefresh:()->Unit)
     val rows=ranked.rows
     val hourly=snapshot.hourly
     val now=java.time.ZonedDateTime.now(java.time.ZoneId.of("Asia/Kolkata"))
+    val today=now.toLocalDate().toString()
+    var selectedHourDay by rememberSaveable { mutableStateOf("") }
+    val hourlyDays=remember(snapshot.hourlyHistory,today){(snapshot.hourlyHistory.map{it.day}+today).distinct().sortedDescending()}
+    val hourDay=selectedHourDay.takeIf{it in hourlyDays}?:today
+    val hourlyBySlot=remember(snapshot.hourlyHistory,hourDay){snapshot.hourlyHistory.filter{it.day==hourDay}.associateBy{it.hour}}
     val ageMinutes=hourly?.let{(System.currentTimeMillis()-it.receivedAtMs)/60000}
     val currentHour=hourly!=null && hourly.day==now.toLocalDate().toString() &&
         hourly.hour==now.hour && ageMinutes!=null && ageMinutes in 0..60 && now.hour in 10..15
@@ -81,6 +86,14 @@ internal fun InstitutionalResearchScreen(state:TraderUiState,onRefresh:()->Unit)
                 "Groww sweep price snapshot: ${hourly.day} ${String.format(Locale.US,"%02d:00",hourly.hour)} slot · client receipt ${java.time.Instant.ofEpochMilli(hourly.receivedAtMs).atZone(java.time.ZoneId.of("Asia/Kolkata")).toLocalTime().toString().take(8)} IST · ${if(currentHour)"current hour" else "older observation"} · not live institutional flow.",style=MaterialTheme.typography.bodySmall)
             val todaySlots=snapshot.hourlyHistory.filter{it.day==now.toLocalDate().toString()}.map{it.hour}.toSet()
             Text("Today's captured hours: ${todaySlots.sorted().joinToString(", ").ifBlank{"none"}} · missing hours are not backfilled.",style=MaterialTheme.typography.labelSmall)
+            var showHourDays by remember{mutableStateOf(false)}
+            Box {
+                OutlinedButton(onClick={showHourDays=true}){Text("Hourly prices: $hourDay")}
+                DropdownMenu(expanded=showHourDays,onDismissRequest={showHourDays=false}){
+                    hourlyDays.forEach{d->DropdownMenuItem(text={Text(d)},onClick={selectedHourDay=d;showHourDays=false})}
+                }
+            }
+            Text("Six hourly slots · first eligible sweep per hour · actual observation times, not exact-hour quotes. Up to 60 snapshots kept.",style=MaterialTheme.typography.labelSmall)
             Text("Bulk and block are separate: overlapping reports must not be summed. FII/DII means only verified named clients matched to issuer filings or AMFI directory. All disclosures includes individuals and other unclassified clients; not all are institutions.",style=MaterialTheme.typography.bodySmall)
             if(report!=null){
                 Text("Disclosure date: ${report.day} · ${report.source} · ${report.disclosedRows} reported rows; ${report.deals.count{it.category=="FII"||it.category=="DII"}} verified, ${report.unmatchedRows} unclassified, ${report.duplicateRows} identical rows excluded.",style=MaterialTheme.typography.bodySmall)
@@ -93,7 +106,7 @@ internal fun InstitutionalResearchScreen(state:TraderUiState,onRefresh:()->Unit)
             Button(onClick=onRefresh,enabled=!state.researchScanning,modifier=Modifier.fillMaxWidth()){
                 Text(if(state.researchScanning)"Refreshing…" else "Refresh institutional research")
             }
-            Text("NSE imports only 18:30–08:00 IST; hourly prices reuse the first completed Fixed sweep in the first 20 minutes of each 10–15 IST clock hour. Missed hours remain missing; no extra Groww requests. Investor identity coverage is partial; all unique disclosures are retained regardless of identity.",style=MaterialTheme.typography.labelSmall)
+            Text("NSE imports only 18:30–08:00 IST; hourly prices reuse the first eligible completed Fixed sweep in each 10–15 IST clock hour. Missed hours remain missing; no extra Groww requests. Investor identity coverage is partial; all unique disclosures are retained regardless of identity.",style=MaterialTheme.typography.labelSmall)
             Text("Top ${rows.size} of 20 · ${if(side=="BUY")"purchases" else "sales"}",style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.Bold)
             if(rows.isEmpty())Text("No disclosed stocks match this selection. If report coverage is incomplete, missing reports are not zero activity. Try All disclosures.",style=MaterialTheme.typography.bodySmall)
         }
@@ -110,6 +123,14 @@ internal fun InstitutionalResearchScreen(state:TraderUiState,onRefresh:()->Unit)
                     val price=hourly?.prices?.get(row.symbol)
                     val change=InstitutionalHistoryPolicy.movement(price,ref)
                     Text("Weighted disclosed ${if(side=="BUY")"buy" else "sell"} price: ${ref?.let{String.format(Locale.US,"₹%.2f",it)}?:"unavailable"} · sweep price: ${price?.let{String.format(Locale.US,"₹%.2f",it)}?:"unavailable"} · difference ${change?.let{String.format(Locale.US,"%+.2f%%",it)}?:"unavailable"}",style=MaterialTheme.typography.bodySmall)
+                    var showHours by rememberSaveable { mutableStateOf(false) }
+                    TextButton(onClick={showHours=!showHours}){Text(if(showHours)"Hide hourly prices" else "Show 10:00–15:00 price observations")}
+                    if(showHours)for(h in 10..15){
+                        val sample=hourlyBySlot[h]
+                        val p=sample?.prices?.get(row.symbol)
+                        val observed=sample?.let{java.time.Instant.ofEpochMilli(it.receivedAtMs).atZone(java.time.ZoneId.of("Asia/Kolkata")).toLocalTime().toString().take(5)}
+                        Text(String.format(Locale.US,"%02d:00 slot",h)+" · "+(p?.let{String.format(Locale.US,"₹%.2f",it)}?:"unavailable")+(if(p!=null && observed!=null)" · observed $observed IST" else ""),style=MaterialTheme.typography.labelSmall)
+                    }
                     val industry=snapshot.sectors[row.symbol]
                     val index=industry?.let{LargeIndexResearchPolicy.sectorIndex(it)}
                     val sectorMove=index?.let{snapshot.sectorMoves[it]}
