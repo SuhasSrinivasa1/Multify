@@ -48,7 +48,7 @@ jobs:
           set -euo pipefail
           python - <<'PY'
           import pathlib, subprocess
-          base="01fe872929f941b8a1cc882e1d1c1c9c9e09c56f"
+          base="c73755439d35929de01470e5c38161a317e824b0"
           root=pathlib.Path("app/src/main/java/com/multify/traderpro")
           # Frozen selection, confirmation, transport-research decision and trailing MUST be byte-identical.
           locked=[
