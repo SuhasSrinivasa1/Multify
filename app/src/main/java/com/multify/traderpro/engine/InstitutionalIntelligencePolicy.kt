@@ -72,11 +72,11 @@ object InstitutionalIntelligencePolicy {
         "UNION MUTUAL FUND","UTI MUTUAL FUND","THE WEALTH COMPANY MUTUAL FUND",
         "WHITEOAK CAPITAL MUTUAL FUND","LIFE INSURANCE CORPORATION OF INDIA"
     )
-    fun category(name:String):String? = when(norm(name)){
-        in fii -> "FII"
-        in dii -> "DII"
-        else -> null
-    }
+    private fun identityKey(name:String)=norm(name).replace(Regex("[.,]"),"").replace(Regex("\\s+")," ").trim()
+    private val verifiedKeys=(fii.map{identityKey(it) to "FII"}+dii.map{identityKey(it) to "DII"})
+        .groupBy({it.first},{it.second}).mapValues{it.value.distinct()}
+    fun category(name:String):String? = verifiedKeys[identityKey(name)]?.singleOrNull()
+
     private val formats=listOf("dd-MMM-uuuu","dd-MMM-uu","dd-MM-uuuu","dd/MM/uuuu","uuuu-MM-dd")
         .map{java.time.format.DateTimeFormatterBuilder().parseCaseInsensitive().appendPattern(it).toFormatter(Locale.ENGLISH).withResolverStyle(java.time.format.ResolverStyle.STRICT)}
     private fun date(s:String):LocalDate? = formats.firstNotNullOfOrNull{f->
