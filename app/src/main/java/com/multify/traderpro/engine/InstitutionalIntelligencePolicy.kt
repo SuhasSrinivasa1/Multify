@@ -11,13 +11,18 @@ data class InstitutionalDeal(
 )
 data class InstitutionalStock(
     val symbol:String,val company:String,val shares:Long,val amountRupees:Double,
-    val fiiRupees:Double,val diiRupees:Double,val investors:List<String>
+    val fiiRupees:Double,val diiRupees:Double,val investors:List<String>,
+    val unclassifiedRupees:Double = 0.0
 )
 data class InstitutionalReport(
     val day:String="",val source:String="",val receivedAtMs:Long=0L,
     val disclosedRows:Int=0,val unmatchedRows:Int=0,val duplicateRows:Int=0,
-    val deals:List<InstitutionalDeal> = emptyList()
-)
+    val deals:List<InstitutionalDeal> = emptyList(),
+    val schemaVersion:Int = 1
+) {
+    val matchedRows:Int get()=deals.count{it.category=="FII" || it.category=="DII"}
+    val retainedRows:Int get()=deals.size
+}
 data class InstitutionalSnapshot(
     val bulk:InstitutionalReport?=null,val block:InstitutionalReport?=null,
     val history:List<InstitutionalReport> = emptyList(),
@@ -118,32 +123,40 @@ object InstitutionalIntelligencePolicy {
             val row=cells(lines.next())
             require(row.size==cols.size){"BAD_ROW_WIDTH"}
             require(date(row[d])==expected){"STALE_OR_MIXED_DATE"}
-            val symbol=norm(row[sy]);val name=norm(row[inv])
-            require(symbol.matches(Regex("[A-Z0-9&._-]{1,32}")) && name.isNotBlank())
+            val symbol=norm(row[sy]);val rawName=norm(row[inv])
+            val name=rawName.ifBlank{"UNIDENTIFIED CLIENT"}
+            require(symbol.matches(Regex("[A-Z0-9&._-]{1,32}")))
             val direction=when(norm(row[side])){"BUY","B"->"BUY";"SELL","S"->"SELL";else->error("BAD_SIDE")}
             val q=row[qty].replace(",","").toLongOrNull()?:error("BAD_QUANTITY")
             val p=row[price].replace(",","").toBigDecimalOrNull()?:error("BAD_PRICE")
             require(q>0 && p>BigDecimal.ZERO && p.toDouble().isFinite() && (p.toDouble()*q).isFinite())
             rows++;require(rows<=10000)
-            val key=listOf(symbol,name,direction,q.toString(),p.stripTrailingZeros().toPlainString())
-            // Identical disclosed sides are conservatively counted once within a file.
-            if(!seen.add(key)){duplicates++;continue}
-            val cat=category(name)
-            if(cat==null){unknown++;continue}
+            val key=listOf(symbol,rawName,direction,q.toString(),p.stripTrailingZeros().toPlainString())
+            // Deduplicate only when the exchange identifies the client. With a blank
+            // client, two rows cannot safely be assumed to be the same transaction.
+            if(rawName.isNotBlank() && !seen.add(key)){duplicates++;continue}
+            val cat=category(name) ?: run { unknown++; "UNCLASSIFIED" }
+            // Preserve every valid, unique exchange-disclosed row. Identity confidence
+            // affects the category filter, never whether the transaction is visible.
             out+=InstitutionalDeal(expected.toString(),symbol,row[co],name,cat,direction,q,p.toDouble())
         }
         // Header-only files have no verifiable trade date; never overwrite a dated snapshot.
         require(rows>0){"NO_DATED_DISCLOSURES"}
-        return InstitutionalReport(expected.toString(),source,receivedAtMs,rows,unknown,duplicates,out)
+        return InstitutionalReport(expected.toString(),source,receivedAtMs,rows,unknown,duplicates,out,schemaVersion=2)
     }
     fun top(report:InstitutionalReport?,side:String,filter:String):List<InstitutionalStock> {
-        require(side in setOf("BUY","SELL") && filter in setOf("ALL","FII","DII"))
-        return report?.deals.orEmpty().filter{it.side==side && (filter=="ALL" || it.category==filter)}
+        require(side in setOf("BUY","SELL") && filter in setOf("ALL","VERIFIED","FII","DII","UNCLASSIFIED"))
+        return report?.deals.orEmpty().filter{it.side==side && when(filter){
+            "ALL"->true
+            "VERIFIED"->it.category=="FII" || it.category=="DII"
+            else->it.category==filter
+        }}
             .groupBy{it.symbol}.map{(symbol,deals)->
                 val f=deals.filter{it.category=="FII"}.sumOf{it.shares*it.price}
                 val d=deals.filter{it.category=="DII"}.sumOf{it.shares*it.price}
-                InstitutionalStock(symbol,deals.first().company,deals.sumOf{it.shares},f+d,f,d,
-                    deals.map{it.investor}.distinct().sorted())
+                val u=deals.filter{it.category=="UNCLASSIFIED"}.sumOf{it.shares*it.price}
+                InstitutionalStock(symbol,deals.first().company,deals.sumOf{it.shares},
+                    deals.sumOf{it.shares*it.price},f,d,deals.map{it.investor}.distinct().sorted(),u)
             }.sortedWith(compareByDescending<InstitutionalStock>{it.amountRupees}.thenBy{it.symbol}).take(TOP)
     }
 }

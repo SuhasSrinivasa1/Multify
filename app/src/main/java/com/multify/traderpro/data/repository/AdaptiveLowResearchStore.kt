@@ -9,13 +9,38 @@ import com.multify.traderpro.engine.AdaptiveLowCandidate
 import java.time.LocalDate
 import kotlin.math.sqrt
 
+data class AdaptiveLowMarketCapDiagnostics(
+    val assetPeriod:String = "",
+    val assetLarge:Int = 0,
+    val assetMid:Int = 0,
+    val assetSmall:Int = 0,
+    val latestUniverseSymbols:Int = 0,
+    val labelsMatchedUniverse:Int = 0,
+    val universeByCategory:Map<String,Int> = emptyMap(),
+    val eligibleByCategory:Map<String,Int> = emptyMap(),
+    val qualifiedByCategory:Map<String,Int> = emptyMap(),
+    val largeCapUniverseSymbols:List<String> = emptyList(),
+    val largeCapEligibleSymbols:List<String> = emptyList(),
+    val largeCapQualifiedSymbols:List<String> = emptyList()
+) {
+    val largeCapCoverageStatus:String get()=when{
+        assetLarge<=0 -> "AMFI_LARGE_BUCKET_MISSING"
+        largeCapUniverseSymbols.isEmpty() -> "NO_AMFI_LARGE_SYMBOL_IN_LATEST_NSE_EOD"
+        largeCapEligibleSymbols.isEmpty() -> "LARGE_SYMBOLS_LACK_COMPLETE_HISTORY"
+        largeCapQualifiedSymbols.isEmpty() -> "LARGE_SYMBOLS_EVALUATED_NO_PATTERN_MATCH"
+        else -> "LARGE_CAP_PATTERN_MATCHES_FOUND"
+    }
+}
+
 data class AdaptiveLowRunState(
     val day: String,
     val months: Int,
     val allNseEquitySymbols: Int,
     val historicallyCompleteSymbols: Int,
     val qualifiedPatterns: Int,
-    val completedAtMs: Long
+    val completedAtMs: Long,
+    val marketCapDiagnostics:AdaptiveLowMarketCapDiagnostics = AdaptiveLowMarketCapDiagnostics(),
+    val schemaVersion:Int = 1
 )
 
 data class AdaptiveLowResearchSummary(
@@ -80,28 +105,33 @@ internal object AdaptiveLowLearningPolicy {
  */
 internal class AdaptiveLowResearchStore(context:Context) {
     private class Store(context:Context):
-        SQLiteOpenHelper(context,"adaptive_low_research_v1.db",null,1){
+        SQLiteOpenHelper(context,"adaptive_low_research_v1.db",null,2){
         override fun onCreate(db:SQLiteDatabase) {
-            db.execSQL("CREATE TABLE run(day TEXT NOT NULL, months INTEGER NOT NULL, universe INTEGER NOT NULL, complete INTEGER NOT NULL, patterns INTEGER NOT NULL, at_ms INTEGER NOT NULL, PRIMARY KEY(day,months))")
+            db.execSQL("CREATE TABLE run(day TEXT NOT NULL, months INTEGER NOT NULL, universe INTEGER NOT NULL, complete INTEGER NOT NULL, patterns INTEGER NOT NULL, at_ms INTEGER NOT NULL, cap_diagnostics TEXT NOT NULL DEFAULT '{}', schema_version INTEGER NOT NULL DEFAULT 2, PRIMARY KEY(day,months))")
             db.execSQL("CREATE TABLE low_day(day TEXT NOT NULL,months INTEGER NOT NULL,symbol TEXT NOT NULL,json TEXT NOT NULL,PRIMARY KEY(day,months,symbol))")
             db.execSQL("CREATE TABLE low_signal(day TEXT NOT NULL,months INTEGER NOT NULL,symbol TEXT NOT NULL,support REAL NOT NULL,reference_close REAL NOT NULL,variants TEXT NOT NULL,outcome_day TEXT,outcome_max_close_pct REAL,outcome_min_close_pct REAL,first_rebound_day TEXT,outcome_hit INTEGER,PRIMARY KEY(day,months,symbol))")
             db.execSQL("CREATE INDEX idx_adaptive_low_signal_pending ON low_signal(outcome_day,day)")
         }
-        override fun onUpgrade(db:SQLiteDatabase,oldVersion:Int,newVersion:Int)=
-            error("Adaptive low research migration requires explicit implementation")
+        override fun onUpgrade(db:SQLiteDatabase,oldVersion:Int,newVersion:Int) {
+            if(oldVersion==1 && newVersion==2) {
+                db.execSQL("ALTER TABLE run ADD COLUMN cap_diagnostics TEXT NOT NULL DEFAULT '{}'")
+                db.execSQL("ALTER TABLE run ADD COLUMN schema_version INTEGER NOT NULL DEFAULT 1")
+            } else error("Unsupported adaptive low research migration $oldVersion to $newVersion")
+        }
     }
     private val store=Store(context)
     private val lock=Any()
     private val gson=Gson()
 
     fun hasRun(day:String,months:Int):Boolean=synchronized(lock){
-        store.readableDatabase.rawQuery("SELECT 1 FROM run WHERE day=? AND months=?",
+        store.readableDatabase.rawQuery("SELECT 1 FROM run WHERE day=? AND months=? AND schema_version>=2",
             arrayOf(day,months.toString())).use{it.moveToFirst()}
     }
 
     /** Atomic database publication: old valid snapshot remains until new complete pass. */
     fun saveDay(
-        day:String,months:Int,universe:Int,complete:Int,rows:List<AdaptiveLowCandidate>
+        day:String,months:Int,universe:Int,complete:Int,rows:List<AdaptiveLowCandidate>,
+        capDiagnostics:AdaptiveLowMarketCapDiagnostics = AdaptiveLowMarketCapDiagnostics()
     )=synchronized(lock) {
         require(months in listOf(3,6))
         require(LocalDate.parse(day).toString()==day && universe>=1500)
@@ -138,6 +168,8 @@ internal class AdaptiveLowResearchStore(context:Context) {
                 put("day",day);put("months",months);put("universe",universe)
                 put("complete",complete);put("patterns",rows.size)
                 put("at_ms",System.currentTimeMillis())
+                put("cap_diagnostics",gson.toJson(capDiagnostics))
+                put("schema_version",2)
             },SQLiteDatabase.CONFLICT_REPLACE)
             db.setTransactionSuccessful()
         } finally {db.endTransaction()}
@@ -145,11 +177,13 @@ internal class AdaptiveLowResearchStore(context:Context) {
 
     fun latestRun(months:Int):AdaptiveLowRunState?=synchronized(lock){
         store.readableDatabase.rawQuery(
-            "SELECT day,months,universe,complete,patterns,at_ms FROM run WHERE months=? ORDER BY day DESC LIMIT 1",
+            "SELECT day,months,universe,complete,patterns,at_ms,cap_diagnostics,schema_version FROM run WHERE months=? ORDER BY day DESC LIMIT 1",
             arrayOf(months.toString())).use{c->
             if(!c.moveToFirst())null
             else AdaptiveLowRunState(c.getString(0),c.getInt(1),c.getInt(2),
-                c.getInt(3),c.getInt(4),c.getLong(5))
+                c.getInt(3),c.getInt(4),c.getLong(5),
+                runCatching{gson.fromJson(c.getString(6),AdaptiveLowMarketCapDiagnostics::class.java)}.getOrNull()
+                    ?:AdaptiveLowMarketCapDiagnostics(),c.getInt(7))
         }
     }
 

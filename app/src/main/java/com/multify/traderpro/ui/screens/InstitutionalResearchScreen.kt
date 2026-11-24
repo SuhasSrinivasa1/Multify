@@ -50,9 +50,13 @@ internal fun InstitutionalResearchScreen(state:TraderUiState,onRefresh:()->Unit)
                 else OutlinedButton(onClick={side="SELL"},modifier=Modifier.weight(1f).testTag("institutional-sells")){Text("Sells")}
             }
             Row(horizontalArrangement=Arrangement.spacedBy(6.dp)){
-                FilterChip(selected=filter=="ALL",onClick={filter="ALL"},label={Text("FII + DII")})
+                FilterChip(selected=filter=="ALL",onClick={filter="ALL"},label={Text("All disclosed")})
+                FilterChip(selected=filter=="VERIFIED",onClick={filter="VERIFIED"},label={Text("Verified FII+DII")})
+            }
+            Row(horizontalArrangement=Arrangement.spacedBy(6.dp)){
                 FilterChip(selected=filter=="FII",onClick={filter="FII"},label={Text("FII")})
                 FilterChip(selected=filter=="DII",onClick={filter="DII"},label={Text("DII")})
+                FilterChip(selected=filter=="UNCLASSIFIED",onClick={filter="UNCLASSIFIED"},label={Text("Unclassified")})
             }
             Row(horizontalArrangement=Arrangement.spacedBy(6.dp)){
                 FilterChip(selected=source=="BULK",onClick={source="BULK"},label={Text("Bulk deals")})
@@ -79,7 +83,9 @@ internal fun InstitutionalResearchScreen(state:TraderUiState,onRefresh:()->Unit)
             Text("Today's captured hours: ${todaySlots.sorted().joinToString(", ").ifBlank{"none"}} · missing hours are not backfilled.",style=MaterialTheme.typography.labelSmall)
             Text("Bulk and block are separate: overlapping reports must not be summed. FII/DII means only exact named clients matched to issuer filings or AMFI directory, not all institutional trades.",style=MaterialTheme.typography.bodySmall)
             if(report!=null){
-                Text("Disclosure date: ${report.day} · ${report.source} · ${report.disclosedRows} reported rows; ${report.deals.size} matched, ${report.unmatchedRows} unmatched, ${report.duplicateRows} identical rows excluded.",style=MaterialTheme.typography.bodySmall)
+                Text("Disclosure date: ${report.day} · ${report.source} · ${report.disclosedRows} reported rows; ${report.matchedRows} verified FII/DII, ${report.unmatchedRows} unclassified, ${report.duplicateRows} identical rows excluded; ${report.retainedRows} unique rows retained.",style=MaterialTheme.typography.bodySmall)
+                if(report.schemaVersion<2)
+                    Text("LEGACY CACHE: v9.0.47 did not retain unmatched rows. The same NSE report will be re-imported once during the next 18:30–08:00 IST refresh; all-disclosed rankings may remain incomplete until then.",color=MaterialTheme.colorScheme.error,style=MaterialTheme.typography.labelSmall)
                 if(report.day!=state.equityResearch.latestDay)
                     Text("Older cached disclosure — latest saved exchange EOD is ${state.equityResearch.latestDay.ifBlank{"unknown"}}.",color=MaterialTheme.colorScheme.error,style=MaterialTheme.typography.labelSmall)
             }else Text("No dated, validated ${source.lowercase(Locale.US)} disclosure cached. Empty or unavailable reports do not imply zero institutional activity.",style=MaterialTheme.typography.bodySmall)
@@ -96,7 +102,7 @@ internal fun InstitutionalResearchScreen(state:TraderUiState,onRefresh:()->Unit)
                     Text("${index+1}. ${row.symbol}",style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.Bold)
                     if(row.company.isNotBlank())Text(row.company,style=MaterialTheme.typography.bodySmall)
                     Text(crores(if(side=="BUY")row.grossBuy else row.grossSell),style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold)
-                    Text("FII ${crores(row.fiiSide)} · DII ${crores(row.diiSide)}",style=MaterialTheme.typography.bodySmall)
+                    Text("FII ${crores(row.fiiSide)} · DII ${crores(row.diiSide)} · Unclassified ${crores(row.unclassifiedSide)}",style=MaterialTheme.typography.bodySmall)
                     Text("Gross buys ${crores(row.grossBuy)} · gross sells ${crores(row.grossSell)} · net ${crores(row.net)}",style=MaterialTheme.typography.bodySmall)
                     Text("${String.format(Locale.US,"%,d",row.sideShares)} disclosed shares · ${row.investors.size} matched names · ${row.buyDays} buy dates · ${row.repeatedBuyers} repeated buyers",style=MaterialTheme.typography.bodySmall)
                     val ref=if(side=="BUY")row.weightedBuy else row.weightedSell
@@ -125,7 +131,7 @@ internal fun InstitutionalResearchScreen(state:TraderUiState,onRefresh:()->Unit)
             }
         }
         item{
-            Text("Source: NSE ${source.lowercase(Locale.US)} deal disclosure. Client classification: selected named FPI issuer disclosures and AMFI fund directory. No complete stock-wise FII/DII flow or investment advice is claimed. Zero in a category means no matched rows in this report.",style=MaterialTheme.typography.labelSmall)
+            Text("Source: NSE ${source.lowercase(Locale.US)} deal disclosure. Every valid unique row is retained. FII/DII filters include only exact verified identities; unclassified clients remain visible separately. This is not complete stock-wise institutional flow or investment advice.",style=MaterialTheme.typography.labelSmall)
         }
     }
 }

@@ -19,11 +19,17 @@ class InstitutionalIntelligencePolicyTest {
         assertEquals(6,r.disclosedRows)
         assertEquals(1,r.duplicateRows)
         assertEquals(2,r.unmatchedRows)
+        assertEquals(5,r.retainedRows)
+        assertEquals(3,r.matchedRows)
         val all=InstitutionalIntelligencePolicy.top(r,"BUY","ALL").single()
-        assertEquals(600000.0,all.amountRupees,0.01)
+        assertEquals(1000000.0,all.amountRupees,0.01)
         assertEquals(200000.0,all.fiiRupees,0.01)
         assertEquals(400000.0,all.diiRupees,0.01)
-        assertEquals(3000L,all.shares)
+        assertEquals(5000L,all.shares)
+        assertEquals(600000.0,InstitutionalIntelligencePolicy.top(r,"BUY","VERIFIED").single().amountRupees,0.01)
+        assertEquals(400000.0,InstitutionalIntelligencePolicy.top(r,"BUY","UNCLASSIFIED").single().amountRupees,0.01)
+        assertEquals(400000.0,all.unclassifiedRupees,0.01)
+        assertEquals(2,r.deals.count{it.category=="UNCLASSIFIED"})
         assertEquals(60000.0,InstitutionalIntelligencePolicy.top(r,"SELL","DII").single().amountRupees,0.01)
         assertTrue(InstitutionalIntelligencePolicy.top(r,"SELL","FII").isEmpty())
     }
@@ -42,6 +48,14 @@ class InstitutionalIntelligencePolicyTest {
         assertTrue(runCatching{parse(row(side="UNKNOWN"))}.isFailure)
         assertTrue(runCatching{parse()}.isFailure)
         assertTrue(runCatching{InstitutionalIntelligencePolicy.parse("<html>bad report</html>",day,"BULK",123)}.isFailure)
+    }
+    @Test fun blankClientNamesRemainVisibleAndAreNotAssumedDuplicates() {
+        val blank=row(client="")
+        val r=parse(blank,blank)
+        assertEquals(2,r.disclosedRows)
+        assertEquals(2,r.retainedRows)
+        assertEquals(2,r.unmatchedRows)
+        assertTrue(r.deals.all{it.category=="UNCLASSIFIED" && it.investor=="UNIDENTIFIED CLIENT"})
     }
     @Test fun sameDealInSeparateFilesIsNotSummed() {
         val a=parse(row(),source="BULK")
