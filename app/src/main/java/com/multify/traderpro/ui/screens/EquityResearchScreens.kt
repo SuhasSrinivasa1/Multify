@@ -280,6 +280,10 @@ internal fun SixMonthLowResearchScreen(state: TraderUiState, onScan: (Int) -> Un
                 FilterChip(selected=capFilter=="SMALL_CAP",onClick={capFilter="SMALL_CAP"},label={Text("Small ${counts["SMALL_CAP"]?:0}")},modifier=Modifier.testTag("low-cap-small"))
             }
             FilterChip(selected=capFilter=="UNCLASSIFIED",onClick={capFilter="UNCLASSIFIED"},label={Text("Unclassified ${counts["UNCLASSIFIED"]?:0}")},modifier=Modifier.testTag("low-cap-unclassified"))
+            val capAudit=if(isThree)research.lowCapAudit3 else research.lowCapAudit6
+            if(capAudit.isNotBlank())Text(capAudit,style=MaterialTheme.typography.labelSmall)
+            else Text("Market-cap rejection audit pending after-hours scan.",style=MaterialTheme.typography.labelSmall)
+            Text("Price evidence date: ${research.latestDay.ifBlank{"unknown"}} · calculation time is not a newer market close.",style=MaterialTheme.typography.labelSmall)
             Text("Approaching historical rebound zones · ${visible.size}",
                 style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.Bold)
             OutlinedTextField(value=search,onValueChange={search=it},singleLine=true,
