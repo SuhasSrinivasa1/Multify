@@ -86,6 +86,12 @@ jobs:
             restore_end=text.index('        val gson = GsonBuilder().disableHtmlEscaping().create()',restore_start)
             text=text[:restore_start]+text[restore_end:]
             text=text.replace('                equityEodResearch.appendPortableHistory(zip)\n                written("eod_research_history.jsonl")\n','')
+            text=text.replace('        val pendingEntryIncludingWorkingRange = pendingEntry ||\n            workingRangeRecommendationStore.pendingAutoBuyIntents().isNotEmpty()\n','')
+            text=text.replace('pendingEntry = pendingEntryIncludingWorkingRange,','pendingEntry = pendingEntry,')
+            text=text.replace('                "broker_holdings_count" to inventory.holdings.size,\n                "broker_positions_count" to inventory.positions.size,\n                "broker_active_gtt_count" to (activeGttsResult.getOrNull()?.values?.sumOf { it.size } ?: -1),\n                "idle_broker_recheck_interval_ms" to idleRecheckIntervalMs,\n                "pending_entry_including_working_range" to pendingEntryIncludingWorkingRange\n','')
+            text=text.replace('                "legacy_recovery_rows" to marked.count { it.smartOrderMode == HoldingSmartOrderPolicy.MODE_RECOVERY_GTT },','                "legacy_recovery_rows" to marked.count { it.smartOrderMode == HoldingSmartOrderPolicy.MODE_RECOVERY_GTT }')
+            text=text.replace('private const val EMPTY_PORTFOLIO_BROKER_RECHECK_MS = 300_000L','private const val EMPTY_PORTFOLIO_BROKER_RECHECK_MS = 180_000L')
+            text=text.replace('private const val NONEMPTY_EXTERNAL_BROKER_RECHECK_MS = 300_000L','private const val NONEMPTY_EXTERNAL_BROKER_RECHECK_MS = 45_000L')
             return text.encode()
           for rel in locked:
             path=root/rel
