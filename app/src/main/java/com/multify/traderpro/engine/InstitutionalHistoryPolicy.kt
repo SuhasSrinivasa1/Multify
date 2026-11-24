@@ -7,7 +7,7 @@ data class InstitutionalHourly(val day:String,val hour:Int,val receivedAtMs:Long
 data class InstitutionalOutcome(val source:String,val day:String,val symbol:String,val baselineDay:String,val outcomeDay:String,val returnPct:Double)
 data class InstitutionalAccumulation(
     val symbol:String,val company:String,val grossBuy:Double,val grossSell:Double,
-    val sideShares:Long,val fiiSide:Double,val diiSide:Double,val weightedBuy:Double?,
+    val sideShares:Long,val fiiSide:Double,val diiSide:Double,val unclassifiedSide:Double=0.0,val weightedBuy:Double?,
     val weightedSell:Double?,val repeatedBuyers:Int,val buyDays:Int,val investors:List<String>
 ) { val net:Double get()=grossBuy-grossSell }
 data class InstitutionalSectorFlow(val sector:String,val buys:Double,val sells:Double) { val net:Double get()=buys-sells }
@@ -21,7 +21,7 @@ object InstitutionalHistoryPolicy {
         return t.toLocalDate().toString()+"-"+t.hour
     }
     fun window(snapshot:InstitutionalSnapshot,source:String,side:String,category:String,days:Int,sectorOnly:String?=null):InstitutionalWindow {
-        require(days in listOf(1,5,10,30) && source in setOf("BULK","BLOCK") && side in setOf("BUY","SELL") && category in setOf("ALL","FII","DII"))
+        require(days in listOf(1,5,10,30) && source in setOf("BULK","BLOCK") && side in setOf("BUY","SELL") && category in setOf("ALL","VERIFIED","FII","DII","UNCLASSIFIED"))
         val reports=(snapshot.history+listOfNotNull(snapshot.bulk,snapshot.block))
             .filter{it.source==source}.associateBy{it.day}.values
         val latest=reports.maxOfOrNull{it.day}.orEmpty()
@@ -30,8 +30,11 @@ object InstitutionalHistoryPolicy {
         // calendar is not yet locally available, show only the last dated file.
         val dates=if(expected.isEmpty())listOfNotNull(latest.takeIf{it.isNotEmpty()}) else expected
         val selected=reports.filter{it.day in dates}
-        val deals=selected.flatMap{it.deals}.filter{(category=="ALL"||it.category==category) &&
-            (sectorOnly==null||snapshot.sectors[it.symbol]==sectorOnly)}
+        val deals=selected.flatMap{it.deals}.filter{(when(category){
+            "ALL"->true
+            "VERIFIED"->it.category=="FII" || it.category=="DII"
+            else->it.category==category
+        }) && (sectorOnly==null||snapshot.sectors[it.symbol]==sectorOnly)}
         val rows=deals.groupBy{it.symbol}.mapNotNull{(sym,all)->
             val buys=all.filter{it.side=="BUY"}; val sells=all.filter{it.side=="SELL"}
             val chosen=if(side=="BUY")buys else sells
@@ -41,6 +44,7 @@ object InstitutionalHistoryPolicy {
             InstitutionalAccumulation(sym,chosen.first().company,b,s,chosen.sumOf{it.shares},
                 chosen.filter{it.category=="FII"}.sumOf{it.shares*it.price},
                 chosen.filter{it.category=="DII"}.sumOf{it.shares*it.price},
+                chosen.filter{it.category=="UNCLASSIFIED"}.sumOf{it.shares*it.price},
                 if(bq>0)b/bq else null,if(sq>0)s/sq else null,
                 buys.groupBy{it.investor}.count{(_,v)->v.map{it.day}.distinct().size>=2},
                 buys.map{it.day}.distinct().size,chosen.map{it.investor}.distinct().sorted())
@@ -53,8 +57,13 @@ object InstitutionalHistoryPolicy {
             .filter{it.source==source}.associateBy{it.day}.values
         val expected=snapshot.sessions.distinct().sorted().takeLast(days)
         val dates=if(expected.isEmpty())listOfNotNull(reports.maxOfOrNull{it.day}) else expected
+        require(category in setOf("ALL","VERIFIED","FII","DII","UNCLASSIFIED") && days in listOf(1,5,10,30))
         return reports.filter{it.day in dates}.flatMap{it.deals}
-            .filter{category=="ALL" || it.category==category}
+            .filter{when(category){
+                "ALL"->true
+                "VERIFIED"->it.category=="FII" || it.category=="DII"
+                else->it.category==category
+            }}
             .groupBy{snapshot.sectors[it.symbol]?.takeIf{v->v.isNotBlank()} ?: "UNMAPPED"}
             .map{(name,deals)->InstitutionalSectorFlow(name,
                 deals.filter{it.side=="BUY"}.sumOf{it.shares*it.price},
