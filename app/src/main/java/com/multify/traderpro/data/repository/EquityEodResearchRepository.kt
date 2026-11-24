@@ -516,6 +516,14 @@ class EquityEodResearchRepository @Inject constructor(
         }
     }
 
+    /** Manual research refresh shares the same mutex and off-hours guard. */
+    suspend fun refreshInstitutionalOnly() = withContext(Dispatchers.IO) {
+        refreshMutex.lock()
+        try {
+            if(afterHours(ZonedDateTime.now(INDIA))) refreshInstitutionalAfterHours()
+        } finally { refreshMutex.unlock() }
+    }
+
     private fun refreshInstitutionalAfterHours() {
         requireAfterHours()
         val last=synchronized(lock) {
