@@ -505,6 +505,14 @@ class TradingEngineService : Service() {
                             "cpu_wake_lock_held" to (positionMonitoringWakeLock?.isHeld == true),
                             "screen_interactive" to
                                 (getSystemService(Context.POWER_SERVICE) as PowerManager).isInteractive,
+                            "battery_optimization_exempt" to
+                                (getSystemService(Context.POWER_SERVICE) as PowerManager).isIgnoringBatteryOptimizations(packageName),
+                            "battery_saver_on" to
+                                (getSystemService(Context.POWER_SERVICE) as PowerManager).isPowerSaveMode,
+                            "thermal_status" to if(android.os.Build.VERSION.SDK_INT>=29)
+                                (getSystemService(Context.POWER_SERVICE) as PowerManager).currentThermalStatus else null,
+                            "available_cpu_processors" to Runtime.getRuntime().availableProcessors(),
+                            "java_heap_limit_bytes" to Runtime.getRuntime().maxMemory(),
                             "external_signal_listener_enabled" to false,
                             "fixed_formula_changed" to false
                         ))
