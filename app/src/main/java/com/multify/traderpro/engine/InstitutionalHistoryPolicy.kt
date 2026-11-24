@@ -21,7 +21,7 @@ object InstitutionalHistoryPolicy {
         return t.toLocalDate().toString()+"-"+t.hour
     }
     fun window(snapshot:InstitutionalSnapshot,source:String,side:String,category:String,days:Int,sectorOnly:String?=null):InstitutionalWindow {
-        require(days in listOf(1,5,10,30) && source in setOf("BULK","BLOCK") && side in setOf("BUY","SELL") && category in setOf("ALL","FII","DII"))
+        require(days in listOf(1,5,10,30) && source in setOf("BULK","BLOCK") && side in setOf("BUY","SELL") && category in setOf("ALL","FII","DII","DISCLOSED","UNCLASSIFIED"))
         val reports=(snapshot.history+listOfNotNull(snapshot.bulk,snapshot.block))
             .filter{it.source==source}.associateBy{it.day}.values
         val latest=reports.maxOfOrNull{it.day}.orEmpty()
@@ -30,7 +30,7 @@ object InstitutionalHistoryPolicy {
         // calendar is not yet locally available, show only the last dated file.
         val dates=if(expected.isEmpty())listOfNotNull(latest.takeIf{it.isNotEmpty()}) else expected
         val selected=reports.filter{it.day in dates}
-        val deals=selected.flatMap{it.deals}.filter{(category=="ALL"||it.category==category) &&
+        val deals=selected.flatMap{it.deals}.filter{InstitutionalIntelligencePolicy.includes(category,it.category) &&
             (sectorOnly==null||snapshot.sectors[it.symbol]==sectorOnly)}
         val rows=deals.groupBy{it.symbol}.mapNotNull{(sym,all)->
             val buys=all.filter{it.side=="BUY"}; val sells=all.filter{it.side=="SELL"}
@@ -54,7 +54,7 @@ object InstitutionalHistoryPolicy {
         val expected=snapshot.sessions.distinct().sorted().takeLast(days)
         val dates=if(expected.isEmpty())listOfNotNull(reports.maxOfOrNull{it.day}) else expected
         return reports.filter{it.day in dates}.flatMap{it.deals}
-            .filter{category=="ALL" || it.category==category}
+            .filter{InstitutionalIntelligencePolicy.includes(category,it.category)}
             .groupBy{snapshot.sectors[it.symbol]?.takeIf{v->v.isNotBlank()} ?: "UNMAPPED"}
             .map{(name,deals)->InstitutionalSectorFlow(name,
                 deals.filter{it.side=="BUY"}.sumOf{it.shares*it.price},
