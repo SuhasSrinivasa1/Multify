@@ -745,7 +745,8 @@ class EquityEodResearchRepository @Inject constructor(
             if(category=="LARGE_CAP")largeUniverse+=symbol
             if(do3) {
                 val subset=bars.filter{!it.date.isBefore(today.minusMonths(3))}
-                if(subset.size>=min3) {
+                val required3=maxOf(min3,AdaptiveLowPatternPolicy.MIN_3M_SESSIONS)
+                if(subset.size>=required3) {
                     eligible3++
                     eligible3ByCategory[category]=(eligible3ByCategory[category]?:0)+1
                     if(category=="LARGE_CAP")largeEligible3+=symbol
@@ -757,7 +758,8 @@ class EquityEodResearchRepository @Inject constructor(
                     }
                 }
             }
-            if(do6 && bars.size>=min6) {
+            val required6=maxOf(min6,AdaptiveLowPatternPolicy.MIN_6M_SESSIONS)
+            if(do6 && bars.size>=required6) {
                 eligible6++
                 eligible6ByCategory[category]=(eligible6ByCategory[category]?:0)+1
                 if(category=="LARGE_CAP")largeEligible6+=symbol
