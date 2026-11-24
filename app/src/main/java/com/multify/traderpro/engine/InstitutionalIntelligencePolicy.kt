@@ -66,7 +66,7 @@ object InstitutionalIntelligencePolicy {
         else -> null
     }
     private val formats=listOf("dd-MMM-uuuu","dd-MMM-uu","dd-MM-uuuu","dd/MM/uuuu","uuuu-MM-dd")
-        .map{DateTimeFormatter.ofPattern(it,Locale.ENGLISH).withResolverStyle(java.time.format.ResolverStyle.STRICT)}
+        .map{java.time.format.DateTimeFormatterBuilder().parseCaseInsensitive().appendPattern(it).toFormatter(Locale.ENGLISH).withResolverStyle(java.time.format.ResolverStyle.STRICT)}
     private fun date(s:String):LocalDate? = formats.firstNotNullOfOrNull{f->
         runCatching{LocalDate.parse(s.trim(),f)}.getOrNull()
     }
@@ -99,7 +99,7 @@ object InstitutionalIntelligencePolicy {
         val inv=column("CLIENTNAME","CLIENT")
         val side=column("BUYSELL","BUYORSELL")
         val qty=column("QUANTITYTRADED","QUANTITY")
-        val price=column("TRADEPRICEWGHTAVGPRICE","TRADEPRICEWIGHTEDAVGPRICE","TRADEPRICE","WEIGHTEDAVERAGEPRICE","TRADEPRICEWEIGHTEDAVERAGEPRICE","TRADEPRICEWGHTAVERAGEPRICE","TRADEPRICEWGHTAVGPRICE")
+        val price=column("TRADEPRICEWGHTAVGPRICE","TRADEPRICEWEIGHTEDAVGPRICE","TRADEPRICE","WEIGHTEDAVERAGEPRICE","TRADEPRICEWEIGHTEDAVERAGEPRICE","TRADEPRICEWGHTAVERAGEPRICE","TRADEPRICEWGHTAVGPRICE","TRADEPRICEWGHTDAVGPRICE","TRADEPRICEWEIGHTEDAVGPRICE","TRADEPRICEWGHTDAVERAGEPRICE","TRADEPRICEWAVGPRICE","PRICE")
         val out=mutableListOf<InstitutionalDeal>()
         val seen=hashSetOf<List<String>>()
         var rows=0;var unknown=0;var duplicates=0
