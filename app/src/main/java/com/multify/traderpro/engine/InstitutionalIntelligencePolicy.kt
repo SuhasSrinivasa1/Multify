@@ -122,16 +122,18 @@ object InstitutionalIntelligencePolicy {
             val row=cells(lines.next())
             require(row.size==cols.size){"BAD_ROW_WIDTH"}
             require(date(row[d])==expected){"STALE_OR_MIXED_DATE"}
-            val symbol=norm(row[sy]);val name=norm(row[inv])
-            require(symbol.matches(Regex("[A-Z0-9&._-]{1,32}")) && name.isNotBlank())
+            val symbol=norm(row[sy]);val rawName=norm(row[inv])
+            val name=rawName.ifBlank{"UNIDENTIFIED CLIENT"}
+            require(symbol.matches(Regex("[A-Z0-9&._-]{1,32}")))
             val direction=when(norm(row[side])){"BUY","B"->"BUY";"SELL","S"->"SELL";else->error("BAD_SIDE")}
             val q=row[qty].replace(",","").toLongOrNull()?:error("BAD_QUANTITY")
             val p=row[price].replace(",","").toBigDecimalOrNull()?:error("BAD_PRICE")
             require(q>0 && p>BigDecimal.ZERO && p.toDouble().isFinite() && (p.toDouble()*q).isFinite())
             rows++;require(rows<=10000)
-            val key=listOf(symbol,name,direction,q.toString(),p.stripTrailingZeros().toPlainString())
-            // Identical disclosed sides are conservatively counted once within a file.
-            if(!seen.add(key)){duplicates++;continue}
+            val key=listOf(symbol,rawName,direction,q.toString(),p.stripTrailingZeros().toPlainString())
+            // Deduplicate only when the exchange identifies the client. With a blank
+            // client, two rows cannot safely be assumed to be the same transaction.
+            if(rawName.isNotBlank() && !seen.add(key)){duplicates++;continue}
             val cat=category(name) ?: run { unknown++; "UNCLASSIFIED" }
             // Preserve every valid, unique exchange-disclosed row. Identity confidence
             // affects the category filter, never whether the transaction is visible.
