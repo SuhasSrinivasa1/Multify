@@ -10,6 +10,7 @@ data class InstitutionalAccumulation(
     val sideShares:Long,val fiiSide:Double,val diiSide:Double,val weightedBuy:Double?,
     val weightedSell:Double?,val repeatedBuyers:Int,val buyDays:Int,val investors:List<String>
 ) { val net:Double get()=grossBuy-grossSell }
+data class InstitutionalSectorFlow(val sector:String,val buys:Double,val sells:Double) { val net:Double get()=buys-sells }
 data class InstitutionalWindow(val rows:List<InstitutionalAccumulation>,val requested:Int,val knownSessions:Int,val reports:Int,val through:String)
 
 /** Price observations are never classified as institutional trades. */
@@ -46,12 +47,20 @@ object InstitutionalHistoryPolicy {
         }.sortedWith(compareByDescending<InstitutionalAccumulation>{if(side=="BUY")it.grossBuy else it.grossSell}.thenBy{it.symbol}).take(20)
         return InstitutionalWindow(rows,days,expected.size,selected.size,dates.lastOrNull().orEmpty())
     }
-    fun trackedSymbols(snapshot:InstitutionalSnapshot):Set<String> =
-        buildSet {
-            for(src in listOf("BULK","BLOCK"))for(side in listOf("BUY","SELL"))
-                for(cat in listOf("ALL","FII","DII"))for(days in listOf(1,5,10,30))
-                    addAll(window(snapshot,src,side,cat,days).rows.map{it.symbol})
-        }.take(960).toSet()
+    /** Aggregate all matched disclosures, not merely the 20 displayed stocks. */
+    fun sectorTotals(snapshot:InstitutionalSnapshot,source:String,category:String,days:Int):List<InstitutionalSectorFlow> {
+        val reports=(snapshot.history+listOfNotNull(snapshot.bulk,snapshot.block))
+            .filter{it.source==source}.associateBy{it.day}.values
+        val expected=snapshot.sessions.distinct().sorted().takeLast(days)
+        val dates=if(expected.isEmpty())listOfNotNull(reports.maxOfOrNull{it.day}) else expected
+        return reports.filter{it.day in dates}.flatMap{it.deals}
+            .filter{category=="ALL" || it.category==category}
+            .groupBy{snapshot.sectors[it.symbol]?.takeIf{v->v.isNotBlank()} ?: "UNMAPPED"}
+            .map{(name,deals)->InstitutionalSectorFlow(name,
+                deals.filter{it.side=="BUY"}.sumOf{it.shares*it.price},
+                deals.filter{it.side=="SELL"}.sumOf{it.shares*it.price})}
+            .sortedWith(compareByDescending<InstitutionalSectorFlow>{kotlin.math.abs(it.net)}.thenBy{it.sector}).take(20)
+    }
     fun movement(price:Double?,reference:Double?):Double? =
         if(price!=null && reference!=null && price.isFinite() && reference.isFinite() && price>0 && reference>0)
             (price/reference-1)*100 else null
