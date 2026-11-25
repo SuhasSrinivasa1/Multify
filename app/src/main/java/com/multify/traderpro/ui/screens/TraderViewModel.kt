@@ -90,9 +90,10 @@ class TraderViewModel @Inject constructor(
         // Screens read local NSE EOD database only. No broker or exchange HTTP request on UI refresh.
         viewModelScope.launch {
             while (isActive) {
-                runCatching { withContext(Dispatchers.IO) { equityEodResearch.snapshot() } }
+                if(!researchScanning.value) runCatching { withContext(Dispatchers.IO) { equityEodResearch.snapshot() } }
                     .onSuccess { equityResearch.value=it }
-                delay(60_000L)
+                val now=ZonedDateTime.now(ZoneId.of("Asia/Kolkata"))
+                delay(if(EquityEodResearchRepository.afterHours(now)) 15*60_000L else 60*60_000L)
             }
         }
         viewModelScope.launch {
