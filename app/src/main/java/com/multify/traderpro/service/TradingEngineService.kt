@@ -553,7 +553,7 @@ class TradingEngineService : Service() {
                 try {
                     val now = ZonedDateTime.now(INDIA)
                     val settings = preferences.settings.first()
-                    val needsAlpha = settings.fixedScannerEnabled || settings.armEffective ||
+                    val needsAlpha = settings.fixedScannerEnabled || settings.armEnabled ||
                         settings.fixedAutoBuyEnabled || settings.workingRangeEnabled
                     val premarket = com.multify.traderpro.engine.NseEquitySessionCalendar.isWarmupWindow(now)
                     val authRequired = recoveryGate.requiresReconnect() ||
