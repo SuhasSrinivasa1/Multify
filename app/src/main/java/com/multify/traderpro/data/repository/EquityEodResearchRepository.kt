@@ -473,8 +473,10 @@ class EquityEodResearchRepository @Inject constructor(
         require(uris.isNotEmpty()) { "Select at least one NSE report file" }
         require(uris.size<=100) { "Select at most 100 NSE report files per import" }
         val localNow=ZonedDateTime.now(INDIA)
-        require(!NseEquitySessionCalendar.isOpen(localNow) && !NseEquitySessionCalendar.isWarmupWindow(localNow)) {
-            "Manual NSE archive import is paused during market hours and the pre-open warmup to protect Fixed scan performance"
+        val premarketWarmup=localNow.dayOfWeek.value in 1..5 &&
+            ((localNow.hour==8 && localNow.minute>=30) || (localNow.hour==9 && localNow.minute<15))
+        require(!NseEquitySessionCalendar.isOpen(localNow) && !premarketWarmup) {
+            "Manual NSE archive import is paused during market hours and 08:30-09:15 pre-open warmup to protect Fixed scan performance"
         }
         val imported=linkedMapOf<LocalDate,Int>()
         var skipped=0

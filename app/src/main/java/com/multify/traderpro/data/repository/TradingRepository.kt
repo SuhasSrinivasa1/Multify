@@ -13819,7 +13819,17 @@ class TradingRepository @Inject constructor(
      */
     /** User-driven ZIP import runs entirely on IO, never on the UI or Fixed scanner thread. */
     suspend fun restoreLearningFromLogs(uri: Uri): LearningRestoreResult = withContext(Dispatchers.IO) {
+        requireResearchMaintenanceWindow()
         learningRestoreMutex.withLock { restoreLearningFromLogsOnIo(uri) }
+    }
+
+    private fun requireResearchMaintenanceWindow() {
+        val now = ZonedDateTime.now(INDIA)
+        val premarketWarmup = now.dayOfWeek.value in 1..5 &&
+            ((now.hour == 8 && now.minute >= 30) || (now.hour == 9 && now.minute < 15))
+        check(!com.multify.traderpro.engine.NseEquitySessionCalendar.isOpen(now) && !premarketWarmup) {
+            "Research backup/restore is paused during NSE market hours and 08:30-09:15 pre-open warmup to protect Fixed scan performance"
+        }
     }
 
     private suspend fun restoreLearningFromLogsOnIo(uri: Uri): LearningRestoreResult {
@@ -14221,6 +14231,7 @@ class TradingRepository @Inject constructor(
         uri: Uri,
         progress: ((String, Int) -> Unit)? = null
     ): LogExportResult = withContext(Dispatchers.IO) {
+        requireResearchMaintenanceWindow()
         // Serialization and SAF writes must not run on Android's main dispatcher.
         // This export does not change trading or Fixed publication.
         val gson = GsonBuilder().setPrettyPrinting().create()
