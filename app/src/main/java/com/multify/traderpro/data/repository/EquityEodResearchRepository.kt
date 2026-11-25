@@ -105,7 +105,9 @@ data class EquityResearchSnapshot(
     val lowCapAudit3: String = "",
     val lowCapAudit6: String = "",
     val lastSource: String = "",
-    val lastSuccessfulImportAtMs: Long = 0L
+    val lastSuccessfulImportAtMs: Long = 0L,
+    val researchMarketCaps: Map<String,String> = emptyMap(),
+    val researchSnapshotAtMs: Long = 0L
 )
 data class EquityEodRefreshProgress(
     val importedDays: Int,
@@ -1219,7 +1221,9 @@ class EquityEodResearchRepository @Inject constructor(
             else if(com.multify.traderpro.engine.InstitutionalHistoryPolicy.slot(at)!=null && !institutionalStore.hasTrackedSymbols())
                 audit.logAsync("INSTITUTIONAL_RESEARCH","HOURLY_NO_TRACKED_DISCLOSURES",mapOf("hour_ist" to at.hour,"groww_api_calls_added" to 0))
         }
-        val memberSet = members().keys
+        if(prefs.getString("pulse_date","")==at.toLocalDate().toString() &&
+            at.toInstant().toEpochMilli()-prefs.getLong("pulse_at_ms",0L) in 0L until 300_000L) return
+        val memberSet = members().keys + amfiMarketCapDataset.labels.keys
         val live = current.filter { (symbol,price) ->
             symbol in memberSet && price.isFinite() && price > 0.0
         }
@@ -1517,7 +1521,10 @@ class EquityEodResearchRepository @Inject constructor(
         val adaptive6Run=adaptiveLowStore.latestRun(6)
         val adaptive3Learning=adaptiveLowStore.learning(3)
         val adaptive6Learning=adaptiveLowStore.learning(6)
-        val memberMap=members()
+        val originalMembers=members()
+        val researchCaps=marketCaps.labels.mapValues{it.value.category}
+        val memberMap=originalMembers + researchCaps.keys.filter{it !in originalMembers}
+            .associateWith{valuation.industryBySymbol[it].orEmpty()}
         val history=linkedMapOf<String,MutableList<EquityEodBar>>()
         val members=memberMap.keys.toList()
         for (chunk in members.chunked(80)) {
@@ -1539,31 +1546,45 @@ class EquityEodResearchRepository @Inject constructor(
         val pulse=if(fresh) unpackPulse("pulse_prices") else emptyMap()
         val opens=if(fresh) unpackPulse("pulse_open") else emptyMap()
         val five=history.mapValues { (_,bars) ->
-            if(bars.size>=6) (bars.last().close/bars[bars.lastIndex-5].close-1)*100 else Double.NaN
+            if(bars.size>=6 && bars.last().date.toString()==latest) (bars.last().close/bars[bars.lastIndex-5].close-1)*100 else Double.NaN
         }
         val peerIntraday=memberMap.keys.mapNotNull { sym ->
             val price=pulse[sym];val open=opens[sym]
             if(price!=null && open!=null && open>0) sym to ((price/open-1)*100) else null
         }.toMap()
-        val allFive=memberMap.keys.mapNotNull { five[it]?.takeIf(Double::isFinite) }
-        val allIntraday=memberMap.keys.mapNotNull { peerIntraday[it] }
+        val originalKeys=originalMembers.keys
+        val allFive=originalKeys.mapNotNull { five[it]?.takeIf(Double::isFinite) }
+        val allIntraday=originalKeys.mapNotNull { peerIntraday[it] }
+        val capGroups=members.filter{it !in originalKeys}.groupBy{researchCaps[it].orEmpty()}
+        val capSectorGroups=members.filter{it !in originalKeys}.groupBy{
+            researchCaps[it].orEmpty()+"|"+memberMap[it].orEmpty()
+        }
+        val capFive=capGroups.mapValues{(_,keys)->keys.mapNotNull{five[it]?.takeIf(Double::isFinite)}}
+        val capIntraday=capGroups.mapValues{(_,keys)->keys.mapNotNull{peerIntraday[it]}}
+        val originalSectorGroups=originalKeys.groupBy{memberMap[it].orEmpty()}
         // This is equal-weighted constituent pulse breadth; it is NOT the live Nifty index.
         val liveLargeBreadth=allIntraday.takeIf{it.size>=10}
             ?.let {moves -> moves.count { it>0.0 }.toDouble()/moves.size*100.0 }
         val result=members.mapNotNull { symbol ->
             val sector=memberMap[symbol].orEmpty()
-            val sectorKeys=memberMap.filterValues { it==sector }.keys
+            val original=symbol in originalKeys
+            val cap=researchCaps[symbol].orEmpty()
+            if(!original && history[symbol]?.lastOrNull()?.date?.toString()!=latest) return@mapNotNull null
+            val sectorKeys=if(original)originalSectorGroups[sector].orEmpty()
+                else if(sector.isBlank())emptyList() else capSectorGroups[cap+"|"+sector].orEmpty()
             val sectorFive=sectorKeys.mapNotNull { five[it]?.takeIf(Double::isFinite) }
             val sectorIntraday=sectorKeys.mapNotNull { peerIntraday[it] }
+            val broadFive=if(original)allFive else capFive[cap].orEmpty()
+            val broadIntraday=if(original)allIntraday else capIntraday[cap].orEmpty()
             // Some sectors contain only 1–2 stocks in a fallback universe. Use
             // the BROAD peer proxy, explicitly labeled, rather than excluding
             // the constituent from all research opportunities.
             val broad=sectorFive.size<3 || (pulse.isNotEmpty() && sectorIntraday.size<3)
             LargeCapEquityResearchPolicy.scoreLargeCap(symbol,sector,history[symbol].orEmpty(),
-                if(broad)allFive else sectorFive,
-                if(broad)allIntraday else sectorIntraday,
+                if(broad)broadFive else sectorFive,
+                if(broad)broadIntraday else sectorIntraday,
                 pulse[symbol],opens[symbol],
-                comparisonBasis=if(broad)"LARGE_CAP_PEER_PROXY" else "SECTOR_PEERS")
+                comparisonBasis=if(broad)if(original)"LARGE_CAP_PEER_PROXY" else "CAP_PEER_PROXY" else "SECTOR_PEERS")
         }.sortedWith(compareByDescending<LargeCapEquityObservation> { it.swingResearch }
             .thenByDescending { it.intradayResearch }.thenByDescending { it.relativeFiveDayPct ?: -999.0 })
         // Stock, Nifty and sector features use only data that existed as of the
@@ -1608,6 +1629,7 @@ class EquityEodResearchRepository @Inject constructor(
         // EOD day, even when they are not actionable. Without this denominator,
         // precision-only learning cannot reveal false negatives and selection bias.
         if(latest.isNotBlank() && lastUniverseCapturedDay != latest &&
+            afterHours(ZonedDateTime.now(INDIA)) &&
             !LocalDate.parse(latest).isBefore(today.minusDays(4))) {
             for(row in result) {
                 val item=evidence[row.symbol] ?: continue
@@ -1643,6 +1665,8 @@ class EquityEodResearchRepository @Inject constructor(
             threeMonthLowRows=threeMonthRows,
             sixMonthLowRows=sixMonthRows,
             largeCaps=result,
+            researchMarketCaps=researchCaps,
+            researchSnapshotAtMs=System.currentTimeMillis(),
             completedDays=totalDays,
             firstDay=first,
             threeMonthCompletedDays=three.sessions,
