@@ -273,7 +273,7 @@ internal fun SixMonthLowResearchScreen(state: TraderUiState, onScan: (Int) -> Un
                 Text("Import official NSE EOD files")
             }
             Text(
-                "Fallback when NSE archive access is blocked: download UDiFF ZIP or Full Bhavcopy CSV files from NSE All Reports, then select multiple files here. Each file must pass date, OHLC, duplicate-symbol and minimum 1,500 EQ-row checks. Local import makes zero Groww/network calls.",
+                "Fallback when NSE archive access is blocked: download UDiFF ZIP or Full Bhavcopy CSV files from the official NSE All Reports page, then select multiple files here. Date, OHLC, duplicate-symbol and minimum 1,500 EQ-row checks are applied. File origin is not cryptographically verified. Import is paused during market hours and pre-open warmup; zero Groww/network calls.",
                 style=MaterialTheme.typography.labelSmall
             )
             val storedSessions=if(isThree)research.threeMonthCompletedDays else research.completedDays
