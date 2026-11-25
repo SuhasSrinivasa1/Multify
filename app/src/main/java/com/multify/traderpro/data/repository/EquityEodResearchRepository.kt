@@ -1237,6 +1237,137 @@ class EquityEodResearchRepository @Inject constructor(
             }?.let { row.substring(0,i) to it }
         }.toMap()
 
+    /** Export only the independent NSE/institutional research stores; never broker, Room or order state. */
+    fun exportPortableResearchBackup():PortableResearchBackup=synchronized(lock) {
+        val databases=linkedMapOf<String,ByteArray>()
+        ResearchDatabaseBackup.exportBytes(context,db,EOD_DATABASE_NAME)?.let {
+            databases[EOD_DATABASE_NAME]=it
+        }
+        valuationStore.exportBackupBytes()?.let { databases["equity_pe_research_v1.db"]=it }
+        largeWatchStore.exportBackupBytes()?.let { databases["large_watch_learning_v1.db"]=it }
+        adaptiveLowStore.exportBackupBytes()?.let { databases["adaptive_low_research_v1.db"]=it }
+        val preferences=linkedMapOf(
+            "eod_research_state_prefs.json" to SharedPrefsBackupCodec.encode(prefs),
+            "institutional_disclosure_prefs.json" to institutionalStore.exportBackupJson()
+        )
+        val files=com.google.gson.JsonObject()
+        databases.forEach { (name,bytes) ->
+            files.add(name,com.google.gson.JsonObject().apply {
+                addProperty("kind","sqlite")
+                addProperty("size",bytes.size)
+                addProperty("sha256",sha256(bytes))
+            })
+        }
+        preferences.forEach { (name,value) ->
+            val bytes=value.toByteArray(Charsets.UTF_8)
+            files.add(name,com.google.gson.JsonObject().apply {
+                addProperty("kind","preferences")
+                addProperty("size",bytes.size)
+                addProperty("sha256",sha256(bytes))
+            })
+        }
+        val manifest=com.google.gson.JsonObject().apply {
+            addProperty("schema","PHAYRA_RESEARCH_BACKUP_V1")
+            addProperty("created_at_ms",System.currentTimeMillis())
+            addProperty("scope","NSE_EOD_AND_RESEARCH_ONLY_NO_TRADING_STATE")
+            add("files",files)
+        }
+        PortableResearchBackup(databases,preferences,com.google.gson.GsonBuilder().setPrettyPrinting().create().toJson(manifest))
+    }
+
+    /**
+     * Check every manifest checksum before merging. Existing rows win; only absent research rows
+     * are inserted. This never imports credentials, holdings, orders, Auto-Buy switches or GTT state.
+     */
+    fun restorePortableResearchBackup(
+        databaseEntries:Map<String,ByteArray>,
+        preferenceEntries:Map<String,String>,
+        manifestJson:String?
+    ):PortableResearchRestoreResult {
+        if(manifestJson.isNullOrBlank())return PortableResearchRestoreResult()
+        val manifest=com.google.gson.JsonParser.parseString(manifestJson).asJsonObject
+        require(manifest.get("schema")?.asString=="PHAYRA_RESEARCH_BACKUP_V1") {
+            "Unsupported portable research backup schema"
+        }
+        val files=manifest.getAsJsonObject("files")?:error("Research backup manifest has no files")
+        val verifiedDatabases=linkedMapOf<String,ByteArray>()
+        val verifiedPreferences=linkedMapOf<String,String>()
+        for((name,metaElement) in files.entrySet()){
+            val meta=metaElement.asJsonObject
+            val kind=meta.get("kind").asString
+            val expectedSize=meta.get("size").asLong
+            val expectedHash=meta.get("sha256").asString
+            when(kind){
+                "sqlite"->{
+                    val bytes=databaseEntries[name]?:error("Research backup is missing database "+name)
+                    require(bytes.size.toLong()==expectedSize && sha256(bytes)==expectedHash) {
+                        "Research database checksum mismatch: "+name
+                    }
+                    verifiedDatabases[name]=bytes
+                }
+                "preferences"->{
+                    val value=preferenceEntries[name]?:error("Research backup is missing preferences "+name)
+                    val bytes=value.toByteArray(Charsets.UTF_8)
+                    require(bytes.size.toLong()==expectedSize && sha256(bytes)==expectedHash) {
+                        "Research preference checksum mismatch: "+name
+                    }
+                    verifiedPreferences[name]=value
+                }
+                else->error("Unknown research backup entry kind")
+            }
+        }
+        val beforeRows=countResearchRows("eod")
+        val beforeSessions=countResearchRows("eod_days")
+        var otherRows=0
+        var databasesMerged=0
+        verifiedDatabases[EOD_DATABASE_NAME]?.let {
+            ResearchDatabaseBackup.mergeBytes(context,db,EOD_DATABASE_NAME,it)
+            databasesMerged++
+        }
+        verifiedDatabases["equity_pe_research_v1.db"]?.let {
+            otherRows+=valuationStore.mergeBackupBytes(it).insertedRows
+            databasesMerged++
+        }
+        verifiedDatabases["large_watch_learning_v1.db"]?.let {
+            otherRows+=largeWatchStore.mergeBackupBytes(it).insertedRows
+            databasesMerged++
+        }
+        verifiedDatabases["adaptive_low_research_v1.db"]?.let {
+            otherRows+=adaptiveLowStore.mergeBackupBytes(it).insertedRows
+            databasesMerged++
+        }
+        var preferenceCount=0
+        verifiedPreferences["eod_research_state_prefs.json"]?.let {
+            preferenceCount+=SharedPrefsBackupCodec.restoreMerge(prefs,it)
+        }
+        verifiedPreferences["institutional_disclosure_prefs.json"]?.let {
+            preferenceCount+=institutionalStore.restoreBackupJson(it)
+        }
+        val eodRows=(countResearchRows("eod")-beforeRows).coerceAtLeast(0)
+        val eodSessions=(countResearchRows("eod_days")-beforeSessions).coerceAtLeast(0)
+        audit.logAsync("MIGRATION","PORTABLE_EOD_RESEARCH_RESTORED",mapOf(
+            "eod_rows_merged" to eodRows,
+            "eod_sessions_merged" to eodSessions,
+            "other_research_rows_merged" to otherRows,
+            "preference_keys_merged" to preferenceCount,
+            "databases_merged" to databasesMerged,
+            "trading_state_restored" to false,
+            "credentials_restored" to false,
+            "broker_orders_restored" to false
+        ))
+        PortableResearchRestoreResult(eodRows,eodSessions,otherRows,preferenceCount,databasesMerged)
+    }
+
+    private fun countResearchRows(table:String):Int=synchronized(lock) {
+        require(table in setOf("eod","eod_days"))
+        db.readableDatabase.rawQuery("SELECT COUNT(*) FROM "+table,null).use {
+            if(it.moveToFirst())it.getInt(0) else 0
+        }
+    }
+
+    private fun sha256(bytes:ByteArray):String =
+        MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+
     fun snapshot(): EquityResearchSnapshot = synchronized(lock) {
         val marketCaps = amfiMarketCapDataset
         val valuation = valuationStore.snapshot()
