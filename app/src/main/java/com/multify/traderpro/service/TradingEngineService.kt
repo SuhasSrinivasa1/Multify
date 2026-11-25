@@ -555,7 +555,8 @@ class TradingEngineService : Service() {
                     val settings = preferences.settings.first()
                     val needsAlpha = settings.fixedScannerEnabled || settings.armEnabled ||
                         settings.fixedAutoBuyEnabled || settings.workingRangeEnabled
-                    val premarket = com.multify.traderpro.engine.NseEquitySessionCalendar.isWarmupWindow(now)
+                    val premarket = now.dayOfWeek.value in 1..5 &&
+                        ((now.hour == 8 && now.minute >= 30) || (now.hour == 9 && now.minute < 15))
                     val authRequired = recoveryGate.requiresReconnect() ||
                         !settings.brokerAuthenticated || !settings.staticIpMatched
                     if (premarket && needsAlpha && authRequired) {
