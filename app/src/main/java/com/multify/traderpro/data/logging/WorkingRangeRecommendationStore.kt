@@ -596,8 +596,9 @@ class WorkingRangeRecommendationStore(context: Context) {
     }
 
     private fun persistLocked() {
-        prefs.edit().putString(KEY_ROWS, gson.toJson(rows)).apply()
-        persistStatsLocked()
+        val editor = prefs.edit().putString(KEY_ROWS, gson.toJson(rows))
+        appendStats(editor)
+        editor.apply()
     }
 
     private fun persistOrderIntentDurablyLocked(): Boolean {
@@ -606,12 +607,20 @@ class WorkingRangeRecommendationStore(context: Context) {
     }
 
     private fun persistRejectionsLocked() {
-        prefs.edit().putString(KEY_REJECTIONS, gson.toJson(rejections)).apply()
-        persistStatsLocked()
+        val editor = prefs.edit().putString(KEY_REJECTIONS, gson.toJson(rejections))
+        appendStats(editor)
+        editor.apply()
     }
 
     private fun persistStatsLocked() {
-        prefs.edit()
+        val editor = prefs.edit()
+        appendStats(editor)
+        editor.apply()
+    }
+
+    /** Batch counters into the same preference commit as row/rejection writes to avoid extra I/O per candidate. */
+    private fun appendStats(editor: android.content.SharedPreferences.Editor) {
+        editor
             .putLong(KEY_STATS_EVALUATED, evaluatedObservations)
             .putLong(KEY_STATS_QUALIFYING, qualifyingObservations)
             .putLong(KEY_STATS_REJECTED, rejectedObservations)
@@ -622,7 +631,6 @@ class WorkingRangeRecommendationStore(context: Context) {
             .putLong(KEY_STATS_SCAN_GENERATIONS, observedScanGenerations)
             .putLong(KEY_STATS_LAST_OBSERVED, lastObservationAtMs)
             .putLong(KEY_STATS_LAST_SCAN_STARTED, lastScanStartedAtMs)
-            .apply()
     }
 
     companion object {
