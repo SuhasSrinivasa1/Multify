@@ -14340,6 +14340,8 @@ class TradingRepository @Inject constructor(
                     zip.closeEntry()
                     written(name)
                 }
+                val dailyShadowReview=File(appContext.filesDir,"daily_shadow_review_v1.json")
+                if(dailyShadowReview.isFile) addText("daily_shadow_review_v1.json",dailyShadowReview.readText())
                 add("settings.json", safeSettings)
                 add("signals.json", signals)
                 add("holdings.json", positions)
