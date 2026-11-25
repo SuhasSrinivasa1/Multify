@@ -1369,10 +1369,12 @@ class EquityEodResearchRepository @Inject constructor(
         PortableResearchRestoreResult(eodRows,eodSessions,otherRows,preferenceCount,databasesMerged)
     }
 
-    private fun countResearchRows(table:String):Int=synchronized(lock) {
-        require(table in setOf("eod","eod_days"))
-        db.readableDatabase.rawQuery("SELECT COUNT(*) FROM "+table,null).use {
-            if(it.moveToFirst())it.getInt(0) else 0
+    private fun countResearchRows(table:String):Int {
+        return synchronized(lock) {
+            require(table in setOf("eod","eod_days"))
+            db.readableDatabase.rawQuery("SELECT COUNT(*) FROM "+table,null).use { cursor ->
+                if(cursor.moveToFirst()) cursor.getInt(0) else 0
+            }
         }
     }
 
