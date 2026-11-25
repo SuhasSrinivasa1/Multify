@@ -80,6 +80,16 @@ class WorkingRangeRecommendationStore(context: Context) {
         gson.fromJson<MutableList<StoredRow>>(prefs.getString(KEY_ROWS, "[]"), rowType)
             ?: mutableListOf()
     }.getOrDefault(mutableListOf())
+    private var evaluatedObservations = prefs.getLong(KEY_STATS_EVALUATED, 0L)
+    private var qualifyingObservations = prefs.getLong(KEY_STATS_QUALIFYING, 0L)
+    private var rejectedObservations = prefs.getLong(KEY_STATS_REJECTED, 0L)
+    private var firstQualifiedEvents = prefs.getLong(KEY_STATS_FIRST_QUALIFIED, 0L)
+    private var confirmedEvents = prefs.getLong(KEY_STATS_CONFIRMED, 0L)
+    private var pendingDroppedEvents = prefs.getLong(KEY_STATS_PENDING_DROPPED, 0L)
+    private var pendingExpiredEvents = prefs.getLong(KEY_STATS_PENDING_EXPIRED, 0L)
+    private var observedScanGenerations = prefs.getLong(KEY_STATS_SCAN_GENERATIONS, 0L)
+    private var lastObservationAtMs = prefs.getLong(KEY_STATS_LAST_OBSERVED, 0L)
+    private var lastScanStartedAtMs = prefs.getLong(KEY_STATS_LAST_SCAN_STARTED, 0L)
 
     /**
      * Auto-Buy permission only. Do not change research observation, invalidate
@@ -193,6 +203,13 @@ class WorkingRangeRecommendationStore(context: Context) {
         }
         val key = "$date|$symbol"
         synchronized(lock) {
+            evaluatedObservations++
+            if (decision.matches) qualifyingObservations++ else rejectedObservations++
+            lastObservationAtMs = maxOf(lastObservationAtMs, observedAtMs)
+            if (scanStartedAtMs > lastScanStartedAtMs) {
+                observedScanGenerations++
+                lastScanStartedAtMs = scanStartedAtMs
+            }
             val index = rows.indexOfFirst { it.dateIst == date && it.symbol == symbol }
             val existing = rows.getOrNull(index)
             if (existing != null && existing.dto.confirmedAtMs > 0L) {
@@ -215,6 +232,7 @@ class WorkingRangeRecommendationStore(context: Context) {
                 while (rejections.size > 600) rejections.removeAt(0)
                 persistRejectionsLocked()
                 if (existing != null && existing.dto.state == "PENDING_CONFIRMATION") {
+                    pendingDroppedEvents++
                     existing.dto = existing.dto.copy(
                         state = "PENDING_DROPPED",
                         lastObservedAtMs = observedAtMs,
@@ -227,6 +245,7 @@ class WorkingRangeRecommendationStore(context: Context) {
                 return
             }
             if (existing == null || existing.dto.state != "PENDING_CONFIRMATION") {
+                firstQualifiedEvents++
                 val first = WorkingRangeRecommendationDto(
                     symbol = symbol,
                     scanStartedAtMs = scanStartedAtMs,
@@ -269,7 +288,10 @@ class WorkingRangeRecommendationStore(context: Context) {
             // requires distinct official scan generations before Alpha BUY.
             if (!com.multify.traderpro.engine.WorkingRangeDistinctScanPolicy.isIndependentSecondScan(
                     existing.dto.scanStartedAtMs, scanStartedAtMs,
-                    existing.lastPassAtMs, observedAtMs)) return
+                    existing.lastPassAtMs, observedAtMs)) {
+                persistStatsLocked()
+                return
+            }
 
             val ageMs = (observedAtMs - existing.dto.firstQualifiedAtMs).coerceAtLeast(0L)
             val ageMinutes = ageMs / 60_000.0
@@ -279,6 +301,7 @@ class WorkingRangeRecommendationStore(context: Context) {
             if (ageMinutes > WorkingRangeCandidatePolicy.MAX_CANDIDATE_AGE_MINUTES ||
                 drift > WorkingRangeCandidatePolicy.MAX_DRIFT_FROM_FIRST_QUALIFIED_PCT ||
                 gap < 0L || gap > WorkingRangeCandidatePolicy.MAX_CONFIRMATION_GAP_MS) {
+                pendingExpiredEvents++
                 existing.dto = existing.dto.copy(
                     state = "PENDING_EXPIRED",
                     lastObservedAtMs = observedAtMs,
@@ -301,6 +324,7 @@ class WorkingRangeRecommendationStore(context: Context) {
             val confirmed = existing.consecutivePasses >=
                 WorkingRangeCandidatePolicy.REQUIRED_CONSECUTIVE_OBSERVATIONS
             val target = if (confirmed) price * (1.0 + targetPct / 100.0) else 0.0
+            if (confirmed) confirmedEvents++
             existing.dto = existing.dto.copy(
                 state = if (confirmed) "IN_RANGE" else "PENDING_CONFIRMATION",
                 entryPrice = if (confirmed) price else 0.0,
@@ -458,6 +482,7 @@ class WorkingRangeRecommendationStore(context: Context) {
     fun export(): Map<String, Any?> {
         runCatching { queue.submit {}.get(5, TimeUnit.SECONDS) }
         return synchronized(lock) {
+        val recentReasonCounts = rejections.flatMap { it.reasons }.groupingBy { it }.eachCount()
         mapOf(
             "schema" to "working_range_research_v9025",
             "research_observation_always_on" to true,
@@ -507,6 +532,27 @@ class WorkingRangeRecommendationStore(context: Context) {
             "legacy_pilot_rows_never_order_eligible" to true,
             "auto_buy_intent_write_is_synchronous_disk_commit" to true,
             "deferred_queue_observations" to droppedQueueItems.get(),
+            "throughput" to mapOf(
+                "candidate_evaluations_total" to evaluatedObservations,
+                "qualifying_observations_total" to qualifyingObservations,
+                "rejected_observations_total" to rejectedObservations,
+                "first_qualification_events_total" to firstQualifiedEvents,
+                "confirmed_events_total" to confirmedEvents,
+                "pending_dropped_total" to pendingDroppedEvents,
+                "pending_expired_total" to pendingExpiredEvents,
+                "distinct_scan_generations_observed" to observedScanGenerations,
+                "pending_confirmation_rows_current" to rows.count { it.dto.state == "PENDING_CONFIRMATION" },
+                "confirmed_in_range_rows_current" to rows.count { it.dto.state == "IN_RANGE" },
+                "retained_rejection_observations" to rejections.size,
+                "recent_rejection_reason_counts" to recentReasonCounts,
+                "recent_distinct_observation_dates" to (rows.map { it.dateIst } + rejections.map { it.dateIst }).distinct().sorted(),
+                "last_observation_at_ms" to lastObservationAtMs,
+                "last_scan_started_at_ms" to lastScanStartedAtMs,
+                "queue_drops_current_process" to droppedQueueItems.get(),
+                "research_observer_always_on" to true,
+                "additional_groww_discovery_calls" to 0,
+                "selection_or_confirmation_thresholds_changed" to false
+            ),
             "rows" to rows.map { mapOf("date_ist" to it.dateIst, "symbol" to it.symbol,
                 "first_qualified_price" to it.firstQualifiedPrice,
                 "consecutive_passes" to it.consecutivePasses, "last_pass_at_ms" to it.lastPassAtMs,
@@ -522,6 +568,7 @@ class WorkingRangeRecommendationStore(context: Context) {
 
     private fun persistLocked() {
         prefs.edit().putString(KEY_ROWS, gson.toJson(rows)).apply()
+        persistStatsLocked()
     }
 
     private fun persistOrderIntentDurablyLocked(): Boolean {
@@ -531,10 +578,36 @@ class WorkingRangeRecommendationStore(context: Context) {
 
     private fun persistRejectionsLocked() {
         prefs.edit().putString(KEY_REJECTIONS, gson.toJson(rejections)).apply()
+        persistStatsLocked()
+    }
+
+    private fun persistStatsLocked() {
+        prefs.edit()
+            .putLong(KEY_STATS_EVALUATED, evaluatedObservations)
+            .putLong(KEY_STATS_QUALIFYING, qualifyingObservations)
+            .putLong(KEY_STATS_REJECTED, rejectedObservations)
+            .putLong(KEY_STATS_FIRST_QUALIFIED, firstQualifiedEvents)
+            .putLong(KEY_STATS_CONFIRMED, confirmedEvents)
+            .putLong(KEY_STATS_PENDING_DROPPED, pendingDroppedEvents)
+            .putLong(KEY_STATS_PENDING_EXPIRED, pendingExpiredEvents)
+            .putLong(KEY_STATS_SCAN_GENERATIONS, observedScanGenerations)
+            .putLong(KEY_STATS_LAST_OBSERVED, lastObservationAtMs)
+            .putLong(KEY_STATS_LAST_SCAN_STARTED, lastScanStartedAtMs)
+            .apply()
     }
 
     companion object {
         private const val KEY_ROWS = "rows_json"
         private const val KEY_REJECTIONS = "rejections_json"
+        private const val KEY_STATS_EVALUATED = "stats_evaluated_v9052"
+        private const val KEY_STATS_QUALIFYING = "stats_qualifying_v9052"
+        private const val KEY_STATS_REJECTED = "stats_rejected_v9052"
+        private const val KEY_STATS_FIRST_QUALIFIED = "stats_first_qualified_v9052"
+        private const val KEY_STATS_CONFIRMED = "stats_confirmed_v9052"
+        private const val KEY_STATS_PENDING_DROPPED = "stats_pending_dropped_v9052"
+        private const val KEY_STATS_PENDING_EXPIRED = "stats_pending_expired_v9052"
+        private const val KEY_STATS_SCAN_GENERATIONS = "stats_scan_generations_v9052"
+        private const val KEY_STATS_LAST_OBSERVED = "stats_last_observed_v9052"
+        private const val KEY_STATS_LAST_SCAN_STARTED = "stats_last_scan_started_v9052"
     }
 }
