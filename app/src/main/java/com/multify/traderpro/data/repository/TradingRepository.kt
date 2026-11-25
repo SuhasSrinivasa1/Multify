@@ -15283,7 +15283,7 @@ class TradingRepository @Inject constructor(
             "suhas_shree_eod_research_v1.db",
             "equity_pe_research_v1.db",
             "large_watch_learning_v1.db",
-            "adaptive_low_research_v1.db"
+            "adaptive_low_research_v1.db", "single_low_research_v1.db"
         )
         private const val MAX_RESTORE_ENTRY_BYTES = 128L * 1024L * 1024L
         private const val MAX_RESTORE_TOTAL_BYTES = 256L * 1024L * 1024L
