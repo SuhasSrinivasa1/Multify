@@ -107,7 +107,15 @@ data class EquityResearchSnapshot(
     val lastSource: String = "",
     val lastSuccessfulImportAtMs: Long = 0L,
     val researchMarketCaps: Map<String,String> = emptyMap(),
-    val researchSnapshotAtMs: Long = 0L
+    val researchSnapshotAtMs: Long = 0L,
+    val historicalLow3: List<com.multify.traderpro.engine.HistoricalLowDiscovery> = emptyList(),
+    val historicalLow6: List<com.multify.traderpro.engine.HistoricalLowDiscovery> = emptyList(),
+    val singleRebound3: List<AdaptiveLowCandidate> = emptyList(),
+    val singleRebound6: List<AdaptiveLowCandidate> = emptyList(),
+    val singleReboundLearning3: List<AdaptiveLowResearchSummary> = emptyList(),
+    val singleReboundLearning6: List<AdaptiveLowResearchSummary> = emptyList(),
+    val lowDiscoveryReady3: Boolean = false,
+    val lowDiscoveryReady6: Boolean = false
 )
 data class EquityEodRefreshProgress(
     val importedDays: Int,
@@ -247,6 +255,13 @@ class EquityEodResearchRepository @Inject constructor(
     private val valuationStore = EquityLowValuationStore(context)
     private val largeWatchStore = LargeWatchLearningStore(context)
     private val adaptiveLowStore = AdaptiveLowResearchStore(context)
+    private val singleLowStore = AdaptiveLowResearchStore(context,"single_low_research_v1.db")
+    private val lowDiscoveryGson = com.google.gson.Gson()
+    private fun readDiscovery(months:Int,day:String):List<com.multify.traderpro.engine.HistoricalLowDiscovery> {
+        if(prefs.getString("low_discovery_${months}_day","")!=day)return emptyList()
+        val raw=prefs.getString("low_discovery_${months}_rows",null)?:return emptyList()
+        return runCatching{lowDiscoveryGson.fromJson(raw,Array<com.multify.traderpro.engine.HistoricalLowDiscovery>::class.java).toList()}.getOrDefault(emptyList())
+    }
     private val institutionalStore = InstitutionalDisclosureStore(context)
     private var lastUniverseCapturedDay = ""
     private val prefs = context.getSharedPreferences("suhas_shree_eod_state", Context.MODE_PRIVATE)
@@ -910,8 +925,8 @@ class EquityEodResearchRepository @Inject constructor(
             three.first,three.second.takeIf{it.isNotBlank()}?.let(LocalDate::parse),today)
         val sixReady=meta.first>=105 && meta.second.isNotBlank() &&
             LocalDate.parse(meta.second).isBefore(today.minusMonths(5).plusDays(14))
-        val do3=threeReady && (!adaptiveLowStore.hasRun(latest,3) || prefs.getString("low_cap_audit_3_day","")!=latest || prefs.getInt("low_cap_audit_3_version",0)!=2)
-        val do6=sixReady && (!adaptiveLowStore.hasRun(latest,6) || prefs.getString("low_cap_audit_6_day","")!=latest || prefs.getInt("low_cap_audit_6_version",0)!=2)
+        val do3=threeReady && (!adaptiveLowStore.hasRun(latest,3) || prefs.getString("low_cap_audit_3_day","")!=latest || prefs.getInt("low_cap_audit_3_version",0)!=2 || !singleLowStore.hasRun(latest,3) || prefs.getString("low_discovery_3_day","")!=latest)
+        val do6=sixReady && (!adaptiveLowStore.hasRun(latest,6) || prefs.getString("low_cap_audit_6_day","")!=latest || prefs.getInt("low_cap_audit_6_version",0)!=2 || !singleLowStore.hasRun(latest,6) || prefs.getString("low_discovery_6_day","")!=latest)
         if(!do3 && !do6) {
             resolveMaturedAdaptiveLowOutcomes()
             return
@@ -926,6 +941,15 @@ class EquityEodResearchRepository @Inject constructor(
         val nRegime=LargeIndexResearchPolicy.regime(nPct)
         val rows3=mutableListOf<AdaptiveLowCandidate>()
         val rows6=mutableListOf<AdaptiveLowCandidate>()
+        val single3=mutableListOf<AdaptiveLowCandidate>()
+        val single6=mutableListOf<AdaptiveLowCandidate>()
+        val discovery3=mutableListOf<com.multify.traderpro.engine.HistoricalLowDiscovery>()
+        val discovery6=mutableListOf<com.multify.traderpro.engine.HistoricalLowDiscovery>()
+        fun discover(symbol:String,months:Int,bars:List<EquityEodBar>,minimum:Int):com.multify.traderpro.engine.HistoricalLowDiscovery? =
+            com.multify.traderpro.engine.HistoricalLowDiscoveryPolicy.evaluate(symbol,months,day,bars,minimum)
+                ?.copy(marketCapCategory=capData.labels[symbol]?.category?:"UNCLASSIFIED",
+                    companyName=instrumentNames[symbol].orEmpty(),
+                    sector=(valData.industryBySymbol[symbol]?:members[symbol]).orEmpty())
         var eligible3=0
         var eligible6=0
         var processed=0
@@ -968,6 +992,8 @@ class EquityEodResearchRepository @Inject constructor(
                 mark(audit3,cap,"UNIVERSE")
                 if(subset.size>=min3) {
                     eligible3++
+                    discover(symbol,3,subset,(min3-1).coerceAtLeast(1))?.let{discovery3+=it}
+                    AdaptiveLowPatternPolicy.evaluateSingleRebound(symbol,3,day,subset)?.let{single3+=enrich(it)}
                     mark(audit3,cap,"HISTORY_ELIGIBLE")
                     AdaptiveLowPatternPolicy.evaluate(symbol,3,day,subset){reason->
                         mark(audit3,cap,reason)
@@ -982,6 +1008,8 @@ class EquityEodResearchRepository @Inject constructor(
                 mark(audit6,cap,"UNIVERSE")
                 if(bars.size>=min6) {
                     eligible6++
+                    discover(symbol,6,bars,(min6-1).coerceAtLeast(1))?.let{discovery6+=it}
+                    AdaptiveLowPatternPolicy.evaluateSingleRebound(symbol,6,day,bars)?.let{single6+=enrich(it)}
                     mark(audit6,cap,"HISTORY_ELIGIBLE")
                     AdaptiveLowPatternPolicy.evaluate(symbol,6,day,bars){reason->
                         mark(audit6,cap,reason)
@@ -1044,8 +1072,22 @@ class EquityEodResearchRepository @Inject constructor(
             audit.logAsync("ADAPTIVE_LOWS","CAP_REJECTION_FUNNEL",mapOf(
                 "day" to latest,"months" to months,"by_cap" to stats,"large_cap_by_symbol" to completeDetails,"groww_api_calls" to 0))
         }
-        if(do3){adaptiveLowStore.saveDay(latest,3,exchangeUniverse,eligible3,rows3);persistCapAudit(3,audit3,large3)}
-        if(do6){adaptiveLowStore.saveDay(latest,6,exchangeUniverse,eligible6,rows6);persistCapAudit(6,audit6,large6)}
+        fun publishDiscovery(months:Int,eligible:Int,strict:List<AdaptiveLowCandidate>,single:List<AdaptiveLowCandidate>,
+            discovery:List<com.multify.traderpro.engine.HistoricalLowDiscovery>) {
+            // Separate stores: the challenger never contaminates original outcomes.
+            singleLowStore.saveDay(latest,months,exchangeUniverse,eligible,single)
+            check(prefs.edit().putString("low_discovery_${months}_rows",lowDiscoveryGson.toJson(discovery))
+                .putString("low_discovery_${months}_day",latest).commit()){"Low discovery cache write failed"}
+            audit.logAsync("ADAPTIVE_LOWS","LOW_DISCOVERY_AND_SINGLE_SHADOW",mapOf(
+                "day" to latest,"months" to months,"near_by_cap" to discovery.filter{it.distancePct>=0}.groupingBy{it.marketCapCategory}.eachCount(),
+                "breakdown_by_cap" to discovery.filter{it.distancePct<0}.groupingBy{it.marketCapCategory}.eachCount(),
+                "strict_by_cap" to strict.groupingBy{it.marketCapCategory}.eachCount(),
+                "single_by_cap" to single.groupingBy{it.marketCapCategory}.eachCount(),"groww_api_calls" to 0))
+        }
+        if(do3){adaptiveLowStore.saveDay(latest,3,exchangeUniverse,eligible3,rows3);persistCapAudit(3,audit3,large3)
+            publishDiscovery(3,eligible3,rows3,single3,discovery3)}
+        if(do6){adaptiveLowStore.saveDay(latest,6,exchangeUniverse,eligible6,rows6);persistCapAudit(6,audit6,large6)
+            publishDiscovery(6,eligible6,rows6,single6,discovery6)}
         resolveMaturedAdaptiveLowOutcomes()
         audit.logAsync("ADAPTIVE_LOWS","FULL_NSE_EOD_SUPPORT_SCAN_COMPLETE",mapOf(
             "day" to latest,"nse_eq_universe" to exchangeUniverse,
@@ -1061,7 +1103,8 @@ class EquityEodResearchRepository @Inject constructor(
 
     private fun resolveMaturedAdaptiveLowOutcomes() {
         requireAfterHours()
-        val unresolved=adaptiveLowStore.pending()
+        for(store in listOf(adaptiveLowStore,singleLowStore)) {
+        val unresolved=store.pending()
         synchronized(lock) {
             for(event in unresolved) {
                 val future=mutableListOf<Pair<String,Double>>()
@@ -1070,8 +1113,9 @@ class EquityEodResearchRepository @Inject constructor(
                     arrayOf(event.symbol,event.day)).use{c->
                     while(c.moveToNext())future+=c.getString(0) to c.getDouble(1)
                 }
-                adaptiveLowStore.resolve(event,future)
+                store.resolve(event,future)
             }
+        }
         }
     }
 
@@ -1264,6 +1308,7 @@ class EquityEodResearchRepository @Inject constructor(
         valuationStore.exportBackupBytes()?.let { databases["equity_pe_research_v1.db"]=it }
         largeWatchStore.exportBackupBytes()?.let { databases["large_watch_learning_v1.db"]=it }
         adaptiveLowStore.exportBackupBytes()?.let { databases["adaptive_low_research_v1.db"]=it }
+        singleLowStore.exportBackupBytes()?.let { databases["single_low_research_v1.db"]=it }
         val preferences=linkedMapOf(
             "eod_research_state_prefs.json" to SharedPrefsBackupCodec.encode(prefs),
             "institutional_disclosure_prefs.json" to institutionalStore.exportBackupJson()
@@ -1357,6 +1402,10 @@ class EquityEodResearchRepository @Inject constructor(
         }
         verifiedDatabases["adaptive_low_research_v1.db"]?.let {
             otherRows+=adaptiveLowStore.mergeBackupBytes(it).insertedRows
+            databasesMerged++
+        }
+        verifiedDatabases["single_low_research_v1.db"]?.let {
+            otherRows+=singleLowStore.mergeBackupBytes(it).insertedRows
             databasesMerged++
         }
         var preferenceCount=0
@@ -1692,6 +1741,14 @@ class EquityEodResearchRepository @Inject constructor(
             officialPeSymbols=valuation.peBySymbol.size,
             industryClassifiedSymbols=valuation.industryBySymbol.size,
             fullIndustryPeCoverage=fullIndustryPeCoverage,
+            historicalLow3=if(threeMonthHistoryComplete)readDiscovery(3,latest) else emptyList(),
+            historicalLow6=if(spanComplete)readDiscovery(6,latest) else emptyList(),
+            singleRebound3=if(threeMonthHistoryComplete)classifyCached(singleLowStore.rows(3,latest)) else emptyList(),
+            singleRebound6=if(spanComplete)classifyCached(singleLowStore.rows(6,latest)) else emptyList(),
+            singleReboundLearning3=singleLowStore.learningSummaries(3),
+            singleReboundLearning6=singleLowStore.learningSummaries(6),
+            lowDiscoveryReady3=threeMonthHistoryComplete && prefs.getString("low_discovery_3_day","")==latest && singleLowStore.hasRun(latest,3),
+            lowDiscoveryReady6=spanComplete && prefs.getString("low_discovery_6_day","")==latest && singleLowStore.hasRun(latest,6),
             adaptiveLowThreeRows=adaptive3,
             adaptiveLowSixRows=adaptive6,
             adaptiveLowThreeRun=adaptive3Run,
