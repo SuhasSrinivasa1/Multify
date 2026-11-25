@@ -566,7 +566,7 @@ class TraderViewModel @Inject constructor(
                 .onSuccess { result ->
                     remote.value = remote.value.copy(
                         loading = false,
-                        message = "Research restored · ${result.eodResearchSessions} EOD sessions · ${result.eodResearchRows} EOD rows · ${result.otherResearchRows} other research rows · ${result.learningCalls} learning calls · ${result.researchSnapshots} snapshots · ${result.forecasts} forecasts · ${result.champions} champions · ${result.reports} reports · ${result.positiveEvidence} positive examples · ${result.archivedFixedOutcomes} Fixed outcomes · ${result.fixedFactorSnapshots} factor snapshots. Credentials, holdings, orders, GTTs and Auto-Buy permissions were not restored.",
+                        message = "Research restored · ${result.eodResearchSessions} EOD sessions · ${result.eodResearchRows} EOD rows · ${result.otherResearchRows} other research rows · ${result.workingRangeStats} Working Range stats · ${result.learningCalls} learning calls · ${result.researchSnapshots} snapshots · ${result.forecasts} forecasts · ${result.champions} champions · ${result.reports} reports · ${result.positiveEvidence} positive examples · ${result.archivedFixedOutcomes} Fixed outcomes · ${result.fixedFactorSnapshots} factor snapshots. Credentials, holdings, orders, GTTs and Auto-Buy permissions were not restored.",
                         error = null
                     )
                     refresh(silent = true)
