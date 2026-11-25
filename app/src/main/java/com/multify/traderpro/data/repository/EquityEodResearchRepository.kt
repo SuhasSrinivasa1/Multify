@@ -1372,7 +1372,7 @@ class EquityEodResearchRepository @Inject constructor(
             "credentials_restored" to false,
             "broker_orders_restored" to false
         ))
-        PortableResearchRestoreResult(eodRows,eodSessions,otherRows,preferenceCount,databasesMerged)
+        return PortableResearchRestoreResult(eodRows,eodSessions,otherRows,preferenceCount,databasesMerged)
     }
 
     private fun countResearchRows(table:String):Int {
