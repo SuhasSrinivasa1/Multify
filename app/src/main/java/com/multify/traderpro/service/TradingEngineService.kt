@@ -55,6 +55,7 @@ class TradingEngineService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var engineJob: Job? = null
     private var mobileHealthJob: Job? = null
+    private var alphaAuthReminderJob: Job? = null
     private var positionMonitorJob: Job? = null
     private var fixedScanJob: Job? = null
     // V902_PREFETCH_FIELD_BEGIN
@@ -265,6 +266,8 @@ class TradingEngineService : Service() {
         forecastNewsJob?.cancel()
         engineJob?.cancel()
         mobileHealthJob?.cancel()
+        alphaAuthReminderJob?.cancel()
+        getSystemService(NotificationManager::class.java).cancel(ALPHA_AUTH_REMINDER_NOTIFICATION_ID)
         scope.cancel()
         auditLogger.log("RUNTIME", "FOREGROUND_ENGINE_DESTROYED")
         super.onDestroy()
@@ -298,6 +301,7 @@ class TradingEngineService : Service() {
 
     private fun startEngineLoop() {
         startMobileHealthWorker()
+        startAlphaAuthReminderWorker()
         startPositionMonitorWorker()
         startFixedScanWorker()
         // Forecast is completely frozen in v8.3. Alpha/Beta belong to Fixed;
@@ -1353,6 +1357,13 @@ class TradingEngineService : Service() {
                 NotificationManager.IMPORTANCE_DEFAULT
             ).apply { description = "Production-qualified PRIMARY forecast opportunities only." }
         )
+        manager.createNotificationChannel(
+            NotificationChannel(
+                ALPHA_AUTH_CHANNEL_ID,
+                "Alpha premarket authentication",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply { description = "Warns when Alpha authentication or registered static-IP verification is required before the NSE session." }
+        )
     }
 
     companion object {
@@ -1360,6 +1371,9 @@ class TradingEngineService : Service() {
         private const val ENGINE_CHANNEL_ID = "production_engine"
         private const val FIXED_CHANNEL_ID = "fixed_buy_recommendations_v773"
         private const val FORECAST_CHANNEL_ID = "forecast_opportunities"
+        private const val ALPHA_AUTH_CHANNEL_ID = "alpha_auth_premarket_v9052"
+        private const val ALPHA_AUTH_REMINDER_PREFS = "alpha_auth_reminder_v9052"
+        private const val ALPHA_AUTH_REMINDER_NOTIFICATION_ID = 68091
         private const val FIXED_NOTIFICATION_PREFS = "fixed_notification_v773"
         private const val FIXED_NOTIFICATION_DATE_KEY = "date"
         private const val FIXED_NOTIFICATION_KEYS_KEY = "keys"
