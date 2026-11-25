@@ -10,7 +10,7 @@ object DailyShadowTrialPolicy {
         Plan("RANGE","maximum first-qualification upward entry drift %","1.60","1.50"),
         Plan("LARGE","minimum swing five-day relative strength %","0.25","0.30"),
         Plan("LOWS","maximum distance above support %","5.00","4.90"),
-        Plan("FII_DII","verified buy rank cutoff","20","19")
+        Plan("FII_DII","verified net-buy rank cutoff","20","19")
     )
     data class Sample(val id:String,val keep:Boolean?,val hit:Boolean?,val outcomePct:Double?)
     data class Day(val day:String,val candidates:Int,val matured:Int,val retained:Int,
