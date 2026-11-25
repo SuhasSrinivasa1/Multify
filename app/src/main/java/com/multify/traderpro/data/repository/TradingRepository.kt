@@ -13778,10 +13778,14 @@ class TradingRepository @Inject constructor(
         val reports: Int,
         val positiveEvidence: Int = 0,
         val archivedFixedOutcomes: Int = 0,
-        val fixedFactorSnapshots: Int = 0
+        val fixedFactorSnapshots: Int = 0,
+        val eodResearchRows: Int = 0,
+        val eodResearchSessions: Int = 0,
+        val otherResearchRows: Int = 0
     ) {
         val total: Int get() = learningCalls + researchSnapshots + forecasts + champions + reports +
-            positiveEvidence + archivedFixedOutcomes + fixedFactorSnapshots
+            positiveEvidence + archivedFixedOutcomes + fixedFactorSnapshots + eodResearchRows +
+            eodResearchSessions + otherResearchRows
     }
 
     /**
@@ -13798,13 +13802,15 @@ class TradingRepository @Inject constructor(
         var restoreStage = "opening learning ZIP"
         try {
         val entries = linkedMapOf<String, String>()
+        val researchDatabaseEntries = linkedMapOf<String, ByteArray>()
         var totalBytes = 0L
         appContext.contentResolver.openInputStream(uri)?.use { raw ->
             ZipInputStream(raw).use { zip ->
                 while (true) {
                     val entry = zip.nextEntry ?: break
                     val name = entry.name.substringAfterLast('/')
-                    if (name in LEARNING_RESTORE_FILES) {
+                    if (name in LEARNING_RESTORE_FILES || name in RESEARCH_BACKUP_TEXT_FILES ||
+                        name in RESEARCH_BACKUP_BINARY_FILES) {
                         val out = ByteArrayOutputStream()
                         val buffer = ByteArray(8192)
                         var entryBytes = 0L
@@ -13817,17 +13823,29 @@ class TradingRepository @Inject constructor(
                             require(totalBytes <= MAX_RESTORE_TOTAL_BYTES) { "Restore ZIP is too large" }
                             out.write(buffer, 0, read)
                         }
-                        entries[name] = out.toString(Charsets.UTF_8.name())
+                        if (name in RESEARCH_BACKUP_BINARY_FILES) researchDatabaseEntries[name] = out.toByteArray()
+                        else entries[name] = out.toString(Charsets.UTF_8.name())
                     }
                     zip.closeEntry()
                 }
             }
         } ?: error("Unable to open restore ZIP")
 
-        require(entries.isNotEmpty()) { "This ZIP does not contain Multify learning files" }
+        require(entries.isNotEmpty() || researchDatabaseEntries.isNotEmpty()) {
+            "This ZIP does not contain Multify learning or research backup files"
+        }
         val gson = GsonBuilder().disableHtmlEscaping().create()
-        restoreStage = "Fixed baseline snapshot"
+        restoreStage = "Portable NSE EOD research databases"
+        val portableResearch = equityEodResearch.restorePortableResearchBackup(
+            researchDatabaseEntries,
+            mapOf(
+                "eod_research_state_prefs.json" to entries["eod_research_state_prefs.json"],
+                "institutional_disclosure_prefs.json" to entries["institutional_disclosure_prefs.json"]
+            ).filterValues { it != null }.mapValues { it.value!! },
+            entries["research_backup_manifest.json"]
+        )
         var restoredFixedSnapshot = false
+        restoreStage = "Fixed baseline snapshot"
         entries["fixed_engine_snapshot.json"]?.let { json ->
             if (fixedEngineSnapshotStore.loadOrNull() == null) {
                 val payload = gson.fromJson(json, FixedEngineSnapshotPayload::class.java)
@@ -14134,6 +14152,10 @@ class TradingRepository @Inject constructor(
             "positive_evidence" to restoredPositiveEvidence,
             "archived_fixed_outcomes" to restoredFixedOutcomes,
             "archived_fixed_factor_rows" to restoredFixedFactors,
+            "eod_research_rows_merged" to portableResearch.eodRowsMerged,
+            "eod_research_sessions_merged" to portableResearch.eodSessionsMerged,
+            "other_research_rows_merged" to portableResearch.otherResearchRowsMerged,
+            "research_preferences_merged" to portableResearch.preferenceKeysMerged,
             "verified_completed_calibration_sessions" to verifiedCompletedSessions.size,
             "fixed_snapshot_restored_or_captured" to restoredFixedSnapshot,
             "fixed_factor_rows_never_used_for_trading" to true,
@@ -14148,7 +14170,10 @@ class TradingRepository @Inject constructor(
             reports = restoredReports,
             positiveEvidence = restoredPositiveEvidence,
             archivedFixedOutcomes = restoredFixedOutcomes,
-            fixedFactorSnapshots = restoredFixedFactors
+            fixedFactorSnapshots = restoredFixedFactors,
+            eodResearchRows = portableResearch.eodRowsMerged,
+            eodResearchSessions = portableResearch.eodSessionsMerged,
+            otherResearchRows = portableResearch.otherResearchRowsMerged
         )
         } catch (error: Exception) {
             if (error is CancellationException) throw error
@@ -14241,6 +14266,12 @@ class TradingRepository @Inject constructor(
                     zip.closeEntry()
                     written(name)
                 }
+                fun addBytes(name: String, value: ByteArray) {
+                    zip.putNextEntry(ZipEntry(name))
+                    zip.write(value)
+                    zip.closeEntry()
+                    written(name)
+                }
                 add("settings.json", safeSettings)
                 add("signals.json", signals)
                 add("holdings.json", positions)
@@ -14329,6 +14360,14 @@ class TradingRepository @Inject constructor(
                         .exportOperatorTransitions(appContext))
                 add("working_range_recommendations_v9021.json",
                     workingRangeRecommendationStore.export())
+                val portableResearchBackup = equityEodResearch.exportPortableResearchBackup()
+                portableResearchBackup.databaseEntries.forEach { (name, bytes) ->
+                    addBytes("research_db/" + name, bytes)
+                }
+                portableResearchBackup.preferenceEntries.forEach { (name, value) ->
+                    addText("research_prefs/" + name, value)
+                }
+                addText("research_backup_manifest.json", portableResearchBackup.manifestJson)
                 add("fixed_shadow_hypotheses_manifest.json", mapOf(
                     "schema" to "fixed_hypotheses_v8322",
                     "purpose" to "OBSERVATIONAL_ONLY",
@@ -15086,7 +15125,21 @@ class TradingRepository @Inject constructor(
             "forecast_univest_same_day.jsonl",
             "research_outcome_chronology.jsonl",
             "decision_evidence.jsonl",
-            "system_audit.jsonl"
+            "system_audit.jsonl",
+            "research_backup_manifest.json",
+            "eod_research_state_prefs.json",
+            "institutional_disclosure_prefs.json"
+        )
+        private val RESEARCH_BACKUP_TEXT_FILES = setOf(
+            "research_backup_manifest.json",
+            "eod_research_state_prefs.json",
+            "institutional_disclosure_prefs.json"
+        )
+        private val RESEARCH_BACKUP_BINARY_FILES = setOf(
+            "suhas_shree_eod_research_v1.db",
+            "equity_pe_research_v1.db",
+            "large_watch_learning_v1.db",
+            "adaptive_low_research_v1.db"
         )
         private const val MAX_RESTORE_ENTRY_BYTES = 128L * 1024L * 1024L
         private const val MAX_RESTORE_TOTAL_BYTES = 256L * 1024L * 1024L
