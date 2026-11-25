@@ -2,6 +2,7 @@ package com.multify.traderpro.data.repository
 
 import android.content.Context
 import android.net.Uri
+import android.provider.OpenableColumns
 import android.os.SystemClock
 import com.google.gson.GsonBuilder
 import com.google.gson.JsonParser
@@ -181,6 +182,8 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import retrofit2.HttpException
 import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.FileOutputStream
 import java.io.IOException
 import java.security.MessageDigest
 import java.time.Instant
@@ -466,6 +469,7 @@ class TradingRepository @Inject constructor(
     private val embeddedHistoricalSeedMutex = Mutex()
     private val bulkMarketDataMutex = Mutex()
     private val learningRestoreMutex = Mutex() // Multiple user taps cannot interleave imports.
+    private val diagnosticExportMutex = Mutex() // One staged archive at a time.
     private var nextBulkMarketDataAtElapsedMs = 0L
     private val fixedLiveDataRateMutex = Mutex()
     private val fixedLiveDataSecondWindowMs = mutableListOf<Long>()
@@ -13792,6 +13796,13 @@ class TradingRepository @Inject constructor(
     }
 
     data class LogExportResult(val entries: Int, val signalCount: Int, val tradeCount: Int)
+    data class PreparedLogExport(
+        val file: File,
+        val fileName: String,
+        val sizeBytes: Long,
+        val result: LogExportResult,
+        val includesResearchBackup: Boolean
+    )
 
     data class LearningRestoreResult(
         val learningCalls: Int,
@@ -13823,12 +13834,16 @@ class TradingRepository @Inject constructor(
         learningRestoreMutex.withLock { restoreLearningFromLogsOnIo(uri) }
     }
 
-    private fun requireResearchMaintenanceWindow() {
+    private fun researchMaintenanceWindowAvailable(): Boolean {
         val now = ZonedDateTime.now(INDIA)
         val premarketWarmup = now.dayOfWeek.value in 1..5 &&
             ((now.hour == 8 && now.minute >= 30) || (now.hour == 9 && now.minute < 15))
-        check(!com.multify.traderpro.engine.NseEquitySessionCalendar.isOpen(now) && !premarketWarmup) {
-            "Research backup/restore is paused during NSE market hours and 08:30-09:15 pre-open warmup to protect Fixed scan performance"
+        return !com.multify.traderpro.engine.NseEquitySessionCalendar.isOpen(now) && !premarketWarmup
+    }
+
+    private fun requireResearchMaintenanceWindow() {
+        check(researchMaintenanceWindowAvailable()) {
+            "Full research backup/restore is paused during NSE market hours and 08:30-09:15 pre-open warmup to protect Fixed scan performance"
         }
     }
 
@@ -14227,11 +14242,12 @@ class TradingRepository @Inject constructor(
         }
     }
 
-    suspend fun exportCompleteLogs(
-        uri: Uri,
+    suspend fun prepareCompleteLogs(
+        includeResearchBackup: Boolean = researchMaintenanceWindowAvailable(),
         progress: ((String, Int) -> Unit)? = null
-    ): LogExportResult = withContext(Dispatchers.IO) {
-        requireResearchMaintenanceWindow()
+    ): PreparedLogExport = withContext(Dispatchers.IO) {
+        diagnosticExportMutex.withLock {
+            if (includeResearchBackup) requireResearchMaintenanceWindow()
         // Serialization and SAF writes must not run on Android's main dispatcher.
         // This export does not change trading or Fixed publication.
         val gson = GsonBuilder().setPrettyPrinting().create()
@@ -14281,8 +14297,20 @@ class TradingRepository @Inject constructor(
             "version" to BuildConfig.VERSION_NAME
         )
         var fileCount = 0
-        appContext.contentResolver.openOutputStream(uri, "w")?.use { raw ->
-            ZipOutputStream(java.io.BufferedOutputStream(raw, 64 * 1024)).use { zip ->
+        val exportDate = LocalDate.now(INDIA).toString()
+        val exportStamp = System.currentTimeMillis()
+        val exportDirectory = File(appContext.cacheDir, "diagnostic_exports").apply {
+            check(mkdirs() || isDirectory) { "Unable to create diagnostic export staging directory" }
+        }
+        exportDirectory.listFiles()?.filter {
+            it.name.endsWith(".part") &&
+                System.currentTimeMillis() - it.lastModified() > 24L * 60L * 60L * 1000L
+        }?.forEach { it.delete() }
+        val stagingFile = File(exportDirectory, "Phayra-$exportDate-$exportStamp.zip.part")
+        val completedFile = File(exportDirectory, "Phayra-$exportDate-$exportStamp.zip")
+        try {
+            FileOutputStream(stagingFile).buffered(64 * 1024).use { raw ->
+                ZipOutputStream(raw).use { zip ->
                 fun written(name: String) {
                     fileCount++
                     progress?.invoke(name, fileCount)
@@ -14400,14 +14428,16 @@ class TradingRepository @Inject constructor(
                         .exportOperatorTransitions(appContext))
                 add("working_range_recommendations_v9021.json",
                     workingRangeRecommendationStore.export())
-                val portableResearchBackup = equityEodResearch.exportPortableResearchBackup()
-                portableResearchBackup.databaseEntries.forEach { (name, bytes) ->
-                    addBytes("research_db/" + name, bytes)
+                if (includeResearchBackup) {
+                    val portableResearchBackup = equityEodResearch.exportPortableResearchBackup()
+                    portableResearchBackup.databaseEntries.forEach { (name, bytes) ->
+                        addBytes("research_db/" + name, bytes)
+                    }
+                    portableResearchBackup.preferenceEntries.forEach { (name, value) ->
+                        addText("research_prefs/" + name, value)
+                    }
+                    addText("research_backup_manifest.json", portableResearchBackup.manifestJson)
                 }
-                portableResearchBackup.preferenceEntries.forEach { (name, value) ->
-                    addText("research_prefs/" + name, value)
-                }
-                addText("research_backup_manifest.json", portableResearchBackup.manifestJson)
                 add("fixed_shadow_hypotheses_manifest.json", mapOf(
                     "schema" to "fixed_hypotheses_v8322",
                     "purpose" to "OBSERVATIONAL_ONLY",
@@ -14551,7 +14581,10 @@ class TradingRepository @Inject constructor(
                     "version" to BuildConfig.VERSION_NAME,
                     "completed_at_ms" to System.currentTimeMillis(),
                     "files_including_manifest" to (fileCount + 1),
-                    "status" to "WRITTEN_COMPLETE_ZIP_STREAM",
+                    "status" to "VERIFIED_COMPLETE_STAGED_ZIP",
+                    "export_mode" to if (includeResearchBackup) "FULL_RESEARCH_BACKUP" else "DAILY_DIAGNOSTICS_ONLY",
+                    "research_backup_included" to includeResearchBackup,
+                    "research_backup_omission_reason" to if (includeResearchBackup) "" else "MARKET_HOURS_OR_PREOPEN_SAFETY_WINDOW",
                     "historical_research_only" to true,
                     "broker_orders_not_inferred_from_prices" to true,
                     "fixed_selection_or_trailing_changed_by_export" to false,
@@ -14559,8 +14592,75 @@ class TradingRepository @Inject constructor(
                 ))
                 zip.finish()
             }
-        } ?: error("Unable to open export destination")
-        LogExportResult(fileCount, signals.size, trades.size)
+            check(stagingFile.isFile && stagingFile.length() > 22L) { "Diagnostic ZIP is empty" }
+            val expectedEntries = fileCount + 1
+            val stagedValidation = DiagnosticZipIntegrity.verify(stagingFile, expectedEntries)
+            check(stagedValidation.entries == expectedEntries) { "Diagnostic ZIP entry count mismatch" }
+            if (!stagingFile.renameTo(completedFile)) {
+                stagingFile.copyTo(completedFile, overwrite = true)
+                check(stagingFile.delete()) { "Unable to finalize diagnostic ZIP" }
+            }
+            val finalValidation = DiagnosticZipIntegrity.verify(completedFile, expectedEntries)
+            check(finalValidation.entries == expectedEntries && completedFile.length() > 22L) {
+                "Final diagnostic ZIP validation failed"
+            }
+            PreparedLogExport(
+                file = completedFile,
+                fileName = if (includeResearchBackup) "Phayra-$exportDate-research-backup.zip"
+                    else "Phayra-$exportDate-daily-diagnostics.zip",
+                sizeBytes = completedFile.length(),
+                result = LogExportResult(fileCount, signals.size, trades.size),
+                includesResearchBackup = includeResearchBackup
+            )
+        } catch (error: Throwable) {
+            stagingFile.delete()
+            completedFile.delete()
+            throw error
+        }
+        }
+    }
+
+    suspend fun writePreparedLogs(uri: Uri, prepared: PreparedLogExport): LogExportResult =
+        withContext(Dispatchers.IO) {
+            val source = prepared.file
+            check(source.isFile && source.length() > 0L && source.length() == prepared.sizeBytes) {
+                "Prepared diagnostic ZIP is missing or incomplete"
+            }
+            val destination = appContext.contentResolver.openOutputStream(uri, "w")
+                ?: error("Unable to open selected ZIP destination")
+            val copied = source.inputStream().buffered().use { input ->
+                destination.buffered().use { output -> input.copyTo(output, 64 * 1024) }
+            }
+            check(copied == prepared.sizeBytes) {
+                "ZIP destination write incomplete: $copied/${prepared.sizeBytes} bytes"
+            }
+            val storedSize = runCatching {
+                appContext.contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+                    if (cursor.moveToFirst() && !cursor.isNull(0)) cursor.getLong(0) else null
+                }
+            }.getOrNull()
+            if (storedSize != null) {
+                check(storedSize == copied) { "ZIP destination size mismatch: $storedSize/$copied bytes" }
+            }
+            auditLogger.logAsync("DIAGNOSTIC_EXPORT", "ZIP_DESTINATION_WRITE_VERIFIED", mapOf(
+                "bytes" to copied,
+                "entries" to prepared.result.entries + 1,
+                "research_backup_included" to prepared.includesResearchBackup
+            ))
+            prepared.result
+        }
+
+    /** Compatibility wrapper; staging and validation happen before destination bytes are written. */
+    suspend fun exportCompleteLogs(
+        uri: Uri,
+        progress: ((String, Int) -> Unit)? = null
+    ): LogExportResult {
+        val prepared = prepareCompleteLogs(progress = progress)
+        return try {
+            writePreparedLogs(uri, prepared)
+        } finally {
+            prepared.file.delete()
+        }
     }
 
     suspend fun shouldCapturePackage(packageName: String): Boolean {
