@@ -7,7 +7,8 @@ import java.util.Locale
 
 data class InstitutionalDeal(
     val day:String,val symbol:String,val company:String,val investor:String,
-    val category:String,val side:String,val shares:Long,val price:Double
+    val category:String,val side:String,val shares:Long,val price:Double,
+    val reportedValue:Double?=null,val tradeFrom:String?=null,val filingId:String?=null
 )
 data class InstitutionalStock(
     val symbol:String,val company:String,val shares:Long,val amountRupees:Double,
@@ -31,7 +32,10 @@ data class InstitutionalSnapshot(
     val sectorMoves:Map<String,Double> = emptyMap(),
     val niftyEodPct:Double? = null,
     val contextDay:String = "",
-    val outcomes:List<InstitutionalOutcome> = emptyList()
+    val outcomes:List<InstitutionalOutcome> = emptyList(),
+    val promoter:InstitutionalReport?=null,
+    val promoterCheckedAtMs:Long=0L,
+    val promoterStatus:String="Not checked"
 )
 
 /**
@@ -149,6 +153,19 @@ object InstitutionalIntelligencePolicy {
         // Header-only files have no verifiable trade date; never overwrite a dated snapshot.
         require(rows>0){"NO_DATED_DISCLOSURES"}
         return InstitutionalReport(expected.toString(),source,receivedAtMs,rows,unknown,duplicates,out,true)
+    }
+    fun effectiveCategory(deal:InstitutionalDeal):String =
+        if(deal.category=="DII" && category(deal.investor)=="DII" &&
+            identityKey(deal.investor).endsWith(" MUTUAL FUND")) "MF" else deal.category
+
+    fun matches(filter:String,deal:InstitutionalDeal):Boolean {
+        val group=effectiveCategory(deal)
+        return when(filter){
+            "OWNERSHIP"->group in setOf("FII","DII","MF","PROMOTER")
+            "ALL"->group in setOf("FII","DII","MF")
+            "DISCLOSED"->true
+            else->filter==group
+        }
     }
     fun includes(filter:String,category:String):Boolean = when(filter){
         "DISCLOSED" -> true
