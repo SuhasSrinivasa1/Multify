@@ -47,7 +47,7 @@ internal fun InstitutionalResearchScreen(state:TraderUiState,onRefresh:()->Unit)
     ){
         item{
             Text("Institutional Intelligence",style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold)
-            Text("Top 20 NSE disclosed gross transaction values · research only · no orders",style=MaterialTheme.typography.bodySmall)
+            Text("Top 20 NSE net disclosed transaction values · research only · no orders",style=MaterialTheme.typography.bodySmall)
             Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp)){
                 if(side=="BUY") Button(onClick={side="BUY"},modifier=Modifier.weight(1f).testTag("institutional-buys")){Text("Buys")}
                 else OutlinedButton(onClick={side="BUY"},modifier=Modifier.weight(1f).testTag("institutional-buys")){Text("Buys")}
@@ -94,7 +94,7 @@ internal fun InstitutionalResearchScreen(state:TraderUiState,onRefresh:()->Unit)
                 }
             }
             Text("Six hourly slots · first eligible sweep per hour · actual observation times, not exact-hour quotes. Up to 60 snapshots kept.",style=MaterialTheme.typography.labelSmall)
-            Text("Bulk and block are separate: overlapping reports must not be summed. FII/DII means only verified named clients matched to issuer filings or AMFI directory. All disclosures includes individuals and other unclassified clients; not all are institutions.",style=MaterialTheme.typography.bodySmall)
+            Text("BUY and SELL lists are mutually exclusive for the same filters: gross buys minus gross sells; balanced stocks appear in neither. Opposing investor groups can differ. Bulk and block are separate: overlapping reports must not be summed. FII/DII means only verified named clients matched to issuer filings or AMFI directory. All disclosures includes individuals and other unclassified clients; not all are institutions.",style=MaterialTheme.typography.bodySmall)
             if(report!=null){
                 Text("Disclosure date: ${report.day} · ${report.source} · ${report.disclosedRows} reported rows; ${report.deals.count{it.category=="FII"||it.category=="DII"}} verified, ${report.unmatchedRows} unclassified, ${report.duplicateRows} identical rows excluded.",style=MaterialTheme.typography.bodySmall)
                 Text("Report received: ${java.time.Instant.ofEpochMilli(report.receivedAtMs).atZone(java.time.ZoneId.of("Asia/Kolkata")).toLocalDateTime().toString()} IST · disclosure date is not live price date.",style=MaterialTheme.typography.labelSmall)
@@ -110,16 +110,16 @@ internal fun InstitutionalResearchScreen(state:TraderUiState,onRefresh:()->Unit)
                 Text(if(state.researchScanning)"Refreshing…" else "Refresh institutional research")
             }
             Text("NSE imports only 18:30–08:00 IST; hourly prices reuse the first eligible completed Fixed sweep in each 10–15 IST clock hour. Missed hours remain missing; no extra Groww requests. Investor identity coverage is partial; all unique disclosures are retained regardless of identity.",style=MaterialTheme.typography.labelSmall)
-            Text("Top ${rows.size} of 20 · ${if(side=="BUY")"purchases" else "sales"}",style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.Bold)
-            if(rows.isEmpty())Text("No disclosed stocks match this selection. If report coverage is incomplete, missing reports are not zero activity. Try All disclosures.",style=MaterialTheme.typography.bodySmall)
+            Text("Top ${rows.size} of 20 · ${if(side=="BUY")"net buying" else "net selling"}",style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.Bold)
+            if(rows.isEmpty())Text("No net directional stocks match this selection. Balanced flows are excluded. If report coverage is incomplete, missing reports are not zero activity. Try All disclosures.",style=MaterialTheme.typography.bodySmall)
         }
         itemsIndexed(rows,key={_,r->r.symbol}){index,row->
             Card(Modifier.fillMaxWidth()){
                 Column(Modifier.padding(12.dp),verticalArrangement=Arrangement.spacedBy(4.dp)){
                     Text("${index+1}. ${row.symbol}",style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.Bold)
                     if(row.company.isNotBlank())Text(row.company,style=MaterialTheme.typography.bodySmall)
-                    Text(crores(if(side=="BUY")row.grossBuy else row.grossSell),style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold)
-                    Text("Verified FII ${crores(row.fiiSide)} · Verified DII ${crores(row.diiSide)} · Unclassified ${crores(((if(side=="BUY")row.grossBuy else row.grossSell)-row.fiiSide-row.diiSide).coerceAtLeast(0.0))}",style=MaterialTheme.typography.bodySmall)
+                    Text((if(row.net>0)"NET BUY +" else "NET SELL −")+crores(kotlin.math.abs(row.net)),style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold)
+                    Text("Gross selected side · verified FII ${crores(row.fiiSide)} · Verified DII ${crores(row.diiSide)} · Unclassified ${crores(((if(side=="BUY")row.grossBuy else row.grossSell)-row.fiiSide-row.diiSide).coerceAtLeast(0.0))}",style=MaterialTheme.typography.bodySmall)
                     Text("Gross buys ${crores(row.grossBuy)} · gross sells ${crores(row.grossSell)} · net ${crores(row.net)}",style=MaterialTheme.typography.bodySmall)
                     Text("${String.format(Locale.US,"%,d",row.sideShares)} disclosed shares · ${row.investors.size} named clients · ${row.buyDays} buy dates · ${row.repeatedBuyers} repeated buyers",style=MaterialTheme.typography.bodySmall)
                     val ref=if(side=="BUY")row.weightedBuy else row.weightedSell
