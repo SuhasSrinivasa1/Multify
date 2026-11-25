@@ -541,6 +541,72 @@ class TradingEngineService : Service() {
         }
     }
 
+    /**
+     * Premarket warning only. Never attempts TOTP or broker authentication automatically.
+     * Repository authentication gates continue to block new orders until Alpha is reauthenticated.
+     */
+    private fun startAlphaAuthReminderWorker() {
+        if (alphaAuthReminderJob?.isActive == true) return
+        alphaAuthReminderJob = scope.launch(Dispatchers.IO) {
+            val reminderPrefs = getSharedPreferences(ALPHA_AUTH_REMINDER_PREFS, Context.MODE_PRIVATE)
+            while (isActive) {
+                try {
+                    val now = ZonedDateTime.now(INDIA)
+                    val settings = preferences.settings.first()
+                    val needsAlpha = settings.fixedScannerEnabled || settings.armEffective ||
+                        settings.fixedAutoBuyEnabled || settings.workingRangeEnabled
+                    val premarket = com.multify.traderpro.engine.NseEquitySessionCalendar.isWarmupWindow(now)
+                    val authRequired = recoveryGate.requiresReconnect() ||
+                        !settings.brokerAuthenticated || !settings.staticIpMatched
+                    if (premarket && needsAlpha && authRequired) {
+                        val day = now.toLocalDate().toString()
+                        if (reminderPrefs.getString("last_day", "") != day) {
+                            val manager = getSystemService(NotificationManager::class.java)
+                            val message = if (!settings.staticIpMatched)
+                                "Alpha static-IP verification is missing. Verify the registered IP in Settings before enabling live execution."
+                            else
+                                "Alpha authentication is required. Open Phayra → Settings → Authenticate Alpha. New BUYs remain blocked until the broker session is verified."
+                            runCatching {
+                                manager.notify(ALPHA_AUTH_REMINDER_NOTIFICATION_ID,
+                                    NotificationCompat.Builder(this@TradingEngineService, ALPHA_AUTH_CHANNEL_ID)
+                                        .setSmallIcon(R.drawable.ic_stat_trader)
+                                        .setContentTitle("Alpha needs attention before NSE open")
+                                        .setContentText(message)
+                                        .setStyle(NotificationCompat.BigTextStyle().bigText(message))
+                                        .setPriority(NotificationCompat.PRIORITY_HIGH)
+                                        .setCategory(NotificationCompat.CATEGORY_STATUS)
+                                        .setAutoCancel(true)
+                                        .build())
+                            }.onFailure {
+                                auditLogger.logAsync("AUTH", "PREMARKET_REMINDER_POST_FAILED",
+                                    mapOf("reason" to it.javaClass.simpleName))
+                            }
+                            reminderPrefs.edit().putString("last_day", day).commit()
+                            auditLogger.logAsync("AUTH", "PREMARKET_ALPHA_AUTH_REQUIRED", mapOf(
+                                "date_ist" to day,
+                                "reconnect_required" to recoveryGate.requiresReconnect(),
+                                "broker_authenticated_setting" to settings.brokerAuthenticated,
+                                "static_ip_matched" to settings.staticIpMatched,
+                                "new_buy_blocked_until_reauthenticated" to true,
+                                "automatic_totp_attempted" to false
+                            ))
+                        }
+                    } else if (!authRequired) {
+                        getSystemService(NotificationManager::class.java)
+                            .cancel(ALPHA_AUTH_REMINDER_NOTIFICATION_ID)
+                        reminderPrefs.edit().remove("last_day").apply()
+                    }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Throwable) {
+                    auditLogger.logAsync("AUTH", "PREMARKET_AUTH_GUARD_ERROR",
+                        mapOf("reason" to error.javaClass.simpleName))
+                }
+                delay(60_000L)
+            }
+        }
+    }
+
     private fun startPositionMonitorWorker() {
         if (positionMonitorJob?.isActive == true) return
         positionMonitorJob = scope.launch {
