@@ -129,6 +129,8 @@ jobs:
           assert "MANUAL_NSE_REPORT_IMPORT" in eod and '"groww_requests" to 0' in eod
           assert "Manual NSE archive import is paused during market hours" in eod
           assert "ARCHIVE_SOURCE_COOLDOWN_LOCAL_RESEARCH_CONTINUES" in eod
+          assert 'offHoursStep("INSTITUTIONAL")' in eod and 'offHoursStep("SUPPORT_RETEST")' in eod
+          assert "MAX_PORTABLE_RESEARCH_BACKUP_BYTES" in eod
 
           # Research backup is checksum-verified and merges only missing research rows.
           backup=(root/"data/repository/ResearchDatabaseBackup.kt").read_text()
