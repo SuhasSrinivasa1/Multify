@@ -30,6 +30,16 @@ class IdleBrokerPollingPolicyTest {
         assertFalse(skip(nowMs = 46_000, intervalMs = 45_000))
     }
 
+    @Test fun tenMinuteAfterHoursHeartbeatAppliesOnlyToVerifiedEmptyIdlePortfolio() {
+        val slow = IdleBrokerPollingPolicy.EMPTY_AFTER_HOURS_RECHECK_MS
+        assertEquals(600_000L, IdleBrokerPollingPolicy.afterHoursRecheckIntervalMs(false, false, true, false, false))
+        assertEquals(60_000L, IdleBrokerPollingPolicy.afterHoursRecheckIntervalMs(false, true, true, false, false))
+        assertEquals(60_000L, IdleBrokerPollingPolicy.afterHoursRecheckIntervalMs(false, false, false, false, false))
+        assertEquals(60_000L, IdleBrokerPollingPolicy.afterHoursRecheckIntervalMs(false, false, true, true, false))
+        assertEquals(60_000L, IdleBrokerPollingPolicy.afterHoursRecheckIntervalMs(false, false, true, false, true))
+        assertEquals(60_000L, IdleBrokerPollingPolicy.afterHoursRecheckIntervalMs(true, false, true, false, false))
+    }
+
     @Test fun staleOrFutureSnapshotsRequireAnotherBrokerPoll() {
         assertFalse(skip(inventoryMs = 5000, nowMs = 2000))
         assertFalse(IdleBrokerPollingPolicy.maySkip(false, 0, false, false, 1000, 1000, 2000, 180_000))
