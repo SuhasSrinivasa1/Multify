@@ -21,7 +21,33 @@ internal class InstitutionalDisclosureStore(context:Context) {
         outcomes=runCatching{gson.fromJson(prefs.getString("outcomes",null),Array<InstitutionalOutcome>::class.java)?.toList().orEmpty()}.getOrDefault(emptyList()))
     private var tracked=(cached.history+listOfNotNull(cached.bulk,cached.block)).flatMap{it.deals}.map{it.symbol}.toSet()
     private var lastSlot=cached.hourly?.let{it.day+"-"+it.hour}.orEmpty()
-    fun snapshot():InstitutionalSnapshot=synchronized(lock){cached}
+    private var promoterResults=readPromoterResults()
+    private var superseded=readSuperseded()
+    private fun readPromoterResults():List<PromoterFilingResult> = runCatching{
+        gson.fromJson(prefs.getString("promoter_files",null),Array<PromoterFilingResult>::class.java)?.toList().orEmpty()
+    }.getOrDefault(emptyList())
+    private fun readSuperseded():Set<String> = runCatching{
+        gson.fromJson(prefs.getString("promoter_superseded",null),Array<String>::class.java)?.toSet().orEmpty()
+    }.getOrDefault(emptySet())
+    fun promoterIds():Set<String> = synchronized(lock){promoterResults.map{it.filing.id}.toSet()}
+    fun recordPromoterIndex(files:List<PromoterFiling>)=synchronized(lock){
+        superseded=superseded+files.map{it.previousId}.filter{it.isNotBlank()}
+        check(prefs.edit().putString("promoter_superseded",gson.toJson(superseded)).commit())
+    }
+    fun savePromoter(result:PromoterFilingResult)=synchronized(lock){
+        promoterResults=(promoterResults+result).associateBy{it.filing.id}.values
+            .sortedByDescending{it.filing.filingDay}.take(4000)
+        check(prefs.edit().putString("promoter_files",gson.toJson(promoterResults)).commit())
+    }
+    fun promoterStatus(status:String,at:Long)=synchronized(lock){
+        prefs.edit().putString("promoter_status",status).putString("promoter_checked_ms",at.toString()).apply()
+    }
+    fun snapshot():InstitutionalSnapshot=synchronized(lock){
+        val reports=PromoterDisclosurePolicy.reports(promoterResults,superseded)
+        cached.copy(history=cached.history+reports,promoter=reports.maxByOrNull{it.day},
+            promoterCheckedAtMs=prefs.getString("promoter_checked_ms","0")?.toLongOrNull()?:0L,
+            promoterStatus=prefs.getString("promoter_status","Not checked").orEmpty())
+    }
     fun hasTrackedSymbols():Boolean=synchronized(lock){tracked.isNotEmpty()}
     fun save(report:InstitutionalReport)=synchronized(lock){
         require(report.source in setOf("BULK","BLOCK") && report.disclosedRows>0)
@@ -82,6 +108,8 @@ internal class InstitutionalDisclosureStore(context:Context) {
             cached=InstitutionalSnapshot(bulk,block,history,hourly=hourly,hourlyHistory=hourlyHistory,outcomes=outcomes)
             tracked=(history+listOfNotNull(bulk,block)).flatMap{it.deals}.map{it.symbol}.toSet()
             lastSlot=hourly?.let{it.day+"-"+it.hour}.orEmpty()
+            promoterResults=readPromoterResults()
+            superseded=readSuperseded()
         }
         restored
     }
