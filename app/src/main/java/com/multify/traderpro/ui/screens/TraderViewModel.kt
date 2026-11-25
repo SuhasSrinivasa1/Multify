@@ -54,6 +54,7 @@ class TraderViewModel @Inject constructor(
     private val remote = MutableStateFlow(RemoteState())
     private val equityResearch = MutableStateFlow(EquityResearchSnapshot())
     private val researchScanning = MutableStateFlow(false)
+    private var pendingLogExport: TradingRepository.PreparedLogExport? = null
 
     val uiState: StateFlow<TraderUiState> = combine(
         repository.settings,
@@ -536,27 +537,59 @@ class TraderViewModel @Inject constructor(
         }
     }
 
-    fun exportLogs(uri: Uri) {
+    fun prepareLogExport(onReady: (String) -> Unit) {
         viewModelScope.launch {
             remote.value = remote.value.copy(
-                loading = true, error = null, message = "Exporting diagnostics in background…")
+                loading = true, error = null, message = "Preparing and validating diagnostics ZIP…")
             runCatching {
-                repository.exportCompleteLogs(uri) { file, count ->
+                repository.prepareCompleteLogs(progress = { file, count ->
                     remote.value = remote.value.copy(
                         loading = true,
-                        message = "Exporting diagnostics · $count files · $file",
+                        message = "Preparing diagnostics · $count files · $file",
                         error = null)
-                }
+                })
             }
-                .onSuccess { result ->
+                .onSuccess { prepared ->
+                    pendingLogExport?.file?.delete()
+                    pendingLogExport = prepared
+                    val mode = if (prepared.includesResearchBackup) "Full research backup" else "Market-hours diagnostics"
                     remote.value = remote.value.copy(
                         loading = false,
-                        message = "Diagnostics and portable research backup exported · ${result.signalCount} signals · ${result.tradeCount} closed holdings · ${result.entries} files",
+                        message = "$mode ready · ${prepared.sizeBytes / 1024L} KB · choose a destination",
+                        error = null
+                    )
+                    onReady(prepared.fileName)
+                }
+                .onFailure { remote.value = remote.value.copy(loading = false, error = it.userMessage()) }
+        }
+    }
+
+    fun writePreparedLogExport(uri: Uri) {
+        val prepared = pendingLogExport
+        if (prepared == null) {
+            remote.value = remote.value.copy(loading = false, error = "No prepared ZIP is waiting. Tap Export again.")
+            return
+        }
+        viewModelScope.launch {
+            remote.value = remote.value.copy(
+                loading = true, error = null, message = "Writing verified ZIP to selected destination…")
+            runCatching { repository.writePreparedLogs(uri, prepared) }
+                .onSuccess { result ->
+                    prepared.file.delete()
+                    pendingLogExport = null
+                    remote.value = remote.value.copy(
+                        loading = false,
+                        message = "ZIP saved and size-verified · ${result.signalCount} signals · ${result.tradeCount} closed holdings · ${result.entries + 1} files",
                         error = null
                     )
                 }
                 .onFailure { remote.value = remote.value.copy(loading = false, error = it.userMessage()) }
         }
+    }
+
+    fun cancelPreparedLogExport() {
+        pendingLogExport?.file?.delete()
+        pendingLogExport = null
     }
 
     fun restoreLearning(uri: Uri) {

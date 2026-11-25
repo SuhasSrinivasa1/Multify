@@ -57,6 +57,11 @@ internal fun LargeCapResearchScreen(state: TraderUiState, onRefresh: () -> Unit)
                 style=MaterialTheme.typography.bodySmall)
             Text("Daily prices: ${r.latestDay.ifBlank { "not loaded" }} · ${r.completedDays} available sessions",
                 style=MaterialTheme.typography.bodySmall)
+            val archiveStatus = r.lastError.ifBlank {
+                if (r.lastSuccessfulImportAtMs > 0L) "last import succeeded" else "no successful NSE archive import recorded"
+            }
+            Text("NSE archive status: $archiveStatus · last attempt ${atIst(r.refreshAtMs)} · last successful import ${atIst(r.lastSuccessfulImportAtMs)}",
+                style=MaterialTheme.typography.labelSmall)
             Text("Intraday pulse: ${if(r.currentPulseAtMs>0)atIst(r.currentPulseAtMs) else "No fresh, complete Fixed sweep"}",
                 style=MaterialTheme.typography.bodySmall)
             Text("Nifty 50 official EOD (${r.niftyContextDay.ifBlank { "unavailable" }}): ${r.niftyEodRegime} · day ${pc(r.niftyEodMovePct)} · previous ${pc(r.niftyPreviousEodMovePct)} · 5 sessions ${pc(r.niftyFiveDayMovePct)}",
@@ -226,6 +231,11 @@ internal fun SixMonthLowResearchScreen(state: TraderUiState, onScan: (Int) -> Un
                 "Latest validated exchange EOD: ${research.latestDay.ifBlank{"not imported"}} · ${if(isThree)research.threeMonthCompletedDays else research.completedDays} archive sessions",
                 style=MaterialTheme.typography.bodySmall
             )
+            val archiveStatus = research.lastError.ifBlank {
+                if (research.lastSuccessfulImportAtMs > 0L) "last import succeeded" else "no successful NSE archive import recorded"
+            }
+            Text("NSE archive status: $archiveStatus · last attempt ${atIst(research.refreshAtMs)} · last successful import ${atIst(research.lastSuccessfulImportAtMs)}",
+                style=MaterialTheme.typography.labelSmall)
             if(research.lastSource.isNotBlank()) {
                 val sourceLabel=if(research.lastSource=="USER_SELECTED_NSE_REPORT")
                     "user-selected NSE report (local validation)" else "NSE archive HTTP"

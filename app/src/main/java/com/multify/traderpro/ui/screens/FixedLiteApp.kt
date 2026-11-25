@@ -73,7 +73,7 @@ fun FixedLiteApp(viewModel: TraderViewModel = hiltViewModel()) {
     var confirmHaltReset by remember { mutableStateOf(false) }
     val snackbar = remember { SnackbarHostState() }
     val export = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) {
-        if (it != null) viewModel.exportLogs(it)
+        if (it != null) viewModel.writePreparedLogExport(it) else viewModel.cancelPreparedLogExport()
     }
     val restore = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) {
         if (it != null) viewModel.restoreLearning(it)
@@ -161,7 +161,7 @@ fun FixedLiteApp(viewModel: TraderViewModel = hiltViewModel()) {
                     state, viewModel,
                     onEnableRequested = { confirmEnable = it },
                     onResetRequested = { confirmHaltReset = true },
-                    onExport = { export.launch("Phayra-v9052-research-backup.zip") },
+                    onExport = { viewModel.prepareLogExport { fileName -> export.launch(fileName) } },
                     onRestore = { restore.launch(arrayOf("application/zip", "application/octet-stream")) }
                 )
             }
@@ -1284,8 +1284,13 @@ internal fun LiteSettingsScreen(
                 "Portable research backup includes NSE EOD, valuation, support-retest, large-watch and institutional research. Restore merges missing rows only. Credentials, holdings, broker orders, GTTs and Auto-Buy permissions are never restored.",
                 style = MaterialTheme.typography.bodySmall
             )
+            Text(
+                "Export is safe during NSE hours: it creates a diagnostics-only ZIP and defers the SQLite research backup until after hours. An automatic full diagnostic/research archive is scheduled around 21:30 IST (best effort), with 14 recent archives retained on this device.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
             Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(10.dp)) {
-                OutlinedButton(onClick = onExport, modifier = Modifier.weight(1f)) { Text("Export backup ZIP") }
+                OutlinedButton(onClick = onExport, modifier = Modifier.weight(1f)) { Text("Export diagnostics / backup ZIP") }
                 OutlinedButton(onClick = onRestore, modifier = Modifier.weight(1f)) { Text("Restore research ZIP") }
             }
         }

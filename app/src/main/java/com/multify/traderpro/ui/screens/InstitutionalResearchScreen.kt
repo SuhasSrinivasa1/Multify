@@ -103,6 +103,8 @@ internal fun InstitutionalResearchScreen(state:TraderUiState,onRefresh:()->Unit)
                 if(report.day!=state.equityResearch.latestDay)
                     Text("Older cached disclosure — latest saved exchange EOD is ${state.equityResearch.latestDay.ifBlank{"unknown"}}.",color=MaterialTheme.colorScheme.error,style=MaterialTheme.typography.labelSmall)
             }else Text("No dated, validated ${source.lowercase(Locale.US)} disclosure cached. Empty or unavailable reports do not imply zero institutional activity.",style=MaterialTheme.typography.bodySmall)
+            if(snapshot.history.isEmpty() && snapshot.bulk==null && snapshot.block==null)
+                Text("No validated bulk/block disclosure is cached, so there are no issuer symbols to sample hourly yet. Hourly prices begin only after a dated report is imported and are copied from completed Fixed sweeps; no extra Groww requests are made.",style=MaterialTheme.typography.labelSmall)
             Button(onClick=onRefresh,enabled=!state.researchScanning,modifier=Modifier.fillMaxWidth()){
                 Text(if(state.researchScanning)"Refreshing…" else "Refresh institutional research")
             }
