@@ -11520,9 +11520,26 @@ class TradingRepository @Inject constructor(
             }
             return portfolioMonitorCount()
         }
-        val reconcileGap = if (!marketOpen && !managedOpen && confirmedEmpty) 5L * 60_000L
+        // Slow only a broker-confirmed empty after-hours portfolio. Any app-owned holding,
+        // external/manual exposure, pending entry or critical trade keeps the existing 60s reconciliation.
+        val emptyVerifiedAfterHours = !marketOpen && !managedOpen && confirmedEmpty &&
+            !pendingEntry && !marketCriticalTradeInFlight
+        val reconcileGap = if (emptyVerifiedAfterHours) EMPTY_PORTFOLIO_AFTER_HOURS_RECHECK_MS
             else CLOSED_SESSION_RECONCILE_MS
         if (!marketOpen && now - lastClosedSessionReconcileAtMs < reconcileGap) {
+            if (emptyVerifiedAfterHours && now - lastIdlePortfolioAuditAtMs >= 60_000L) {
+                lastIdlePortfolioAuditAtMs = now
+                auditLogger.logAsync("PORTFOLIO_MONITOR", "AFTER_HOURS_VERIFIED_EMPTY_POLL_DEFERRED", mapOf(
+                    "next_reverify_after_ms" to reconcileGap,
+                    "app_owned_holdings" to 0,
+                    "pending_entries" to 0,
+                    "broker_inventory_verified_empty" to true,
+                    "active_gtts_verified_empty" to true,
+                    "existing_server_gtt_left_untouched" to true,
+                    "per_buy_fresh_inventory_check_preserved" to true,
+                    "protection_monitor_cadence_changed" to false
+                ))
+            }
             return portfolioMonitorCount()
         }
         if (!marketOpen) lastClosedSessionReconcileAtMs = now
@@ -15160,6 +15177,7 @@ class TradingRepository @Inject constructor(
         private const val BULK_MARKET_DATA_429_COOLDOWN_MS = 1_500L
         private const val BROKER_INVENTORY_REFRESH_MS = 5_000L
         private const val EMPTY_PORTFOLIO_BROKER_RECHECK_MS = 180_000L
+        private const val EMPTY_PORTFOLIO_AFTER_HOURS_RECHECK_MS = 10L * 60L * 1000L
         private const val NONEMPTY_EXTERNAL_BROKER_RECHECK_MS = 45_000L
         private const val ACTIVE_GTT_REFRESH_MS = 30_000L
         private const val ACTIVE_GTT_PAGE_SIZE = 50
