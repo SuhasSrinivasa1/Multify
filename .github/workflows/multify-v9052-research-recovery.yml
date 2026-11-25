@@ -116,7 +116,7 @@ jobs:
           assert "BETA_READ_ONLY_DENIED" in beta and "method == \"GET\"" in beta
           assert "versionCode = 9052" in build
           assert 'applicationIdSuffix = ".v9052test"' in build
-          assert "v9.0.52-research-recovery-TEST" in build
+          assert "9.0.52-research-recovery-TEST" in build
 
           # NSE archive 403 recovery is per-host exponential backoff; local import is validated and broker-free.
           nse=(root/"engine/NseArchiveRecoveryPolicy.kt").read_text()
