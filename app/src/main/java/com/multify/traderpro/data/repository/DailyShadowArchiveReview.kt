@@ -119,7 +119,7 @@ internal object DailyShadowArchiveReview {
                     buildList{while(c.moveToNext())add(c.getString(0))}
                 }
             }.orEmpty()
-            val trials=old.trials.toMutableList()
+            val trials=old.trials.filterNot{it.section=="FII_DII" && it.parameter!="verified net-buy rank cutoff"}.toMutableList()
             if(today in sessions && trials.none{it.registeredDay==today}){
                 Policy.plans.firstOrNull{p->trials.none{it.section==p.section}}?.let{p->
                     trials+=Trial(p.section,p.parameter,p.baseline,p.challenger,today,now)
@@ -168,9 +168,16 @@ internal object DailyShadowArchiveReview {
                     val day=report.str("day");val source=report.str("source");val receipt=report.long("receivedAtMs")
                     if(receipt<=0 || day.isBlank())continue
                     val observedDay=maxOf(day,date(receipt))
-                    val ranked=report.rows("deals").filter{it.str("side")=="BUY" && it.str("category") in setOf("FII","DII")}
-                        .groupBy{it.str("symbol")}.map{(sym,rows)->sym to rows.sumOf{(it.num("shares")?:0.0)*(it.num("price")?:0.0)}}
-                        .sortedWith(compareByDescending<Pair<String,Double>>{it.second}.thenBy{it.first}).take(20)
+                    val ranked=report.rows("deals").filter{it.str("side") in setOf("BUY","SELL") && it.str("category") in setOf("FII","DII")}
+                        .groupBy{it.str("symbol")}.mapNotNull{(sym,rows)->
+                            if(rows.any{it.num("shares")==null || it.num("price")==null})null else {
+                                val net=rows.fold(java.math.BigDecimal.ZERO){sum,d->
+                                    val amount=java.math.BigDecimal.valueOf(d.num("shares")!!)*java.math.BigDecimal.valueOf(d.num("price")!!)
+                                    if(d.str("side")=="BUY")sum+amount else sum-amount
+                                }
+                                if(net.signum()>0)sym to net else null
+                            }
+                        }.sortedWith(compareByDescending<Pair<String,java.math.BigDecimal>>{it.second}.thenBy{it.first}).take(20)
                     for((i,pair) in ranked.withIndex()){
                         val outcome=outcomes[source+"|"+day+"|"+pair.first]
                         val ret=outcome?.let{v->v.num("returnPct")?.takeIf{v.str("outcomeDay")==horizon(observedDay,6)}}
