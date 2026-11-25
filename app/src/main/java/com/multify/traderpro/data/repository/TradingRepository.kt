@@ -11524,8 +11524,14 @@ class TradingRepository @Inject constructor(
         // external/manual exposure, pending entry or critical trade keeps the existing 60s reconciliation.
         val emptyVerifiedAfterHours = !marketOpen && !managedOpen && confirmedEmpty &&
             !pendingEntry && !marketCriticalTradeInFlight
-        val reconcileGap = if (emptyVerifiedAfterHours) EMPTY_PORTFOLIO_AFTER_HOURS_RECHECK_MS
-            else CLOSED_SESSION_RECONCILE_MS
+        val reconcileGap = com.multify.traderpro.engine.IdleBrokerPollingPolicy.afterHoursRecheckIntervalMs(
+            marketOpen = marketOpen,
+            appOwnedHolding = managedOpen,
+            brokerInventoryAndGttsVerifiedEmpty = confirmedEmpty,
+            pendingEntry = pendingEntry,
+            criticalTradeInFlight = marketCriticalTradeInFlight,
+            normalIntervalMs = CLOSED_SESSION_RECONCILE_MS
+        )
         if (!marketOpen && now - lastClosedSessionReconcileAtMs < reconcileGap) {
             if (emptyVerifiedAfterHours && now - lastIdlePortfolioAuditAtMs >= 60_000L) {
                 lastIdlePortfolioAuditAtMs = now
@@ -15177,7 +15183,6 @@ class TradingRepository @Inject constructor(
         private const val BULK_MARKET_DATA_429_COOLDOWN_MS = 1_500L
         private const val BROKER_INVENTORY_REFRESH_MS = 5_000L
         private const val EMPTY_PORTFOLIO_BROKER_RECHECK_MS = 180_000L
-        private const val EMPTY_PORTFOLIO_AFTER_HOURS_RECHECK_MS = 10L * 60L * 1000L
         private const val NONEMPTY_EXTERNAL_BROKER_RECHECK_MS = 45_000L
         private const val ACTIVE_GTT_REFRESH_MS = 30_000L
         private const val ACTIVE_GTT_PAGE_SIZE = 50
