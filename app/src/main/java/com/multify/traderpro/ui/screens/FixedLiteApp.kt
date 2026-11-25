@@ -1267,6 +1267,10 @@ internal fun LiteSettingsScreen(
 
         LiteCard {
             SectionTitle("Safety and diagnostics", "Review before changing protection state")
+            val shadowPrefs=LocalContext.current.getSharedPreferences("phayra_shadow_review",android.content.Context.MODE_PRIVATE)
+            val reviewSummary=shadowPrefs.getString("summary","").orEmpty()
+            Text("Daily shadow review · at most one new parameter per validated session · 3 consecutive improved matured sessions for provisional research review only. No automatic live changes.",style=MaterialTheme.typography.bodySmall)
+            Text(reviewSummary.ifBlank{"Awaiting the first verified nightly diagnostic archive."},style=MaterialTheme.typography.labelSmall)
             if (state.settings.safetyHalt || state.dashboard?.halted == true) {
                 StatusPill("SAFETY HALT ACTIVE", LiteTone.NEGATIVE)
                 OutlinedButton(onClick = onResetRequested, modifier = Modifier.fillMaxWidth()) {
