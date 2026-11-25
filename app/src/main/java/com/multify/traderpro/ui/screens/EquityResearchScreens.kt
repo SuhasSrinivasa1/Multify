@@ -41,18 +41,31 @@ private fun atIst(ms: Long): String =
 @Composable
 internal fun LargeCapResearchScreen(state: TraderUiState, onRefresh: () -> Unit) {
     val r=state.equityResearch
-    val intraday=r.largeCaps.filter { it.intradayResearch }
-    val swing=r.largeCaps.filter { it.swingResearch }
+    var capFilter by rememberSaveable { mutableStateOf("LARGE_CAP") }
+    val selected=r.largeCaps.filter{capFilter=="ALL" || (r.researchMarketCaps[it.symbol]?:"UNCLASSIFIED")==capFilter}
+    val intraday=selected.filter { it.intradayResearch }
+    val swing=selected.filter { it.swingResearch }
     LazyColumn(
         modifier=Modifier.fillMaxSize(),
         contentPadding=PaddingValues(14.dp),
         verticalArrangement=Arrangement.spacedBy(10.dp)
     ) {
         item {
-            ResearchNotice("LARGE-CAP NSE EQUITY", "Research only · cash shares · Fixed is unchanged")
+            ResearchNotice("LARGE · ALL MARKET-CAP RESEARCH", "Research only · cash shares · Fixed is unchanged")
+            Row(horizontalArrangement=Arrangement.spacedBy(6.dp)){
+                FilterChip(selected=capFilter=="ALL",onClick={capFilter="ALL"},label={Text("All")})
+                FilterChip(selected=capFilter=="LARGE_CAP",onClick={capFilter="LARGE_CAP"},label={Text("Large")})
+                FilterChip(selected=capFilter=="MID_CAP",onClick={capFilter="MID_CAP"},label={Text("Mid")})
+            }
+            Row(horizontalArrangement=Arrangement.spacedBy(6.dp)){
+                FilterChip(selected=capFilter=="SMALL_CAP",onClick={capFilter="SMALL_CAP"},label={Text("Small")})
+                FilterChip(selected=capFilter=="UNCLASSIFIED",onClick={capFilter="UNCLASSIFIED"},label={Text("Unclassified")})
+            }
+            Text("AMFI ${r.marketCapClassificationPeriod.ifBlank{"unavailable"}} · ${selected.size} usable histories in selected cohort · last local calculation ${atIst(r.researchSnapshotAtMs)}",style=MaterialTheme.typography.labelSmall)
+            Text("Mid/small cap results are an unvalidated extension of the existing research rule, not live orders.",style=MaterialTheme.typography.labelSmall)
             Spacer(Modifier.height(8.dp))
             Text("Intraday momentum + multi-day swing opportunities",style=MaterialTheme.typography.titleMedium)
-            Text("Swing: EOD trend watch for the next session. Intraday: fresh Fixed-sweep strength during the session. Nonqualifying large caps are monitored internally but hidden.",style=MaterialTheme.typography.bodySmall)
+            Text("Swing: EOD trend watch for the next session. Intraday: fresh Fixed-sweep strength during the session. Nonqualifying stocks are monitored internally but hidden.",style=MaterialTheme.typography.bodySmall)
             Text("Universe: ${r.memberSource} · ${r.largeCaps.size} stocks with usable EOD history",
                 style=MaterialTheme.typography.bodySmall)
             Text("Daily prices: ${r.latestDay.ifBlank { "not loaded" }} · ${r.completedDays} available sessions",
@@ -84,7 +97,7 @@ internal fun LargeCapResearchScreen(state: TraderUiState, onRefresh: () -> Unit)
             )
         }
         items(intraday, key={ "intraday_${it.symbol}" }) { row ->
-            LargeCapRow(row,"INTRADAY SHADOW",r.latestDay,r.largeWatchEvidence[row.symbol])
+            LargeCapRow(row,"INTRADAY SHADOW",r.latestDay,r.largeWatchEvidence[row.symbol],r.researchMarketCaps[row.symbol]?:"UNCLASSIFIED")
         }
         item {
             Text("Swing watch · ${swing.size}",style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.Bold)
@@ -95,7 +108,7 @@ internal fun LargeCapResearchScreen(state: TraderUiState, onRefresh: () -> Unit)
             )
         }
         items(swing,key={"swing_${it.symbol}"}) { row ->
-            LargeCapRow(row,"SWING SHADOW",r.latestDay,r.largeWatchEvidence[row.symbol])
+            LargeCapRow(row,"SWING SHADOW",r.latestDay,r.largeWatchEvidence[row.symbol],r.researchMarketCaps[row.symbol]?:"UNCLASSIFIED")
         }
         item {
             Text("Daily shadow-learning ledger",style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.Bold)
@@ -118,7 +131,7 @@ internal fun LargeCapResearchScreen(state: TraderUiState, onRefresh: () -> Unit)
 }
 
 @Composable
-private fun LargeCapRow(r: LargeCapEquityObservation, label: String, eodDate: String = "", evidence: LargeWatchEvidence? = null) {
+private fun LargeCapRow(r: LargeCapEquityObservation, label: String, eodDate: String = "", evidence: LargeWatchEvidence? = null, cap: String = "UNCLASSIFIED") {
     var evidenceExpanded by rememberSaveable(r.symbol,label) { mutableStateOf(false) }
     Card(shape=RoundedCornerShape(12.dp)) {
         Column(Modifier.fillMaxWidth().padding(12.dp),verticalArrangement=Arrangement.spacedBy(3.dp)) {
@@ -127,7 +140,7 @@ private fun LargeCapRow(r: LargeCapEquityObservation, label: String, eodDate: St
                 Text(label,style=MaterialTheme.typography.labelSmall,
                     color=MaterialTheme.colorScheme.primary)
             }
-            Text("${r.sector} · EOD ${price(r.close)}",style=MaterialTheme.typography.bodySmall)
+            Text("${cap.replace('_',' ')} · ${r.sector.ifBlank{"sector unknown"}} · EOD ${price(r.close)}",style=MaterialTheme.typography.bodySmall)
             Text("5-day ${pc(r.fiveDayPct)} · 20-day ${pc(r.twentyDayPct)} · ${if(r.comparisonBasis=="SECTOR_PEERS")"sector peers" else "broad peers"} ${pc(r.sectorFiveDayPct)}",
                 style=MaterialTheme.typography.bodySmall)
             Text("5-day relative strength ${pc(r.relativeFiveDayPct)} · ${if(r.comparisonBasis=="SECTOR_PEERS")"sector" else "broad peer"} breadth ${pc(r.sectorBreadthPct)}",
@@ -161,9 +174,10 @@ private fun LargeCapRow(r: LargeCapEquityObservation, label: String, eodDate: St
             if(r.swingResearch && label == "SWING SHADOW") {
                 val zone = SwingPullbackResearchPolicy.evaluate(r.close,r.ema20,r.ema50)
                 if(zone != null) {
-                    Text("Next-session pullback reference ${price(zone.preferred)} · watch zone ${price(zone.lower)}–${price(zone.upper)}",
+                    Text("Potential pullback entry reference ${price(zone.preferred)} · watch zone ${price(zone.lower)}–${price(zone.upper)}",
                         fontWeight=FontWeight.Bold,style=MaterialTheme.typography.bodyMedium)
-                    Text("Based on ${eodDate.ifBlank { "latest saved EOD" }} close; ${String.format(Locale.US,"%.2f%%",zone.closeExtensionPct)} below EOD close. ${if(zone.distantPullback)"EXTENDED — wait for a pullback; do not chase." else "Wait for a fresh price/volume confirmation."}",
+                    val decline=(1.0-zone.preferred/r.close)*100.0
+                    Text("Based on ${eodDate.ifBlank { "latest saved EOD" }} close; requires a ${String.format(Locale.US,"%.2f%%",decline)} decline to the reference. ${if(zone.distantPullback)"EXTENDED — do not chase." else "Watch for a pullback."} A decline is not predicted; no buy until independently confirmed. A break below support may invalidate the setup.",
                         style=MaterialTheme.typography.labelSmall)
                 }
             }
