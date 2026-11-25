@@ -32,10 +32,11 @@ class EquityEodRefreshWorker @AssistedInject constructor(
         if(market && prefs.getString("last_local_hour","")==slot) return Result.success()
         return try {
             val progress=if(off)eod.refreshAfterHours(25) else null
+            if(market)eod.refreshInstitutionalOnly()
             val snapshot=withContext(Dispatchers.IO){eod.snapshot()}
             if(market) prefs.edit().putString("last_local_hour",slot).apply()
             audit.logAsync("EOD_RESEARCH","SCHEDULED_RESEARCH_REFRESH",mapOf(
-                "mode" to if(off)"AFTER_HOURS" else "MARKET_HOUR_LOCAL",
+                "mode" to if(off)"AFTER_HOURS" else "MARKET_HOUR_OWNERSHIP",
                 "latest_eod" to snapshot.latestDay,"sessions" to snapshot.completedDays,
                 "imported_days" to (progress?.importedDays?:0),
                 "archive_requests" to (progress?.requestedDays?:0),
