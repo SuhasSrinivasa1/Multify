@@ -167,7 +167,7 @@ private fun LargeCapRow(r: LargeCapEquityObservation, label: String, eodDate: St
 }
 
 @Composable
-internal fun SixMonthLowResearchScreen(state: TraderUiState, onScan: (Int) -> Unit) {
+internal fun SixMonthLowResearchScreen(state: TraderUiState, onScan: (Int) -> Unit, onImport: () -> Unit) {
     val research=state.equityResearch
     var selectedMonths by rememberSaveable { mutableStateOf(3) }
     var search by rememberSaveable { mutableStateOf("") }
@@ -223,9 +223,14 @@ internal fun SixMonthLowResearchScreen(state: TraderUiState, onScan: (Int) -> Un
                     label={Text("6M")},modifier=Modifier.testTag("low-range-6m"))
             }
             Text(
-                "Latest exchange EOD: ${research.latestDay.ifBlank{"not imported"}} · ${if(isThree)research.threeMonthCompletedDays else research.completedDays} archive sessions",
+                "Latest validated exchange EOD: ${research.latestDay.ifBlank{"not imported"}} · ${if(isThree)research.threeMonthCompletedDays else research.completedDays} archive sessions",
                 style=MaterialTheme.typography.bodySmall
             )
+            if(research.lastSource.isNotBlank()) {
+                val sourceLabel=if(research.lastSource=="USER_SELECTED_NSE_REPORT")
+                    "user-selected NSE report (local validation)" else "NSE archive HTTP"
+                Text("Last successful import source: $sourceLabel",style=MaterialTheme.typography.labelSmall)
+            }
             if(scanFresh) {
                 Text(
                     "Completed full-NSE EOD scan: ${scan!!.allNseEquitySymbols} EQ symbols · ${scan.historicallyCompleteSymbols} symbols with adequate ${selectedMonths}M history · ${scan.qualifiedPatterns} confirmed near-support patterns",
@@ -235,9 +240,13 @@ internal fun SixMonthLowResearchScreen(state: TraderUiState, onScan: (Int) -> Un
                     style=MaterialTheme.typography.labelSmall)
             } else {
                 Text(
-                    if(!historyReady)
-                        "HISTORY BUILDING — full ${selectedMonths}M evidence is not yet ready; no support-pattern claim will be made."
-                    else "PENDING AFTER-HOURS FULL-NSE PATTERN SCAN — new TEST install has no precomputed local watchlist yet.",
+                    if(!historyReady && research.latestDay.isBlank() && research.lastError.isNotBlank())
+                        "SOURCE UNAVAILABLE — no validated EOD session is stored. Import official NSE reports or wait for archive recovery; no support-pattern claim will be made."
+                    else if(!historyReady && research.latestDay.isBlank())
+                        "NO VALIDATED EOD DATA IMPORTED — historical coverage is empty; no support-pattern claim will be made."
+                    else if(!historyReady)
+                        "HISTORY BUILDING — validated EOD data exists but full ${selectedMonths}M coverage is not yet ready; no support-pattern claim will be made."
+                    else "PENDING AFTER-HOURS FULL-NSE PATTERN SCAN — no current-day precomputed local watchlist yet.",
                     color=MaterialTheme.colorScheme.error,
                     style=MaterialTheme.typography.bodySmall
                 )
@@ -259,6 +268,14 @@ internal fun SixMonthLowResearchScreen(state: TraderUiState, onScan: (Int) -> Un
                     Text("Recalculating…")
                 } else Text("Refresh research / Scan Now")
             }
+            OutlinedButton(onClick=onImport,enabled=!state.researchScanning,
+                modifier=Modifier.fillMaxWidth().testTag("import-official-nse-eod")) {
+                Text("Import official NSE EOD files")
+            }
+            Text(
+                "Fallback when NSE archive access is blocked: download UDiFF ZIP or Full Bhavcopy CSV files from NSE All Reports, then select multiple files here. Each file must pass date, OHLC, duplicate-symbol and minimum 1,500 EQ-row checks. Local import makes zero Groww/network calls.",
+                style=MaterialTheme.typography.labelSmall
+            )
             val storedSessions=if(isThree)research.threeMonthCompletedDays else research.completedDays
             val requiredSessions=if(isThree)55 else 105
             Text("Validated sessions: $storedSessions / $requiredSessions minimum · date span also required",style=MaterialTheme.typography.labelSmall)
