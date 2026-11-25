@@ -189,22 +189,35 @@ private fun LargeCapRow(r: LargeCapEquityObservation, label: String, eodDate: St
 internal fun SixMonthLowResearchScreen(state: TraderUiState, onScan: (Int) -> Unit, onImport: () -> Unit) {
     val research=state.equityResearch
     var selectedMonths by rememberSaveable { mutableStateOf(3) }
+    var lowMode by rememberSaveable { mutableStateOf("NEAR") }
     var search by rememberSaveable { mutableStateOf("") }
     var capFilter by rememberSaveable { mutableStateOf("ALL") }
     val isThree=selectedMonths==3
     val historyReady=if(isThree)research.threeMonthHistoryComplete else research.sixMonthHistoryComplete
-    val result=if(isThree)research.adaptiveLowThreeRows else research.adaptiveLowSixRows
+    val strictRows=if(isThree)research.adaptiveLowThreeRows else research.adaptiveLowSixRows
+    val singleRows=if(isThree)research.singleRebound3 else research.singleRebound6
+    val discoveryRows=if(isThree)research.historicalLow3 else research.historicalLow6
+    val result=if(lowMode=="SINGLE")singleRows else strictRows
+    val discoveryMode=lowMode=="NEAR" || lowMode=="BREAKDOWN"
+    val discovery=discoveryRows.filter{if(lowMode=="BREAKDOWN")it.distancePct<0 else it.distancePct>=0}
     val scan=if(isThree)research.adaptiveLowThreeRun else research.adaptiveLowSixRun
-    val learning=if(isThree)research.adaptiveLowThreeLearning else research.adaptiveLowSixLearning
-    val scanFresh=historyReady && scan!=null && scan.day==research.latestDay
+    val learning=if(lowMode=="SINGLE") {
+        if(isThree)research.singleReboundLearning3 else research.singleReboundLearning6
+    } else if(isThree)research.adaptiveLowThreeLearning else research.adaptiveLowSixLearning
+    val discoveryReady=if(isThree)research.lowDiscoveryReady3 else research.lowDiscoveryReady6
+    val strictFresh=historyReady && scan!=null && scan.day==research.latestDay
+    val scanFresh=strictFresh && (lowMode=="STRICT" || discoveryReady)
+    val categoryRows=if(discoveryMode)discovery.map{it.marketCapCategory} else result.map{it.marketCapCategory}
+    val discoveryVisible=if(scanFresh && discoveryMode)discovery.filter{
+        (capFilter=="ALL" || it.marketCapCategory==capFilter) &&
+        (search.isBlank() || it.symbol.contains(search.trim(),true) || it.companyName.contains(search.trim(),true) || it.sector.contains(search.trim(),true))
+    }.sortedBy{kotlin.math.abs(it.distancePct)} else emptyList()
     // Closest confirmed approaches first. No "hot" API request or dynamic
     // eligibility change occurs on this UI thread.
-    fun countLabel(category:String):String = if(!scanFresh) "—" else (result.count{it.marketCapCategory==category}).toString()
-    val counts=remember(result,scanFresh) {
-        if(scanFresh) result.groupingBy{it.marketCapCategory}.eachCount() else emptyMap()
-    }
-    val visible=remember(result,scanFresh,search,capFilter) {
-        if(!scanFresh) emptyList() else result.filter {
+    fun countLabel(category:String):String = if(!scanFresh) "—" else categoryRows.count{it==category}.toString()
+    val counts=if(scanFresh)categoryRows.groupingBy{it}.eachCount() else emptyMap()
+    val visible=remember(result,scanFresh,search,capFilter,discoveryMode) {
+        if(!scanFresh || discoveryMode) emptyList() else result.filter {
             (capFilter=="ALL" || it.marketCapCategory==capFilter) &&
                 (search.isBlank() || it.symbol.contains(search.trim(),true) ||
                 it.companyName.contains(search.trim(),true) ||
@@ -224,15 +237,15 @@ internal fun SixMonthLowResearchScreen(state: TraderUiState, onScan: (Int) -> Un
     ) {
         item {
             ResearchNotice(
-                "ADAPTIVE NSE SUPPORT RETESTS",
-                "Research-only · repeated rebound lows, approaching from ABOVE within strictly 5% · no automatic BUY"
+                "NSE HISTORICAL LOWS",
+                "Four separate research views · no automatic BUY"
             )
             Text(
-                "Find previous support levels that produced at least TWO confirmed +5% rebounds within ten subsequent EOD sessions and are now being revisited during a decline.",
+                "Near historical lows is broad discovery; single rebound is a shadow challenger; repeated rebound is the unchanged original rule. Breakdown means the close is below the previous period low.",
                 style=MaterialTheme.typography.bodyMedium
             )
             Text(
-                "This is NOT a list of stocks simply near a 3M/6M low. Raw NSE OHLC/volume history is scanned across all saved NSE EQ names after market hours.",
+                "All views use the same validated NSE EOD archive. Prior-period lows exclude the latest session; no additional Groww requests.",
                 style=MaterialTheme.typography.bodySmall
             )
             Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
@@ -241,6 +254,20 @@ internal fun SixMonthLowResearchScreen(state: TraderUiState, onScan: (Int) -> Un
                 FilterChip(selected=!isThree,onClick={selectedMonths=6},
                     label={Text("6M")},modifier=Modifier.testTag("low-range-6m"))
             }
+            Row(horizontalArrangement=Arrangement.spacedBy(6.dp)) {
+                FilterChip(selected=lowMode=="NEAR",onClick={lowMode="NEAR"},label={Text("Near lows")})
+                FilterChip(selected=lowMode=="BREAKDOWN",onClick={lowMode="BREAKDOWN"},label={Text("Breakdown")})
+            }
+            Row(horizontalArrangement=Arrangement.spacedBy(6.dp)) {
+                FilterChip(selected=lowMode=="SINGLE",onClick={lowMode="SINGLE"},label={Text("1 rebound · shadow")})
+                FilterChip(selected=lowMode=="STRICT",onClick={lowMode="STRICT"},label={Text("2+ rebounds")})
+            }
+            Text(when(lowMode){
+                "NEAR"->"Close at or up to 5% above the prior low. Not a reversal signal."
+                "BREAKDOWN"->"Close below the prior low. Support may have failed; not a buy list."
+                "SINGLE"->"At least one qualifying historical rebound; only minimum reaction count differs from the strict rule."
+                else->"Original repeated support retest: at least two prior +5% rebounds."
+            },style=MaterialTheme.typography.bodySmall)
             Text(
                 "Latest validated exchange EOD: ${research.latestDay.ifBlank{"not imported"}} · ${if(isThree)research.threeMonthCompletedDays else research.completedDays} archive sessions",
                 style=MaterialTheme.typography.bodySmall
@@ -257,7 +284,7 @@ internal fun SixMonthLowResearchScreen(state: TraderUiState, onScan: (Int) -> Un
             }
             if(scanFresh) {
                 Text(
-                    "Completed full-NSE EOD scan: ${scan!!.allNseEquitySymbols} EQ symbols · ${scan.historicallyCompleteSymbols} symbols with adequate ${selectedMonths}M history · ${scan.qualifiedPatterns} confirmed near-support patterns",
+                    "Completed full-NSE EOD scan: ${scan!!.allNseEquitySymbols} EQ symbols · ${scan.historicallyCompleteSymbols} symbols with adequate ${selectedMonths}M history · ${categoryRows.size} matches in selected view",
                     style=MaterialTheme.typography.bodyMedium,fontWeight=FontWeight.SemiBold
                 )
                 Text("Cached analysis completed ${atIst(scan.completedAtMs)}; no Groww market-data use.",
@@ -319,7 +346,7 @@ internal fun SixMonthLowResearchScreen(state: TraderUiState, onScan: (Int) -> Un
             if(research.marketCapClassificationCount==0)
                 Text("Classification asset unavailable — no size is guessed.",color=MaterialTheme.colorScheme.error)
             Row(horizontalArrangement=Arrangement.spacedBy(6.dp)) {
-                FilterChip(selected=capFilter=="ALL",onClick={capFilter="ALL"},label={Text("All ${if(scanFresh)result.size.toString() else "—"}")},modifier=Modifier.testTag("low-cap-all"))
+                FilterChip(selected=capFilter=="ALL",onClick={capFilter="ALL"},label={Text("All ${if(scanFresh)categoryRows.size.toString() else "—"}")},modifier=Modifier.testTag("low-cap-all"))
                 FilterChip(selected=capFilter=="LARGE_CAP",onClick={capFilter="LARGE_CAP"},label={Text("Large ${countLabel("LARGE_CAP")}")},modifier=Modifier.testTag("low-cap-large"))
             }
             Row(horizontalArrangement=Arrangement.spacedBy(6.dp)) {
@@ -329,37 +356,57 @@ internal fun SixMonthLowResearchScreen(state: TraderUiState, onScan: (Int) -> Un
             FilterChip(selected=capFilter=="UNCLASSIFIED",onClick={capFilter="UNCLASSIFIED"},label={Text("Unclassified ${countLabel("UNCLASSIFIED")}")},modifier=Modifier.testTag("low-cap-unclassified"))
             val capAudit=if(isThree)research.lowCapAudit3 else research.lowCapAudit6
             var expandedAudit by rememberSaveable { mutableStateOf(false) }
-            if(scanFresh && capFilter=="LARGE_CAP" && counts["LARGE_CAP"]==null) {
+            if(scanFresh && lowMode=="STRICT" && capFilter=="LARGE_CAP" && counts["LARGE_CAP"]==null) {
                 Text("Large Cap: zero confirmed support-retest matches, not zero large-cap stocks.",fontWeight=FontWeight.SemiBold)
                 Text("Requires two prior 5% rebounds within 10 sessions, rapid 2% rebounds, a repeated support cluster and a fresh decline to within 5% above support.",style=MaterialTheme.typography.bodySmall)
             }
             if(scanFresh && capAudit.isNotBlank()) {
-                Text(capAudit.substringBefore("\nFirst rejection:"),style=MaterialTheme.typography.bodySmall)
+                Text("Original strict strategy audit: "+capAudit.substringBefore("\nFirst rejection:"),style=MaterialTheme.typography.bodySmall)
                 OutlinedButton(onClick={expandedAudit=!expandedAudit}){Text(if(expandedAudit)"Hide rejection details" else "Why stocks failed · view rejection details")}
                 if(expandedAudit)Text(capAudit.substringAfter("\nFirst rejection:",capAudit),style=MaterialTheme.typography.bodySmall)
             } else Text("Market-cap rejection audit pending after-hours scan. Missing data is not zero matches.",style=MaterialTheme.typography.bodySmall)
             Text("Price evidence date: ${research.latestDay.ifBlank{"unknown"}} · calculation time is not a newer market close.",style=MaterialTheme.typography.labelSmall)
-            Text("Approaching historical rebound zones · ${visible.size}",
+            Text(when(lowMode) {
+                "NEAR"->"Near previous historical lows"
+                "BREAKDOWN"->"Below previous historical lows"
+                "SINGLE"->"Single-rebound challenger"
+                else->"Approaching repeated rebound zones"
+            }+" · "+(if(discoveryMode)discoveryVisible.size else visible.size),
                 style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.Bold)
             OutlinedTextField(value=search,onValueChange={search=it},singleLine=true,
                 label={Text("Filter ticker, company or mapped sector")},
                 modifier=Modifier.fillMaxWidth())
-            if(visible.isEmpty()) Text(
-                if(scanFresh && capFilter=="LARGE_CAP" && counts["LARGE_CAP"]==null)
+            if((if(discoveryMode)discoveryVisible.isEmpty() else visible.isEmpty())) Text(
+                if(scanFresh && lowMode=="STRICT" && capFilter=="LARGE_CAP" && counts["LARGE_CAP"]==null)
                     "No qualifying large-cap support retests. See the rejection audit above."
                 else if(scanFresh && (capFilter!="ALL" || search.isNotBlank()))
                     "No candidates match the selected filters. Choose All or clear the search."
                 else if(scanFresh)
-                    "No NSE EQ shares meet the full repeated-rebound, falling-toward-support and STRICTLY under-5% criteria today. An empty list is a valid outcome."
+                    "No NSE EQ shares meet the selected research criteria today. An empty list is a valid outcome."
                 else "No eligible list until the local after-hours scan completes.",
                 style=MaterialTheme.typography.bodySmall
             )
         }
-        items(visible,key={"${selectedMonths}M_${it.symbol}"}) { c ->
-            AdaptiveLowOpportunityRow(c)
+        items(discoveryVisible,key={"discovery_${selectedMonths}_${it.symbol}"}) { c ->
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(12.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
+                    Text(c.symbol,style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.Bold)
+                    if(c.companyName.isNotBlank())Text(c.companyName,style=MaterialTheme.typography.bodySmall)
+                    MarketCapBadge(c.marketCapCategory,null)
+                    Text("EOD ${price(c.close)} · ${c.day}",style=MaterialTheme.typography.bodyMedium)
+                    Text("Prior ${c.months}M low ${price(c.priorLow)} · ${c.priorLowDay}",style=MaterialTheme.typography.bodyMedium)
+                    Text(lowDistanceLabel(c.distancePct,c.months),fontWeight=FontWeight.Bold,
+                        color=if(c.distancePct<0)MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary)
+                    Text(if(c.distancePct<0)"SUPPORT BREAKDOWN — wait for fresh recovery evidence; not a BUY."
+                        else "Watchlist only — wait for fresh price, volume and reversal evidence; no confirmed entry.",style=MaterialTheme.typography.bodySmall)
+                }
+            }
+        }
+        items(visible,key={"${lowMode}_${selectedMonths}M_${it.symbol}"}) { c ->
+            AdaptiveLowOpportunityRow(c,lowMode=="SINGLE")
         }
         item {
-            Text("Adaptive research audit · ${selectedMonths}M",
+            Text(if(discoveryMode)"Original rebound research audit (not discovery outcomes)" else "Adaptive research audit · ${selectedMonths}M",
                 style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.Bold)
             Text(
                 "Each independent observation is followed for ten FULL future EOD sessions. A +5% later EOD close is only a research rebound, not a fill or executable P&L. Unmatured observations remain unresolved.",
@@ -382,12 +429,13 @@ internal fun SixMonthLowResearchScreen(state: TraderUiState, onScan: (Int) -> Un
 }
 
 @Composable
-private fun AdaptiveLowOpportunityRow(c: com.multify.traderpro.engine.AdaptiveLowCandidate) {
+private fun AdaptiveLowOpportunityRow(c: com.multify.traderpro.engine.AdaptiveLowCandidate, singleShadow:Boolean=false) {
     var expanded by rememberSaveable(c.symbol,c.months,c.asOfDay) { mutableStateOf(false) }
     Card(shape=RoundedCornerShape(12.dp)) {
         Column(Modifier.fillMaxWidth().padding(12.dp),
             verticalArrangement=Arrangement.spacedBy(5.dp)) {
             Text(c.symbol,fontWeight=FontWeight.Bold,style=MaterialTheme.typography.titleMedium)
+            if(singleShadow)Text("SINGLE-REBOUND SHADOW · not an executable BUY",style=MaterialTheme.typography.labelSmall)
             if(c.companyName.isNotBlank() && !c.companyName.equals(c.symbol,true))
                 Text(c.companyName,style=MaterialTheme.typography.bodySmall)
             MarketCapBadge(c.marketCapCategory,null)
@@ -404,7 +452,7 @@ private fun AdaptiveLowOpportunityRow(c: com.multify.traderpro.engine.AdaptiveLo
             Text("Historical support watch range ${price(c.entryLow)}–${price(c.entryHigh)}",
                 style=MaterialTheme.typography.bodyMedium)
             Text(
-                "Latest ${c.asOfDay} close ${price(c.latestClose)} · ${String.format(Locale.US,"%.2f%%",c.distanceAboveSupportPct)} above repeated support ${price(c.supportPrice)}",
+                "Latest ${c.asOfDay} close ${price(c.latestClose)} · ${String.format(Locale.US,"%.2f%%",c.distanceAboveSupportPct)} above historical support ${price(c.supportPrice)}",
                 style=MaterialTheme.typography.bodySmall
             )
             Text(
