@@ -722,20 +722,18 @@ class EquityEodResearchRepository @Inject constructor(
             }
             if (blocked) break
         }
-        // Read-only NSE PE and index-industry imports, after hours only, independent of Groww.
-        // Neither data source changes the frozen Fixed selection/BUY path.
+        // Independent after-hours research stages run even when the bhavcopy archive is blocked.
+        // Each host has its own persisted cooldown, so a 403 on one source never gates another.
+        // These stages are read-only and add zero Groww calls; Fixed scoring/BUY inputs remain frozen.
         fun offHoursStep(name:String,task:()->Unit) {
             if(!afterHours(ZonedDateTime.now(INDIA)))return
             runCatching{task()}.onFailure{err->audit.logAsync("EOD_RESEARCH","RESEARCH_STAGE_FAILED",
                 mapOf("stage" to name,"reason" to (err.message?:err.javaClass.simpleName).take(180),"groww_requests" to 0))}
         }
-        if(!blocked) {
-            offHoursStep("VALUATION"){refreshValuationAfterHours()}
-            offHoursStep("INDEX"){refreshLargeIndexEodAfterHours()}
-            offHoursStep("OHLC"){refreshExistingOhlcAfterHours(maxDays = 6)}
-            if(cooldownUntil(archiveHost)<=System.currentTimeMillis())
-                offHoursStep("INSTITUTIONAL"){refreshInstitutionalAfterHours()}
-        }
+        offHoursStep("VALUATION"){refreshValuationAfterHours()}
+        offHoursStep("INDEX"){refreshLargeIndexEodAfterHours()}
+        offHoursStep("OHLC"){refreshExistingOhlcAfterHours(maxDays = 6)}
+        offHoursStep("INSTITUTIONAL"){refreshInstitutionalAfterHours()}
         offHoursStep("SUPPORT_RETEST"){refreshAdaptiveLowsAfterHours()}
         val summary="Imported $imported · archive attempts $wireRequests · missing files $missingFiles · deferred $skipped"
         prefs.edit().putLong("last_eod_attempt_ms",System.currentTimeMillis())
