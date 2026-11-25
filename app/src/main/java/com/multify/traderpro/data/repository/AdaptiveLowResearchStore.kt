@@ -78,9 +78,9 @@ internal object AdaptiveLowLearningPolicy {
  * Separate SQLite research-only store. Does not share a broker/trading database.
  * Daily snapshots are immutable once completed; sparse future data stays unresolved.
  */
-internal class AdaptiveLowResearchStore(context:Context) {
-    private class Store(context:Context):
-        SQLiteOpenHelper(context,"adaptive_low_research_v1.db",null,1){
+internal class AdaptiveLowResearchStore(context:Context, private val databaseName:String="adaptive_low_research_v1.db") {
+    private class Store(context:Context,name:String):
+        SQLiteOpenHelper(context,name,null,1){
         override fun onCreate(db:SQLiteDatabase) {
             db.execSQL("CREATE TABLE run(day TEXT NOT NULL, months INTEGER NOT NULL, universe INTEGER NOT NULL, complete INTEGER NOT NULL, patterns INTEGER NOT NULL, at_ms INTEGER NOT NULL, PRIMARY KEY(day,months))")
             db.execSQL("CREATE TABLE low_day(day TEXT NOT NULL,months INTEGER NOT NULL,symbol TEXT NOT NULL,json TEXT NOT NULL,PRIMARY KEY(day,months,symbol))")
@@ -91,7 +91,7 @@ internal class AdaptiveLowResearchStore(context:Context) {
             error("Adaptive low research migration requires explicit implementation")
     }
     private val appContext=context.applicationContext
-    private val store=Store(appContext)
+    private val store=Store(appContext,databaseName)
     private val lock=Any()
     private val gson=Gson()
 
@@ -201,10 +201,10 @@ internal class AdaptiveLowResearchStore(context:Context) {
     }
 
     fun exportBackupBytes():ByteArray?=synchronized(lock){
-        ResearchDatabaseBackup.exportBytes(appContext,store,"adaptive_low_research_v1.db")
+        ResearchDatabaseBackup.exportBytes(appContext,store,databaseName)
     }
     fun mergeBackupBytes(bytes:ByteArray):ResearchDatabaseBackup.MergeResult=synchronized(lock){
-        ResearchDatabaseBackup.mergeBytes(appContext,store,"adaptive_low_research_v1.db",bytes)
+        ResearchDatabaseBackup.mergeBytes(appContext,store,databaseName,bytes)
     }
 
     fun learning(months:Int):List<AdaptiveLowResearchSummary> = synchronized(lock) {
