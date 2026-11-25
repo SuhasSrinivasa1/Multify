@@ -47,9 +47,14 @@ internal object SharedPrefsBackupCodec {
                 continue
             }
             val isDeadline = key.contains("cooldown_until") || key.contains("_retry_") ||
-                key.endsWith("_retry_at_ms") || key.endsWith("_until_ms")
+                key.endsWith("_retry_at_ms") || key.endsWith("_until_ms") ||
+                key.endsWith("_success_at_ms")
+            val isFailureCounter = key.contains("nse_403_failures")
             if (isDeadline && existing is Long && type == "long" && value.asLong > existing) {
                 editor.putLong(key, value.asLong)
+                restored++
+            } else if (isFailureCounter && existing is Int && type == "int" && value.asInt > existing) {
+                editor.putInt(key, value.asInt)
                 restored++
             } else if (existing is String && existing.isBlank() && type == "string" && value.asString.isNotBlank()) {
                 editor.putString(key, value.asString)
