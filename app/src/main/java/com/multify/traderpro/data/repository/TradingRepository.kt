@@ -14591,6 +14591,7 @@ class TradingRepository @Inject constructor(
                     "no_automatic_delete_or_truncate" to true
                 ))
                 zip.finish()
+                }
             }
             check(stagingFile.isFile && stagingFile.length() > 22L) { "Diagnostic ZIP is empty" }
             val expectedEntries = fileCount
