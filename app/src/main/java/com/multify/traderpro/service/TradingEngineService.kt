@@ -859,8 +859,15 @@ class TradingEngineService : Service() {
                                 return (after - before).coerceAtLeast(0L)
                             }
                             val historicalAfter = repository.fixedHistoricalRequestCounters()
+                            val cadence = com.multify.traderpro.engine.FixedScanScheduleDiagnostics.classify(actualStartSpacingMs)
+                            val durationBucket = com.multify.traderpro.engine.FixedScanScheduleDiagnostics.durationBucket(elapsed)
                             auditLogger.logAsync("RUNTIME", "FIXED_SCAN_PROFILE", mapOf(
                                 "elapsed_ms" to elapsed,
+                                "duration_bucket" to durationBucket,
+                                "duration_warning_only" to true,
+                                "cadence_status" to cadence.status,
+                                "estimated_skipped_scan_intervals" to cadence.estimatedSkippedIntervals,
+                                "cadence_is_observational_not_causal" to true,
                                 "scan_id" to scanId,
                                 "scan_started_at_ms" to startedAt,
                                 "scan_completed_at_ms" to (startedAt + elapsed),
@@ -895,6 +902,20 @@ class TradingEngineService : Service() {
                                 "evaluation_concurrency_high_end" to 8,
                                 "fixed_formula_changed" to false
                             ))
+                            if (cadence.status == "LATE" || cadence.status == "INTERVAL_GAP") {
+                                auditLogger.logAsync("FIXED_PERFORMANCE", "FIXED_SCAN_CADENCE_GAP", mapOf(
+                                    "scan_id" to scanId,
+                                    "scan_started_at_ms" to startedAt,
+                                    "target_spacing_ms" to cadence.targetSpacingMs,
+                                    "actual_spacing_ms" to cadence.actualSpacingMs,
+                                    "status" to cadence.status,
+                                    "estimated_skipped_intervals" to cadence.estimatedSkippedIntervals,
+                                    "elapsed_ms" to elapsed,
+                                    "duration_bucket" to durationBucket,
+                                    "reason_not_inferred" to true,
+                                    "fixed_strategy_changed" to false
+                                ))
+                            }
                         }
                         if (scanned) {
                             // Research-only cohort audit: no broker request, no
