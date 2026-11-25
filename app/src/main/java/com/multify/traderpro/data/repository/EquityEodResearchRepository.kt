@@ -464,6 +464,90 @@ class EquityEodResearchRepository @Inject constructor(
         return rows.size
     }
 
+    /**
+     * Manual, user-selected NSE report fallback for archive-host 403s.
+     * Files are parsed and validated locally; this path makes zero Groww/network requests.
+     */
+    suspend fun importLocalArchives(uris:List<Uri>):EquityEodLocalImportResult=withContext(Dispatchers.IO) {
+        require(uris.isNotEmpty()) { "Select at least one NSE report file" }
+        require(uris.size<=100) { "Select at most 100 NSE report files per import" }
+        val imported=linkedMapOf<LocalDate,Int>()
+        var skipped=0
+        val failures=mutableListOf<String>()
+        val latest=latestEligibleDate(ZonedDateTime.now(INDIA))
+        val oldest=LocalDate.now(INDIA).minusDays(400)
+        for(uri in uris) {
+            val parsed=runCatching { NseBhavcopyFileImporter.parse(context,uri) }
+            if(parsed.isFailure) {
+                failures += NseBhavcopyFileImporter.displayName(context,uri) + ": " +
+                    (parsed.exceptionOrNull()?.message ?: "Invalid NSE report").take(100)
+                continue
+            }
+            val file=parsed.getOrThrow()
+            try {
+                check(!file.date.isAfter(latest)) { "Report date is newer than latest eligible exchange EOD" }
+                check(!file.date.isBefore(oldest)) { "Report is older than the supported 400-day import window" }
+                val accepted=persistManualArchive(file.date,file.rows)
+                if(accepted) imported[file.date]=maxOf(imported[file.date] ?: 0,file.rows.size)
+                else skipped++
+            } catch(error:Exception) {
+                failures += file.fileName + ": " + (error.message ?: error.javaClass.simpleName).take(100)
+            }
+        }
+        val rowsImported=imported.values.sum()
+        if(imported.isNotEmpty()) {
+            prefs.edit()
+                .putString("last_eod_source","USER_SELECTED_NSE_REPORT")
+                .putLong("last_eod_success_at_ms",System.currentTimeMillis())
+                .putString("last_eod_progress","Manual NSE import · " + imported.size + " sessions · " +
+                    rowsImported + " EQ rows · " + skipped + " skipped · " + failures.size + " rejected")
+                .apply()
+        }
+        audit.logAsync("EOD_RESEARCH","MANUAL_NSE_REPORT_IMPORT",mapOf(
+            "imported_sessions" to imported.size,
+            "imported_eq_rows" to rowsImported,
+            "skipped_files" to skipped,
+            "failed_files" to failures.take(12),
+            "network_requests" to 0,
+            "groww_requests" to 0,
+            "trading_state_changed" to false
+        ))
+        EquityEodLocalImportResult(imported.size,rowsImported,skipped,failures.take(12))
+    }
+
+    private fun persistManualArchive(date:LocalDate,rows:List<EquityEodBar>):Boolean=synchronized(lock) {
+        val sql=db.writableDatabase
+        val existing=sql.rawQuery("SELECT symbols FROM eod_days WHERE day=?",arrayOf(date.toString())).use {
+            if(it.moveToFirst())it.getInt(0) else 0
+        }
+        // Never replace a larger already-validated session with a smaller manual file.
+        if(existing>=rows.size)return@synchronized false
+        sql.beginTransaction()
+        try {
+            sql.delete("eod","day=?",arrayOf(date.toString()))
+            for(bar in rows) {
+                sql.insertOrThrow("eod",null,ContentValues().apply {
+                    put("day",bar.date.toString())
+                    put("symbol",bar.symbol)
+                    put("low",bar.low)
+                    put("close",bar.close)
+                    put("volume",bar.volume)
+                    bar.open?.let { put("open",it) }
+                    bar.high?.let { put("high",it) }
+                })
+            }
+            sql.insertWithOnConflict("eod_days",null,ContentValues().apply {
+                put("day",date.toString())
+                put("symbols",rows.size)
+                put("updated_ms",System.currentTimeMillis())
+            },SQLiteDatabase.CONFLICT_REPLACE)
+            sql.setTransactionSuccessful()
+        } finally {
+            sql.endTransaction()
+        }
+        true
+    }
+
     private fun symbolsFromIndex(url: String): Map<String,String> {
         requireAfterHours()
         return sourceGet(url).use { r ->
