@@ -56,4 +56,29 @@ class InstitutionalHistoryPolicyTest {
         assertNull(InstitutionalHistoryPolicy.movement(100.0,null))
         assertEquals(10.0,InstitutionalHistoryPolicy.movement(110.0,100.0)!!,0.01)
     }
+    @Test fun netDirectionsAreExclusiveAndBalancedFlowsAreNeither() {
+        val day="2026-11-24"
+        val r=report(day,d(day,"BUY",100,10.0,"BUYER"),d(day,"SELL",70,10.0,"BUYER"),
+            d(day,"BUY",90,10.0,"SELLER"),d(day,"SELL",100,10.0,"SELLER"),
+            d(day,"BUY",3,0.1,"BALANCED"),d(day,"SELL",1,0.3,"BALANCED"),
+            d(day,"BUY",1000,10.0,"GROSS"),d(day,"SELL",999,10.0,"GROSS"))
+        val snap=InstitutionalSnapshot(bulk=r,sessions=listOf(day))
+        val buys=InstitutionalHistoryPolicy.window(snap,"BULK","BUY","ALL",1).rows
+        val sells=InstitutionalHistoryPolicy.window(snap,"BULK","SELL","ALL",1).rows
+        assertEquals(listOf("BUYER","GROSS"),buys.map{it.symbol})
+        assertEquals(listOf("SELLER"),sells.map{it.symbol})
+        assertTrue(buys.map{it.symbol}.toSet().intersect(sells.map{it.symbol}.toSet()).isEmpty())
+        assertEquals(300.0,buys.first().net,0.001)
+        assertEquals(-100.0,sells.first().net,0.001)
+    }
+    @Test fun opposingInvestorGroupsAndDifferentPeriodsCanLegitimatelyDiffer() {
+        val a="2026-11-23";val b="2026-11-24"
+        val old=report(a,d(a,"BUY",200,10.0))
+        val latest=report(b,d(b,"SELL",100,10.0),d(b,"BUY",20,10.0,cat="DII"))
+        val snap=InstitutionalSnapshot(bulk=latest,history=listOf(old,latest),sessions=listOf(a,b))
+        assertEquals("ABC",InstitutionalHistoryPolicy.window(snap,"BULK","SELL","ALL",1).rows.single().symbol)
+        assertEquals("ABC",InstitutionalHistoryPolicy.window(snap,"BULK","BUY","ALL",5).rows.single().symbol)
+        assertEquals("ABC",InstitutionalHistoryPolicy.window(snap,"BULK","BUY","DII",1).rows.single().symbol)
+        assertTrue(InstitutionalHistoryPolicy.window(snap,"BULK","BUY","ALL",1).rows.isEmpty())
+    }
 }
