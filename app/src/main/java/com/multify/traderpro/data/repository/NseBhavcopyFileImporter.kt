@@ -60,7 +60,7 @@ internal object NseBhavcopyFileImporter {
         return Parsed(name, result.first, result.second)
     }
 
-    private fun parseUdiFF(
+    internal fun parseUdiFF(
         reader: BufferedReader,
         entryName: String
     ): Pair<LocalDate, List<EquityEodBar>> {
@@ -107,7 +107,7 @@ internal object NseBhavcopyFileImporter {
         return date to map.values.toList()
     }
 
-    private fun parseFullBhavcopy(reader: BufferedReader): Pair<LocalDate, List<EquityEodBar>> {
+    internal fun parseFullBhavcopy(reader: BufferedReader): Pair<LocalDate, List<EquityEodBar>> {
         val headings = cells(reader.readLine() ?: error("Full Bhavcopy header missing"))
             .map { it.removePrefix("\uFEFF").trim().uppercase(Locale.US) }
         val indices = listOf("SYMBOL", "SERIES", "DATE1", "OPEN_PRICE", "HIGH_PRICE", "LOW_PRICE", "CLOSE_PRICE", "TTL_TRD_QNTY")
