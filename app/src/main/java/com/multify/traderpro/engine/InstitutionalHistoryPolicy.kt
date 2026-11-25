@@ -38,7 +38,13 @@ object InstitutionalHistoryPolicy {
             val buys=all.filter{it.side=="BUY"}; val sells=all.filter{it.side=="SELL"}
             val chosen=if(side=="BUY")buys else sells
             if(chosen.isEmpty())return@mapNotNull null
-            val b=buys.sumOf{it.shares*it.price};val s=sells.sumOf{it.shares*it.price}
+            // Use decimal rupee values to avoid floating-point noise assigning a balanced stock a side.
+            fun value(rows:List<InstitutionalDeal>)=rows.fold(java.math.BigDecimal.ZERO){total,d->
+                total+java.math.BigDecimal.valueOf(d.price)*java.math.BigDecimal.valueOf(d.shares)}
+            val buyValue=value(buys);val sellValue=value(sells)
+            val direction=buyValue.compareTo(sellValue)
+            if((side=="BUY" && direction<=0)||(side=="SELL" && direction>=0))return@mapNotNull null
+            val b=buyValue.toDouble();val s=sellValue.toDouble()
             val bq=buys.sumOf{it.shares};val sq=sells.sumOf{it.shares}
             InstitutionalAccumulation(sym,chosen.first().company,b,s,chosen.sumOf{it.shares},
                 chosen.filter{it.category=="FII"}.sumOf{it.shares*it.price},
@@ -46,7 +52,7 @@ object InstitutionalHistoryPolicy {
                 if(bq>0)b/bq else null,if(sq>0)s/sq else null,
                 buys.groupBy{it.investor}.count{(_,v)->v.map{it.day}.distinct().size>=2},
                 buys.map{it.day}.distinct().size,chosen.map{it.investor}.distinct().sorted())
-        }.sortedWith(compareByDescending<InstitutionalAccumulation>{if(side=="BUY")it.grossBuy else it.grossSell}.thenBy{it.symbol}).take(20)
+        }.sortedWith(compareByDescending<InstitutionalAccumulation>{if(side=="BUY")it.net else -it.net}.thenBy{it.symbol}).take(20)
         return InstitutionalWindow(rows,days,expected.size,selected.size,dates.lastOrNull().orEmpty())
     }
     /** Aggregate all matched disclosures, not merely the 20 displayed stocks. */
