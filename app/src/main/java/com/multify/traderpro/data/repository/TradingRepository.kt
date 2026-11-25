@@ -14593,7 +14593,7 @@ class TradingRepository @Inject constructor(
                 zip.finish()
             }
             check(stagingFile.isFile && stagingFile.length() > 22L) { "Diagnostic ZIP is empty" }
-            val expectedEntries = fileCount + 1
+            val expectedEntries = fileCount
             val stagedValidation = DiagnosticZipIntegrity.verify(stagingFile, expectedEntries)
             check(stagedValidation.entries == expectedEntries) { "Diagnostic ZIP entry count mismatch" }
             if (!stagingFile.renameTo(completedFile)) {
@@ -14644,7 +14644,7 @@ class TradingRepository @Inject constructor(
             }
             auditLogger.logAsync("DIAGNOSTIC_EXPORT", "ZIP_DESTINATION_WRITE_VERIFIED", mapOf(
                 "bytes" to copied,
-                "entries" to prepared.result.entries + 1,
+                "entries" to prepared.result.entries,
                 "research_backup_included" to prepared.includesResearchBackup
             ))
             prepared.result

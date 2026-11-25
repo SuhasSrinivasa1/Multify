@@ -56,16 +56,16 @@ class DailyDiagnosticBackupWorker @AssistedInject constructor(
             check(staging.isFile && staging.length() == prepared.sizeBytes && staging.length() > 22L) {
                 "Daily diagnostic backup copy is incomplete"
             }
-            val stagedValidation = DiagnosticZipIntegrity.verify(staging, prepared.result.entries + 1)
-            check(stagedValidation.entries == prepared.result.entries + 1) {
+            val stagedValidation = DiagnosticZipIntegrity.verify(staging, prepared.result.entries)
+            check(stagedValidation.entries == prepared.result.entries) {
                 "Daily diagnostic backup staging validation failed"
             }
             if (!staging.renameTo(destination)) {
                 staging.copyTo(destination, overwrite = true)
                 check(staging.delete()) { "Unable to finalize daily diagnostic backup" }
             }
-            val verified = DiagnosticZipIntegrity.verify(destination, prepared.result.entries + 1)
-            check(destination.length() == prepared.sizeBytes && verified.entries == prepared.result.entries + 1) {
+            val verified = DiagnosticZipIntegrity.verify(destination, prepared.result.entries)
+            check(destination.length() == prepared.sizeBytes && verified.entries == prepared.result.entries) {
                 "Daily diagnostic backup final validation failed"
             }
 

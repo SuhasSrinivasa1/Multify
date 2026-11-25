@@ -237,8 +237,8 @@ jobs:
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$apk" > signer-v9053.txt
           "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$apk" > package-v9053.txt
           grep -F "name='com.multify.traderpro.vivoy73final.v9053test'" package-v9053.txt >/dev/null
-          grep -F "versionCode='9052'" package-v9053.txt >/dev/null
-          grep -F "versionName='9.0.52-research-recovery-TEST-debug'" package-v9053.txt >/dev/null
+          grep -F "versionCode='9053'" package-v9053.txt >/dev/null
+          grep -F "versionName='9.0.53-diagnostic-export-recovery-TEST-debug'" package-v9053.txt >/dev/null
           python - <<'PY'
           import csv,io,json,zipfile,collections,pathlib
           asset="assets/amfi_market_cap_categories.csv"

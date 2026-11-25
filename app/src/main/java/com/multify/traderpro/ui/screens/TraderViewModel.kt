@@ -579,7 +579,7 @@ class TraderViewModel @Inject constructor(
                     pendingLogExport = null
                     remote.value = remote.value.copy(
                         loading = false,
-                        message = "ZIP saved and size-verified · ${result.signalCount} signals · ${result.tradeCount} closed holdings · ${result.entries + 1} files",
+                        message = "ZIP saved and size-verified · ${result.signalCount} signals · ${result.tradeCount} closed holdings · ${result.entries} files",
                         error = null
                     )
                 }
