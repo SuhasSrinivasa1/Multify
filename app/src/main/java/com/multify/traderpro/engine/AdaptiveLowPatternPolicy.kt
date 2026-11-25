@@ -129,7 +129,14 @@ object AdaptiveLowPatternPolicy {
             (h-b.close)/span<=0.50
     }
 
-    fun evaluate(symbol:String, months:Int, asOf:LocalDate, rawBars:List<EquityEodBar>, onReject:(String)->Unit = {}):AdaptiveLowCandidate? {
+    fun evaluate(symbol:String, months:Int, asOf:LocalDate, rawBars:List<EquityEodBar>, onReject:(String)->Unit = {}):AdaptiveLowCandidate? =
+        evaluateWithMinimum(symbol,months,asOf,rawBars,MIN_PRIOR_REACTIONS,onReject)
+
+    /** Research challenger: exactly one parameter differs; never used for original strict results. */
+    fun evaluateSingleRebound(symbol:String, months:Int, asOf:LocalDate, rawBars:List<EquityEodBar>, onReject:(String)->Unit = {}):AdaptiveLowCandidate? =
+        evaluateWithMinimum(symbol,months,asOf,rawBars,1,onReject)
+
+    private fun evaluateWithMinimum(symbol:String, months:Int, asOf:LocalDate, rawBars:List<EquityEodBar>, minimumReactions:Int, onReject:(String)->Unit):AdaptiveLowCandidate? {
         fun rejected(reason:String):AdaptiveLowCandidate? { onReject(reason); return null }
         if(months!=3 && months!=6)return rejected("INVALID_WINDOW")
         val start=asOf.minusMonths(months.toLong())
@@ -180,7 +187,7 @@ object AdaptiveLowPatternPolicy {
                 candlePattern=AdaptiveLowCandleEvidence.patternAt(bars,i)
             )
         }
-        if(episodes.size<MIN_PRIOR_REACTIONS)return rejected("FEWER_THAN_TWO_QUALIFYING_REBOUNDS")
+        if(episodes.size<minimumReactions)return rejected(if(minimumReactions==1)"NO_QUALIFYING_REBOUND" else "FEWER_THAN_TWO_QUALIFYING_REBOUNDS")
         val clusters=mutableListOf<List<Pair<Int,AdaptiveLowReaction>>>()
         for((_,anchor) in episodes){
             val raw=episodes.filter { (_,r)->
@@ -192,7 +199,7 @@ object AdaptiveLowPatternPolicy {
                     item.first-selected.last().first>=MIN_REACTION_SPACING_SESSIONS)
                     selected+=item
             }
-            if(selected.size>=MIN_PRIOR_REACTIONS)clusters+=selected
+            if(selected.size>=minimumReactions)clusters+=selected
         }
         if(clusters.isEmpty())return rejected("NO_REPEAT_SUPPORT_CLUSTER")
         val latest10=closes.takeLast(10).maxOrNull()?:return rejected("INSUFFICIENT_VALID_HISTORY")
