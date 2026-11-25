@@ -152,6 +152,7 @@ class EquityEodResearchRepository @Inject constructor(
         private val BASIC = DateTimeFormatter.BASIC_ISO_DATE
         private val SYMBOL_REGEX = Regex("[A-Z0-9&._-]{1,32}")
         private const val EOD_DATABASE_NAME = "suhas_shree_eod_research_v1.db"
+        private const val MAX_PORTABLE_RESEARCH_BACKUP_BYTES = 128L * 1024L * 1024L
         private const val MAX_ARCHIVE_ROWS = 12000
         private const val MIN_VALID_EQ_ROWS = 1500
         private const val MAX_BARS_PER_SYMBOL = 200
@@ -1261,6 +1262,11 @@ class EquityEodResearchRepository @Inject constructor(
             "eod_research_state_prefs.json" to SharedPrefsBackupCodec.encode(prefs),
             "institutional_disclosure_prefs.json" to institutionalStore.exportBackupJson()
         )
+        val totalBackupBytes=databases.values.sumOf { it.size.toLong() } +
+            preferences.values.sumOf { it.toByteArray(Charsets.UTF_8).size.toLong() }
+        check(totalBackupBytes<=MAX_PORTABLE_RESEARCH_BACKUP_BYTES) {
+            "Portable research backup exceeds safe export size limit"
+        }
         val files=com.google.gson.JsonObject()
         databases.forEach { (name,bytes) ->
             files.add(name,com.google.gson.JsonObject().apply {
