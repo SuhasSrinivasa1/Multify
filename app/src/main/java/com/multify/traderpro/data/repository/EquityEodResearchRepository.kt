@@ -2,6 +2,7 @@ package com.multify.traderpro.data.repository
 
 import android.content.ContentValues
 import android.content.Context
+import android.net.Uri
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import com.multify.traderpro.data.logging.AuditLogger
@@ -22,6 +23,7 @@ import kotlinx.coroutines.sync.Mutex
 import com.multify.traderpro.engine.NseArchiveRecoveryPolicy
 import android.os.SystemClock
 import java.io.IOException
+import java.security.MessageDigest
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Cookie
@@ -101,7 +103,9 @@ data class EquityResearchSnapshot(
     val liveLargeCapBreadthProxyPct: Double? = null,
     val institutional: com.multify.traderpro.engine.InstitutionalSnapshot = com.multify.traderpro.engine.InstitutionalSnapshot(),
     val lowCapAudit3: String = "",
-    val lowCapAudit6: String = ""
+    val lowCapAudit6: String = "",
+    val lastSource: String = "",
+    val lastSuccessfulImportAtMs: Long = 0L
 )
 data class EquityEodRefreshProgress(
     val importedDays: Int,
@@ -109,6 +113,24 @@ data class EquityEodRefreshProgress(
     val sourceFailure: Boolean,
     val requestedDays: Int = 0,
     val retryPending: Boolean = false
+)
+data class EquityEodLocalImportResult(
+    val importedSessions: Int,
+    val importedRows: Int,
+    val skippedFiles: Int,
+    val failedFiles: List<String>
+)
+data class PortableResearchBackup(
+    val databaseEntries: Map<String, ByteArray>,
+    val preferenceEntries: Map<String, String>,
+    val manifestJson: String
+)
+data class PortableResearchRestoreResult(
+    val eodRowsMerged: Int = 0,
+    val eodSessionsMerged: Int = 0,
+    val otherResearchRowsMerged: Int = 0,
+    val preferenceKeysMerged: Int = 0,
+    val databasesMerged: Int = 0
 )
 
 /**
@@ -129,6 +151,7 @@ class EquityEodResearchRepository @Inject constructor(
         private val INDIA = ZoneId.of("Asia/Kolkata")
         private val BASIC = DateTimeFormatter.BASIC_ISO_DATE
         private val SYMBOL_REGEX = Regex("[A-Z0-9&._-]{1,32}")
+        private const val EOD_DATABASE_NAME = "suhas_shree_eod_research_v1.db"
         private const val MAX_ARCHIVE_ROWS = 12000
         private const val MIN_VALID_EQ_ROWS = 1500
         private const val MAX_BARS_PER_SYMBOL = 200
@@ -198,7 +221,7 @@ class EquityEodResearchRepository @Inject constructor(
     }
 
     private class Store(context: Context) : SQLiteOpenHelper(
-        context, "suhas_shree_eod_research_v1.db", null, 2
+        context, EOD_DATABASE_NAME, null, 2
     ) {
         override fun onCreate(db: SQLiteDatabase) {
             db.execSQL("CREATE TABLE eod(day TEXT NOT NULL, symbol TEXT NOT NULL, low REAL NOT NULL, close REAL NOT NULL, volume INTEGER NOT NULL, open REAL, high REAL, PRIMARY KEY(day,symbol))")
@@ -306,13 +329,26 @@ class EquityEodResearchRepository @Inject constructor(
     }
     private fun recordSourceFailure(host:String,code:Int,retryAfter:String?,reason:String) {
         val now=System.currentTimeMillis()
-        val wait=NseArchiveRecoveryPolicy.cooldownMs(code,retryAfter,now)
+        val failureKey="nse_403_failures_"+host
+        val failures=if(code==403)(prefs.getInt(failureKey,0)+1).coerceAtMost(9) else 1
+        val wait=NseArchiveRecoveryPolicy.cooldownMs(code,retryAfter,now,failures)
         if(wait<=0)return
         val until=maxOf(cooldownUntil(host),NseArchiveRecoveryPolicy.deadline(now,wait))
-        val saved=prefs.edit().putLong("nse_cooldown_until_"+host,until)
-            .putString("nse_cooldown_reason_"+host,reason).commit()
+        val editor=prefs.edit().putLong("nse_cooldown_until_"+host,until)
+            .putString("nse_cooldown_reason_"+host,reason)
+        if(code==403)editor.putInt(failureKey,failures)
+        val saved=editor.commit()
         audit.logAsync("EOD_RESEARCH","SOURCE_COOLDOWN",mapOf("host" to host,"reason" to reason,
-            "retry_after" to retryAfter,"until_ms" to until,"persisted" to saved,"groww_requests" to 0))
+            "retry_after" to retryAfter,"consecutive_403_failures" to if(code==403)failures else null,
+            "cooldown_ms" to wait,"until_ms" to until,"persisted" to saved,"groww_requests" to 0))
+    }
+
+    private fun recordSourceSuccess(host:String) {
+        val failureKey="nse_403_failures_"+host
+        if(prefs.getInt(failureKey,0)>0 || cooldownUntil(host)>0L) {
+            prefs.edit().putInt(failureKey,0)
+                .remove("nse_cooldown_until_"+host).remove("nse_cooldown_reason_"+host).commit()
+        }
     }
     private fun sourceGet(url:String):okhttp3.Response {
         requireAfterHours()
@@ -328,6 +364,7 @@ class EquityEodResearchRepository @Inject constructor(
             throw e
         }
         if(!response.isSuccessful)recordSourceFailure(host,response.code,response.header("Retry-After"),"HTTP "+response.code)
+        else recordSourceSuccess(host)
         return response
     }
     private fun warmNseSession() {
@@ -554,7 +591,8 @@ class EquityEodResearchRepository @Inject constructor(
             try {
                 val rows=importArchive(day)
                 imported++
-                prefs.edit().remove(retryKey).apply()
+                prefs.edit().remove(retryKey).putString("last_eod_source","NSE_ARCHIVE_HTTP")
+                    .putLong("last_eod_success_at_ms",System.currentTimeMillis()).apply()
                 audit.logAsync("EOD_RESEARCH","BHAVCOPY_IMPORTED",mapOf(
                     "date" to day.toString(),"equity_rows" to rows,"groww_api_calls" to 0
                 ))
@@ -1382,6 +1420,8 @@ class EquityEodResearchRepository @Inject constructor(
             sixMonthHistoryComplete=spanComplete,
             lastError=prefs.getString("last_eod_error","").orEmpty(),
             archiveProgress=prefs.getString("last_eod_progress","").orEmpty(),
+            lastSource=prefs.getString("last_eod_source","").orEmpty(),
+            lastSuccessfulImportAtMs=prefs.getLong("last_eod_success_at_ms",0L),
             memberSource=prefs.getString("members_source","CURATED_SEEDS_UNVERIFIED").orEmpty(),
             currentPulseAtMs=if(fresh)prefs.getLong("pulse_at_ms",0L) else 0L,
             refreshAtMs=prefs.getLong("last_eod_attempt_ms",0L),
