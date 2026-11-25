@@ -40,11 +40,10 @@ internal object NseBhavcopyFileImporter {
             if (isZip) {
                 ZipInputStream(input).use { zip ->
                     var entry = zip.nextEntry
-                    while (entry != null && !entry.name.endsWith(".csv", true)) {
-                        zip.closeEntry()
-                        entry = zip.nextEntry
+                    while (entry != null && entry.isDirectory) entry = zip.nextEntry
+                    require(entry != null && entry.name.endsWith(".csv", true)) {
+                        "ZIP must begin with a CSV report; unexpected entries are rejected safely"
                     }
-                    require(entry != null) { "ZIP contains no CSV report" }
                     val parsed = parseUdiFF(
                         BufferedReader(InputStreamReader(zip, Charsets.UTF_8)),
                         entry.name
@@ -78,7 +77,7 @@ internal object NseBhavcopyFileImporter {
         while (true) {
             val line = reader.readLine() ?: break
             chars += line.length
-            check(chars <= MAX_CSV_CHARS) { "UDiFF CSV exceeds safe size" }
+            check(line.length <= 1_000_000 && chars <= MAX_CSV_CHARS) { "UDiFF CSV exceeds safe size" }
             rowsRead++
             check(rowsRead <= MAX_ROWS) { "UDiFF has too many rows" }
             val values = cells(line)
@@ -122,7 +121,7 @@ internal object NseBhavcopyFileImporter {
         while (true) {
             val line = reader.readLine() ?: break
             chars += line.length
-            check(chars <= MAX_CSV_CHARS) { "Full Bhavcopy CSV exceeds safe size" }
+            check(line.length <= 1_000_000 && chars <= MAX_CSV_CHARS) { "Full Bhavcopy CSV exceeds safe size" }
             rowsRead++
             check(rowsRead <= MAX_ROWS) { "Full Bhavcopy has too many rows" }
             val values = cells(line)
