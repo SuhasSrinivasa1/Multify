@@ -368,16 +368,29 @@ class EquityEodResearchRepository @Inject constructor(
                 .remove("nse_cooldown_until_"+host).remove("nse_cooldown_reason_"+host).commit()
         }
     }
-    private fun sourceGet(url:String):okhttp3.Response {
-        requireAfterHours()
+    private fun sourceGet(url:String,promoterOnly:Boolean=false):okhttp3.Response {
+        fun allowedWindow(){
+            if(!promoterOnly)requireAfterHours()
+            else {
+                val u=url.toHttpUrl()
+                check(u.scheme=="https" && ((u.host=="www.nseindia.com" && u.encodedPath=="/api/corporates-pit-gg") ||
+                    (u.host=="nsearchives.nseindia.com" && u.encodedPath.startsWith("/corporate/") && u.encodedPath.endsWith(".xml",true))))
+                check(afterHours(ZonedDateTime.now(INDIA))||NseEquitySessionCalendar.isOpen(ZonedDateTime.now(INDIA))){"PIT_REFRESH_OUTSIDE_WINDOW"}
+            }
+        }
+        allowedWindow()
         val host=url.toHttpUrl().host
         if(!NseArchiveRecoveryPolicy.allowed(System.currentTimeMillis(),cooldownUntil(host)))
             throw IOException("NSE_SOURCE_COOLDOWN "+cooldownText(host))
         val gap=(NseArchiveRecoveryPolicy.MIN_GAP_MS-(SystemClock.elapsedRealtime()-(lastWire[host]?:0L))).coerceAtLeast(0L)
         if(gap>0)Thread.sleep(gap)
-        requireAfterHours()
+        allowedWindow()
         lastWire[host]=SystemClock.elapsedRealtime()
-        val response=try{client.newCall(request(url)).execute()}catch(e:IOException){
+        val response=try{
+            val req=if(promoterOnly)request(url).newBuilder().header("Accept","application/json, application/xml, text/xml")
+                .header("Referer","https://www.nseindia.com/companies-listing/corporate-filings-insider-trading").build() else request(url)
+            (if(promoterOnly)client.newBuilder().followRedirects(false).followSslRedirects(false).build() else client).newCall(req).execute()
+        }catch(e:IOException){
             recordSourceFailure(host,0,null,"NETWORK "+e.javaClass.simpleName)
             throw e
         }
@@ -753,7 +766,7 @@ class EquityEodResearchRepository @Inject constructor(
         offHoursStep("VALUATION"){refreshValuationAfterHours()}
         offHoursStep("INDEX"){refreshLargeIndexEodAfterHours()}
         offHoursStep("OHLC"){refreshExistingOhlcAfterHours(maxDays = 6)}
-        offHoursStep("INSTITUTIONAL"){refreshInstitutionalAfterHours()}
+        offHoursStep("INSTITUTIONAL"){refreshInstitutionalAfterHours();refreshPromoterLocked(false)}
         offHoursStep("SUPPORT_RETEST"){refreshAdaptiveLowsAfterHours()}
         val summary="Imported $imported · archive attempts $wireRequests · missing files $missingFiles · deferred $skipped"
         prefs.edit().putLong("last_eod_attempt_ms",System.currentTimeMillis())
@@ -772,8 +785,54 @@ class EquityEodResearchRepository @Inject constructor(
     suspend fun refreshInstitutionalOnly() = withContext(Dispatchers.IO) {
         refreshMutex.lock()
         try {
-            if(afterHours(ZonedDateTime.now(INDIA))) refreshInstitutionalAfterHours()
+            val now=ZonedDateTime.now(INDIA)
+            if(afterHours(now)){refreshInstitutionalAfterHours();refreshPromoterLocked(false)}
+            else if(NseEquitySessionCalendar.isOpen(now))refreshPromoterLocked(true)
         } finally { refreshMutex.unlock() }
+    }
+
+    /** One live-hour check; off-hours bounded catch-up, same host cooldown and mutex. */
+    private fun refreshPromoterLocked(live:Boolean) {
+        val now=ZonedDateTime.now(INDIA)
+        val slot=now.toLocalDate().toString()+"-"+now.hour+(if(live)"" else "-"+now.minute/30)
+        val key=if(live)"pit_live_slot" else "pit_off_slot"
+        if(prefs.getString(key,"")==slot)return
+        prefs.edit().putString(key,slot).apply()
+        val at=System.currentTimeMillis()
+        var parsed=0
+        var pending=0
+        try {
+            val today=now.toLocalDate()
+            // Live: recent filings only. Off-hours: alternate recent and older weekly windows.
+            val bucket=if(live)0 else ((now.hour*2+now.minute/30)%7)
+            val through=today.minusDays(bucket*7L)
+            val from=through.minusDays(6)
+            val fmt=DateTimeFormatter.ofPattern("dd-MM-uuuu")
+            val url="https://www.nseindia.com/api/corporates-pit-gg?index=equities&from_date="+from.format(fmt)+"&to_date="+through.format(fmt)
+            val body=sourceGet(url,true).use{r->
+                check(r.isSuccessful){"PIT_INDEX_HTTP_"+r.code}
+                val input=r.body?.source()?:error("PIT_EMPTY_BODY")
+                check(!input.request(4_000_001L)){"PIT_INDEX_OVERSIZE"};input.readUtf8()
+            }
+            val files=com.multify.traderpro.engine.PromoterDisclosurePolicy.parseList(body,from,through)
+            institutionalStore.recordPromoterIndex(files)
+            val known=institutionalStore.promoterIds()
+            val todo=files.filter{it.id !in known && it.id !in files.map{f->f.previousId}.toSet()}.sortedByDescending{it.filingDay}
+            pending=todo.size
+            for(f in todo.take(if(live)3 else 12)){
+                val xml=sourceGet(f.xmlUrl,true).use{r->
+                    check(r.isSuccessful){"PIT_XML_HTTP_"+r.code}
+                    val input=r.body?.source()?:error("PIT_XML_EMPTY_BODY")
+                    check(!input.request(2_000_001L)){"PIT_XML_OVERSIZE"};input.readUtf8()
+                }
+                val result=com.multify.traderpro.engine.PromoterDisclosurePolicy.parseXml(f,xml,System.currentTimeMillis())
+                institutionalStore.savePromoter(result);parsed++;pending--
+            }
+            institutionalStore.promoterStatus("Checked $from to $through · ${files.size} indexed filings · $parsed new parsed · $pending pending in this window; not full market coverage",at)
+        }catch(e:Exception){
+            institutionalStore.promoterStatus("Partial/unavailable · "+(e.message?:e.javaClass.simpleName).take(140)+" · $parsed new parsed; cached filings retained",at)
+        }
+        audit.logAsync("INSTITUTIONAL_RESEARCH","PROMOTER_REFRESH",mapOf("live" to live,"parsed" to parsed,"pending" to pending,"groww_api_calls" to 0))
     }
 
     private fun refreshInstitutionalAfterHours() {
@@ -1773,7 +1832,8 @@ class EquityEodResearchRepository @Inject constructor(
                     val days=mutableListOf<String>()
                     while(c.moveToNext())days+=c.getString(0)
                     val disclosure= institutionalStore.snapshot()
-                    (days+disclosure.history.map{it.day}+listOfNotNull(disclosure.bulk?.day,disclosure.block?.day))
+                    (days+disclosure.history.filter{it.source!="PROMOTER"}.map{it.day}+listOfNotNull(disclosure.bulk?.day,disclosure.block?.day)+
+                        if(NseEquitySessionCalendar.isOpen(ZonedDateTime.now(INDIA)))listOf(LocalDate.now(INDIA).toString()) else emptyList())
                         .distinct().sorted().takeLast(30)
                 },
                 sectors=memberMap + valuation.industryBySymbol,
