@@ -452,7 +452,7 @@ internal fun LiteFixedScreen(
     val discoveryLabel = when {
         !state.settings.fixedScannerEnabled -> "PAUSED"
         !marketOpen -> "MARKET CLOSED"
-        !state.settings.brokerAuthenticated -> "AUTH REQUIRED"
+        (!state.settings.brokerAuthenticated || state.brokerReconnectRequired) -> "AUTH REQUIRED"
         health.discoveryBaselineReady -> health.discovery.ifBlank { "READY" }
         else -> health.discovery.ifBlank { "WAITING" }
     }
@@ -501,7 +501,7 @@ internal fun LiteFixedScreen(
                         when {
                             !marketOpen -> "Live discovery starts during the NSE session. Coverage is not measured while closed."
                             !state.settings.fixedScannerEnabled -> "Scanning paused. Broker-side SELL/GTT monitoring remains separate."
-                            !state.settings.brokerAuthenticated -> "Authenticate Alpha before checking market coverage."
+                            (!state.settings.brokerAuthenticated || state.brokerReconnectRequired) -> "Authenticate Alpha before checking market coverage."
                             else -> "Waiting for a complete market sweep. No coverage percentage is inferred."
                         },
                         style = MaterialTheme.typography.bodySmall,
@@ -606,7 +606,7 @@ internal fun LiteFixedScreen(
             item(key = "fixed-empty") {
                 EmptyStateCard(
                     "No published recommendations",
-                    if (!state.settings.brokerAuthenticated) "Connect Alpha and verify the registered static IP to enable market data."
+                    if (!state.settings.brokerAuthenticated || state.brokerReconnectRequired) "Connect Alpha and verify the registered static IP to enable market data."
                     else "No qualifying PRIMARY has been published yet. WAITING is not a failed scan."
                 ) { Icon(Icons.Default.TrendingUp, contentDescription = null) }
             }
@@ -614,7 +614,7 @@ internal fun LiteFixedScreen(
             items(recommendations, key = { "fixed-" + it.symbol + "-" + it.generatedAtMs }) { row ->
                 FixedRecommendationCard(
                     row, onBuy, nowMs,
-                    state.settings.brokerAuthenticated && state.settings.staticIpMatched &&
+                    state.settings.brokerAuthenticated && !state.brokerReconnectRequired && state.settings.staticIpMatched &&
                         !state.settings.safetyHalt && dashboard?.halted != true
                 )
             }
@@ -713,7 +713,7 @@ internal fun LiteManualScreen(state: TraderUiState, viewModel: TraderViewModel) 
     val matches = if (ready) viewModel.manualStockMatches(query) else emptyList()
     val activeSelection = selected?.let { id -> matches.firstOrNull { it.symbol == id } }
     val authenticated = state.settings.brokerAuthenticated &&
-        state.settings.staticIpMatched
+        !state.brokerReconnectRequired && state.settings.staticIpMatched
     val istNow = java.time.ZonedDateTime.now(ZoneId.of("Asia/Kolkata"))
     val marketOpen = com.multify.traderpro.engine.MisIntradayLongPolicy.mayEnter(istNow)
     val shortWindow = ManualShortIntradayPolicy.mayOpen(istNow)
@@ -1191,7 +1191,7 @@ internal fun LiteSettingsScreen(
                 ) { Text("Authenticate") }
             }
             Text(
-                "Authentication: " + (if (state.settings.brokerAuthenticated) "verified" else "not verified") +
+                "Authentication: " + (if (state.settings.brokerAuthenticated && !state.brokerReconnectRequired) "verified" else "not verified") +
                     " · Static IP: " + (if (state.settings.staticIpMatched) "matched" else "not matched"),
                 style = MaterialTheme.typography.labelMedium,
                 color = if (alphaReady) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
