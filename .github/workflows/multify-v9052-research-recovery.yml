@@ -149,6 +149,8 @@ jobs:
           assert "pendingEntry" in idle and "criticalTradeInFlight" in idle
           assert "AFTER_HOURS_VERIFIED_EMPTY_POLL_DEFERRED" in repository
           assert "per_buy_fresh_inventory_check_preserved" in repository
+          assert "requireResearchMaintenanceWindow()" in repository
+          assert "08:30-09:15" in repository
 
           # Alpha reconnect reminder is notification-only; no automatic TOTP or order retry.
           assert "PREMARKET_ALPHA_AUTH_REQUIRED" in service
@@ -160,6 +162,7 @@ jobs:
           wr=(root/"data/logging/WorkingRangeRecommendationStore.kt").read_text()
           assert "candidate_evaluations_total" in wr and "recent_rejection_reason_counts" in wr
           assert "selection_or_confirmation_thresholds_changed" in wr
+          assert "appendStats(editor)" in wr
           scan=(root/"engine/FixedScanScheduleDiagnostics.kt").read_text()
           assert "estimatedSkippedIntervals" in scan and "durationBucket" in scan
           assert "FIXED_SCAN_CADENCE_GAP" in service
@@ -189,7 +192,7 @@ jobs:
             "AdaptiveLowCandleEvidenceTest","AmfiMarketCapClassificationParserTest",
             "InstitutionalIntelligencePolicyTest","InstitutionalHistoryPolicyTest",
             "InstitutionalDisclosureCoverageTest","NseArchiveRecoveryPolicyTest",
-            "FixedScanScheduleDiagnosticsTest","IdleBrokerPollingPolicyTest"
+            "FixedScanScheduleDiagnosticsTest","IdleBrokerPollingPolicyTest","NseBhavcopyFileImporterTest"
           ]
           absent=[x for x in essential if not any(x in y for y in names)]
           assert not absent, absent
