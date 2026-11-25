@@ -97,6 +97,7 @@ internal fun InstitutionalResearchScreen(state:TraderUiState,onRefresh:()->Unit)
             Text("Bulk and block are separate: overlapping reports must not be summed. FII/DII means only verified named clients matched to issuer filings or AMFI directory. All disclosures includes individuals and other unclassified clients; not all are institutions.",style=MaterialTheme.typography.bodySmall)
             if(report!=null){
                 Text("Disclosure date: ${report.day} · ${report.source} · ${report.disclosedRows} reported rows; ${report.deals.count{it.category=="FII"||it.category=="DII"}} verified, ${report.unmatchedRows} unclassified, ${report.duplicateRows} identical rows excluded.",style=MaterialTheme.typography.bodySmall)
+                Text("Report received: ${java.time.Instant.ofEpochMilli(report.receivedAtMs).atZone(java.time.ZoneId.of("Asia/Kolkata")).toLocalDateTime().toString()} IST · disclosure date is not live price date.",style=MaterialTheme.typography.labelSmall)
                 val verified=report.deals.count{it.category=="FII"||it.category=="DII"}
                 val denominator=(report.disclosedRows-report.duplicateRows).coerceAtLeast(1)
                 Text("Investor verification coverage: ${String.format(Locale.US,"%.1f%%",100.0*verified/denominator)} · ${if(report.retainedAllRows)"all unique rows retained" else "legacy incomplete cache — reimport required"}",style=MaterialTheme.typography.bodySmall)
@@ -104,7 +105,7 @@ internal fun InstitutionalResearchScreen(state:TraderUiState,onRefresh:()->Unit)
                     Text("Older cached disclosure — latest saved exchange EOD is ${state.equityResearch.latestDay.ifBlank{"unknown"}}.",color=MaterialTheme.colorScheme.error,style=MaterialTheme.typography.labelSmall)
             }else Text("No dated, validated ${source.lowercase(Locale.US)} disclosure cached. Empty or unavailable reports do not imply zero institutional activity.",style=MaterialTheme.typography.bodySmall)
             if(snapshot.history.isEmpty() && snapshot.bulk==null && snapshot.block==null)
-                Text("No validated bulk/block disclosure is cached, so there are no issuer symbols to sample hourly yet. Hourly prices begin only after a dated report is imported and are copied from completed Fixed sweeps; no extra Groww requests are made.",style=MaterialTheme.typography.labelSmall)
+                Text("No dated bulk/block disclosure cached. Completed Fixed sweeps can still be captured hourly; later reports may be compared with these actual earlier prices, never treated as live institutional flow.",style=MaterialTheme.typography.labelSmall)
             Button(onClick=onRefresh,enabled=!state.researchScanning,modifier=Modifier.fillMaxWidth()){
                 Text(if(state.researchScanning)"Refreshing…" else "Refresh institutional research")
             }
