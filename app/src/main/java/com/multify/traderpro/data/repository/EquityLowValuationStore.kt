@@ -28,7 +28,8 @@ internal class EquityLowValuationStore(context: Context) {
         val industrySource: String
     )
 
-    private val helper = Helper(context)
+    private val appContext = context.applicationContext
+    private val helper = Helper(appContext)
     private val lock = Any()
 
     private fun setMeta(db: SQLiteDatabase, key: String, value: String) {
@@ -76,6 +77,14 @@ internal class EquityLowValuationStore(context: Context) {
         }
 
     fun peDate(): String = synchronized(lock) { readMeta(helper.readableDatabase, "pe_day") }
+
+    fun exportBackupBytes(): ByteArray? = synchronized(lock) {
+        ResearchDatabaseBackup.exportBytes(appContext, helper, "equity_pe_research_v1.db")
+    }
+
+    fun mergeBackupBytes(bytes: ByteArray): ResearchDatabaseBackup.MergeResult = synchronized(lock) {
+        ResearchDatabaseBackup.mergeBytes(appContext, helper, "equity_pe_research_v1.db", bytes)
+    }
 
     fun snapshot(): Snapshot = synchronized(lock) {
         val db = helper.readableDatabase

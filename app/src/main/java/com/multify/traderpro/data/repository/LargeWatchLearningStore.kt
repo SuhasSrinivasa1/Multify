@@ -85,7 +85,8 @@ internal class LargeWatchLearningStore(context:Context) {
         override fun onUpgrade(db:SQLiteDatabase,oldVersion:Int,newVersion:Int)=
             error("Large watch learning migration must be explicit")
     }
-    private val db=Helper(context)
+    private val appContext=context.applicationContext
+    private val db=Helper(appContext)
     private val lock=Any()
     private val gson=Gson()
 
@@ -176,6 +177,13 @@ internal class LargeWatchLearningStore(context:Context) {
             put("outcome_day",outcomeDay);put("outcome_ret",ret)
             put("outcome_hit",if(ret>=LargeWatchLearningPolicy.HIT_PCT)1 else 0)
         },"day=? AND symbol=? AND kind=? AND outcome_day IS NULL",arrayOf(day,symbol,kind))
+    }
+
+    fun exportBackupBytes():ByteArray?=synchronized(lock){
+        ResearchDatabaseBackup.exportBytes(appContext,db,"large_watch_learning_v1.db")
+    }
+    fun mergeBackupBytes(bytes:ByteArray):ResearchDatabaseBackup.MergeResult=synchronized(lock){
+        ResearchDatabaseBackup.mergeBytes(appContext,db,"large_watch_learning_v1.db",bytes)
     }
 
     fun learningSummaries():List<LargeWatchLearningSummary> = synchronized(lock){

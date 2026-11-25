@@ -90,7 +90,8 @@ internal class AdaptiveLowResearchStore(context:Context) {
         override fun onUpgrade(db:SQLiteDatabase,oldVersion:Int,newVersion:Int)=
             error("Adaptive low research migration requires explicit implementation")
     }
-    private val store=Store(context)
+    private val appContext=context.applicationContext
+    private val store=Store(appContext)
     private val lock=Any()
     private val gson=Gson()
 
@@ -197,6 +198,13 @@ internal class AdaptiveLowResearchStore(context:Context) {
             put("outcome_hit",if(hit)1 else 0)
         },"day=? AND months=? AND symbol=? AND outcome_day IS NULL",
             arrayOf(p.day,p.months.toString(),p.symbol))
+    }
+
+    fun exportBackupBytes():ByteArray?=synchronized(lock){
+        ResearchDatabaseBackup.exportBytes(appContext,store,"adaptive_low_research_v1.db")
+    }
+    fun mergeBackupBytes(bytes:ByteArray):ResearchDatabaseBackup.MergeResult=synchronized(lock){
+        ResearchDatabaseBackup.mergeBytes(appContext,store,"adaptive_low_research_v1.db",bytes)
     }
 
     fun learning(months:Int):List<AdaptiveLowResearchSummary> = synchronized(lock) {
