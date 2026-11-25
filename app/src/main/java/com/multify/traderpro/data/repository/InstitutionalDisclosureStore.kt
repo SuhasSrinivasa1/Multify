@@ -42,8 +42,10 @@ internal class InstitutionalDisclosureStore(context:Context) {
      * No network request, database query, retry, or trading decision here. */
     fun captureHourly(at:ZonedDateTime,current:Map<String,Double>,open:Map<String,Double>):Boolean=synchronized(lock){
         val slot=InstitutionalHistoryPolicy.slot(at)?:return@synchronized false
-        if(slot==lastSlot || tracked.isEmpty())return@synchronized false
-        val prices=current.filter{(s,p)->s in tracked && p.isFinite() && p>0}
+        if(slot==lastSlot || cached.hourlyHistory.any{it.day==at.toLocalDate().toString() && it.hour==at.hour})return@synchronized false
+        // Preserve a real market sweep even when a dated report has not yet arrived.
+        // Later disclosures may join the earlier sample; never fabricate missed slots.
+        val prices=current.filter{(_,p)->p.isFinite() && p>0}
         if(prices.isEmpty())return@synchronized false
         val sample=InstitutionalHourly(at.toLocalDate().toString(),at.hour,at.toInstant().toEpochMilli(),
             prices,open.filter{(s,p)->s in prices && p.isFinite() && p>0})
