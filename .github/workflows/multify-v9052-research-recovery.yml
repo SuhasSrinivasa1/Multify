@@ -112,7 +112,8 @@ jobs:
           assert "FIXED_V741_DETAILED_FORECAST_UNIVERSE_LIMIT = 48" in repository
           assert "forecastBackgroundScanningEnabled(): Boolean = false" in repository
           assert "Alpha-only" in repository or '"ALPHA"' in repository
-          assert "BETA_READ_ONLY" in repository or "BetaReadOnlyInterceptor" in repository
+          beta=(root/"data/network/BetaReadOnlyInterceptor.kt").read_text()
+          assert "BETA_READ_ONLY_DENIED" in beta and "method == \"GET\"" in beta
           assert "versionCode = 9052" in build
           assert 'applicationIdSuffix = ".v9052test"' in build
           assert "v9.0.52-research-recovery-TEST" in build
