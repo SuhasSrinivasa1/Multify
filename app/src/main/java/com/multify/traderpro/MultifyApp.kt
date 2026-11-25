@@ -55,7 +55,7 @@ class MultifyApp : Application(), Configuration.Provider {
         // November 8 14:00 IST Muhurat warmup. The existing sticky foreground
         // service remains primary; WorkManager start time is not exact.
         TradingSessionStartScheduler.scheduleNext(this)
-        // Offline NSE equity research: enqueue only for 18:40 IST or a permitted off-hours catch-up.
+        // Recurring research refresh: bounded off-hours NSE imports, local hourly market research.
         // This worker has its own hard per-request after-hours guard and never calls Groww.
         EquityEodRefreshScheduler.scheduleNext(this)
         // Local-only nightly diagnostic/research backup. This worker makes no Groww or NSE requests.
