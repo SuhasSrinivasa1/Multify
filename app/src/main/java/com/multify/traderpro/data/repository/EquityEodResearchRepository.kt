@@ -615,12 +615,21 @@ class EquityEodResearchRepository @Inject constructor(
         try {
             if (!afterHours(ZonedDateTime.now(INDIA))) return@withContext EquityEodRefreshProgress(0,0,false)
         // NSE's archive domain sometimes needs an NSE homepage cookie session.
-        // Warm once nightly, not for every requested day, and never during the market.
-        if(!NseArchiveRecoveryPolicy.allowed(System.currentTimeMillis(),cooldownUntil(archiveHost))) {
-            prefs.edit().putString("last_eod_error",cooldownText(archiveHost)).apply()
-            return@withContext EquityEodRefreshProgress(0,0,true,0,true)
+        // A source cooldown suppresses only remote archive attempts; local EOD replay and
+        // independent research stages must still run on already-validated history.
+        val archiveSourceReady=NseArchiveRecoveryPolicy.allowed(
+            System.currentTimeMillis(),cooldownUntil(archiveHost))
+        if(archiveSourceReady) warmNseSession()
+        else {
+            val message=cooldownText(archiveHost)
+            prefs.edit().putString("last_eod_error",message).apply()
+            audit.logAsync("EOD_RESEARCH","ARCHIVE_SOURCE_COOLDOWN_LOCAL_RESEARCH_CONTINUES",mapOf(
+                "retry_at_ms" to cooldownUntil(archiveHost),
+                "network_requests" to 0,
+                "groww_requests" to 0,
+                "local_support_retest_allowed" to true
+            ))
         }
-        warmNseSession()
         refreshMembers()
         val today = LocalDate.now(INDIA)
         val last = latestEligibleDate(ZonedDateTime.now(INDIA))
@@ -649,8 +658,8 @@ class EquityEodResearchRepository @Inject constructor(
         val missing = valid.filter { it.toString() !in present }
         var imported = 0
         var wireRequests = 0
-        var blocked = false
-        var lastFailure = ""
+        var blocked = !archiveSourceReady
+        var lastFailure = if(archiveSourceReady) "" else cooldownText(archiveHost)
         var retryPending = false
         var missingFiles = 0
         var skipped = 0
