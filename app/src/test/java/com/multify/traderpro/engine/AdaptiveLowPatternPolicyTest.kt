@@ -87,4 +87,13 @@ class AdaptiveLowPatternPolicyTest {
         bars[22]=bars[22].copy(close=1800.0,high=1801.0)
         assertNull(AdaptiveLowPatternPolicy.evaluate("DEMO",3,day,bars))
     }
+    @Test fun oneReboundChallengerDoesNotRelaxOriginalRule() {
+        val bars=data(secondLow=840.0)
+        assertNull(AdaptiveLowPatternPolicy.evaluate("DEMO",3,day,bars))
+        val single=AdaptiveLowPatternPolicy.evaluateSingleRebound("DEMO",3,day,bars)!!
+        assertEquals(900.0,single.supportPrice,0.001)
+        assertEquals(1,single.reactions.size)
+        assertNull(AdaptiveLowPatternPolicy.evaluateSingleRebound("DEMO",3,day,data(last=899.0)))
+        assertNull(AdaptiveLowPatternPolicy.evaluateSingleRebound("DEMO",6,day,bars))
+    }
 }
