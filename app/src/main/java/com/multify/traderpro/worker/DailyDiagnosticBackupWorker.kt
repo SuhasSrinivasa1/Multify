@@ -6,6 +6,10 @@ import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import com.multify.traderpro.data.logging.AuditLogger
 import com.multify.traderpro.data.repository.DiagnosticZipIntegrity
+import com.multify.traderpro.data.repository.DailyShadowArchiveReview
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.CancellationException
 import com.multify.traderpro.data.repository.EquityEodResearchRepository
 import com.multify.traderpro.data.repository.TradingRepository
 import dagger.assisted.Assisted
@@ -69,6 +73,16 @@ class DailyDiagnosticBackupWorker @AssistedInject constructor(
                 "Daily diagnostic backup final validation failed"
             }
 
+            // Archive remains valid even if research evaluation fails. No broker access.
+            try {
+                val review=withContext(Dispatchers.IO){DailyShadowArchiveReview.run(applicationContext,destination)}
+                audit.logAsync("DAILY_SHADOW","REVIEW_PERSISTED",mapOf(
+                    "trial_count" to review.trials.size,"trading_rules_changed" to false,"groww_requests" to 0))
+            } catch(cancelled:CancellationException){throw cancelled}
+            catch(e:Exception){
+                audit.logAsync("DAILY_SHADOW","REVIEW_FAILED",mapOf(
+                    "reason" to (e.message?:e.javaClass.simpleName).take(160),"groww_requests" to 0))
+            }
             val archives = directory.listFiles()
                 ?.filter { it.isFile && it.extension.equals("zip", ignoreCase = true) }
                 ?.sortedByDescending { it.lastModified() }
