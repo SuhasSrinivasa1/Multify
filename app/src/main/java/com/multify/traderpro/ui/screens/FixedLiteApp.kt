@@ -75,6 +75,12 @@ fun FixedLiteApp(viewModel: TraderViewModel = hiltViewModel()) {
     val export = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) {
         if (it != null) viewModel.exportLogs(it)
     }
+    val restore = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) {
+        if (it != null) viewModel.restoreLearning(it)
+    }
+    val importNseFiles = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        if (uris.isNotEmpty()) viewModel.importNseArchives(uris)
+    }
 
     LaunchedEffect(state.message, state.error) {
         (state.error ?: state.message)?.takeIf { it.isNotBlank() }?.let {
@@ -146,14 +152,17 @@ fun FixedLiteApp(viewModel: TraderViewModel = hiltViewModel()) {
                 LitePage.WORKING_RANGE -> LiteRangeScreen(state)
                 LitePage.MANUAL -> LiteManualScreen(state, viewModel)
                 LitePage.LARGE_CAP -> LargeCapResearchScreen(state,viewModel::refreshResearchView)
-                LitePage.SIX_MONTH_LOW -> SixMonthLowResearchScreen(state,viewModel::scanLowRangeNow)
+                LitePage.SIX_MONTH_LOW -> SixMonthLowResearchScreen(state,viewModel::scanLowRangeNow) {
+                    importNseFiles.launch(arrayOf("*/*"))
+                }
                 LitePage.INSTITUTIONAL -> InstitutionalResearchScreen(state,viewModel::refreshInstitutionalResearch)
                 LitePage.AVERAGES -> LiteAveragesScreen(state)
                 LitePage.SETTINGS -> LiteSettingsScreen(
                     state, viewModel,
                     onEnableRequested = { confirmEnable = it },
                     onResetRequested = { confirmHaltReset = true },
-                    onExport = { export.launch("Phayra-v9051-archive-diagnostics.zip") }
+                    onExport = { export.launch("Phayra-v9052-research-backup.zip") },
+                    onRestore = { restore.launch(arrayOf("application/zip", "application/octet-stream")) }
                 )
             }
         }
@@ -261,7 +270,8 @@ internal fun LiteBottomBar(page: LitePage, onNavigate: (LitePage) -> Unit) {
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun AccountStatusStrip(state: TraderUiState) {
-    val alphaReady = state.settings.brokerAuthenticated && state.settings.staticIpMatched
+    val alphaReady = state.settings.brokerAuthenticated && state.settings.staticIpMatched &&
+        !state.brokerReconnectRequired
     val alphaStatus = when {
         alphaReady -> "CONNECTED"
         state.credentialsConfigured -> "AUTH REQUIRED"
@@ -1061,7 +1071,8 @@ internal fun LiteSettingsScreen(
     vm: TraderViewModel,
     onEnableRequested: (String) -> Unit,
     onResetRequested: () -> Unit,
-    onExport: () -> Unit
+    onExport: () -> Unit,
+    onRestore: () -> Unit
 ) {
     var alphaKey by remember { mutableStateOf("") }
     var alphaTotp by remember { mutableStateOf("") }
@@ -1076,7 +1087,8 @@ internal fun LiteSettingsScreen(
     val allProtected = positions.all {
         GttProtectionReadinessPolicy.verified(it.smartOrderMode, it.smartOrderId, it.smartOrderStatus)
     }
-    val alphaReady = state.settings.brokerAuthenticated && state.settings.staticIpMatched
+    val alphaReady = state.settings.brokerAuthenticated && state.settings.staticIpMatched &&
+        !state.brokerReconnectRequired
     val canEnableAutoBuy = alphaReady && state.dashboard != null && !state.settings.safetyHalt && state.dashboard?.halted != true && allProtected
 
     Column(
@@ -1268,7 +1280,14 @@ internal fun LiteSettingsScreen(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            OutlinedButton(onClick = onExport, modifier = Modifier.fillMaxWidth()) { Text("Export diagnostics ZIP") }
+            Text(
+                "Portable research backup includes NSE EOD, valuation, support-retest, large-watch and institutional research. Restore merges missing rows only. Credentials, holdings, broker orders, GTTs and Auto-Buy permissions are never restored.",
+                style = MaterialTheme.typography.bodySmall
+            )
+            Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(10.dp)) {
+                OutlinedButton(onClick = onExport, modifier = Modifier.weight(1f)) { Text("Export backup ZIP") }
+                OutlinedButton(onClick = onRestore, modifier = Modifier.weight(1f)) { Text("Restore research ZIP") }
+            }
         }
         Spacer(Modifier.height(8.dp))
     }
