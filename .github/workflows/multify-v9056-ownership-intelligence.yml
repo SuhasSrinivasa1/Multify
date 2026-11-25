@@ -1,0 +1,312 @@
+name: Phayra v9.0.56 Ownership Intelligence TEST
+
+on:
+  push:
+    branches:
+      - v9056-ownership-intelligence-20261125
+  pull_request:
+    branches:
+      - main
+      - v9050-master-session-validation-20261124
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-and-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Android SDK
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
+      - name: Prepare stable release signing identity when configured
+        env:
+          MULTIFY_KEYSTORE_BASE64: ${{ secrets.MULTIFY_KEYSTORE_BASE64 }}
+          MULTIFY_KEYSTORE_PASSWORD: ${{ secrets.MULTIFY_KEYSTORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${MULTIFY_KEYSTORE_BASE64:-}" && -n "${MULTIFY_KEYSTORE_PASSWORD:-}" ]]; then
+            printf '%s' "$MULTIFY_KEYSTORE_BASE64" | base64 --decode > app/multify-v4-stable.jks
+            test -s app/multify-v4-stable.jks
+            echo "MULTIFY_KEYSTORE_PASSWORD=$MULTIFY_KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+            echo "STABLE_SIGNING_READY=true" >> "$GITHUB_ENV"
+          else
+            echo "STABLE_SIGNING_READY=false" >> "$GITHUB_ENV"
+          fi
+      - name: Generate required official AMFI classification asset
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check openpyxl==3.1.5
+          python tools/fetch_amfi_market_cap.py --output app/src/main/assets/amfi_market_cap_categories.csv --metadata build/amfi-market-cap-source.txt
+          test -s app/src/main/assets/amfi_market_cap_categories.csv
+          cat build/amfi-market-cap-source.txt
+      - name: Frozen strategy parity and reliability safety checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import pathlib, subprocess
+          base="018cb721377bbdae0800c4a4ffac18dd4b91fccf"
+          root=pathlib.Path("app/src/main/java/com/multify/traderpro")
+          # These production selection, confirmation, target, SELL/trailing and account-routing sources
+          # must remain byte-identical to v9.0.51. Reliability changes are outside the frozen contract.
+          locked=[
+            "engine/HardStopLossPolicy.kt",
+            "engine/GttProtectionReadinessPolicy.kt",
+            "engine/SteppedTrailingPolicy.kt",
+            "engine/FixedFinalContract.kt",
+            "engine/FixedLocalStrategyEngine.kt",
+            "engine/FixedForecastPublicationPolicy.kt",
+            "engine/FixedForecastQualityPolicy.kt",
+            "engine/FixedMarketDiscoveryPolicy.kt",
+            "engine/FixedRepeatQualificationPolicy.kt",
+            "engine/FixedCategoryAccountRoutingPolicy.kt",
+            "engine/FixedBetaDetailCycleCapacityPolicy.kt",
+            "engine/FixedWorkingRangeShadowPolicy.kt",
+            "engine/WorkingRangeCandidatePolicy.kt",
+            "engine/WorkingRangeEntryMomentumPolicy.kt",
+            "engine/WorkingRangeAutoBuyPolicy.kt",
+            "engine/WorkingRangeExitPolicy.kt",
+            "engine/FixedDiscoveryWindowScheduler.kt",
+            "engine/FixedScanPerformancePolicy.kt",
+            "engine/FixedResearchCapacityPolicy.kt",
+            "engine/FixedHistoricalWindowStore.kt",
+            "engine/AdaptiveLowCandleEvidence.kt",
+            "engine/SwingPullbackResearchPolicy.kt",
+            "engine/LargeCapEquityResearchPolicy.kt",
+            "data/repository/LowPeResearchPolicy.kt",
+            "data/repository/LargeWatchFeaturePolicy.kt",
+            "data/repository/AmfiMarketCapClassification.kt",
+            "data/network/BetaReadOnlyInterceptor.kt",
+            "data/network/BetaResearchGate.kt",
+            "data/network/BetaPriorityPermitQueue.kt",
+            "data/network/GrowwHotDataCacheInterceptor.kt",
+            "data/network/GrowwHistoricalThrottlePolicy.kt"
+          ]
+          for rel in locked:
+            path=root/rel
+            actual=path.read_bytes()
+            expected=subprocess.check_output(["git","show",f"{base}:{path.as_posix()}"])
+            assert actual==expected, "FROZEN_PRODUCTION_SOURCE_CHANGED "+rel
+
+          # Three explicitly authorized research-only files have changed; production policies remain locked.
+          lows=(root/"engine/AdaptiveLowPatternPolicy.kt").read_text()
+          assert "const val MIN_PRIOR_REACTIONS = 2" in lows
+          assert "evaluateWithMinimum(symbol,months,asOf,rawBars,MIN_PRIOR_REACTIONS,onReject)" in lows
+          assert "evaluateWithMinimum(symbol,months,asOf,rawBars,1,onReject)" in lows
+          flow=(root/"engine/InstitutionalHistoryPolicy.kt").read_text()
+          assert "buyValue.compareTo(sellValue)" in flow
+          assert 'if(side=="BUY")it.net else -it.net' in flow
+          hard=(root/"engine/HardStopLossPolicy.kt").read_text()
+          integrity=(root/"engine/ReleaseIntegrityManifest.kt").read_text()
+          trailing=(root/"engine/SteppedTrailingPolicy.kt").read_text()
+          repository=(root/"data/repository/TradingRepository.kt").read_text()
+          service=(root/"service/TradingEngineService.kt").read_text()
+          build=pathlib.Path("app/build.gradle.kts").read_text()
+          assert "const val MAX_LOSS_PCT = 2.0" in hard
+          assert "const val HARD_STOP_LOSS_PCT = 2.0" in integrity
+          assert "TRAIL_ARM_PCT = 0.55" in integrity
+          assert "TRAIL_INITIAL_PROTECTED_GAIN_PCT = 0.50" in integrity
+          assert "TRAIL_STEP_PCT = 0.10" in integrity
+          assert "ARM_TRIGGER_PCT" in trailing and "INITIAL_STOP_GAIN_PCT" in trailing
+          assert "GTT_CREATE_ACK_ID_MISSING_RECONCILE_ONLY" in repository
+          assert "blindSell" not in repository
+          assert "FIXED_V741_FORECAST_SCAN_INTERVAL_MS = 90_000L" in repository
+          assert "FIXED_V741_DETAILED_FORECAST_UNIVERSE_LIMIT = 48" in repository
+          assert "forecastBackgroundScanningEnabled(): Boolean = false" in repository
+          assert "Alpha-only" in repository or '"ALPHA"' in repository
+          beta=(root/"data/network/BetaReadOnlyInterceptor.kt").read_text()
+          assert "BETA_READ_ONLY_DENIED" in beta and "method == \"GET\"" in beta
+          assert "versionCode = 9056" in build
+          assert 'applicationIdSuffix = ".v9056test"' in build
+          assert "9.0.56-ownership-intelligence" in build
+
+          # NSE archive 403 recovery is per-host exponential backoff; local import is validated and broker-free.
+          nse=(root/"engine/NseArchiveRecoveryPolicy.kt").read_text()
+          importer=(root/"data/repository/NseBhavcopyFileImporter.kt").read_text()
+          eod=(root/"data/repository/EquityEodResearchRepository.kt").read_text()
+          assert "MAX_ACCESS_COOLDOWN_MS = 24 * 60 * 60_000L" in nse
+          assert "consecutive403Failures" in nse
+          assert "TckrSymb" in importer and "TTL_TRD_QNTY" in importer
+          assert "MIN_VALID_EQ_ROWS = 1500" in importer
+          assert "MANUAL_NSE_REPORT_IMPORT" in eod and '"groww_requests" to 0' in eod
+          assert "Manual NSE archive import is paused during market hours" in eod
+          assert "ARCHIVE_SOURCE_COOLDOWN_LOCAL_RESEARCH_CONTINUES" in eod
+          assert 'offHoursStep("INSTITUTIONAL")' in eod and 'offHoursStep("SUPPORT_RETEST")' in eod
+          assert "MAX_PORTABLE_RESEARCH_BACKUP_BYTES" in eod
+
+          # Research backup is checksum-verified and merges only missing research rows.
+          backup=(root/"data/repository/ResearchDatabaseBackup.kt").read_text()
+          codec=(root/"data/repository/SharedPrefsBackupCodec.kt").read_text()
+          assert "PHAYRA_RESEARCH_BACKUP_V1" in eod
+          assert "INSERT OR IGNORE" in backup
+          assert "PRAGMA quick_check" in backup
+          assert "credentials_restored" in eod and "broker_orders_restored" in eod
+          assert "never overwrite current device settings" in codec
+          assert "research_db/" in (root/"data/repository/TradingRepository.kt").read_text()
+          assert "working_range_stats" in (root/"data/repository/TradingRepository.kt").read_text()
+
+          # Empty after-hours polling slows only after fresh broker inventory AND active GTT list are both empty.
+          idle=(root/"engine/IdleBrokerPollingPolicy.kt").read_text()
+          assert "EMPTY_AFTER_HOURS_RECHECK_MS = 10L * 60L * 1000L" in idle
+          assert "pendingEntry" in idle and "criticalTradeInFlight" in idle
+          assert "AFTER_HOURS_VERIFIED_EMPTY_POLL_DEFERRED" in repository
+          assert "per_buy_fresh_inventory_check_preserved" in repository
+          assert "requireResearchMaintenanceWindow()" in repository
+          assert "08:30-09:15" in repository
+
+          # Alpha reconnect reminder is notification-only; no automatic TOTP or order retry.
+          assert "PREMARKET_ALPHA_AUTH_REQUIRED" in service
+          assert "automatic_totp_attempted" in service
+          assert "new_buy_blocked_until_reauthenticated" in service
+          assert "brokerReconnectRequired" in (root/"ui/screens/TraderViewModel.kt").read_text()
+
+          # New throughput telemetry is observational and does not alter Working Range qualification.
+          wr=(root/"data/logging/WorkingRangeRecommendationStore.kt").read_text()
+          assert "candidate_evaluations_total" in wr and "recent_rejection_reason_counts" in wr
+          assert "selection_or_confirmation_thresholds_changed" in wr
+          assert "appendStats(editor)" in wr
+          scan=(root/"engine/FixedScanScheduleDiagnostics.kt").read_text()
+          assert "estimatedSkippedIntervals" in scan and "durationBucket" in scan
+          assert "FIXED_SCAN_CADENCE_GAP" in service
+          diagnostics=(root/"data/repository/TradingRepository.kt").read_text()
+          assert "prepareCompleteLogs" in diagnostics and "writePreparedLogs" in diagnostics
+          assert "DiagnosticZipIntegrity.verify" in diagnostics and "research_backup_included" in diagnostics
+          worker=(root/"worker/DailyDiagnosticBackupWorker.kt").read_text()
+          scheduler=(root/"worker/DailyDiagnosticBackupScheduler.kt").read_text()
+          assert "MAX_ARCHIVES = 14" in worker and "groww_api_calls" in worker
+          assert "21, 30" in scheduler and "ExistingWorkPolicy.KEEP" in scheduler
+          assert "prepareLogExport" in (root/"ui/screens/TraderViewModel.kt").read_text()
+          print(f"PASS: {len(locked)} frozen production sources identical; export staging, nightly backup and safety assertions passed")
+          PY
+      - name: Backend regression tests
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check -r backend/requirements.txt
+          python -m pytest -q backend/tests | tee backend-tests-v9056.txt
+      - name: Android unit tests and assemble isolated TEST APK
+        run: |
+          set -euo pipefail
+          gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug
+          python - <<'PY'
+          import glob,xml.etree.ElementTree as ET,pathlib
+          fs=glob.glob("app/build/test-results/testDebugUnitTest/TEST-*.xml")
+          roots=[ET.parse(p).getroot() for p in fs]
+          n=sum(int(x.attrib.get("tests",0)) for x in roots)
+          errors=sum(int(x.attrib.get("failures",0))+int(x.attrib.get("errors",0)) for x in roots)
+          names=[x.attrib.get("name","") for x in roots]
+          essential=[
+            "HardStopLossPolicyTest","GttProtectionReadinessPolicyTest","FixedFinalContractTest",
+            "FixedBetaDetailCycleCapacityPolicyTest","BrokerOrderAcknowledgementPolicyTest",
+            "LowPeResearchPolicyTest","SwingPullbackResearchPolicyTest","LargeIndexResearchPolicyTest",
+            "LargeWatchFeaturePolicyTest","LargeWatchLearningPolicyTest","AdaptiveLowPatternPolicyTest",
+            "AdaptiveLowCandleEvidenceTest","AmfiMarketCapClassificationParserTest",
+            "InstitutionalIntelligencePolicyTest","InstitutionalHistoryPolicyTest",
+            "InstitutionalDisclosureCoverageTest","NseArchiveRecoveryPolicyTest","DiagnosticZipIntegrityTest","HistoricalLowDiscoveryPolicyTest","DailyShadowTrialPolicyTest","OwnershipIntelligenceTest",
+            "FixedScanScheduleDiagnosticsTest","IdleBrokerPollingPolicyTest","NseBhavcopyFileImporterTest"
+          ]
+          absent=[x for x in essential if not any(x in y for y in names)]
+          assert not absent, absent
+          assert n>=608 and errors==0,(n,errors)
+          pathlib.Path("android-tests-v9056.txt").write_text(f"{n} Android tests; {errors} failures; required suites present\n")
+          print(n,"Android unit tests passed")
+          PY
+      - name: Assemble production update APK with stable signing key
+        run: |
+          set -euo pipefail
+          if [[ "${STABLE_SIGNING_READY:-false}" == "true" ]]; then
+            gradle --no-daemon :app:assembleRelease
+          else
+            echo "Stable signing secrets are not configured; only the isolated TEST APK will be delivered."
+          fi
+      - name: Inspect TEST APK identity and signer
+        run: |
+          set -euo pipefail
+          apk="app/build/outputs/apk/debug/app-debug.apk"
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$apk" > signer-v9056.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$apk" > package-v9056.txt
+          grep -F "name='com.multify.traderpro.vivoy73final.v9056test'" package-v9056.txt >/dev/null
+          grep -F "versionCode='9056'" package-v9056.txt >/dev/null
+          grep -F "versionName='9.0.56-ownership-intelligence-TEST-debug'" package-v9056.txt >/dev/null
+          python - <<'PY'
+          import csv,io,json,zipfile,collections,pathlib
+          asset="assets/amfi_market_cap_categories.csv"
+          path=pathlib.Path("app/src/main/assets/amfi_market_cap_categories.csv")
+          with zipfile.ZipFile("app/build/outputs/apk/debug/app-debug.apk") as z:
+              raw=z.read(asset)
+          assert raw==path.read_bytes()
+          txt=raw.decode("utf-8")
+          assert "#period=" in txt and "#source=https://" in txt
+          rows=list(csv.DictReader(io.StringIO("\n".join(l for l in txt.splitlines() if not l.startswith("#")))))
+          counts=collections.Counter(r["category"] for r in rows)
+          assert len(rows)>=250 and len({r["symbol"] for r in rows})==len(rows)
+          assert all(counts[k]>0 for k in ("LARGE_CAP","MID_CAP","SMALL_CAP"))
+          for row in rows:
+              rank=int(row["rank"])
+              assert rank>0 and row["category"]==("LARGE_CAP" if rank<=100 else "MID_CAP" if rank<=250 else "SMALL_CAP")
+          meta=json.loads(pathlib.Path("build/amfi-market-cap-source.txt").read_text())
+          assert dict(counts)==meta["category_counts"]
+          print("AMFI APK ASSET VERIFIED",meta["period"],dict(counts))
+          PY
+          sha256sum "$apk" > SHA256-v9056.txt
+          stat -c "APK size (bytes): %s" "$apk" > size-v9056.txt
+          echo "TEST side-by-side package. Do not run two authenticated trading engines concurrently. Export research backup before uninstalling any package." > safety-v9056.txt
+          mkdir -p build/delivery
+          cp "$apk" build/delivery/Phayra-v9.0.56-TEST.apk
+          if [[ -f app/build/outputs/apk/release/app-release.apk ]]; then
+            release_apk="app/build/outputs/apk/release/app-release.apk"
+            "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$release_apk" > signer-v9056-release.txt
+            "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$release_apk" > package-v9056-release.txt
+            grep -F "name='com.multify.traderpro.vivoy73final'" package-v9056-release.txt >/dev/null
+            grep -F "versionCode='9056'" package-v9056-release.txt >/dev/null
+            python - <<'PY'
+          import re,pathlib
+          text=pathlib.Path("signer-v9056-release.txt").read_text().lower()
+          match=re.search(r"certificate sha-256 digest:\s*([0-9a-f:]+)",text)
+          assert match, "Release APK signer fingerprint missing"
+          actual=match.group(1).replace(":","")
+          expected="3f72d5c24e676c712d9e7e9feaa829960bfca9cdffc9ea4da6738372824e8755"
+          assert actual==expected, (actual,expected)
+          print("PRODUCTION UPDATE SIGNER VERIFIED")
+          PY
+            cp "$release_apk" build/delivery/Phayra-v9.0.56-UPDATE.apk
+            echo "PRODUCTION_UPDATE_APK_SIGNED=true" > release-signing-status-v9056.txt
+          else
+            echo "PRODUCTION_UPDATE_APK_SIGNED=false; stable signing secrets were not available." > release-signing-status-v9056.txt
+          fi
+          cp SHA256-v9056.txt signer-v9056.txt package-v9056.txt size-v9056.txt safety-v9056.txt android-tests-v9056.txt backend-tests-v9056.txt build/delivery/
+          cp release-signing-status-v9056.txt build/delivery/
+      - name: Upload TEST APK and validation evidence
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Phayra-v9.0.56-Ownership-Intelligence
+          path: |
+            build/delivery/*
+            SHA256-v9056.txt
+            signer-v9056.txt
+            package-v9056.txt
+            size-v9056.txt
+            safety-v9056.txt
+            android-tests-v9056.txt
+            backend-tests-v9056.txt
+            app/src/main/assets/amfi_market_cap_categories.csv
+            build/amfi-market-cap-source.txt
+          if-no-files-found: error
+          retention-days: 30
