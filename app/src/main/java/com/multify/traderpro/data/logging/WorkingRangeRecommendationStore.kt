@@ -562,6 +562,35 @@ class WorkingRangeRecommendationStore(context: Context) {
         }
     }
 
+    /** Restore only cumulative research counters from an exported JSON snapshot. Order intents/rows are never imported. */
+    fun restorePortableStatsFromExport(json:String):Int=synchronized(lock) {
+        val root=runCatching{com.google.gson.JsonParser.parseString(json).asJsonObject}.getOrNull() ?: return@synchronized 0
+        val stats=root.getAsJsonObject("throughput") ?: return@synchronized 0
+        fun merge(name:String,current:Long):Long {
+            val incoming=stats.get(name)?.takeIf{it.isJsonPrimitive && it.asJsonPrimitive.isNumber}?.asLong ?: return current
+            return max(current,incoming)
+        }
+        val before=listOf(evaluatedObservations,qualifyingObservations,rejectedObservations,
+            firstQualifiedEvents,confirmedEvents,pendingDroppedEvents,pendingExpiredEvents,
+            observedScanGenerations,lastObservationAtMs,lastScanStartedAtMs)
+        evaluatedObservations=merge("candidate_evaluations_total",evaluatedObservations)
+        qualifyingObservations=merge("qualifying_observations_total",qualifyingObservations)
+        rejectedObservations=merge("rejected_observations_total",rejectedObservations)
+        firstQualifiedEvents=merge("first_qualification_events_total",firstQualifiedEvents)
+        confirmedEvents=merge("confirmed_events_total",confirmedEvents)
+        pendingDroppedEvents=merge("pending_dropped_total",pendingDroppedEvents)
+        pendingExpiredEvents=merge("pending_expired_total",pendingExpiredEvents)
+        observedScanGenerations=merge("distinct_scan_generations_observed",observedScanGenerations)
+        lastObservationAtMs=merge("last_observation_at_ms",lastObservationAtMs)
+        lastScanStartedAtMs=merge("last_scan_started_at_ms",lastScanStartedAtMs)
+        val after=listOf(evaluatedObservations,qualifyingObservations,rejectedObservations,
+            firstQualifiedEvents,confirmedEvents,pendingDroppedEvents,pendingExpiredEvents,
+            observedScanGenerations,lastObservationAtMs,lastScanStartedAtMs)
+        val changed=before.zip(after).count{it.first!=it.second}
+        if(changed>0)persistStatsLocked()
+        changed
+    }
+
     private fun trimLocked() {
         if (rows.size > 400) rows.subList(0, rows.size - 400).clear()
     }

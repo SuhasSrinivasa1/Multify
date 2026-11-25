@@ -13804,11 +13804,12 @@ class TradingRepository @Inject constructor(
         val fixedFactorSnapshots: Int = 0,
         val eodResearchRows: Int = 0,
         val eodResearchSessions: Int = 0,
-        val otherResearchRows: Int = 0
+        val otherResearchRows: Int = 0,
+        val workingRangeStats: Int = 0
     ) {
         val total: Int get() = learningCalls + researchSnapshots + forecasts + champions + reports +
             positiveEvidence + archivedFixedOutcomes + fixedFactorSnapshots + eodResearchRows +
-            eodResearchSessions + otherResearchRows
+            eodResearchSessions + otherResearchRows + workingRangeStats
     }
 
     /**
@@ -13867,6 +13868,9 @@ class TradingRepository @Inject constructor(
             ).filterValues { it != null }.mapValues { it.value!! },
             entries["research_backup_manifest.json"]
         )
+        val restoredWorkingRangeStats = entries["working_range_recommendations_v9021.json"]?.let {
+            workingRangeRecommendationStore.restorePortableStatsFromExport(it)
+        } ?: 0
         var restoredFixedSnapshot = false
         restoreStage = "Fixed baseline snapshot"
         entries["fixed_engine_snapshot.json"]?.let { json ->
@@ -14179,6 +14183,7 @@ class TradingRepository @Inject constructor(
             "eod_research_sessions_merged" to portableResearch.eodSessionsMerged,
             "other_research_rows_merged" to portableResearch.otherResearchRowsMerged,
             "research_preferences_merged" to portableResearch.preferenceKeysMerged,
+            "working_range_stats_merged" to restoredWorkingRangeStats,
             "verified_completed_calibration_sessions" to verifiedCompletedSessions.size,
             "fixed_snapshot_restored_or_captured" to restoredFixedSnapshot,
             "fixed_factor_rows_never_used_for_trading" to true,
@@ -14196,7 +14201,8 @@ class TradingRepository @Inject constructor(
             fixedFactorSnapshots = restoredFixedFactors,
             eodResearchRows = portableResearch.eodRowsMerged,
             eodResearchSessions = portableResearch.eodSessionsMerged,
-            otherResearchRows = portableResearch.otherResearchRowsMerged
+            otherResearchRows = portableResearch.otherResearchRowsMerged,
+            workingRangeStats = restoredWorkingRangeStats
         )
         } catch (error: Exception) {
             if (error is CancellationException) throw error
@@ -15151,7 +15157,8 @@ class TradingRepository @Inject constructor(
             "system_audit.jsonl",
             "research_backup_manifest.json",
             "eod_research_state_prefs.json",
-            "institutional_disclosure_prefs.json"
+            "institutional_disclosure_prefs.json",
+            "working_range_recommendations_v9021.json"
         )
         private val RESEARCH_BACKUP_TEXT_FILES = setOf(
             "research_backup_manifest.json",
