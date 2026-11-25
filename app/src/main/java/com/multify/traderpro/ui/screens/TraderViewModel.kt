@@ -39,6 +39,7 @@ data class TraderUiState(
     val credentialsConfigured: Boolean = false,
     val betaConfigured: Boolean = false,
     val betaAuthenticated: Boolean = false,
+    val brokerReconnectRequired: Boolean = false,
     val message: String? = null,
     val error: String? = null
 )
@@ -71,6 +72,7 @@ class TraderViewModel @Inject constructor(
             credentialsConfigured = repository.hasBrokerCredentials(),
             betaConfigured = repository.betaCredentialsConfigured(),
             betaAuthenticated = repository.betaResearchAuthenticated(),
+            brokerReconnectRequired = repository.brokerReconnectRequired(),
             message = r.message,
             error = r.error
         )
@@ -181,6 +183,36 @@ class TraderViewModel @Inject constructor(
             } catch (e: Exception) {
                 remote.value = remote.value.copy(
                     error = "${selectedMonths}M low scan failed: ${e.userMessage()}",
+                    message = null
+                )
+            } finally {
+                researchScanning.value = false
+            }
+        }
+    }
+
+    /** Import one or more user-selected official NSE UDiFF ZIP / Full Bhavcopy CSV files locally. */
+    fun importNseArchives(uris: List<Uri>) {
+        viewModelScope.launch {
+            if (researchScanning.value) return@launch
+            researchScanning.value = true
+            remote.value = remote.value.copy(message = null, error = null)
+            try {
+                val result = withContext(Dispatchers.IO) { equityEodResearch.importLocalArchives(uris) }
+                equityResearch.value = withContext(Dispatchers.IO) { equityEodResearch.snapshot() }
+                val detail = result.failedFiles.take(2).joinToString(" · ")
+                remote.value = remote.value.copy(
+                    message = "Manual NSE import · " + result.importedSessions + " sessions · " +
+                        result.importedRows + " EQ rows · " + result.skippedFiles + " skipped · " +
+                        result.failedFiles.size + " rejected. Zero Groww/network calls." +
+                        if (detail.isBlank()) "" else " " + detail,
+                    error = null
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                remote.value = remote.value.copy(
+                    error = "NSE file import failed: " + error.userMessage(),
                     message = null
                 )
             } finally {
@@ -519,7 +551,7 @@ class TraderViewModel @Inject constructor(
                 .onSuccess { result ->
                     remote.value = remote.value.copy(
                         loading = false,
-                        message = "Long-only logs exported · ${result.signalCount} signals · ${result.tradeCount} closed holdings · ${result.entries} files",
+                        message = "Diagnostics and portable research backup exported · ${result.signalCount} signals · ${result.tradeCount} closed holdings · ${result.entries} files",
                         error = null
                     )
                 }
@@ -534,7 +566,7 @@ class TraderViewModel @Inject constructor(
                 .onSuccess { result ->
                     remote.value = remote.value.copy(
                         loading = false,
-                        message = "Learning restored · ${result.learningCalls} Multify rows · ${result.researchSnapshots} research snapshots · ${result.forecasts} forecasts · ${result.champions} champions · ${result.reports} reports · ${result.positiveEvidence} positive examples · ${result.archivedFixedOutcomes} archived Fixed outcomes · ${result.fixedFactorSnapshots} Fixed factor snapshots. Trading state was not restored.",
+                        message = "Research restored · ${result.eodResearchSessions} EOD sessions · ${result.eodResearchRows} EOD rows · ${result.otherResearchRows} other research rows · ${result.learningCalls} learning calls · ${result.researchSnapshots} snapshots · ${result.forecasts} forecasts · ${result.champions} champions · ${result.reports} reports · ${result.positiveEvidence} positive examples · ${result.archivedFixedOutcomes} Fixed outcomes · ${result.fixedFactorSnapshots} factor snapshots. Credentials, holdings, orders, GTTs and Auto-Buy permissions were not restored.",
                         error = null
                     )
                     refresh(silent = true)
