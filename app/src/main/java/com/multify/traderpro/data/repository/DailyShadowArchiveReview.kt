@@ -173,7 +173,7 @@ internal object DailyShadowArchiveReview {
                         .sortedWith(compareByDescending<Pair<String,Double>>{it.second}.thenBy{it.first}).take(20)
                     for((i,pair) in ranked.withIndex()){
                         val outcome=outcomes[source+"|"+day+"|"+pair.first]
-                        val ret=outcome?.num("returnPct")?.takeIf{outcome.str("outcomeDay")==horizon(observedDay,6)}
+                        val ret=outcome?.let{v->v.num("returnPct")?.takeIf{v.str("outcomeDay")==horizon(observedDay,6)}}
                         add("FII_DII",observedDay,Policy.Sample(pair.first,i<19,ret?.let{it>=0.5},ret))
                     }
                 }
