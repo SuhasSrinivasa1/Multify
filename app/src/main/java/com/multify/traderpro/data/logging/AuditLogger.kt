@@ -5,6 +5,9 @@ import android.os.Process
 import dagger.hilt.android.qualifiers.ApplicationContext
 import org.json.JSONObject
 import java.io.File
+import java.io.BufferedWriter
+import java.io.FileOutputStream
+import java.io.OutputStreamWriter
 import java.time.Instant
 import java.security.MessageDigest
 import java.util.concurrent.ArrayBlockingQueue
@@ -24,6 +27,10 @@ class AuditLogger @Inject constructor(
     private val directory = File(context.filesDir, "audit").apply { mkdirs() }
     private val file = File(directory, "system_audit.jsonl")
     private val lock = Any()
+    private var writer: BufferedWriter? = null
+    private var bufferedBytes = 0L
+    private var bufferedRecords = 0
+    private var lastFlushAtMs = System.currentTimeMillis()
     private val asyncDropped = AtomicLong(0L)
     private val executor = ThreadPoolExecutor(
         1, 1, 0L, TimeUnit.MILLISECONDS,
@@ -65,6 +72,7 @@ class AuditLogger @Inject constructor(
             executor.submit {}.get(EXPORT_FLUSH_TIMEOUT_MS, TimeUnit.MILLISECONDS)
         }
         return synchronized(lock) {
+            flushWriterLocked()
             directory.listFiles()?.filter { it.name.endsWith(".jsonl") }
                 ?.sortedBy { it.name }?.joinToString("") { it.readText() }.orEmpty()
         }
@@ -74,6 +82,7 @@ class AuditLogger @Inject constructor(
     fun appendExportEntry(zip: ZipOutputStream) {
         runCatching { executor.submit {}.get(EXPORT_FLUSH_TIMEOUT_MS, TimeUnit.MILLISECONDS) }
         val snapshot = synchronized(lock) {
+            flushWriterLocked()
             directory.listFiles()?.filter { it.isFile && it.name.endsWith(".jsonl") }
                 ?.sortedBy { it.name }.orEmpty().map { it to it.length() }
         }
@@ -95,6 +104,7 @@ class AuditLogger @Inject constructor(
 
     /** Exact archival import; idempotent by digest. Does not restore secrets or broker state. */
     fun restoreArchived(jsonl: String): Int = synchronized(lock) {
+        closeWriterLocked()
         val valid = jsonl.lineSequence().filter { line ->
             runCatching { val x = JSONObject(line); x.has("timestamp_ms") && x.has("category") && x.has("event") }.getOrDefault(false)
         }.joinToString("\n", postfix = "\n")
@@ -130,7 +140,21 @@ class AuditLogger @Inject constructor(
                     if (!isSensitiveKey(key)) safe.put(key, value ?: JSONObject.NULL)
                 }
                 obj.put("details", safe)
-                file.appendText(obj.toString() + "\n")
+                val line = obj.toString() + "\n"
+                val bytes = line.toByteArray(Charsets.UTF_8).size.toLong()
+                rotateIfNeeded(bytes)
+                val out = writer ?: BufferedWriter(
+                    OutputStreamWriter(FileOutputStream(file, true), Charsets.UTF_8), WRITER_BUFFER_BYTES
+                ).also { writer = it }
+                out.write(line)
+                bufferedBytes += bytes
+                bufferedRecords++
+                val critical = listOf("ORDER", "GTT", "PROTECTION", "SELL", "BUY", "BROKER", "SAFETY", "RMS")
+                    .any { marker -> category.uppercase().contains(marker) || event.uppercase().contains(marker) }
+                if (critical || bufferedRecords >= MAX_BUFFERED_RECORDS ||
+                    System.currentTimeMillis() - lastFlushAtMs >= MAX_BUFFER_AGE_MS) {
+                    flushWriterLocked()
+                }
                 // Keep curated decisions/outcomes in a separate persistent evidence journal.
                 // Never let an evidence write failure block broker/order protection.
                 decisionEvidenceJournal.capture(category, event, safe, timestampMs)
@@ -138,8 +162,23 @@ class AuditLogger @Inject constructor(
         }
     }
 
-    private fun rotateIfNeeded() {
-        if (!file.exists() || file.length() < MAX_BYTES) return
+    /** Flush buffered telemetry before export, rotation or a safety-critical event. */
+    private fun flushWriterLocked() {
+        writer?.flush()
+        bufferedBytes = 0L
+        bufferedRecords = 0
+        lastFlushAtMs = System.currentTimeMillis()
+    }
+
+    private fun closeWriterLocked() {
+        runCatching { flushWriterLocked() }
+        runCatching { writer?.close() }
+        writer = null
+    }
+
+    private fun rotateIfNeeded(incomingBytes: Long) {
+        if (!file.exists() || file.length() + bufferedBytes + incomingBytes < MAX_BYTES) return
+        closeWriterLocked()
         // Never delete an older audit segment. Old data is included in ZIP exports.
         var index = 1
         while (File(directory, "system_audit.${index.toString().padStart(7, '0')}.jsonl").exists()) index++
@@ -154,6 +193,9 @@ class AuditLogger @Inject constructor(
 
     companion object {
         private const val MAX_BYTES = 12L * 1024L * 1024L
+        private const val WRITER_BUFFER_BYTES = 64 * 1024
+        private const val MAX_BUFFERED_RECORDS = 64
+        private const val MAX_BUFFER_AGE_MS = 1_000L
         private const val ASYNC_QUEUE_CAPACITY = 4096
         private const val EXPORT_FLUSH_TIMEOUT_MS = 3_000L
     }
