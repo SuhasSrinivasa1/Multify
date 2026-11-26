@@ -92,14 +92,14 @@ internal object DailyShadowArchiveReview {
                     if(at<=0 || px<=0 || target<=0 || minute(at)>=15*60+15)return@runCatching null
                     Entry(j.str("recommendation_id"),date(at),j.str("symbol"),at,px,target,2.0,minute(at)<14*60+45)
                 }.getOrNull()
-            }.toList().sortedBy{it.at}.distinctBy{it.day+"|"+it.symbol}
+            }.toList().sortedBy{it.at}.distinctBy{it.id}
         }
     }
     private fun range(zip:ZipFile):List<Entry> {
         val root=zip.read("working_range_recommendations_v9021.json")?.let{JsonParser.parseString(it).asJsonObject}
             ?:return emptyList()
         return root.rows("rows").mapNotNull{x->
-            val j=x.obj("recommendation")?:return@mapNotNull null
+            val j=x.obj("confirmation_evidence")?:x.obj("recommendation")?:return@mapNotNull null
             val at=j.long("confirmedAtMs");val px=j.num("entryPrice")?:0.0
             val first=j.num("firstQualifiedPrice");val target=j.num("targetPct")?:0.0
             val stop=j.num("researchStopPct")?:0.0
@@ -133,7 +133,16 @@ internal object DailyShadowArchiveReview {
             fun add(section:String,day:String,sample:Policy.Sample){
                 cohorts.getOrPut(section){linkedMapOf()}.getOrPut(day){mutableListOf()}+=sample
             }
-            for(e in fixedEntries)add("FIXED",e.day,intraday(e,points))
+            for(e in fixedEntries.distinctBy{it.day+"|"+it.symbol})add("FIXED",e.day,intraday(e,points))
+            for((_,events) in fixedEntries.groupBy{it.day+"|"+it.symbol}) {
+                var previous:Long?=null
+                for(e in events.sortedBy{it.at}) {
+                    val gap=previous?.let{e.at-it}
+                    if(gap==null || gap>=30*60_000L)
+                        add("FIXED_REPEAT",e.day,intraday(e.copy(keep=gap==null || gap>=45*60_000L),points))
+                    previous=e.at
+                }
+            }
             for(e in rangeEntries)add("RANGE",e.day,intraday(e,points))
             fun horizon(day:String,n:Int)=sessions.filter{it>day}.getOrNull(n-1)
             withDb(context,zip,"large_watch_learning_v1.db"){db->
