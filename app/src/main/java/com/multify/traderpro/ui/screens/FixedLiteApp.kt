@@ -438,6 +438,9 @@ internal fun LiteFixedScreen(
     val health = dashboard?.fixedHealth ?: EngineHealthDto()
     val recommendations = dashboard?.fixedForecasts.orEmpty()
         .sortedWith(compareBy<ForecastDto> { it.rank }.thenByDescending { it.generatedAtMs })
+    var showAllRecommendations by rememberSaveable { mutableStateOf(false) }
+    val visibleRecommendations = if (showAllRecommendations) recommendations else
+        recommendations.sortedByDescending { it.generatedAtMs }.take(20).sortedBy { it.rank }
     val positions = dashboard?.positions.orEmpty().filter { it.quantity > 0 }
     val discoveryTone = when (health.discovery.uppercase(Locale.US)) {
         "READY", "HEALTHY", "COMPLETE" -> LiteTone.POSITIVE
@@ -600,7 +603,10 @@ internal fun LiteFixedScreen(
         }
 
         item(key = "fixed-recommendations-title") {
-            SectionTitle("Fixed recommendations", recommendations.size.toString() + " published · original rank order")
+            SectionTitle("Fixed recommendations", recommendations.size.toString() + " published · daily totals retained")
+            if (recommendations.size > 20) TextButton(onClick = { showAllRecommendations = !showAllRecommendations }) {
+                Text(if (showAllRecommendations) "Show latest 20" else "Show all ${recommendations.size} recommendations")
+            }
         }
         if (recommendations.isEmpty()) {
             item(key = "fixed-empty") {
@@ -611,7 +617,7 @@ internal fun LiteFixedScreen(
                 ) { Icon(Icons.Default.TrendingUp, contentDescription = null) }
             }
         } else {
-            items(recommendations, key = { "fixed-" + it.symbol + "-" + it.generatedAtMs }) { row ->
+            items(visibleRecommendations, key = { "fixed-" + it.symbol + "-" + it.generatedAtMs }) { row ->
                 FixedRecommendationCard(
                     row, onBuy, nowMs,
                     state.settings.brokerAuthenticated && !state.brokerReconnectRequired && state.settings.staticIpMatched &&
