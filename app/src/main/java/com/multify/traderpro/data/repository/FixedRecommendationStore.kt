@@ -77,6 +77,9 @@ class FixedRecommendationStore @Inject constructor(
 ) {
     private val prefs = context.getSharedPreferences("fixed_recommendations_v75", Context.MODE_PRIVATE)
     private val gson = GsonBuilder().disableHtmlEscaping().create()
+    // This store is single-process. Keep the parsed snapshot in memory so dashboard reads
+    // do not repeatedly deserialize the complete 30-day JSON ledger.
+    private var cachedState: FixedRecommendationState? = null
 
     @Synchronized
     internal fun archivedRecommendations(): List<FixedRecommendationRecord> = load().recommendations
@@ -156,13 +159,18 @@ class FixedRecommendationStore @Inject constructor(
     internal fun update(record: FixedRecommendationRecord) = upsert(record)
 
     private fun load(): FixedRecommendationState {
-        val raw = prefs.getString(KEY_STATE, null) ?: return FixedRecommendationState()
-        return runCatching { gson.fromJson(raw, FixedRecommendationState::class.java) }
-            .getOrDefault(FixedRecommendationState())
+        cachedState?.let { return it }
+        val raw = prefs.getString(KEY_STATE, null)
+        val parsed = if (raw.isNullOrBlank()) FixedRecommendationState()
+        else runCatching { gson.fromJson(raw, FixedRecommendationState::class.java) }
+            .getOrNull() ?: FixedRecommendationState()
+        cachedState = parsed
+        return parsed
     }
 
     private fun save(state: FixedRecommendationState) {
-        prefs.edit().putString(KEY_STATE, gson.toJson(state)).commit()
+        val committed = prefs.edit().putString(KEY_STATE, gson.toJson(state)).commit()
+        cachedState = if (committed) state else null
     }
 
     private fun retainDays(rows: List<FixedRecommendationRecord>): List<FixedRecommendationRecord> {
