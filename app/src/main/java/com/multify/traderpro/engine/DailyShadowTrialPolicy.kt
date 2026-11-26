@@ -7,6 +7,7 @@ object DailyShadowTrialPolicy {
     data class Plan(val section:String,val parameter:String,val baseline:String,val challenger:String)
     val plans=listOf(
         Plan("FIXED","latest publication time IST","15:15","14:45"),
+        Plan("FIXED_REPEAT","minimum time from preceding publication minutes","30","45"),
         Plan("RANGE","maximum first-qualification upward entry drift %","1.60","1.50"),
         Plan("LARGE","minimum swing five-day relative strength %","0.25","0.30"),
         Plan("LOWS","maximum distance above support %","5.00","4.90"),
