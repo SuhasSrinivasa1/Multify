@@ -10,6 +10,10 @@ on:
       - v9050-master-session-validation-20261124
   workflow_dispatch:
 
+concurrency:
+  group: phayra-v9057-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
