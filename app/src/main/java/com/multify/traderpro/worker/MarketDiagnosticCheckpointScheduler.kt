@@ -63,7 +63,9 @@ object MarketDiagnosticCheckpointScheduler {
                 java.time.Instant.ofEpochMilli(last).atZone(india).plusHours(3)
             else now.plusHours(3)
             val latestToday = now.toLocalDate().atTime(LocalTime.of(15, 15)).atZone(india)
-            if (due.isAfter(latestToday)) latestToday else due
+            if (due.isAfter(latestToday))
+                now.toLocalDate().plusDays(1).atTime(LocalTime.of(9, 15)).atZone(india)
+            else due
         } else {
             val openToday = now.toLocalDate().atTime(LocalTime.of(9, 15)).atZone(india)
             if (now.isBefore(openToday)) openToday
