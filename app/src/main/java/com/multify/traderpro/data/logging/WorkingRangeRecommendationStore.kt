@@ -39,7 +39,9 @@ class WorkingRangeRecommendationStore(context: Context) {
         var dto: WorkingRangeRecommendationDto,
         var firstQualifiedPrice: Double,
         var consecutivePasses: Int,
-        var lastPassAtMs: Long
+        var lastPassAtMs: Long,
+        var firstQualificationEvidence: WorkingRangeRecommendationDto? = null,
+        var confirmationEvidence: WorkingRangeRecommendationDto? = null
     )
 
     private val prefs = context.applicationContext.getSharedPreferences(
@@ -276,7 +278,7 @@ class WorkingRangeRecommendationStore(context: Context) {
                     emaAlignmentMode = decision.emaAlignmentMode,
                     reason = "Working Range v0.3 · first matching scan · confirmation 1/2 · research observation"
                 )
-                val row = StoredRow(date, symbol, first, price, 1, observedAtMs)
+                val row = StoredRow(date, symbol, first, price, 1, observedAtMs, firstQualificationEvidence = first)
                 if (index >= 0) rows[index] = row else rows.add(row)
                 trimLocked()
                 persistLocked()
@@ -358,6 +360,7 @@ class WorkingRangeRecommendationStore(context: Context) {
                     "WORKING RANGE v0.3 · two independent scan evaluations · Auto-Buy eligibility checked separately"
                 else "Working Range v0.3 · confirmation 2/2 pending"
             )
+            if (confirmed) existing.confirmationEvidence = existing.dto
             persistLocked()
         }
     }
@@ -556,6 +559,8 @@ class WorkingRangeRecommendationStore(context: Context) {
             "rows" to rows.map { mapOf("date_ist" to it.dateIst, "symbol" to it.symbol,
                 "first_qualified_price" to it.firstQualifiedPrice,
                 "consecutive_passes" to it.consecutivePasses, "last_pass_at_ms" to it.lastPassAtMs,
+                "first_qualification_evidence" to it.firstQualificationEvidence,
+                "confirmation_evidence" to it.confirmationEvidence,
                 "recommendation" to it.dto) },
             "rejected_candidate_observations" to rejections
         )
