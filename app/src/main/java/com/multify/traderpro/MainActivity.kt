@@ -3,6 +3,8 @@ package com.multify.traderpro
 import android.Manifest
 import android.os.Build
 import android.os.Bundle
+import android.os.Debug
+import android.view.Choreographer
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -32,6 +34,61 @@ class MainActivity : ComponentActivity() {
                 FixedLiteApp()
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        frameMonitoring = true
+        lastFrameNanos = 0L
+        resetFrameWindow()
+        Choreographer.getInstance().postFrameCallback(frameCallback)
+    }
+
+    override fun onPause() {
+        frameMonitoring = false
+        Choreographer.getInstance().removeFrameCallback(frameCallback)
+        reportFrameWindow("ACTIVITY_PAUSE")
+        super.onPause()
+    }
+
+    override fun onDestroy() {
+        frameMonitoring = false
+        Choreographer.getInstance().removeFrameCallback(frameCallback)
+        super.onDestroy()
+    }
+
+    private fun resetFrameWindow() {
+        frameCount = 0L
+        intervalTotalMs = 0.0
+        maxFrameIntervalMs = 0.0
+        framesOver50Ms = 0L
+        framesOver100Ms = 0L
+        lastFrameReportAtMs = System.currentTimeMillis()
+    }
+
+    /** Main-thread work is limited to counters; serialization and disk writes stay on AuditLogger's worker. */
+    private fun reportFrameWindow(reason: String) {
+        if (frameCount <= 0L) {
+            resetFrameWindow()
+            return
+        }
+        val runtime = Runtime.getRuntime()
+        runCatching {
+            auditLogger.logAsync("ANDROID_PERFORMANCE", "UI_FRAME_TIMING", mapOf(
+                "window_reason" to reason,
+                "sampled_frame_intervals" to frameCount,
+                "average_frame_interval_ms" to intervalTotalMs / frameCount,
+                "max_frame_interval_ms" to maxFrameIntervalMs,
+                "frames_at_least_50ms" to framesOver50Ms,
+                "frames_at_least_100ms" to framesOver100Ms,
+                "java_heap_used_bytes" to (runtime.totalMemory() - runtime.freeMemory()),
+                "java_heap_max_bytes" to runtime.maxMemory(),
+                "native_heap_allocated_bytes" to Debug.getNativeHeapAllocatedSize(),
+                "frame_interval_is_rendered_frame_time" to false,
+                "no_trading_or_scoring_effect" to true
+            ))
+        }
+        resetFrameWindow()
     }
 
     private fun requestPostNotificationsIfNeeded() {
