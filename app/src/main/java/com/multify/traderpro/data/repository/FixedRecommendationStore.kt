@@ -152,14 +152,37 @@ class FixedRecommendationStore @Inject constructor(
     @Synchronized
     internal fun update(record: FixedRecommendationRecord) = upsert(record)
 
+    @Synchronized
+    internal fun updateObservedBatch(updates: List<FixedRecommendationRecord>) {
+        if (updates.isEmpty()) return
+        val state = load()
+        val byId = updates.associateBy { it.id }
+        val merged = state.recommendations.map { current ->
+            val next = byId[current.id]
+            if (next == null || next.lastObservedAtMs <= current.lastObservedAtMs) current
+            else current.copy(
+                status = if (next.status == "TARGET_HIT") "TARGET_HIT" else current.status,
+                targetHitAtMs = current.targetHitAtMs ?: next.targetHitAtMs,
+                lastPrice = next.lastPrice,
+                maxFavourablePct = maxOf(current.maxFavourablePct, next.maxFavourablePct),
+                maxAdversePct = maxOf(current.maxAdversePct, next.maxAdversePct),
+                lastObservedAtMs = next.lastObservedAtMs
+            )
+        }
+        save(state.copy(recommendations = merged))
+    }
+    private var cachedState: FixedRecommendationState? = null
     private fun load(): FixedRecommendationState {
+        cachedState?.let { return it }
         val raw = prefs.getString(KEY_STATE, null) ?: return FixedRecommendationState()
-        return runCatching { gson.fromJson(raw, FixedRecommendationState::class.java) }
-            .getOrDefault(FixedRecommendationState())
+        return (runCatching { gson.fromJson(raw, FixedRecommendationState::class.java) }
+            .getOrNull() ?: FixedRecommendationState()).also { cachedState = it }
     }
 
     private fun save(state: FixedRecommendationState) {
-        prefs.edit().putString(KEY_STATE, gson.toJson(state)).commit()
+        if (state == cachedState) return
+        check(prefs.edit().putString(KEY_STATE, gson.toJson(state)).commit()) { "Fixed persistence failed" }
+        cachedState = state
     }
 
     private fun retainDays(rows: List<FixedRecommendationRecord>): List<FixedRecommendationRecord> {
