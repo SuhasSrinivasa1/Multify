@@ -16,8 +16,8 @@ import java.util.concurrent.TimeUnit
 object MarketDiagnosticCheckpointScheduler {
     internal val india: ZoneId = ZoneId.of("Asia/Kolkata")
     internal const val PREFS = "phayra_market_diagnostic_checkpoints"
-    internal const val MIN_RECOMMENDATIONS = 20
-    internal const val CHECKPOINT_INTERVAL_MS = 3L * 60L * 60L * 1000L
+    internal const val MIN_RECOMMENDATIONS = com.multify.traderpro.engine.MarketDiagnosticCheckpointPolicy.RECOMMENDATION_BATCH_SIZE
+    internal const val CHECKPOINT_INTERVAL_MS = com.multify.traderpro.engine.MarketDiagnosticCheckpointPolicy.TIME_INTERVAL_MS
 
     fun onAppStarted(context: Context, recommendationCount: Int) {
         maybeScheduleForRecommendations(context, recommendationCount)
