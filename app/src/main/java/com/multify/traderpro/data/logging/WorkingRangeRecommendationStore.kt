@@ -5,6 +5,7 @@ import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import com.multify.traderpro.data.network.QuotePayload
 import com.multify.traderpro.data.network.WorkingRangeRecommendationDto
+import com.multify.traderpro.data.network.WorkingRangeFeatureSnapshot
 import com.multify.traderpro.engine.FixedQuoteMarketabilityPresentationPolicy
 import com.multify.traderpro.engine.FixedStrategyEvaluation
 import com.multify.traderpro.engine.WorkingRangeCandidatePolicy
@@ -16,6 +17,7 @@ import java.time.ZoneId
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.max
 import kotlin.math.min
@@ -74,6 +76,12 @@ class WorkingRangeRecommendationStore(context: Context) {
         gson.fromJson<MutableList<StoredRejection>>(prefs.getString(KEY_REJECTIONS, "[]"), rejectionType)
             ?: mutableListOf()
     }.getOrDefault(mutableListOf())
+    private var rejectionsDirty = false
+    private var rejectionsSincePersist = 0
+    private var rejectionFlushScheduled = false
+    private val rejectionFlushScheduler = Executors.newSingleThreadScheduledExecutor { runnable ->
+        Thread(runnable, "WorkingRangeRejectionFlush").apply { isDaemon = true; priority = Thread.MIN_PRIORITY }
+    }
     // This switch gates broker execution ONLY. The research observer is always enabled.
     @Volatile private var autoBuyEnabled: Boolean = false
     private val rows: MutableList<StoredRow> = runCatching {
@@ -102,8 +110,11 @@ class WorkingRangeRecommendationStore(context: Context) {
     }
 
     /** Wait until every already-enqueued Working Range observation has been persisted. */
-    fun flush(timeoutMs: Long = 5_000L): Boolean =
-        runCatching { queue.submit {}.get(timeoutMs, TimeUnit.MILLISECONDS); true }.getOrDefault(false)
+    fun flush(timeoutMs: Long = 5_000L): Boolean = runCatching {
+        queue.submit {}.get(timeoutMs, TimeUnit.MILLISECONDS)
+        synchronized(lock) { if (rejectionsDirty) persistRejectionsLocked() }
+        true
+    }.getOrDefault(false)
 
     /** Durable one-shot order intent, keyed by the confirmed symbol/event timestamp. */
     fun reserveAutoBuy(symbol: String, confirmedAtMs: Long, reference: String, quantity: Int): Boolean =
@@ -173,6 +184,36 @@ class WorkingRangeRecommendationStore(context: Context) {
         }.onFailure { droppedQueueItems.incrementAndGet() }
     }
 
+    private fun featureSnapshot(
+        evaluation: FixedStrategyEvaluation,
+        decision: WorkingRangeCandidatePolicy.Decision,
+        price: Double,
+        observedAtMs: Long,
+        scanStartedAtMs: Long
+    ): WorkingRangeFeatureSnapshot {
+        val f = evaluation.features
+        return WorkingRangeFeatureSnapshot(
+            observedAtMs = observedAtMs,
+            scanStartedAtMs = scanStartedAtMs,
+            price = price,
+            rsi = f.rsi14,
+            rsiSlope = f.rsiSlope,
+            rvol = f.rvol,
+            greenVolumeShare = f.greenVolumeShare,
+            volumeAcceleration = f.volumeAcceleration,
+            ema9 = f.ema9, ema20 = f.ema20, ema50 = f.ema50,
+            ema9Slope = f.ema9Slope, ema20Slope = f.ema20Slope,
+            macdHistogramSlope = f.macdHistogramSlope,
+            targetRequirementAtr = decision.targetRequirementAtr,
+            vwapExtensionAtr = decision.vwapExtensionAtr,
+            atr14 = f.atr14, vwap = f.vwap,
+            range52Position = f.range52Position,
+            spreadBps = f.spreadBps,
+            orderBookImbalance = f.orderBookImbalance,
+            emaAlignmentMode = decision.emaAlignmentMode
+        )
+    }
+
     private fun observeOnWorker(
         symbol: String,
         evaluation: FixedStrategyEvaluation,
@@ -230,7 +271,10 @@ class WorkingRangeRecommendationStore(context: Context) {
                     vwapExtensionAtr = decision.vwapExtensionAtr
                 ))
                 while (rejections.size > 600) rejections.removeAt(0)
-                persistRejectionsLocked()
+                rejectionsDirty = true
+                rejectionsSincePersist++
+                if (rejectionsSincePersist >= REJECTION_BATCH_SIZE) persistRejectionsLocked()
+                else scheduleRejectionFlushLocked()
                 if (existing != null && existing.dto.state == "PENDING_CONFIRMATION") {
                     pendingDroppedEvents++
                     existing.dto = existing.dto.copy(
@@ -274,6 +318,7 @@ class WorkingRangeRecommendationStore(context: Context) {
                     quoteClientReceiptAgeMs = marketability.clientReceiptAgeMs,
                     autoBuyEnabled = this@WorkingRangeRecommendationStore.autoBuyEnabled,
                     emaAlignmentMode = decision.emaAlignmentMode,
+                    firstQualifiedFeatures = featureSnapshot(evaluation, decision, price, observedAtMs, scanStartedAtMs),
                     reason = "Working Range v0.3 · first matching scan · confirmation 1/2 · research observation"
                 )
                 val row = StoredRow(date, symbol, first, price, 1, observedAtMs)
@@ -354,6 +399,8 @@ class WorkingRangeRecommendationStore(context: Context) {
                     this@WorkingRangeRecommendationStore.autoBuyEnabled
                 else existing.dto.autoBuyEnabled,
                 emaAlignmentMode = decision.emaAlignmentMode,
+                confirmationFeatures = existing.dto.confirmationFeatures
+                    ?: featureSnapshot(evaluation, decision, price, observedAtMs, scanStartedAtMs),
                 reason = if (confirmed)
                     "WORKING RANGE v0.3 · two independent scan evaluations · Auto-Buy eligibility checked separately"
                 else "Working Range v0.3 · confirmation 2/2 pending"
@@ -482,6 +529,7 @@ class WorkingRangeRecommendationStore(context: Context) {
     fun export(): Map<String, Any?> {
         runCatching { queue.submit {}.get(5, TimeUnit.SECONDS) }
         return synchronized(lock) {
+        if (rejectionsDirty) persistRejectionsLocked()
         val recentReasonCounts = rejections.flatMap { it.reasons }.groupingBy { it }.eachCount()
         mapOf(
             "schema" to "working_range_research_v9025",
@@ -606,10 +654,23 @@ class WorkingRangeRecommendationStore(context: Context) {
         return prefs.edit().putString(KEY_ROWS, gson.toJson(rows)).commit()
     }
 
+    private fun scheduleRejectionFlushLocked() {
+        if (rejectionFlushScheduled) return
+        rejectionFlushScheduled = true
+        rejectionFlushScheduler.schedule({
+            synchronized(lock) {
+                if (rejectionsDirty) persistRejectionsLocked()
+                rejectionFlushScheduled = false
+            }
+        }, REJECTION_FLUSH_DELAY_MS, TimeUnit.MILLISECONDS)
+    }
+
     private fun persistRejectionsLocked() {
         val editor = prefs.edit().putString(KEY_REJECTIONS, gson.toJson(rejections))
         appendStats(editor)
         editor.apply()
+        rejectionsDirty = false
+        rejectionsSincePersist = 0
     }
 
     private fun persistStatsLocked() {
@@ -634,6 +695,8 @@ class WorkingRangeRecommendationStore(context: Context) {
     }
 
     companion object {
+        private const val REJECTION_BATCH_SIZE = 25
+        private const val REJECTION_FLUSH_DELAY_MS = 2_000L
         private const val KEY_ROWS = "rows_json"
         private const val KEY_REJECTIONS = "rejections_json"
         private const val KEY_STATS_EVALUATED = "stats_evaluated_v9052"
