@@ -26,7 +26,16 @@ internal object FixedPrimaryProgressionResearch {
                 recommendation.symbol.uppercase()].orEmpty()
                 .filter { it.scanAtMs <= recommendation.generatedAtMs }
             val firstAny = series.firstOrNull()
-            val primary = series.filter {
+            val priorEventAt = recommendations.asSequence().filter {
+                it.recommendationDate == recommendation.recommendationDate &&
+                    it.symbol.equals(recommendation.symbol, true) && it.generatedAtMs < recommendation.generatedAtMs
+            }.maxOfOrNull { it.generatedAtMs }
+            val resetAt = priorEventAt?.let { prev -> series.lastOrNull {
+                it.scanAtMs > prev && (it.qualityTier != "PRIMARY" || !it.publishEligible || !it.executionEligible)
+            }?.scanAtMs }
+            val episode = if (priorEventAt == null) series else if (resetAt != null)
+                series.filter { it.scanAtMs > resetAt } else emptyList()
+            val primary = episode.filter {
                 it.qualityTier == "PRIMARY" && it.publishEligible && it.executionEligible
             }.distinctBy { it.scanAtMs }
             val secondary = series.firstOrNull { it.qualityTier == "SECONDARY" }
@@ -48,6 +57,8 @@ internal object FixedPrimaryProgressionResearch {
                 "first_any_tier" to firstAny?.qualityTier,
                 "first_secondary_scan_at_ms" to secondary?.scanAtMs,
                 "first_secondary_price" to secondary?.observedPrice,
+                "prior_event_scan_at_ms" to priorEventAt,
+                "witnessed_reset_scan_at_ms" to resetAt,
                 "first_qualified_primary_scan_at_ms" to first?.scanAtMs,
                 "first_qualified_primary_observed_price" to firstPrice,
                 "independent_primary_scan_count_through_generation" to primary.size,
