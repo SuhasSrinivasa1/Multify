@@ -30,7 +30,7 @@ class DailyShadowTrialPolicyTest {
         assertEquals(5,DailyShadowTrialPolicy.assess("2026-11-26",rows()+rows(),true).candidates)
     }
     @Test fun fiveSectionsOneParameterEach(){
-        assertEquals(setOf("FIXED","RANGE","LARGE","LOWS","FII_DII"),DailyShadowTrialPolicy.plans.map{it.section}.toSet())
+        assertEquals(setOf("FIXED","FIXED_REPEAT","RANGE","LARGE","LOWS","FII_DII"),DailyShadowTrialPolicy.plans.map{it.section}.toSet())
         assertTrue(DailyShadowTrialPolicy.plans.all{it.baseline!=it.challenger})
     }
 }
