@@ -30,7 +30,9 @@ object MarketDiagnosticCheckpointScheduler {
 
     private fun maybeScheduleForRecommendations(context: Context, recommendationCount: Int) {
         val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        val archivedCount = prefs.getInt("last_checkpoint_recommendation_count", 0)
+        val today = ZonedDateTime.now(india).toLocalDate().toString()
+        val archivedDate = prefs.getString("last_checkpoint_recommendation_date", "")
+        val archivedCount = if (archivedDate == today) prefs.getInt("last_checkpoint_recommendation_count", 0) else 0
         if (recommendationCount - archivedCount < MIN_RECOMMENDATIONS) return
         val bucket = recommendationCount / MIN_RECOMMENDATIONS
         val request = OneTimeWorkRequestBuilder<MarketDiagnosticCheckpointWorker>()
