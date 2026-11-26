@@ -438,6 +438,12 @@ internal fun LiteFixedScreen(
     val health = dashboard?.fixedHealth ?: EngineHealthDto()
     val recommendations = dashboard?.fixedForecasts.orEmpty()
         .sortedWith(compareBy<ForecastDto> { it.rank }.thenByDescending { it.generatedAtMs })
+    var showAllRecommendations by rememberSaveable { mutableStateOf(false) }
+    val latestRecommendations = remember(recommendations) {
+        recommendations.sortedByDescending { it.generatedAtMs }.take(20)
+            .sortedWith(compareBy<ForecastDto> { it.rank }.thenByDescending { it.generatedAtMs })
+    }
+    val visibleRecommendations = if (showAllRecommendations) recommendations else latestRecommendations
     val positions = dashboard?.positions.orEmpty().filter { it.quantity > 0 }
     val discoveryTone = when (health.discovery.uppercase(Locale.US)) {
         "READY", "HEALTHY", "COMPLETE" -> LiteTone.POSITIVE
@@ -600,7 +606,19 @@ internal fun LiteFixedScreen(
         }
 
         item(key = "fixed-recommendations-title") {
-            SectionTitle("Fixed recommendations", recommendations.size.toString() + " published · original rank order")
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                SectionTitle("Fixed recommendations",
+                    if (showAllRecommendations || recommendations.size <= 20)
+                        recommendations.size.toString() + " published · original rank order"
+                    else "Showing 20 newest of ${recommendations.size} · older records retained")
+                if (recommendations.size > 20) {
+                    TextButton(onClick = { showAllRecommendations = !showAllRecommendations }) {
+                        Text(if (showAllRecommendations) "Show latest 20" else "Show all ${recommendations.size}")
+                    }
+                }
+                Text("Daily averages and archived outcomes include all recommendations; this display limit does not delete data.",
+                    style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
         }
         if (recommendations.isEmpty()) {
             item(key = "fixed-empty") {
@@ -611,7 +629,7 @@ internal fun LiteFixedScreen(
                 ) { Icon(Icons.Default.TrendingUp, contentDescription = null) }
             }
         } else {
-            items(recommendations, key = { "fixed-" + it.symbol + "-" + it.generatedAtMs }) { row ->
+            items(visibleRecommendations, key = { "fixed-" + it.symbol + "-" + it.generatedAtMs }) { row ->
                 FixedRecommendationCard(
                     row, onBuy, nowMs,
                     state.settings.brokerAuthenticated && !state.brokerReconnectRequired && state.settings.staticIpMatched &&
