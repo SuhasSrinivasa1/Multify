@@ -4490,34 +4490,37 @@ class TradingRepository @Inject constructor(
             )
         }
 
-        publishable.forEachIndexed { index, item ->
+        val publishedRecords = publishable.mapIndexed { index, item ->
             val price = item.evaluation.features.ltp
-            fixedRecommendationStore.upsert(
-                FixedRecommendationRecord(
-                    id = FixedRecommendationStore.fixedEventId(today, item.symbol, nowMs),
-                    recommendationDate = today,
-                    rank = existing.size + index + 1,
-                    symbol = item.symbol,
-                    entryPrice = price,
-                    targetPct = targetPct,
-                    targetPrice = price * (1.0 + targetPct / 100.0),
-                    confidence = item.evaluation.confidence,
-                    score = item.score,
-                    strategy = item.evaluation.strategy,
-                    regime = item.evaluation.regime,
-                    marketRegime = marketRegime,
-                    championKey = item.championKey,
-                    reason = "Frozen ${FixedEngineSnapshotStore.SNAPSHOT_ID} · " + item.quality.reason + " · " + item.evaluation.reason +
-                        " · family " + item.factorModel.dominantFamily +
-                        " · family consensus " + fmt(item.factorModel.consensusScore * 100.0) + "%" +
-                        " · capacity " + fmt(item.quality.volatilityCapacityPct) + "% for " + fmt(targetPct) + "% target",
-                    generatedAtMs = nowMs,
-                    lastPrice = price,
-                    lastObservedAtMs = nowMs,
-                    qualityTier = item.quality.tier,
-                    executionEligible = item.quality.executionEligible
-                )
+            FixedRecommendationRecord(
+                id = FixedRecommendationStore.fixedEventId(today, item.symbol, nowMs),
+                recommendationDate = today,
+                rank = existing.size + index + 1,
+                symbol = item.symbol,
+                entryPrice = price,
+                targetPct = targetPct,
+                targetPrice = price * (1.0 + targetPct / 100.0),
+                confidence = item.evaluation.confidence,
+                score = item.score,
+                strategy = item.evaluation.strategy,
+                regime = item.evaluation.regime,
+                marketRegime = marketRegime,
+                championKey = item.championKey,
+                reason = "Frozen ${FixedEngineSnapshotStore.SNAPSHOT_ID} · " + item.quality.reason + " · " + item.evaluation.reason +
+                    " · family " + item.factorModel.dominantFamily +
+                    " · family consensus " + fmt(item.factorModel.consensusScore * 100.0) + "%" +
+                    " · capacity " + fmt(item.quality.volatilityCapacityPct) + "% for " + fmt(targetPct) + "% target",
+                generatedAtMs = nowMs,
+                lastPrice = price,
+                lastObservedAtMs = nowMs,
+                qualityTier = item.quality.tier,
+                executionEligible = item.quality.executionEligible
             )
+        }
+        fixedRecommendationStore.upsertAll(publishedRecords)
+        if (publishedRecords.isNotEmpty()) {
+            com.multify.traderpro.worker.MarketDiagnosticCheckpointScheduler
+                .onRecommendationCountChanged(appContext, fixedRecommendationStore.recommendations(today).size)
         }
 
         val all = fixedRecommendationStore.recommendations(today)
@@ -10449,19 +10452,18 @@ class TradingRepository @Inject constructor(
         val nowMs = System.currentTimeMillis()
         val today = now.toLocalDate().toString()
         val rows = fixedRecommendationStore.recommendations(today)
-        fixedOutcomePerformanceStore.record(rows)
-        fixedHistoricalEvidenceArchive.capture(rows)
-        // No research-only candidates: monitor official Fixed published stocks only.
+        // Only official Fixed published events are monitored. Daily averages are
+        // written after a changed batch, not on every no-op polling cycle.
         if (rows.isEmpty()) return 0
 
         val open = marketSession() == "OPEN"
         if (!open) {
-            // Do not hallucinate intraday target hits from a stale post-close quote.
-            rows.filter { it.status == "ACTIVE" }.forEach { row ->
-                fixedRecommendationStore.update(row.copy(status = "SESSION_ENDED"))
-            }
-            fixedOutcomePerformanceStore.record(fixedRecommendationStore.recommendations(today))
-            fixedHistoricalEvidenceArchive.capture(fixedRecommendationStore.recommendations(today))
+            val ended = rows.filter { it.status == "ACTIVE" }
+                .map { it.copy(status = "SESSION_ENDED") }
+            if (ended.isNotEmpty()) fixedRecommendationStore.upsertAll(ended)
+            val finalRows = fixedRecommendationStore.recommendations(today)
+            fixedOutcomePerformanceStore.record(finalRows)
+            fixedHistoricalEvidenceArchive.capture(finalRows)
             return 0
         }
 
@@ -10471,34 +10473,43 @@ class TradingRepository @Inject constructor(
             ?.previousLtps.orEmpty()
         val cachedAt = discovery?.updatedAtMs ?: 0L
         var observed = 0
+        val cachedUpdates = mutableListOf<FixedRecommendationRecord>()
         for (row in rows) {
-            // The published generatedAtMs is scan START, not delivery. Use a full scan-spacing
-            // delay before accepting the shared discovery snapshot as post-publication evidence.
+            // generatedAtMs is scan START, not delivery. Keep the conservative scan-spacing delay.
             if (cachedAt < row.generatedAtMs + FIXED_V741_FORECAST_SCAN_INTERVAL_MS ||
                 cachedAt <= row.lastObservedAtMs) continue
             val price = cachedPrices[row.symbol.uppercase(Locale.US)] ?: continue
             if (price.isFinite() && price > 0.0) {
-                updateFixedObservedOutcome(row, price, cachedAt, "DISCOVERY_CACHE")
-                observed++
+                updateFixedObservedOutcome(row, price, cachedAt, "DISCOVERY_CACHE")?.let {
+                    cachedUpdates += it
+                    observed++
+                }
             }
+        }
+        if (cachedUpdates.isNotEmpty()) {
+            fixedRecommendationStore.upsertAll(cachedUpdates)
+            val updatedRows = fixedRecommendationStore.recommendations(today)
+            fixedOutcomePerformanceStore.record(updatedRows)
+            fixedHistoricalEvidenceArchive.capture(updatedRows)
+            _fixedDeliveryEvents.tryEmit(cachedAt)
         }
 
         if (nowMs - lastFixedOutcomeMonitorAtMs < FORECAST_OUTCOME_INTERVAL_MS ||
             fixedApiPriorityRequested || marketCriticalTradeInFlight) {
-            if (observed > 0) fixedOutcomePerformanceStore.record(fixedRecommendationStore.recommendations(today))
             return fixedRecommendationStore.recommendations(today).count { it.status == "ACTIVE" }
         }
         // Avoid delaying protected trades and the high-priority Fixed scanner when Live Data is saturated.
         val liveUsage = GrowwApiUsageLedger.snapshot().categories
             .firstOrNull { it.category == GrowwApiUsageLedger.Category.LIVE_DATA }
         if (liveUsage == null || liveUsage.minuteHeadroom <= 5) {
-            if (observed > 0) fixedOutcomePerformanceStore.record(fixedRecommendationStore.recommendations(today))
             return fixedRecommendationStore.recommendations(today).count { it.status == "ACTIVE" }
         }
         lastFixedOutcomeMonitorAtMs = nowMs
-        val token = ensureToken() ?: return fixedRecommendationStore.recommendations(today).count { it.status == "ACTIVE" }
+        val token = ensureToken()
+            ?: return fixedRecommendationStore.recommendations(today).count { it.status == "ACTIVE" }
         val symbols = rows.map { it.symbol.uppercase(Locale.US) }.distinct()
         if (symbols.isEmpty()) return 0
+
         // Groww accepts at most 50 NSE instruments in a single LTP call.
         // Every chunk goes through the existing Alpha Live Data governor.
         val fetched = linkedMapOf<String, Double>()
@@ -10528,26 +10539,32 @@ class TradingRepository @Inject constructor(
             "extra_wallet_api_calls" to 0
         ))
         val observedAt = System.currentTimeMillis()
-        for (row in fixedRecommendationStore.recommendations(today)) {
+        val currentRows = fixedRecommendationStore.recommendations(today)
+        val liveUpdates = mutableListOf<FixedRecommendationRecord>()
+        for (row in currentRows) {
             val price = fetched["NSE_${row.symbol.uppercase(Locale.US)}"]
                 ?: fetched[row.symbol.uppercase(Locale.US)] ?: continue
             if (price.isFinite() && price > 0.0) {
-                updateFixedObservedOutcome(row, price, observedAt, "LIVE_LTP")
-                observed++
+                updateFixedObservedOutcome(row, price, observedAt, "LIVE_LTP")?.let {
+                    liveUpdates += it
+                    observed++
+                }
             }
         }
-        if (observed > 0) {
-            if (observed > 0) fixedOutcomePerformanceStore.record(fixedRecommendationStore.recommendations(today))
-            fixedHistoricalEvidenceArchive.capture(fixedRecommendationStore.recommendations(today))
-            _fixedDeliveryEvents.tryEmit(observedAt) // Repaint Fixed badges and Averages promptly.
+        if (liveUpdates.isNotEmpty()) {
+            fixedRecommendationStore.upsertAll(liveUpdates)
+            val updatedRows = fixedRecommendationStore.recommendations(today)
+            fixedOutcomePerformanceStore.record(updatedRows)
+            fixedHistoricalEvidenceArchive.capture(updatedRows)
+            _fixedDeliveryEvents.tryEmit(observedAt)
         }
         return fixedRecommendationStore.recommendations(today).count { it.status == "ACTIVE" }
     }
 
     private fun updateFixedObservedOutcome(
         row: FixedRecommendationRecord, price: Double, atMs: Long, source: String
-    ) {
-        if (atMs <= row.lastObservedAtMs || atMs <= row.generatedAtMs) return
+    ): FixedRecommendationRecord? {
+        if (atMs <= row.lastObservedAtMs || atMs <= row.generatedAtMs) return null
         researchOutcomeChronologyJournal.observe("FIXED", row.symbol.uppercase(Locale.US),
             row.generatedAtMs, row.entryPrice, row.targetPrice, price, atMs, source)
         val move = maxOf(0.0, (price / row.entryPrice - 1.0) * 100.0)
@@ -10555,20 +10572,22 @@ class TradingRepository @Inject constructor(
         val targetHit = row.status == "TARGET_HIT" || price >= row.targetPrice ||
             maxMfe >= row.targetPct - 1e-9
         val nextStatus = if (targetHit) "TARGET_HIT" else row.status
-        fixedRecommendationStore.update(row.copy(
+        val updated = row.copy(
             status = nextStatus,
             targetHitAtMs = row.targetHitAtMs ?: if (targetHit) atMs else null,
             lastPrice = price,
             maxFavourablePct = maxMfe,
-            maxAdversePct = maxOf(row.maxAdversePct, maxOf(0.0, (row.entryPrice - price) / row.entryPrice * 100.0)),
+            maxAdversePct = maxOf(row.maxAdversePct,
+                maxOf(0.0, (row.entryPrice - price) / row.entryPrice * 100.0)),
             lastObservedAtMs = atMs
-        ))
+        )
         if (targetHit && row.status != "TARGET_HIT") {
             auditLogger.log("FIXED_OUTCOME", "TARGET_HIT", mapOf(
                 "symbol" to row.symbol, "target_pct" to row.targetPct,
                 "mfe_pct" to maxMfe, "observed_price" to price, "source" to source
             ))
         }
+        return updated
     }
 
     private suspend fun fetchForecastOutcomeLtps(token: String, symbols: List<String>): Map<String, Double> {
