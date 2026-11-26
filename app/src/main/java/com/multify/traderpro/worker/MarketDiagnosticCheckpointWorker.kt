@@ -37,13 +37,14 @@ class MarketDiagnosticCheckpointWorker @AssistedInject constructor(
         val currentCount = fixedStore.recommendations(today).size
         val archivedCount = prefs.getInt("last_checkpoint_recommendation_count", 0)
         val lastAt = prefs.getLong("last_checkpoint_at_ms", 0L)
-        val due = when (trigger) {
-            "RECOMMENDATIONS" -> currentCount - archivedCount >=
-                MarketDiagnosticCheckpointScheduler.MIN_RECOMMENDATIONS
-            else -> NseEquitySessionCalendar.isOpen(now) &&
-                (lastAt == 0L || System.currentTimeMillis() - lastAt >=
-                    MarketDiagnosticCheckpointScheduler.CHECKPOINT_INTERVAL_MS)
-        }
+        val due = com.multify.traderpro.engine.MarketDiagnosticCheckpointPolicy.shouldCheckpoint(
+            trigger = trigger,
+            currentRecommendationCount = currentCount,
+            archivedRecommendationCount = archivedCount,
+            lastCheckpointAtMs = lastAt,
+            nowMs = System.currentTimeMillis(),
+            marketOpen = NseEquitySessionCalendar.isOpen(now)
+        )
         if (!due) {
             MarketDiagnosticCheckpointScheduler.scheduleNextTimeCheckpoint(applicationContext)
             return Result.success()
