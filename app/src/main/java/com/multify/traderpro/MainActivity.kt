@@ -11,14 +11,44 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.core.content.ContextCompat
+import com.multify.traderpro.data.logging.AuditLogger
 import com.multify.traderpro.worker.MarketDiagnosticCheckpointScheduler
 import com.multify.traderpro.service.TradingEngineService
 import com.multify.traderpro.ui.screens.FixedLiteApp
 import com.multify.traderpro.ui.theme.MultifyTraderTheme
 import dagger.hilt.android.AndroidEntryPoint
+import javax.inject.Inject
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
+    @Inject lateinit var auditLogger: AuditLogger
+
+    private var frameMonitoring = false
+    private var lastFrameNanos = 0L
+    private var frameCount = 0L
+    private var intervalTotalMs = 0.0
+    private var maxFrameIntervalMs = 0.0
+    private var framesOver50Ms = 0L
+    private var framesOver100Ms = 0L
+    private var lastFrameReportAtMs = 0L
+    private val frameCallback = object : Choreographer.FrameCallback {
+        override fun doFrame(frameTimeNanos: Long) {
+            if (!frameMonitoring) return
+            if (lastFrameNanos > 0L) {
+                val interval = (frameTimeNanos - lastFrameNanos).coerceAtLeast(0L) / 1_000_000.0
+                frameCount++
+                intervalTotalMs += interval
+                maxFrameIntervalMs = maxOf(maxFrameIntervalMs, interval)
+                if (interval >= 50.0) framesOver50Ms++
+                if (interval >= 100.0) framesOver100Ms++
+            }
+            lastFrameNanos = frameTimeNanos
+            val now = System.currentTimeMillis()
+            if (now - lastFrameReportAtMs >= 60_000L) reportFrameWindow("PERIODIC")
+            Choreographer.getInstance().postFrameCallback(this)
+        }
+    }
+
     private val notificationsPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { }
