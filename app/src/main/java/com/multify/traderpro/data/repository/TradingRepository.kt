@@ -1874,6 +1874,16 @@ class TradingRepository @Inject constructor(
         )
     }
 
+    /** Cached broker inventory only; no broker requests or ownership changes. */
+    fun portfolioPreview():PortfolioPreview {
+        val inventory=brokerInventorySnapshot?:return PortfolioPreview(null,emptyList(),emptyList())
+        val day=LocalDate.now(INDIA).toString()
+        val sweep=fixedMarketDiscoveryStateStore.loadHealth(day)?.let{fixedMarketDiscoveryStateStore.load(day)}
+        return PortfolioPreview(inventory.atMs,inventory.holdings.entries.sortedBy{it.key}.map{(symbol,h)->
+            PortfolioHoldingPreview(symbol,h.isin,h.quantity,h.averagePrice,h.dematFreeQuantity,h.t1Quantity,sweep?.previousLtps?.get(symbol),sweep?.updatedAtMs)
+        },inventory.positions.keys.sorted())
+    }
+
     suspend fun refreshDashboardLocal(): DashboardDto {
         val settings = preferences.settings.first()
         val fixedSnapshotState = runCatching { ensureFixedEngineSnapshot() }.getOrNull()

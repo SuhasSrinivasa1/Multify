@@ -49,7 +49,8 @@ class TraderViewModel @Inject constructor(
     private val repository: TradingRepository,
     private val preferences: AppPreferences,
     private val nseSymbols: NseSymbolRepository,
-    private val equityEodResearch: EquityEodResearchRepository
+    private val equityEodResearch: EquityEodResearchRepository,
+    private val liveNews: com.multify.traderpro.data.repository.LiveNewsIntelligence
 ) : ViewModel() {
     private val remote = MutableStateFlow(RemoteState())
     private val equityResearch = MutableStateFlow(EquityResearchSnapshot())
@@ -118,6 +119,9 @@ class TraderViewModel @Inject constructor(
             }
         }
     }
+
+    suspend fun liveNewsSnapshot()=withContext(Dispatchers.IO){liveNews.snapshot()}
+    suspend fun portfolioPreview()=withContext(Dispatchers.IO){repository.portfolioPreview()}
 
     /** Does not call broker dashboard, quotes, holdings, or archive backfill. */
     fun refreshInstitutionalResearch() {

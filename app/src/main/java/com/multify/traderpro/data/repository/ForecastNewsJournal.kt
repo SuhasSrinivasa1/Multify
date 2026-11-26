@@ -11,6 +11,13 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /** Append-only, portable forecast-only event journal. No API keys, holdings or order state. */
+data class LiveNewsMeta(
+    val sentiment:String,val evidence:String,val reportedPercentages:List<Double>,
+    val cluster1h:Int,val cluster3h:Int,val cluster5h:Int,
+    val alertedAtMs:Long?=null,val baseline:Double?=null,val baselineAtMs:Long?=null,
+    val outcome15Pct:Double?=null,val outcome30Pct:Double?=null,val outcome60Pct:Double?=null,
+    val outcome60AtMs:Long?=null
+)
 data class ForecastNewsEvent(
     val id: String,
     val source: String,
@@ -33,7 +40,8 @@ data class ForecastNewsEvent(
     val lastObservedPrice: Double? = null,
     val lastObservedAtMs: Long? = null,
     val firstOnePctAtMs: Long? = null,
-    val completedAtMs: Long? = null
+    val completedAtMs: Long? = null,
+    val liveNews: LiveNewsMeta? = null
 )
 
 @Singleton
@@ -64,8 +72,10 @@ class ForecastNewsJournal @Inject constructor(@ApplicationContext context: Conte
         latest[row.id] = row
     }
 
+    fun find(id: String): ForecastNewsEvent? = synchronized(lock) { latest[id] }
+
     fun recent(limit: Int = 500): List<ForecastNewsEvent> = synchronized(lock) {
-        latest.values.toList().takeLast(limit)
+        latest.values.drop((latest.size-limit).coerceAtLeast(0))
     }
 
     fun dueForEvaluation(nowMs: Long, limit: Int = 3): List<ForecastNewsEvent> = synchronized(lock) {
@@ -137,8 +147,8 @@ class ForecastNewsJournal @Inject constructor(@ApplicationContext context: Conte
                 ?: return@forEach
             if (row.id.isBlank() || row.id.length > 128 || row.symbol.length > 32) return@forEach
             val local = latest[row.id]
-            if (local == null || (row.lastObservedAtMs ?: row.firstSeenAtMs) >
-                (local.lastObservedAtMs ?: local.firstSeenAtMs)) {
+            if (local == null || maxOf(row.lastObservedAtMs ?: row.firstSeenAtMs, row.liveNews?.outcome60AtMs ?: 0L, row.liveNews?.alertedAtMs ?: 0L) >
+                maxOf(local.lastObservedAtMs ?: local.firstSeenAtMs, local.liveNews?.outcome60AtMs ?: 0L, local.liveNews?.alertedAtMs ?: 0L)) {
                 append(row)
                 latest[row.id] = row
                 restored++

@@ -60,7 +60,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-internal enum class LitePage { FIXED, WORKING_RANGE, MANUAL, LARGE_CAP, SIX_MONTH_LOW, INSTITUTIONAL, AVERAGES, SETTINGS }
+internal enum class LitePage { FIXED, WORKING_RANGE, MANUAL, LARGE_CAP, SIX_MONTH_LOW, INSTITUTIONAL, PORTFOLIO, AVERAGES, SETTINGS }
 private enum class LiteTone { POSITIVE, WARNING, NEGATIVE, INFO, NEUTRAL }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -115,7 +115,8 @@ fun FixedLiteApp(viewModel: TraderViewModel = hiltViewModel()) {
                                     LitePage.MANUAL -> "Intraday MIS BUY / SELL"
                                     LitePage.LARGE_CAP -> "Large-cap research"
                                     LitePage.SIX_MONTH_LOW -> "3M / 6M lows"
-                                    LitePage.INSTITUTIONAL -> "Institutional intelligence"
+                                    LitePage.INSTITUTIONAL -> "Institutional & news intelligence"
+                                    LitePage.PORTFOLIO -> "Portfolio profit ladder"
                                     LitePage.AVERAGES -> "Observed Fixed outcomes"
                                     LitePage.SETTINGS -> "Accounts and controls"
                                 },
@@ -128,6 +129,7 @@ fun FixedLiteApp(viewModel: TraderViewModel = hiltViewModel()) {
                         }
                     },
                     actions = {
+                        IconButton(onClick={page=LitePage.PORTFOLIO}){Icon(Icons.Default.TrendingUp,contentDescription="Open portfolio intelligence")}
                         IconButton(onClick = { page = LitePage.AVERAGES }) {
                             Icon(Icons.Default.Analytics, contentDescription = "Open Fixed averages")
                         }
@@ -155,7 +157,8 @@ fun FixedLiteApp(viewModel: TraderViewModel = hiltViewModel()) {
                 LitePage.SIX_MONTH_LOW -> SixMonthLowResearchScreen(state,viewModel::scanLowRangeNow) {
                     importNseFiles.launch(arrayOf("*/*"))
                 }
-                LitePage.INSTITUTIONAL -> InstitutionalResearchScreen(state,viewModel::refreshInstitutionalResearch)
+                LitePage.INSTITUTIONAL -> InstitutionalResearchScreen(state,viewModel::refreshInstitutionalResearch,viewModel)
+                LitePage.PORTFOLIO -> PortfolioIntelligenceScreen(viewModel)
                 LitePage.AVERAGES -> LiteAveragesScreen(state)
                 LitePage.SETTINGS -> LiteSettingsScreen(
                     state, viewModel,

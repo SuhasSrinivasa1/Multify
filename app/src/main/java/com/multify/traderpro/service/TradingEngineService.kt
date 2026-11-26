@@ -47,6 +47,7 @@ import javax.inject.Inject
 @AndroidEntryPoint
 class TradingEngineService : Service() {
     @Inject lateinit var repository: TradingRepository
+    @Inject lateinit var liveNews: com.multify.traderpro.data.repository.LiveNewsIntelligence
     @Inject lateinit var auditLogger: AuditLogger
     @Inject lateinit var recoveryGate: GrowwRecoveryGate
     @Inject lateinit var betaResearchGate: BetaResearchGate
@@ -73,6 +74,7 @@ class TradingEngineService : Service() {
     private val fixedScanIdSequence = java.util.concurrent.atomic.AtomicLong(0L)
     private var forecastScanJob: Job? = null
     private var forecastNewsJob: Job? = null
+    private var liveNewsJob: Job? = null
     private var positionMonitoringWakeLock: PowerManager.WakeLock? = null
     @Volatile private var lastKnownManagedCount = 0
     @Volatile private var lastManagedMonitorSucceeded = true
@@ -264,6 +266,7 @@ class TradingEngineService : Service() {
         fixedScanJob?.cancel()
         forecastScanJob?.cancel()
         forecastNewsJob?.cancel()
+        liveNewsJob?.cancel()
         engineJob?.cancel()
         mobileHealthJob?.cancel()
         alphaAuthReminderJob?.cancel()
@@ -299,7 +302,20 @@ class TradingEngineService : Service() {
         }
     }
 
+    private fun startLiveNewsWorker() {
+        if(liveNewsJob?.isActive==true)return
+        liveNewsJob=scope.launch(Dispatchers.IO.limitedParallelism(1)) {
+            while(isActive) {
+                try { liveNews.cycle() } catch(e:CancellationException) { throw e }
+                catch(e:Exception) { auditLogger.logAsync("LIVE_NEWS","CYCLE_FAILED",mapOf("type" to e.javaClass.simpleName)) }
+                val open=com.multify.traderpro.engine.NseEquitySessionCalendar.isOpen(ZonedDateTime.now(ZoneId.of("Asia/Kolkata")))
+                delay(if(open)60_000L else 15*60_000L)
+            }
+        }
+    }
+
     private fun startEngineLoop() {
+        startLiveNewsWorker()
         startMobileHealthWorker()
         startAlphaAuthReminderWorker()
         startPositionMonitorWorker()

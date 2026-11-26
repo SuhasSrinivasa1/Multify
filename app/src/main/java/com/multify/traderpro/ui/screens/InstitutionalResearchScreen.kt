@@ -17,9 +17,24 @@ import java.util.Locale
 private fun crores(value:Double):String = String.format(Locale.US,"₹%,.2f Cr",value/10_000_000.0)
 
 @Composable
-internal fun InstitutionalResearchScreen(state:TraderUiState,onRefresh:()->Unit) {
+internal fun InstitutionalResearchScreen(state:TraderUiState,onRefresh:()->Unit,viewModel:TraderViewModel?=null) {
+    var showNews by rememberSaveable{mutableStateOf(false)}
+    Column(Modifier.fillMaxSize()) {
+        if(viewModel!=null)Row(Modifier.fillMaxWidth().padding(horizontal=12.dp),horizontalArrangement=Arrangement.spacedBy(8.dp)){
+            FilterChip(selected=!showNews,onClick={showNews=false},label={Text("FII / DII")})
+            FilterChip(selected=showNews,onClick={showNews=true},label={Text("Live news")})
+        }
+        Box(Modifier.weight(1f)){
+            if(showNews&&viewModel!=null)LiveNewsScreen(viewModel)
+            else InstitutionalDisclosuresContent(state,onRefresh)
+        }
+    }
+}
+
+@Composable
+private fun InstitutionalDisclosuresContent(state:TraderUiState,onRefresh:()->Unit) {
     var side by rememberSaveable { mutableStateOf("BUY") }
-    var filter by rememberSaveable { mutableStateOf("OWNERSHIP") }
+    var filter by rememberSaveable { mutableStateOf("DISCLOSED") }
     var source by rememberSaveable { mutableStateOf("COMBINED") }
     val snapshot=state.equityResearch.institutional
     val report=when(source){"BULK"->snapshot.bulk;"BLOCK"->snapshot.block;"PROMOTER"->snapshot.promoter;else->null}
@@ -47,7 +62,10 @@ internal fun InstitutionalResearchScreen(state:TraderUiState,onRefresh:()->Unit)
     ){
         item{
             Text("Ownership Intelligence",style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold)
-            Text("Top 10 net disclosed purchases / sales · FII, DII, mutual funds, promoters · research only · no orders",style=MaterialTheme.typography.bodySmall)
+            Text("Top 10 net disclosed purchases / sales · research only · no orders",style=MaterialTheme.typography.bodySmall)
+            val allRows=listOfNotNull(snapshot.bulk,snapshot.block).flatMap{it.deals}
+            val verifiedRows=allRows.filter{it.category=="FII"||it.category=="DII"}
+            Text("Latest cached bulk/block: "+verifiedRows.size+" verified / "+allRows.size+" raw rows · "+verifiedRows.map{it.symbol}.distinct().size+" verified stocks · overlaps possible. Unknown investors are not assumed institutional. Full FPI registry coverage pending.",style=MaterialTheme.typography.bodySmall)
             Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp)){
                 if(side=="BUY") Button(onClick={side="BUY"},modifier=Modifier.weight(1f).testTag("institutional-buys")){Text("Buys")}
                 else OutlinedButton(onClick={side="BUY"},modifier=Modifier.weight(1f).testTag("institutional-buys")){Text("Buys")}

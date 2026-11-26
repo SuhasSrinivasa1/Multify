@@ -4,6 +4,7 @@ import android.content.Context
 import com.google.gson.Gson
 import com.multify.traderpro.data.logging.AuditLogger
 import com.multify.traderpro.engine.ForecastNewsPatternPolicy
+import com.multify.traderpro.engine.LiveNewsSentimentPolicy
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -39,6 +40,8 @@ class ForecastNewsMonitor @Inject constructor(
     @Volatile private var companyByName: Map<String, String> = emptyMap()
     private var lastCatalogAttempt = 0L
     private var lastFetchAtMs = 0L
+    @Volatile private var statuses: Map<String,String> = emptyMap()
+    fun liveFeedStatus(): String = statuses.entries.joinToString(" · ") { it.key + ": " + it.value }.ifBlank { "Not yet polled" }
 
     suspend fun poll(): Int = withContext(Dispatchers.IO) {
         val now = System.currentTimeMillis()
@@ -59,8 +62,11 @@ class ForecastNewsMonitor @Inject constructor(
         var newestPublishedAtMs = 0L
         var oldestPublishedAtMs = Long.MAX_VALUE
         for (feed in RSS_FEEDS) {
+            val until = prefs.getLong("feed_until_" + feed.first, 0L)
+            if (now < until) { statuses = statuses + (feed.first to "COOLDOWN"); continue }
             try {
                 val entries = fetchRss(feed.second)
+                statuses = statuses + (feed.first to (if (entries.isEmpty()) "EMPTY_OR_UNAVAILABLE" else entries.size.toString() + " items"))
                 examined += entries.size
                 for (entry in entries) {
                     val published = parseDate(entry.published)
@@ -70,12 +76,14 @@ class ForecastNewsMonitor @Inject constructor(
                     if (published > now + 60_000L) { futureDates++; continue }
                     if (published < now - 3L * 24L * 60 * 60_000L) { staleDates++; continue }
                     eligibleDatedItems++
-                    val symbol = resolveSymbol(entry.title, entry.summary)
+                    val symbol = resolveSymbol(entry.title, entry.summary).ifBlank {
+                        if (feed.first.startsWith("BSE")) Regex(" - (\\d{6}) - ").find(entry.title)?.groupValues?.get(1)?.let { "BSE:"+it }.orEmpty() else ""
+                    }
                     if (symbol.isBlank()) unresolvedSymbols++
                     val id = sha256(feed.first + "|" + (entry.guid.ifBlank { entry.url.ifBlank { entry.title + published } }))
                     // Existing unresolved events are retained by ID but may be promoted to
                     // research when a refreshed NSE catalog uniquely resolves their issuer.
-                    val old = journal.recent(1500).firstOrNull { it.id == id }
+                    val old = journal.find(id)
                     if (old != null) {
                         if (old.symbol.isBlank() && symbol.isNotBlank()) {
                             val reassessed = ForecastNewsPatternPolicy.assess(entry.title, entry.summary,
@@ -94,7 +102,7 @@ class ForecastNewsMonitor @Inject constructor(
                         duplicateIds++
                         continue
                     }
-                    val near = journal.recent(500).filter { it.symbol == symbol && symbol.isNotBlank() &&
+                    val near = journal.recent(5000).filter { it.symbol == symbol && symbol.isNotBlank() &&
                         now - it.firstSeenAtMs in 0L..(24L * 60 * 60_000L) }
                     val canonicalTitle = normalize(entry.title).take(180)
                     if (near.any { normalize(it.headline).take(180) == canonicalTitle }) {
@@ -112,12 +120,16 @@ class ForecastNewsMonitor @Inject constructor(
                         ((now - published) / 60_000L).coerceAtLeast(0),
                         uniqueIn(5), uniqueIn(10), uniqueIn(15), sourceVerified = true)
                     if (assess.category == "OTHER" || assess.direction != "POSITIVE_POSSIBLE") unclassified++
+                    val liveLabel=LiveNewsSentimentPolicy.classify(entry.title,entry.summary)
+                    val clusterInput=near.map{normalize(it.headline) to it.firstSeenAtMs}+(canonicalTitle to now)
                     val event = ForecastNewsEvent(id, feed.first, symbol, entry.title.take(300),
                         entry.summary.take(1200), entry.url.take(500), assess.category, assess.direction,
                         published, now, gson.toJson(assess.features), assess.confidence,
                         status = if (symbol.isBlank()) "UNRESOLVED_SYMBOL" else if (assess.category == "OTHER" ||
                             assess.direction != "POSITIVE_POSSIBLE") "RESEARCH_ONLY" else "NEW",
-                        rationale = assess.reason)
+                        rationale = assess.reason, liveNews = LiveNewsMeta(liveLabel.sentiment,liveLabel.evidence,
+                            liveLabel.reportedPercentages,LiveNewsSentimentPolicy.cluster(now,1,clusterInput),
+                            LiveNewsSentimentPolicy.cluster(now,3,clusterInput),LiveNewsSentimentPolicy.cluster(now,5,clusterInput)))
                     if (journal.addIfAbsent(event)) {
                         newlyStored++
                         audit.logAsync("FORECAST_NEWS", "EVENT_CAPTURED", mapOf(
@@ -125,7 +137,7 @@ class ForecastNewsMonitor @Inject constructor(
                             "direction" to assess.direction, "published_at_ms" to published,
                             "observed_at_ms" to now, "confidence" to assess.confidence,
                             "feature_count" to assess.features.size,
-                            "status" to event.status, "source_exchange" to "NSE",
+                            "status" to event.status, "source_exchange" to (if (feed.first.startsWith("BSE")) "BSE" else "NSE"),
                             "reported_amount_crore" to assess.features["reported_amount_crore"],
                             "catalyst_count_15m" to assess.features["cluster_15m"],
                             "distinct_recent_nse_titles_24h" to near.distinctBy {
@@ -136,6 +148,9 @@ class ForecastNewsMonitor @Inject constructor(
                 }
             } catch (err: Exception) {
                 failures++
+                val backoff=if(err.message?.contains("HTTP 403")==true||err.message?.contains("HTTP 429")==true)60*60_000L else 5*60_000L
+                prefs.edit().putLong("feed_until_"+feed.first,now+backoff).apply()
+                statuses=statuses+(feed.first to "ERROR / COOLDOWN")
                 audit.logAsync("FORECAST_NEWS", "FEED_ERROR", mapOf(
                     "feed" to feed.first, "error_type" to err.javaClass.simpleName,
                     "message" to (err.message ?: "").take(140)))
@@ -155,7 +170,7 @@ class ForecastNewsMonitor @Inject constructor(
                 ((now - newestPublishedAtMs) / 60_000L) else null),
             "oldest_feed_age_minutes" to (if (oldestPublishedAtMs < Long.MAX_VALUE)
                 ((now - oldestPublishedAtMs) / 60_000L) else null),
-            "nse_only" to true))
+            "nse_only" to false))
         newlyStored
     }
 
@@ -312,7 +327,8 @@ class ForecastNewsMonitor @Inject constructor(
     companion object {
         private val RSS_FEEDS = listOf(
             "NSE_ANNOUNCEMENTS" to "https://nsearchives.nseindia.com/content/RSS/Online_announcements.xml",
-            "NSE_FINANCIAL_RESULTS" to "https://nsearchives.nseindia.com/content/RSS/Financial_Results.xml"
+            "NSE_FINANCIAL_RESULTS" to "https://nsearchives.nseindia.com/content/RSS/Financial_Results.xml",
+            "BSE_ANNOUNCEMENTS" to "https://www.bseindia.com/data/xml/announcements.aspx"
         )
     }
 }
