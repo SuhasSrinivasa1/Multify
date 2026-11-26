@@ -52,7 +52,10 @@ class FixedOutcomePerformanceStore @Inject constructor(@ApplicationContext conte
             )
         }
         val days = existing.values.map { it.date }.distinct().sortedDescending().take(30).toSet()
-        prefs.edit().putString("samples", gson.toJson(existing.values.filter { it.date in days })).commit()
+        val next = existing.values.filter { it.date in days }
+        if (next == load()) return
+        check(prefs.edit().putString("samples", gson.toJson(next)).commit()) { "Fixed analytics persistence failed" }
+        cachedSamples = next
     }
 
     @Synchronized
@@ -68,9 +71,13 @@ class FixedOutcomePerformanceStore @Inject constructor(@ApplicationContext conte
         return FixedOutcomeMetrics.calculate(load().filter { it.date == today })
     }
 
+    private var cachedSamples: List<FixedOutcomeSample>? = null
     @Synchronized
-    private fun load(): List<FixedOutcomeSample> = runCatching {
+    private fun load(): List<FixedOutcomeSample> {
+        cachedSamples?.let { return it }
+        return (runCatching {
         val raw = prefs.getString("samples", null) ?: return@runCatching emptyList()
         gson.fromJson<List<FixedOutcomeSample>>(raw, listType) ?: emptyList()
-    }.getOrDefault(emptyList())
+        }.getOrDefault(emptyList())).also { cachedSamples = it }
+    }
 }
