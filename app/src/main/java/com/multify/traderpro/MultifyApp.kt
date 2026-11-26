@@ -60,6 +60,7 @@ class MultifyApp : Application(), Configuration.Provider {
         EquityEodRefreshScheduler.scheduleNext(this)
         // Local-only nightly diagnostic/research backup. This worker makes no Groww or NSE requests.
         DailyDiagnosticBackupScheduler.scheduleNext(this)
+        com.multify.traderpro.worker.IntradayDiagnosticCheckpointWorker.schedule(this)
         // v9.0.14 ran initial and periodic workers together, doubling NSE 403s.
         // Retire both legacy jobs. One unique one-off performs recovery now;
         // a monthly periodic maintenance job first runs 30 days later.
