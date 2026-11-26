@@ -128,16 +128,19 @@ class FixedRecommendationStore @Inject constructor(
     }
 
     @Synchronized
-    internal fun upsert(record: FixedRecommendationRecord) {
+    internal fun upsert(record: FixedRecommendationRecord) = upsertAll(listOf(record))
+
+    /**
+     * Batch a complete monitor/publish sweep into one JSON parse and one durable commit.
+     * Recommendation identity and retention semantics are unchanged.
+     */
+    @Synchronized
+    internal fun upsertAll(records: List<FixedRecommendationRecord>) {
+        if (records.isEmpty()) return
         val state = load()
-        // Separate, immutable event identity. Multiple genuinely independent
-        // setups can share a symbol/date; an outcome update must touch only its
-        // original event, never delete a newer recommendation.
-        val rows = state.recommendations
-            .filterNot { it.id == record.id }
-            .toMutableList()
-        rows += record
-        save(state.copy(recommendations = retainDays(rows)))
+        val byId = state.recommendations.associateBy { it.id }.toMutableMap()
+        records.forEach { record -> byId[record.id] = record }
+        save(state.copy(recommendations = retainDays(byId.values.toList())))
     }
 
     @Synchronized
