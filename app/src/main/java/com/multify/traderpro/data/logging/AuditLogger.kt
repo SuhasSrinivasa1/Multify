@@ -132,7 +132,6 @@ class AuditLogger @Inject constructor(
     ) {
         runCatching {
             synchronized(lock) {
-                rotateIfNeeded()
                 val diagnosticEvent = FixedResearchAuditClassificationPolicy.label(
                     category, event, details["message"] as? String)
                 val obj = JSONObject()
