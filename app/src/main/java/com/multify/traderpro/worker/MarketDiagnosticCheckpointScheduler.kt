@@ -19,8 +19,16 @@ object MarketDiagnosticCheckpointScheduler {
     internal const val MIN_RECOMMENDATIONS = com.multify.traderpro.engine.MarketDiagnosticCheckpointPolicy.RECOMMENDATION_BATCH_SIZE
     internal const val CHECKPOINT_INTERVAL_MS = com.multify.traderpro.engine.MarketDiagnosticCheckpointPolicy.TIME_INTERVAL_MS
 
-    fun onAppStarted(context: Context, recommendationCount: Int) {
-        maybeScheduleForRecommendations(context, recommendationCount)
+    fun onAppStarted(context: Context) {
+        val today = java.time.ZonedDateTime.now(india).toLocalDate().toString()
+        val request = OneTimeWorkRequestBuilder<MarketDiagnosticCheckpointWorker>()
+            .setInputData(Data.Builder().putString("trigger", "RECOMMENDATIONS").build())
+            .addTag("phayra-market-diagnostic-checkpoint")
+            .build()
+        // The worker reads today's recommendation count off the main thread.
+        WorkManager.getInstance(context.applicationContext).enqueueUniqueWork(
+            "phayra-market-checkpoint-startup-$today", ExistingWorkPolicy.KEEP, request
+        )
         scheduleNextTimeCheckpoint(context)
     }
 
