@@ -15,7 +15,6 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.File
-import java.time.Instant
 import java.time.ZoneId
 import java.time.ZonedDateTime
 
@@ -60,6 +59,7 @@ class MarketDiagnosticCheckpointWorker @AssistedInject constructor(
         val stamp = System.currentTimeMillis()
         val staging = File(directory, "Phayra-$today-$stamp.zip.part")
         val destination = File(directory, "Phayra-$today-$stamp.zip")
+        var scheduleNext = true
         return try {
             check(directory.mkdirs() || directory.isDirectory) {
                 "Unable to create market checkpoint directory"
@@ -109,6 +109,7 @@ class MarketDiagnosticCheckpointWorker @AssistedInject constructor(
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Exception) {
+            scheduleNext = false
             staging.delete()
             audit.logAsync("DIAGNOSTIC_CHECKPOINT", "CHECKPOINT_FAILED", mapOf(
                 "trigger" to trigger,
@@ -119,7 +120,7 @@ class MarketDiagnosticCheckpointWorker @AssistedInject constructor(
             if (runAttemptCount < 2) Result.retry() else Result.failure()
         } finally {
             prepared?.file?.delete()
-            MarketDiagnosticCheckpointScheduler.scheduleNextTimeCheckpoint(applicationContext)
+            if (scheduleNext) MarketDiagnosticCheckpointScheduler.scheduleNextTimeCheckpoint(applicationContext)
         }
     }
 
