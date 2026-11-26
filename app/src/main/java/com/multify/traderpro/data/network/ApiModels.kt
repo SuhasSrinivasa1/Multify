@@ -275,6 +275,32 @@ data class ForecastDto(
  * Separate, manually reviewed Working Range pilot card.
  * It is not a Fixed recommendation, not a broker order and never Auto-Buy eligible.
  */
+/** Immutable feature capture at the first qualification and independent confirmation scans. */
+data class WorkingRangeFeatureSnapshot(
+    val observedAtMs: Long,
+    val scanStartedAtMs: Long,
+    val price: Double,
+    val rsi: Double?,
+    val rsiSlope: Double?,
+    val rvol: Double?,
+    val greenVolumeShare: Double?,
+    val volumeAcceleration: Double?,
+    val ema9: Double?,
+    val ema20: Double?,
+    val ema50: Double?,
+    val ema9Slope: Double?,
+    val ema20Slope: Double?,
+    val macdHistogramSlope: Double?,
+    val targetRequirementAtr: Double?,
+    val vwapExtensionAtr: Double?,
+    val atr14: Double?,
+    val vwap: Double?,
+    val range52Position: Double?,
+    val spreadBps: Double?,
+    val orderBookImbalance: Double?,
+    val emaAlignmentMode: String
+)
+
 data class WorkingRangeRecommendationDto(
     val symbol: String = "",
     val scanStartedAtMs: Long = 0L,
@@ -331,7 +357,9 @@ data class WorkingRangeRecommendationDto(
     val autoBuyOrderId: String? = null,
     val autoBuyQuantity: Int = 0,
     val autoBuyFillPrice: Double? = null,
-    val emaAlignmentMode: String = "UNKNOWN"
+    val emaAlignmentMode: String = "UNKNOWN",
+    val firstQualifiedFeatures: WorkingRangeFeatureSnapshot? = null,
+    val confirmationFeatures: WorkingRangeFeatureSnapshot? = null
 )
 
 data class ForecastChampionDto(
