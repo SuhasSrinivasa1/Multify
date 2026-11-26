@@ -193,7 +193,28 @@ jobs:
           assert "MAX_ARCHIVES = 14" in worker and "groww_api_calls" in worker
           assert "21, 30" in scheduler and "ExistingWorkPolicy.KEEP" in scheduler
           assert "prepareLogExport" in (root/"ui/screens/TraderViewModel.kt").read_text()
-          print(f"PASS: {len(locked)} frozen production sources identical; export staging, nightly backup and safety assertions passed")
+          fixed_store=(root/"data/repository/FixedRecommendationStore.kt").read_text()
+          assert "internal fun upsertAll(records: List<FixedRecommendationRecord>)" in fixed_store
+          assert "fixedRecommendationStore.upsertAll(cachedUpdates)" in repository
+          assert "fixedRecommendationStore.upsertAll(liveUpdates)" in repository
+          ui=(root/"ui/screens/FixedLiteApp.kt").read_text()
+          assert ".take(20)" in ui and "older records retained" in ui
+          audit=(root/"data/logging/AuditLogger.kt").read_text()
+          assert "MAX_BUFFERED_RECORDS = 64" in audit and "MAX_BUFFER_AGE_MS = 1_000L" in audit
+          assert "scheduleFlushLocked()" in audit and "flushWriterLocked()" in audit
+          checkpoints=(root/"worker/MarketDiagnosticCheckpointWorker.kt").read_text()
+          scheduler=(root/"worker/MarketDiagnosticCheckpointScheduler.kt").read_text()
+          policy=(root/"engine/MarketDiagnosticCheckpointPolicy.kt").read_text()
+          assert "prepareCompleteLogs(includeResearchBackup = false)" in checkpoints
+          assert '"raw_logs_deleted" to false' in checkpoints and '"broker_state_cleared" to false' in checkpoints
+          assert "MAX_CHECKPOINTS = 8" in checkpoints
+          assert "RECOMMENDATION_BATCH_SIZE = 20" in policy and "3L * 60L * 60L" in policy
+          assert "scheduleNextTimeCheckpoint" in scheduler
+          working=(root/"data/logging/WorkingRangeRecommendationStore.kt").read_text()
+          assert "REJECTION_BATCH_SIZE = 25" in working
+          assert "firstQualifiedFeatures" in working and "confirmationFeatures" in working
+          assert "scheduleRejectionFlushLocked" in working
+          print(f"PASS: {len(locked)} frozen production sources identical; batched persistence, checkpoints and evidence assertions passed")
           PY
       - name: Backend regression tests
         run: |
