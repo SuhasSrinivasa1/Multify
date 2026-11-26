@@ -218,7 +218,7 @@ jobs:
           assert "REJECTION_BATCH_SIZE = 25" in working
           assert "firstQualifiedFeatures" in working and "confirmationFeatures" in working
           assert "scheduleRejectionFlushLocked" in working
-          activity=(root.parent.parent.parent/"MainActivity.kt").read_text()
+          activity=(root/"MainActivity.kt").read_text()
           assert "UI_FRAME_TIMING" in activity and "Choreographer.FrameCallback" in activity
           assert "no_trading_or_scoring_effect" in activity
           print(f"PASS: {len(locked)} frozen production sources identical; batched persistence, checkpoints and evidence assertions passed")
