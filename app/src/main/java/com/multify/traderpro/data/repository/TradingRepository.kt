@@ -4519,8 +4519,11 @@ class TradingRepository @Inject constructor(
         }
         fixedRecommendationStore.upsertAll(publishedRecords)
         if (publishedRecords.isNotEmpty()) {
+            val publishedSnapshot = fixedRecommendationStore.recommendations(today)
+            fixedOutcomePerformanceStore.record(publishedSnapshot)
+            fixedHistoricalEvidenceArchive.capture(publishedSnapshot)
             com.multify.traderpro.worker.MarketDiagnosticCheckpointScheduler
-                .onRecommendationCountChanged(appContext, fixedRecommendationStore.recommendations(today).size)
+                .onRecommendationCountChanged(appContext, publishedSnapshot.size)
         }
 
         val all = fixedRecommendationStore.recommendations(today)
