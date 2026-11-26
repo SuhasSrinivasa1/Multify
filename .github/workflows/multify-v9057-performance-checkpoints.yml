@@ -200,6 +200,9 @@ jobs:
           fixed_store=(root/"data/repository/FixedRecommendationStore.kt").read_text()
           assert "internal fun upsertAll(records: List<FixedRecommendationRecord>)" in fixed_store
           assert "private var cachedState: FixedRecommendationState?" in fixed_store
+          outcomes=(root/"data/repository/FixedOutcomePerformanceStore.kt").read_text()
+          assert "private var cachedSamples: List<FixedOutcomeSample>?" in outcomes
+          assert "if (!changed) return" in outcomes
           assert "fixedRecommendationStore.upsertAll(cachedUpdates)" in repository
           assert "fixedRecommendationStore.upsertAll(liveUpdates)" in repository
           ui=(root/"ui/screens/FixedLiteApp.kt").read_text()
