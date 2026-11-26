@@ -19,6 +19,7 @@ class FixedOutcomePerformanceStore @Inject constructor(@ApplicationContext conte
     private val gson = GsonBuilder().disableHtmlEscaping().create()
     private val listType = object : TypeToken<List<FixedOutcomeSample>>() {}.type
     private val ist = ZoneId.of("Asia/Kolkata")
+    private var cachedSamples: List<FixedOutcomeSample>? = null
 
     /** On the new release's first launch, start from zero; never import old, unmonitored v7.8.5 calls. */
     @Synchronized
@@ -34,13 +35,14 @@ class FixedOutcomePerformanceStore @Inject constructor(@ApplicationContext conte
     internal fun record(rows: List<FixedRecommendationRecord>) {
         val started = startedAtMs()
         val existing = load().associateBy { "${it.date}|${it.symbol.uppercase()}|${it.publishedAtMs}" }.toMutableMap()
+        var changed = false
         rows.forEach { row ->
             if (row.generatedAtMs < started || !row.entryPrice.isFinite() || row.entryPrice <= 0.0) return@forEach
             val key = "${row.recommendationDate}|${row.symbol.uppercase()}|${row.generatedAtMs}"
             val previous = existing[key]
             val latestMfe = maxOf(previous?.maxFavourablePct ?: 0.0, row.maxFavourablePct.coerceAtLeast(0.0))
             val observed = previous?.observed == true || row.lastObservedAtMs > row.generatedAtMs
-            existing[key] = FixedOutcomeSample(
+            val sample = FixedOutcomeSample(
                 date = row.recommendationDate,
                 symbol = row.symbol,
                 publishedAtMs = row.generatedAtMs,
@@ -50,9 +52,15 @@ class FixedOutcomePerformanceStore @Inject constructor(@ApplicationContext conte
                 fullTargetHit = previous?.fullTargetHit == true || row.status == "TARGET_HIT" ||
                     (observed && latestMfe + 1e-9 >= row.targetPct)
             )
+            if (previous != sample) {
+                existing[key] = sample
+                changed = true
+            }
         }
+        if (!changed) return
         val days = existing.values.map { it.date }.distinct().sortedDescending().take(30).toSet()
-        prefs.edit().putString("samples", gson.toJson(existing.values.filter { it.date in days })).commit()
+        val retained = existing.values.filter { it.date in days }
+        cachedSamples = if (prefs.edit().putString("samples", gson.toJson(retained)).commit()) retained else null
     }
 
     @Synchronized
@@ -69,8 +77,13 @@ class FixedOutcomePerformanceStore @Inject constructor(@ApplicationContext conte
     }
 
     @Synchronized
-    private fun load(): List<FixedOutcomeSample> = runCatching {
-        val raw = prefs.getString("samples", null) ?: return@runCatching emptyList()
-        gson.fromJson<List<FixedOutcomeSample>>(raw, listType) ?: emptyList()
-    }.getOrDefault(emptyList())
+    private fun load(): List<FixedOutcomeSample> {
+        cachedSamples?.let { return it }
+        val parsed = runCatching {
+            val raw = prefs.getString("samples", null) ?: return@runCatching emptyList()
+            gson.fromJson<List<FixedOutcomeSample>>(raw, listType) ?: emptyList()
+        }.getOrDefault(emptyList())
+        cachedSamples = parsed
+        return parsed
+    }
 }
