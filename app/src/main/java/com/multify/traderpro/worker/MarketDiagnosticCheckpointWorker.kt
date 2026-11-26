@@ -35,7 +35,8 @@ class MarketDiagnosticCheckpointWorker @AssistedInject constructor(
         val trigger = inputData.getString("trigger") ?: "TIME"
         val today = now.toLocalDate().toString()
         val currentCount = fixedStore.recommendations(today).size
-        val archivedCount = prefs.getInt("last_checkpoint_recommendation_count", 0)
+        val archivedDate = prefs.getString("last_checkpoint_recommendation_date", "")
+        val archivedCount = if (archivedDate == today) prefs.getInt("last_checkpoint_recommendation_count", 0) else 0
         val lastAt = prefs.getLong("last_checkpoint_at_ms", 0L)
         val due = com.multify.traderpro.engine.MarketDiagnosticCheckpointPolicy.shouldCheckpoint(
             trigger = trigger,
@@ -82,6 +83,7 @@ class MarketDiagnosticCheckpointWorker @AssistedInject constructor(
             check(prefs.edit()
                 .putLong("last_checkpoint_at_ms", savedAt)
                 .putInt("last_checkpoint_recommendation_count", currentCount)
+                .putString("last_checkpoint_recommendation_date", today)
                 .putString("last_checkpoint_file", destination.name)
                 .putLong("last_checkpoint_bytes", destination.length())
                 .putString("last_checkpoint_trigger", trigger)
