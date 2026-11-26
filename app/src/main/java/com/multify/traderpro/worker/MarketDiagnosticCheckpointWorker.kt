@@ -12,6 +12,8 @@ import com.multify.traderpro.engine.NseEquitySessionCalendar
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 import java.time.Instant
 import java.time.ZoneId
@@ -26,7 +28,9 @@ class MarketDiagnosticCheckpointWorker @AssistedInject constructor(
     private val fixedStore: FixedRecommendationStore,
     private val audit: AuditLogger
 ) : CoroutineWorker(appContext, params) {
-    override suspend fun doWork(): Result {
+    override suspend fun doWork(): Result = checkpointMutex.withLock { doWorkLocked() }
+
+    private suspend fun doWorkLocked(): Result {
         val zone = ZoneId.of("Asia/Kolkata")
         val now = ZonedDateTime.now(zone)
         val prefs = applicationContext.getSharedPreferences(
@@ -120,6 +124,7 @@ class MarketDiagnosticCheckpointWorker @AssistedInject constructor(
     }
 
     companion object {
+        private val checkpointMutex = Mutex()
         private const val MAX_CHECKPOINTS = 8
     }
 }
