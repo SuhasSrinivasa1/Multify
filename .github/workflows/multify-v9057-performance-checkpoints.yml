@@ -199,6 +199,7 @@ jobs:
           assert "prepareLogExport" in (root/"ui/screens/TraderViewModel.kt").read_text()
           fixed_store=(root/"data/repository/FixedRecommendationStore.kt").read_text()
           assert "internal fun upsertAll(records: List<FixedRecommendationRecord>)" in fixed_store
+          assert "private var cachedState: FixedRecommendationState?" in fixed_store
           assert "fixedRecommendationStore.upsertAll(cachedUpdates)" in repository
           assert "fixedRecommendationStore.upsertAll(liveUpdates)" in repository
           ui=(root/"ui/screens/FixedLiteApp.kt").read_text()
