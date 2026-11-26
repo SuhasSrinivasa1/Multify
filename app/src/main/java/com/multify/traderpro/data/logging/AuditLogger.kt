@@ -13,6 +13,8 @@ import java.security.MessageDigest
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
@@ -31,6 +33,10 @@ class AuditLogger @Inject constructor(
     private var bufferedBytes = 0L
     private var bufferedRecords = 0
     private var lastFlushAtMs = System.currentTimeMillis()
+    private val flushScheduled = AtomicBoolean(false)
+    private val flushScheduler = Executors.newSingleThreadScheduledExecutor { runnable ->
+        Thread(runnable, "multify-audit-flush").apply { isDaemon = true; priority = Thread.MIN_PRIORITY }
+    }
     private val asyncDropped = AtomicLong(0L)
     private val executor = ThreadPoolExecutor(
         1, 1, 0L, TimeUnit.MILLISECONDS,
@@ -154,6 +160,8 @@ class AuditLogger @Inject constructor(
                 if (critical || bufferedRecords >= MAX_BUFFERED_RECORDS ||
                     System.currentTimeMillis() - lastFlushAtMs >= MAX_BUFFER_AGE_MS) {
                     flushWriterLocked()
+                } else {
+                    scheduleFlushLocked()
                 }
                 // Keep curated decisions/outcomes in a separate persistent evidence journal.
                 // Never let an evidence write failure block broker/order protection.
@@ -174,6 +182,17 @@ class AuditLogger @Inject constructor(
         runCatching { flushWriterLocked() }
         runCatching { writer?.close() }
         writer = null
+    }
+
+    /** Flush idle batches within one second even when no subsequent audit row arrives. */
+    private fun scheduleFlushLocked() {
+        if (!flushScheduled.compareAndSet(false, true)) return
+        flushScheduler.schedule({
+            synchronized(lock) {
+                flushWriterLocked()
+                flushScheduled.set(false)
+            }
+        }, MAX_BUFFER_AGE_MS, TimeUnit.MILLISECONDS)
     }
 
     private fun rotateIfNeeded(incomingBytes: Long) {
