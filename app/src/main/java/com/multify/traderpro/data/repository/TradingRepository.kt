@@ -10471,6 +10471,7 @@ class TradingRepository @Inject constructor(
             ?.previousLtps.orEmpty()
         val cachedAt = discovery?.updatedAtMs ?: 0L
         var observed = 0
+        val cachedUpdates = mutableListOf<FixedRecommendationRecord>()
         for (row in rows) {
             // The published generatedAtMs is scan START, not delivery. Use a full scan-spacing
             // delay before accepting the shared discovery snapshot as post-publication evidence.
@@ -10478,11 +10479,11 @@ class TradingRepository @Inject constructor(
                 cachedAt <= row.lastObservedAtMs) continue
             val price = cachedPrices[row.symbol.uppercase(Locale.US)] ?: continue
             if (price.isFinite() && price > 0.0) {
-                updateFixedObservedOutcome(row, price, cachedAt, "DISCOVERY_CACHE")
-                observed++
+                observedFixedOutcome(row, price, cachedAt, "DISCOVERY_CACHE")?.let { cachedUpdates += it; observed++ }
             }
         }
 
+        fixedRecommendationStore.updateObservedBatch(cachedUpdates)
         if (nowMs - lastFixedOutcomeMonitorAtMs < FORECAST_OUTCOME_INTERVAL_MS ||
             fixedApiPriorityRequested || marketCriticalTradeInFlight) {
             if (observed > 0) fixedOutcomePerformanceStore.record(fixedRecommendationStore.recommendations(today))
@@ -10528,26 +10529,30 @@ class TradingRepository @Inject constructor(
             "extra_wallet_api_calls" to 0
         ))
         val observedAt = System.currentTimeMillis()
+        val liveUpdates = mutableListOf<FixedRecommendationRecord>()
         for (row in fixedRecommendationStore.recommendations(today)) {
             val price = fetched["NSE_${row.symbol.uppercase(Locale.US)}"]
                 ?: fetched[row.symbol.uppercase(Locale.US)] ?: continue
             if (price.isFinite() && price > 0.0) {
-                updateFixedObservedOutcome(row, price, observedAt, "LIVE_LTP")
-                observed++
+                observedFixedOutcome(row, price, observedAt, "LIVE_LTP")?.let { liveUpdates += it; observed++ }
             }
         }
+        fixedRecommendationStore.updateObservedBatch(liveUpdates)
+        auditLogger.logAsync("FIXED_OUTCOME", "BATCH_PERSISTENCE_PROFILE", mapOf(
+            "cached_updates" to cachedUpdates.size, "live_updates" to liveUpdates.size,
+            "maximum_outcome_state_commits" to 2, "groww_requests_added" to 0))
         if (observed > 0) {
-            if (observed > 0) fixedOutcomePerformanceStore.record(fixedRecommendationStore.recommendations(today))
+            fixedOutcomePerformanceStore.record(fixedRecommendationStore.recommendations(today))
             fixedHistoricalEvidenceArchive.capture(fixedRecommendationStore.recommendations(today))
             _fixedDeliveryEvents.tryEmit(observedAt) // Repaint Fixed badges and Averages promptly.
         }
         return fixedRecommendationStore.recommendations(today).count { it.status == "ACTIVE" }
     }
 
-    private fun updateFixedObservedOutcome(
+    private fun observedFixedOutcome(
         row: FixedRecommendationRecord, price: Double, atMs: Long, source: String
-    ) {
-        if (atMs <= row.lastObservedAtMs || atMs <= row.generatedAtMs) return
+    ): FixedRecommendationRecord? {
+        if (atMs <= row.lastObservedAtMs || atMs <= row.generatedAtMs) return null
         researchOutcomeChronologyJournal.observe("FIXED", row.symbol.uppercase(Locale.US),
             row.generatedAtMs, row.entryPrice, row.targetPrice, price, atMs, source)
         val move = maxOf(0.0, (price / row.entryPrice - 1.0) * 100.0)
@@ -10555,20 +10560,21 @@ class TradingRepository @Inject constructor(
         val targetHit = row.status == "TARGET_HIT" || price >= row.targetPrice ||
             maxMfe >= row.targetPct - 1e-9
         val nextStatus = if (targetHit) "TARGET_HIT" else row.status
-        fixedRecommendationStore.update(row.copy(
+        val updated = row.copy(
             status = nextStatus,
             targetHitAtMs = row.targetHitAtMs ?: if (targetHit) atMs else null,
             lastPrice = price,
             maxFavourablePct = maxMfe,
             maxAdversePct = maxOf(row.maxAdversePct, maxOf(0.0, (row.entryPrice - price) / row.entryPrice * 100.0)),
             lastObservedAtMs = atMs
-        ))
+        )
         if (targetHit && row.status != "TARGET_HIT") {
             auditLogger.log("FIXED_OUTCOME", "TARGET_HIT", mapOf(
                 "symbol" to row.symbol, "target_pct" to row.targetPct,
                 "mfe_pct" to maxMfe, "observed_price" to price, "source" to source
             ))
         }
+        return updated
     }
 
     private suspend fun fetchForecastOutcomeLtps(token: String, symbols: List<String>): Map<String, Double> {
@@ -14241,6 +14247,10 @@ class TradingRepository @Inject constructor(
                 (error.message ?: error.javaClass.simpleName).take(130) + ". Previously restored rows are safe to retry.", error)
         }
     }
+
+    /** Local checkpoint readiness only; never reserves or blocks broker execution. */
+    fun diagnosticCheckpointReady(): Boolean = !fixedApiPriorityRequested && !marketCriticalTradeInFlight
+    fun diagnosticCheckpointCount(): Int = fixedRecommendationStore.recommendations(LocalDate.now(INDIA).toString()).size
 
     suspend fun prepareCompleteLogs(
         includeResearchBackup: Boolean = researchMaintenanceWindowAvailable(),
