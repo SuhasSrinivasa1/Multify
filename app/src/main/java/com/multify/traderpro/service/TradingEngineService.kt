@@ -47,6 +47,7 @@ import javax.inject.Inject
 @AndroidEntryPoint
 class TradingEngineService : Service() {
     @Inject lateinit var repository: TradingRepository
+    @Inject lateinit var portfolioShadow: com.multify.traderpro.data.repository.PortfolioShadowResearch
     @Inject lateinit var liveNews: com.multify.traderpro.data.repository.LiveNewsIntelligence
     @Inject lateinit var auditLogger: AuditLogger
     @Inject lateinit var recoveryGate: GrowwRecoveryGate
@@ -75,6 +76,7 @@ class TradingEngineService : Service() {
     private var forecastScanJob: Job? = null
     private var forecastNewsJob: Job? = null
     private var liveNewsJob: Job? = null
+    private var portfolioShadowJob: Job? = null
     private var positionMonitoringWakeLock: PowerManager.WakeLock? = null
     @Volatile private var lastKnownManagedCount = 0
     @Volatile private var lastManagedMonitorSucceeded = true
@@ -267,6 +269,7 @@ class TradingEngineService : Service() {
         forecastScanJob?.cancel()
         forecastNewsJob?.cancel()
         liveNewsJob?.cancel()
+        portfolioShadowJob?.cancel()
         engineJob?.cancel()
         mobileHealthJob?.cancel()
         alphaAuthReminderJob?.cancel()
@@ -316,6 +319,12 @@ class TradingEngineService : Service() {
 
     private fun startEngineLoop() {
         startLiveNewsWorker()
+        if(portfolioShadowJob?.isActive!=true) portfolioShadowJob=scope.launch(Dispatchers.IO.limitedParallelism(1)) {
+            while(kotlinx.coroutines.currentCoroutineContext().isActive) {
+                try { portfolioShadow.cycle() } catch(e:CancellationException){throw e} catch(_:Exception) { /* no broker actions */ }
+                delay(60_000L)
+            }
+        }
         startMobileHealthWorker()
         startAlphaAuthReminderWorker()
         startPositionMonitorWorker()

@@ -1878,7 +1878,8 @@ class TradingRepository @Inject constructor(
     fun portfolioPreview():PortfolioPreview {
         val inventory=brokerInventorySnapshot?:return PortfolioPreview(null,emptyList(),emptyList())
         val day=LocalDate.now(INDIA).toString()
-        val sweep=fixedMarketDiscoveryStateStore.loadHealth(day)?.let{fixedMarketDiscoveryStateStore.load(day)}
+        val sweep=fixedMarketDiscoveryStateStore.loadHealth(day)?.takeIf{!it.abortedForNetwork&&it.batchErrors==0&&it.coverageRatio>=.85}
+            ?.let{fixedMarketDiscoveryStateStore.load(day)}?.takeIf{System.currentTimeMillis()-it.updatedAtMs in 0L..180_000L}
         return PortfolioPreview(inventory.atMs,inventory.holdings.entries.sortedBy{it.key}.map{(symbol,h)->
             PortfolioHoldingPreview(symbol,h.isin,h.quantity,h.averagePrice,h.dematFreeQuantity,h.t1Quantity,sweep?.previousLtps?.get(symbol),sweep?.updatedAtMs)
         },inventory.positions.keys.sorted())

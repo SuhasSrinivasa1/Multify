@@ -1501,6 +1501,17 @@ class EquityEodResearchRepository @Inject constructor(
     private fun sha256(bytes:ByteArray):String =
         MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 
+    /** Local-only, bounded holdings research. Missing OHLC rows are not fabricated. */
+    fun portfolioDailyBars(symbol:String):List<com.multify.traderpro.engine.PortfolioShadowPolicy.Bar> = synchronized(lock) {
+        val latest=latestEligibleDate(ZonedDateTime.now(INDIA)).toString()
+        val rows=mutableListOf<com.multify.traderpro.engine.PortfolioShadowPolicy.Bar>()
+        db.readableDatabase.rawQuery("SELECT day,close,high,low,volume FROM eod WHERE symbol=? AND day<=? ORDER BY day DESC LIMIT 100",arrayOf(symbol,latest)).use { c ->
+            while(c.moveToNext()) if(!c.isNull(2)&&!c.isNull(3))
+                rows+=com.multify.traderpro.engine.PortfolioShadowPolicy.Bar(c.getString(0),c.getDouble(1),c.getDouble(2),c.getDouble(3),c.getLong(4))
+        }
+        rows.reversed()
+    }
+
     fun snapshot(): EquityResearchSnapshot = synchronized(lock) {
         val marketCaps = amfiMarketCapDataset
         val valuation = valuationStore.snapshot()

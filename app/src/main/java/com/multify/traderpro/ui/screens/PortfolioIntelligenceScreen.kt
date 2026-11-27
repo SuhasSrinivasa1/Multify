@@ -17,6 +17,7 @@ import com.multify.traderpro.data.repository.PortfolioPreview
 import com.multify.traderpro.data.repository.LiveNewsIntelligence
 import com.multify.traderpro.engine.PortfolioLadderPolicy
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.time.Instant
 import java.time.ZoneId
 import java.util.Locale
@@ -70,50 +71,57 @@ internal fun LiveNewsScreen(viewModel:TraderViewModel) {
 
 @Composable
 internal fun PortfolioIntelligenceScreen(viewModel:TraderViewModel){
-    val context=LocalContext.current
-    val prefs=remember{context.getSharedPreferences("portfolio_ladder_preview_v1",Context.MODE_PRIVATE)}
-    var total by rememberSaveable{mutableStateOf(prefs.getString("total","0")?:"0")}
-    var perStock by rememberSaveable{mutableStateOf(prefs.getString("stock","0")?:"0")}
-    var perAdd by rememberSaveable{mutableStateOf(prefs.getString("add","0")?:"0")}
+    var step by rememberSaveable{mutableStateOf("")}
     var saved by remember{mutableStateOf(false)}
-    var preview by remember{mutableStateOf<PortfolioPreview?>(null)}
-    LaunchedEffect(viewModel){while(true){preview=viewModel.portfolioPreview();delay(15_000L)}}
-    fun amount(s:String)=s.toDoubleOrNull()?.takeIf{it.isFinite()&&it>=0}
-    val budget=amount(total);val stock=amount(perStock);val add=amount(perAdd)
-    val valid=budget!=null&&stock!=null&&add!=null&&stock<=budget&&add<=stock
+    var filter by rememberSaveable{mutableStateOf("ALL")}
+    var preview by remember{mutableStateOf<com.multify.traderpro.data.repository.PortfolioShadowResearch.Snapshot?>(null)}
+    val scope=rememberCoroutineScope()
+    LaunchedEffect(viewModel){while(true){
+        val s=viewModel.portfolioShadowSnapshot()
+        preview=s
+        if(step.isBlank())step=s.budget.toString()
+        delay(30_000L)
+    }}
+    val amount=step.toDoubleOrNull()?.takeIf{it.isFinite()&&it>=0}
     LazyColumn(Modifier.fillMaxSize(),contentPadding=PaddingValues(14.dp),verticalArrangement=Arrangement.spacedBy(10.dp)){
         item{
             Text("Portfolio intelligence",style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold)
-            Text("RESEARCH / PREVIEW ONLY",color=MaterialTheme.colorScheme.error,fontWeight=FontWeight.Bold)
-            Text("No BUY, SELL or GTT changes. Existing positions remain under original protection.")
-            Text("Downward averaging budget",style=MaterialTheme.typography.titleMedium)
-            OutlinedTextField(value=total,onValueChange={total=it;saved=false},label={Text("Total reserved budget (₹)")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Decimal),modifier=Modifier.fillMaxWidth())
-            OutlinedTextField(value=perStock,onValueChange={perStock=it;saved=false},label={Text("Maximum per stock (₹)")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Decimal),modifier=Modifier.fillMaxWidth())
-            OutlinedTextField(value=perAdd,onValueChange={perAdd=it;saved=false},label={Text("Maximum per averaging step (₹)")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Decimal),modifier=Modifier.fillMaxWidth())
-            Button(onClick={saved=prefs.edit().putString("total",total).putString("stock",perStock).putString("add",perAdd).commit()},enabled=valid,modifier=Modifier.fillMaxWidth()){Text(if(saved)"Budget saved" else "Save preview budget")}
-            if(!valid)Text("Require 0 ≤ per step ≤ per stock ≤ total.",color=MaterialTheme.colorScheme.error)
-            Text("Profit: +10%, +20%, +30% of live broker average; 33% of remaining whole shares. First downward ladder 90%, 80%, 70% of anchor. Following a confirmed profit sale: fill minus 5% of anchor; then subtract 10% of anchor per confirmed add. After an averaging fill, re-arm +10% of new live average.")
-            Text("Cached Alpha inventory: "+stamp(preview?.inventoryAtMs),style=MaterialTheme.typography.labelSmall)
-            Text("Settled holdings below; separate CNC position symbols: "+preview?.cncPositionSymbols.orEmpty().joinToString().ifBlank{"—"})
-            Text("Historical sale milestones cannot be inferred from current profit. Each row is an uninitialized first-step preview. Observed prices are not execution quotes.",style=MaterialTheme.typography.bodySmall)
+            Text("SHADOW / PAPER RESEARCH ONLY",color=MaterialTheme.colorScheme.error,fontWeight=FontWeight.Bold)
+            Text("No real orders, no broker GTT changes. Paper quantities and sampled prices are not actual fills.")
+            OutlinedTextField(value=step,onValueChange={step=it;saved=false},label={Text("Maximum per averaging step (₹)")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Decimal),modifier=Modifier.fillMaxWidth())
+            Text("Same budget for upward and downward research. 0.5% illustrative fee reserve; fresh cash and portfolio caps not verified here.")
+            Button(onClick={scope.launch{saved=viewModel.savePortfolioStepBudget(amount?:0.0)}},enabled=amount!=null,modifier=Modifier.fillMaxWidth()){Text(if(saved)"Saved" else "Save shared budget")}
+            Text("Cached Alpha inventory: "+stamp(preview?.inventoryAt),style=MaterialTheme.typography.labelSmall)
+            Text("Daily EMA20/50 and ATR use unadjusted EOD data. Sweep samples are not closed 5m/15m candles. No live BUY eligibility.")
+            Text("Paper profit milestones +10% steps; 33% remaining. After observed +20%: peak minus 5/8/10 points, non-loosening. Adoption skips earlier milestones.")
+            Row(horizontalArrangement=Arrangement.spacedBy(4.dp)){
+                for(c in listOf("ALL","UP","DOWN","TRAIL"))FilterChip(selected=filter==c,onClick={filter=c},label={Text(c)})
+            }
         }
-        val holdings=preview?.holdings.orEmpty()
-        if(holdings.isEmpty())item{Text("No cached broker holdings available. This does not establish an empty portfolio.")}
-        items(holdings,key={it.symbol}){h->
+        val rows=preview?.rows.orEmpty().filter{filter=="ALL"||it.candidate.kind.startsWith(filter)||(filter=="TRAIL"&&it.state?.armed==true)}
+        if(rows.isEmpty())item{Text("No matching cached holdings. Missing data is not an empty portfolio.")}
+        items(rows,key={it.holding.isin.ifBlank{it.holding.symbol}}){r->
+            val h=r.holding;val s=r.state
             Card(Modifier.fillMaxWidth()){
                 Column(Modifier.padding(12.dp),verticalArrangement=Arrangement.spacedBy(4.dp)){
                     Text(h.symbol,style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.Bold)
-                    Text("Shares: "+h.quantity+" · free "+h.free+" · T1 "+h.t1)
-                    Text("Broker average: "+money(h.average)+" · observed: "+(h.price?.let{money(it)}?:"unavailable"))
-                    Text("Price time: "+stamp(h.priceAtMs),style=MaterialTheme.typography.labelSmall)
-                    if(h.average.isFinite()&&h.average>0){
-                        val p=PortfolioLadderPolicy.initial(h.average)
-                        Text("First profit threshold: "+money(PortfolioLadderPolicy.sellTrigger(p,h.average))+" · "+PortfolioLadderPolicy.sellQuantity(h.quantity)+" shares")
-                        Text("First averaging threshold: "+money(p.nextAddPrice)+" · next "+money(h.average*.80))
-                        val px=h.price
-                        if(px!=null&&px.isFinite()&&px>0)Text("Observed gross P&L: "+String.format(Locale.US,"%+.2f%%",(px/h.average-1)*100))
-                        if(valid)Text("Budget-based add preview: "+PortfolioLadderPolicy.addQuantity(p,stock!!,add!!)+" shares")
-                    }else Text("Missing valid broker cost basis.")
+                    Text("Actual shares "+h.quantity+" · free "+h.free+" · T1 "+h.t1)
+                    Text("Broker average "+money(h.average)+" · observed "+(h.price?.let{money(it)}?:"unavailable"))
+                    Text("Price time "+stamp(h.priceAtMs))
+                    if(h.average>0) h.price?.let{Text("Observed gross P&L "+String.format(Locale.US,"%+.2f%%",(it/h.average-1)*100))}
+                    Text(r.candidate.kind+" · "+r.candidate.reason)
+                    if(r.candidate.quantity>0)Text("Research quantity "+r.candidate.quantity+" · not approved for execution")
+                    r.trend?.let{Text("Daily bars "+it.count+" · EMA20 "+money(it.ema20)+" · EMA50 "+money(it.ema50)+" · ATR "+money(it.atr))}
+                    if(s!=null){
+                        Text("Paper remaining "+s.paperRemaining+" · observed peak "+money(s.peak))
+                        Text("Next paper profit milestone "+money(s.reference*(1+s.nextProfit/100.0)))
+                        Text("Initial research zones: upward "+money(s.reference*1.05)+" · downward "+listOf(.90,.80,.70).joinToString{money(s.reference*it)})
+                        com.multify.traderpro.engine.PortfolioShadowPolicy.levels(s).forEachIndexed{i,v->
+                            Text("Paper protective stage "+(i+1)+" · "+money(v)+if(i<s.stages)" · sampled touch" else " · waiting")
+                        }
+                        if(s.changed)Text("Actual holding changed; reconciliation required. Prior research retained.",color=MaterialTheme.colorScheme.error)
+                        for(ev in s.events.takeLast(5).reversed())Text(ev.kind+" · "+ev.paperQuantity+" paper shares · observed "+money(ev.observed)+" · "+stamp(ev.at),style=MaterialTheme.typography.labelSmall)
+                    }
                 }
             }
         }
