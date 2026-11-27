@@ -321,8 +321,10 @@ class TradingEngineService : Service() {
         startLiveNewsWorker()
         if(portfolioShadowJob?.isActive!=true) portfolioShadowJob=scope.launch(Dispatchers.IO.limitedParallelism(1)) {
             while(kotlinx.coroutines.currentCoroutineContext().isActive) {
-                try { portfolioShadow.cycle() } catch(e:CancellationException){throw e} catch(_:Exception) { /* no broker actions */ }
-                delay(60_000L)
+                try { portfolioShadow.cycle() } catch(e:CancellationException){throw e} catch(e:Exception) {
+                    auditLogger.logAsync("PORTFOLIO_SHADOW","CYCLE_FAILED",mapOf("type" to e.javaClass.simpleName,"no_orders" to true))
+                }
+                delay(120_000L)
             }
         }
         startMobileHealthWorker()
@@ -852,6 +854,16 @@ class TradingEngineService : Service() {
                             // retrying the Fixed scan every second. No complete scan is lost.
                             val remaining = (cooldownUntilMs - nowMs).coerceAtLeast(0L)
                             delay(if (remaining > 0L) remaining.coerceAtMost(30_000L) else SCAN_WORKER_POLL_MS)
+                            continue
+                        }
+                        if (!repository.fixedSweepQuotaFeasible()) {
+                            if(nowMs-lastFixedPauseAuditMs>=30_000L){
+                                auditLogger.logAsync("FIXED_DATA_PIPELINE","DEGRADED_SWEEP_DEFERRED_V9060",
+                                    mapOf("reason" to "BETA_ONLY_FULL_UNIVERSE_INFEASIBLE",
+                                        "no_new_sweep_requests" to true,"protection_priority" to true))
+                                lastFixedPauseAuditMs=nowMs
+                            }
+                            delay(30_000L)
                             continue
                         }
                         if (previousFixedPause != null) {

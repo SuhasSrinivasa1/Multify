@@ -34,20 +34,30 @@ class ForecastNewsMonitor @Inject constructor(
     private val audit: AuditLogger
 ) {
     private val http = OkHttpClient.Builder()
-        .connectTimeout(Duration.ofSeconds(8)).readTimeout(Duration.ofSeconds(12)).build()
+        .connectTimeout(Duration.ofSeconds(8)).readTimeout(Duration.ofSeconds(12)).callTimeout(Duration.ofSeconds(18)).build()
     private val prefs = context.getSharedPreferences("forecast_news_symbol_catalog", Context.MODE_PRIVATE)
     private val gson = Gson()
     @Volatile private var companyByName: Map<String, String> = emptyMap()
+    private val localMaster=NseSymbolRepository(context)
+    private var indexedCatalog:Map<String,String>?=null
+    private var index:ForecastNewsSymbolResolutionPolicy.Index?=null
     private var lastCatalogAttempt = 0L
     private var lastFetchAtMs = 0L
     @Volatile private var statuses: Map<String,String> = emptyMap()
     fun liveFeedStatus(): String = statuses.entries.joinToString(" · ") { it.key + ": " + it.value }.ifBlank { "Not yet polled" }
 
-    suspend fun poll(): Int = withContext(Dispatchers.IO) {
+    suspend fun poll(onProgress:()->Unit = {}): Int = withContext(Dispatchers.IO) {
         val now = System.currentTimeMillis()
         if (now - lastFetchAtMs < 55_000L) return@withContext 0
         lastFetchAtMs = now
-        if (companyByName.isEmpty()) refreshCatalog(now)
+        if(companyByName.isEmpty()) {
+            val rows=localMaster.instruments().filter{it.companyName!=it.symbol}
+                .associate{normalize(it.companyName) to it.symbol}
+            if(rows.size>500)companyByName=rows else refreshCatalog(now)
+        }
+        val recentBySymbol=journal.recent(5000).filter{it.symbol.isNotBlank()&&now-it.firstSeenAtMs in 0L..24*60*60_000L}
+            .groupBy{it.symbol}.mapValues{it.value.toMutableList()}.toMutableMap()
+        var deferred=0
         var examined = 0
         var newlyStored = 0
         var failures = 0
@@ -68,7 +78,12 @@ class ForecastNewsMonitor @Inject constructor(
                 val entries = fetchRss(feed.second)
                 statuses = statuses + (feed.first to (if (entries.isEmpty()) "EMPTY_OR_UNAVAILABLE" else entries.size.toString() + " items"))
                 examined += entries.size
-                for (entry in entries) {
+                val processingStart=android.os.SystemClock.elapsedRealtime()
+                var newInFeed=0
+                for (entry in entries.sortedByDescending{parseDate(it.published)?:0L}) {
+                    if(android.os.SystemClock.elapsedRealtime()-processingStart>=8_000L || newInFeed>=100){
+                        deferred++;break
+                    }
                     val published = parseDate(entry.published)
                     if (published == null) { missingDate++; continue }
                     newestPublishedAtMs = maxOf(newestPublishedAtMs, published)
@@ -76,14 +91,14 @@ class ForecastNewsMonitor @Inject constructor(
                     if (published > now + 60_000L) { futureDates++; continue }
                     if (published < now - 3L * 24L * 60 * 60_000L) { staleDates++; continue }
                     eligibleDatedItems++
+                    val id = sha256(feed.first + "|" + (entry.guid.ifBlank { entry.url.ifBlank { entry.title + published } }))
+                    val old = journal.find(id)
+                    if(old!=null && old.symbol.isNotBlank()){duplicateIds++;continue}
                     val symbol = resolveSymbol(entry.title, entry.summary).ifBlank {
                         if (feed.first.startsWith("BSE")) Regex(" - (\\d{6}) - ").find(entry.title)?.groupValues?.get(1)?.let { "BSE:"+it }.orEmpty() else ""
                     }
                     if (symbol.isBlank()) unresolvedSymbols++
-                    val id = sha256(feed.first + "|" + (entry.guid.ifBlank { entry.url.ifBlank { entry.title + published } }))
-                    // Existing unresolved events are retained by ID but may be promoted to
-                    // research when a refreshed NSE catalog uniquely resolves their issuer.
-                    val old = journal.find(id)
+                    // Existing unresolved rows may be recovered by a stronger catalog.
                     if (old != null) {
                         if (old.symbol.isBlank() && symbol.isNotBlank()) {
                             val reassessed = ForecastNewsPatternPolicy.assess(entry.title, entry.summary,
@@ -102,8 +117,7 @@ class ForecastNewsMonitor @Inject constructor(
                         duplicateIds++
                         continue
                     }
-                    val near = journal.recent(5000).filter { it.symbol == symbol && symbol.isNotBlank() &&
-                        now - it.firstSeenAtMs in 0L..(24L * 60 * 60_000L) }
+                    val near = recentBySymbol[symbol].orEmpty()
                     val canonicalTitle = normalize(entry.title).take(180)
                     if (near.any { normalize(it.headline).take(180) == canonicalTitle }) {
                         duplicateTitles++
@@ -132,6 +146,9 @@ class ForecastNewsMonitor @Inject constructor(
                             LiveNewsSentimentPolicy.cluster(now,3,clusterInput),LiveNewsSentimentPolicy.cluster(now,5,clusterInput)))
                     if (journal.addIfAbsent(event)) {
                         newlyStored++
+                        newInFeed++
+                        if(symbol.isNotBlank())recentBySymbol.getOrPut(symbol){mutableListOf()}.add(event)
+                        if(newInFeed%10==0)onProgress()
                         audit.logAsync("FORECAST_NEWS", "EVENT_CAPTURED", mapOf(
                             "id" to id, "symbol" to symbol, "category" to assess.category,
                             "direction" to assess.direction, "published_at_ms" to published,
@@ -146,7 +163,9 @@ class ForecastNewsMonitor @Inject constructor(
                                 .atZone(java.time.ZoneId.of("Asia/Kolkata")).hour !in 9..15)))
                     } else duplicateIds++
                 }
-            } catch (err: Exception) {
+                onProgress()
+            } catch (err: kotlinx.coroutines.CancellationException) { throw err }
+            catch (err: Exception) {
                 failures++
                 val backoff=if(err.message?.contains("HTTP 403")==true||err.message?.contains("HTTP 429")==true)60*60_000L else 5*60_000L
                 prefs.edit().putLong("feed_until_"+feed.first,now+backoff).apply()
@@ -158,6 +177,7 @@ class ForecastNewsMonitor @Inject constructor(
         }
         audit.logAsync("FORECAST_NEWS", "POLL_PROFILE", mapOf("items_examined" to examined,
             "new_events" to newlyStored, "source_failures" to failures,
+            "bounded_feed_passes_deferred" to deferred, "indexed_catalog" to true,
             "catalog_size" to companyByName.size, "poll_started_at_ms" to now,
             "symbol_resolution_policy" to "ANCHORED_UNAMBIGUOUS_CORPORATE_NAME",
             "unresolved_titles_are_research_not_orders" to true,
@@ -201,8 +221,13 @@ class ForecastNewsMonitor @Inject constructor(
         }
     }
 
-    private fun resolveSymbol(title: String, summary: String): String =
-        ForecastNewsSymbolResolutionPolicy.resolve(title, companyByName)
+    private fun resolveSymbol(title: String, summary: String): String {
+        if(indexedCatalog!==companyByName){
+            index=ForecastNewsSymbolResolutionPolicy.Index(companyByName)
+            indexedCatalog=companyByName
+        }
+        return index?.resolve(title).orEmpty()
+    }
 
 
     internal fun parseDate(s: String): Long? = ForecastNewsDatePolicy.parse(s)

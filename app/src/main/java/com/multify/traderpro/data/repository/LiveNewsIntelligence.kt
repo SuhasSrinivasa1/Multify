@@ -32,13 +32,17 @@ class LiveNewsIntelligence @Inject constructor(
     private var lastSweepMs=0L
     private val prefs=context.getSharedPreferences("live_news_intelligence_v1",Context.MODE_PRIVATE)
     suspend fun cycle() {
-        monitor.poll()
-        lastPollMs=System.currentTimeMillis()
-        val now=ZonedDateTime.now(india)
-        if(NseEquitySessionCalendar.isOpen(now)) {
-            observeSweep(now)
-            alertFresh(now)
+        fun processAvailable(){
+            val now=ZonedDateTime.now(india)
+            if(NseEquitySessionCalendar.isOpen(now)){
+                observeSweep(now)
+                alertFresh(now)
+            }
         }
+        processAvailable()
+        monitor.poll { processAvailable() }
+        lastPollMs=System.currentTimeMillis()
+        processAvailable()
     }
     fun snapshot():Snapshot {
         val cutoff=ZonedDateTime.now(india).toLocalDate().atStartOfDay(india).toInstant().toEpochMilli()

@@ -2592,6 +2592,16 @@ class TradingRepository @Inject constructor(
         )
     }
 
+    /** No network requests. Avoid repeatedly starting known-infeasible degraded scans. */
+    suspend fun fixedSweepQuotaFeasible(symbolCount:Int = nseSymbols.symbols().distinct().size):Boolean {
+        if (symbolCount<=0) return true // retain original missing-master handling
+        if (alphaCategoryReadyForFixed(GrowwApiUsageLedger.Category.LIVE_DATA)) return true
+        if (fixedBetaMarketTokenOrNull()==null || !betaResearchGate.healthyForFixed(BetaResearchGate.Type.LIVE)) return false
+        return com.multify.traderpro.engine.FixedDegradedSweepAdmission.betaOnlyFeasible(
+            (symbolCount+49)/50,betaResearchGate.configuredLiveLimitPerMinute(),
+            BetaResearchGate.latestLiveStatus().activeGapMs)
+    }
+
     private suspend fun marketDataAvailableForFixed(): Boolean =
         !fixedReadOnlyTransportIncomplete && fixedReadOnlyCategoriesAvailable()
 
@@ -2660,9 +2670,12 @@ class TradingRepository @Inject constructor(
                         // v9.0.17 READ-ONLY: Early Watch can be empty even though the
                         // official tier store recorded PRIMARY observations. Recover
                         // those scan-start observations without inventing quote times.
-                        val persistedFirstPrimary = fixedRecommendationStore.observations(
-                            row.recommendationDate
-                        ).asSequence().filter { observation ->
+                        val symbolObservations=fixedRecommendationStore.observations(row.recommendationDate)
+                            .filter{it.symbol.equals(row.symbol,true)&&it.scanAtMs<=row.generatedAtMs}
+                        val currentReset=symbolObservations.lastOrNull{it.qualityTier!="PRIMARY"||!it.publishEligible||!it.executionEligible}?.scanAtMs
+                        val episodePrimary=symbolObservations.filter{it.qualityTier=="PRIMARY"&&it.publishEligible&&it.executionEligible&&
+                            (currentReset==null||it.scanAtMs>currentReset)}.minByOrNull{it.scanAtMs}
+                        val persistedFirstPrimary = symbolObservations.asSequence().filter { observation ->
                             observation.symbol.equals(row.symbol, true) &&
                                 observation.scanAtMs <= row.generatedAtMs &&
                                 observation.qualityTier == "PRIMARY" &&
@@ -2690,6 +2703,11 @@ class TradingRepository @Inject constructor(
                             "published_target_pct" to row.targetPct,
                             "first_primary_at_ms" to firstPrimaryAtMs,
                             "first_primary_price" to firstPrimaryPrice,
+                            "current_episode_first_primary_at_ms" to episodePrimary?.scanAtMs,
+                            "current_episode_first_primary_price" to episodePrimary?.observedPrice,
+                            "current_episode_reset_at_ms" to currentReset,
+                            "current_episode_runup_pct" to episodePrimary?.observedPrice?.takeIf{it>0}?.let{(row.entryPrice/it-1)*100},
+                            "current_episode_to_publication_ms" to episodePrimary?.let{recommendationCompletedAtMs-it.scanAtMs},
                             "first_primary_source" to (if (first != null)
                                 "PERSISTED_EARLY_WATCH" else if (persistedFirstPrimary != null)
                                 "PERSISTED_QUALIFIED_TIER_SCAN_START" else "UNAVAILABLE"),
@@ -4501,6 +4519,23 @@ class TradingRepository @Inject constructor(
             )
         }
 
+        // Trace the actual vetoes without modifying ranking, confirmation or publication.
+        val unseenSymbols=unseen.mapTo(hashSetOf()){it.symbol}
+        val publishableSymbols=publishable.mapTo(hashSetOf()){it.symbol}
+        val decisions=ranked.filter{it.quality.tier=="PRIMARY"}.map{item->
+            val hits=priorPrimaryHits(item.symbol)
+            mapOf("symbol" to item.symbol,"price" to item.evaluation.features.ltp,
+                "repeat_eligible" to (item.symbol in unseenSymbols),
+                "price_band" to RecommendationPriceBandPolicy.eligible(item.evaluation.features.ltp),
+                "baseline_ready" to discoveryPass.baselineReady,
+                "market_wide_discovered" to (item.symbol in discoveredSymbols),
+                "current_publish_eligible" to item.quality.publishEligible,
+                "current_execution_eligible" to item.quality.executionEligible,
+                "prior_primary_hits" to hits,"selected_to_publish" to (item.symbol in publishableSymbols))
+        }
+        if(decisions.isNotEmpty())auditLogger.logAsync("FIXED_ENTRY_TIMING","PUBLICATION_DECISIONS_V9060",
+            mapOf("scan_at_ms" to nowMs,"decisions" to decisions,"selection_changed" to false))
+
         publishable.forEachIndexed { index, item ->
             val price = item.evaluation.features.ltp
             fixedRecommendationStore.upsert(
@@ -4980,9 +5015,10 @@ class TradingRepository @Inject constructor(
         if (!com.multify.traderpro.engine.FixedSweepPrefetchPolicy.canStart(
                 nowMs, dueAtMs, marketCriticalTradeInFlight, marketDataAvailableForFixed()
             )) return false
-        val token = ensureToken() ?: return false
         val master = nseSymbols.symbols().distinct()
         if (master.isEmpty()) return false
+        if (!fixedSweepQuotaFeasible(master.size)) return false
+        val token = ensureToken() ?: return false
         val date = clock.toLocalDate().toString()
         val pending = pendingFixedSweepMutex.withLock {
             // The early discovery-triggered worker and the legacy post-cycle
@@ -5189,6 +5225,15 @@ class TradingRepository @Inject constructor(
         val alphaLiveReadyForResearch = runCatching {
             recoveryGate.checkRequestAllowed(GrowwApiUsageLedger.Category.LIVE_DATA)
         }.isSuccess
+        if (!alphaLiveReadyForResearch && betaToken != null &&
+            !com.multify.traderpro.engine.FixedDegradedSweepAdmission.betaOnlyFeasible(
+                chunks.size,betaResearchGate.configuredLiveLimitPerMinute(),initialBetaGapMs)) {
+            auditLogger.logAsync("FIXED_DUAL_ACCOUNT","BETA_ONLY_SWEEP_QUOTA_DEFERRED_V9060",mapOf(
+                "required_batches" to chunks.size,"beta_limit_per_minute" to betaResearchGate.configuredLiveLimitPerMinute(),
+                "beta_gap_ms" to initialBetaGapMs,"budget_window_ms" to 90_000L,
+                "new_requests" to 0,"partial_publication" to false,"alpha_protection_unchanged" to true))
+            return PrecomputedFixedSweep(emptyMap(),1,true,System.currentTimeMillis(),0)
+        }
         auditLogger.logAsync("FIXED_DUAL_ACCOUNT", "BETA_FIRST_SWEEP_PLAN_V908", mapOf(
             "preferred_beta_ltp_slots" to chunks.indices.count { index ->
                 val status = BetaResearchGate.latestLiveStatus()
@@ -14451,6 +14496,14 @@ class TradingRepository @Inject constructor(
                         .exportOperatorTransitions(appContext))
                 add("working_range_recommendations_v9021.json",
                     workingRangeRecommendationStore.export())
+                val shadowPrefs=appContext.getSharedPreferences("portfolio_shadow_v1",android.content.Context.MODE_PRIVATE)
+                add("portfolio_shadow_research_v9060.json",mapOf(
+                    "research_only" to true,"broker_fills_or_gtt_verified" to false,
+                    "shared_budget" to shadowPrefs.getString("step","0"),
+                    "states" to shadowPrefs.all.filterKeys{it.startsWith("state_")}.mapValues{
+                        runCatching{com.google.gson.JsonParser.parseString(it.value.toString())}.getOrNull()},
+                    "latest_decisions" to shadowPrefs.getString("latest_decisions",""),
+                    "restoring_this_file_does_not_activate_trading" to true))
                 if (includeResearchBackup) {
                     val portableResearchBackup = equityEodResearch.exportPortableResearchBackup()
                     portableResearchBackup.databaseEntries.forEach { (name, bytes) ->

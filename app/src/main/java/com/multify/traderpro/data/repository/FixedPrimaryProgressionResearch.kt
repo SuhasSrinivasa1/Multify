@@ -30,11 +30,13 @@ internal object FixedPrimaryProgressionResearch {
                 it.recommendationDate == recommendation.recommendationDate &&
                     it.symbol.equals(recommendation.symbol, true) && it.generatedAtMs < recommendation.generatedAtMs
             }.maxOfOrNull { it.generatedAtMs }
-            val resetAt = priorEventAt?.let { prev -> series.lastOrNull {
-                it.scanAtMs > prev && (it.qualityTier != "PRIMARY" || !it.publishEligible || !it.executionEligible)
-            }?.scanAtMs }
-            val episode = if (priorEventAt == null) series else if (resetAt != null)
-                series.filter { it.scanAtMs > resetAt } else emptyList()
+            val sessionFirst = series.firstOrNull { it.qualityTier=="PRIMARY"&&it.publishEligible&&it.executionEligible }
+            val resetAt = series.lastOrNull {
+                (priorEventAt==null||it.scanAtMs>priorEventAt) &&
+                    (it.qualityTier!="PRIMARY"||!it.publishEligible||!it.executionEligible)
+            }?.scanAtMs
+            val episode = if (resetAt!=null) series.filter{it.scanAtMs>resetAt}
+                else if(priorEventAt==null) series else emptyList()
             val primary = episode.filter {
                 it.qualityTier == "PRIMARY" && it.publishEligible && it.executionEligible
             }.distinctBy { it.scanAtMs }
@@ -59,6 +61,9 @@ internal object FixedPrimaryProgressionResearch {
                 "first_secondary_price" to secondary?.observedPrice,
                 "prior_event_scan_at_ms" to priorEventAt,
                 "witnessed_reset_scan_at_ms" to resetAt,
+                "session_first_primary_scan_at_ms" to sessionFirst?.scanAtMs,
+                "session_first_primary_observed_price" to sessionFirst?.observedPrice,
+                "session_first_primary_runup_pct" to sessionFirst?.observedPrice?.takeIf{it>0}?.let{(recommendation.entryPrice/it-1)*100},
                 "first_qualified_primary_scan_at_ms" to first?.scanAtMs,
                 "first_qualified_primary_observed_price" to firstPrice,
                 "independent_primary_scan_count_through_generation" to primary.size,
@@ -83,7 +88,7 @@ internal object FixedPrimaryProgressionResearch {
             )
         }
         return mapOf(
-            "schema" to "fixed_primary_progression_v9017",
+            "schema" to "fixed_primary_progression_v9060",
             "source" to "PERSISTED_FIXED_ALL_TIER_OBSERVATIONS",
             "trade_or_fixed_selection_effect" to false,
             "new_broker_requests" to 0,

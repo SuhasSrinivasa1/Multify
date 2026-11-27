@@ -70,6 +70,12 @@ class PortfolioShadowResearch @Inject constructor(@ApplicationContext context:Co
             }
             Row(h,s,t,c)
         }
-        return Snapshot(inv.inventoryAtMs,rows,inv.cncPositionSymbols,amount)
+        val result=Snapshot(inv.inventoryAtMs,rows,inv.cncPositionSymbols,amount)
+        // Keep latest research reasons, not a second copy of the complete paper journal.
+        val decisions=gson.toJson(rows.map{r->mapOf("symbol" to r.holding.symbol,"price_at_ms" to r.holding.priceAtMs,
+            "kind" to r.candidate.kind,"reason" to r.candidate.reason,"paper_qty" to r.candidate.quantity,
+            "daily_bar_count" to r.trend?.count,"armed" to r.state?.armed)})
+        if(prefs.getString("latest_decisions","")!=decisions) prefs.edit().putString("latest_decisions",decisions).apply()
+        return result
     }
 }

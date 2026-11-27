@@ -34,6 +34,14 @@ class FixedPrimaryProgressionResearchTest {
         assertEquals(false, first["earliest_first_primary_missing"])
     }
 
+    @Test fun initialPublicationAlsoUsesLatestReset() {
+        val report=FixedPrimaryProgressionResearch.export(
+            listOf(obs(1000,"PRIMARY",100.0),obs(2000,"SECONDARY",101.0),obs(3000,"PRIMARY",103.0),obs(4000,"PRIMARY",104.0)),
+            listOf(rec(11,4000,104.0)))
+        val e=(report["events"] as List<*>).first() as Map<*,*>
+        assertEquals(1000L,e["session_first_primary_scan_at_ms"])
+        assertEquals(3000L,e["first_qualified_primary_scan_at_ms"])
+    }
     @Test fun noFirstPrimaryIsNotInvented() {
         val report = FixedPrimaryProgressionResearch.export(
             listOf(obs(1000, "SECONDARY", 97.0)), listOf(rec(11, 3000, 102.0))

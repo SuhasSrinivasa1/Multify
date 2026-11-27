@@ -1,9 +1,9 @@
-name: Phayra v9.0.59 Portfolio Shadow TEST
+name: Phayra v9.0.60 Reliability Recovery TEST
 
 on:
   push:
     branches:
-      - v9059-portfolio-shadow-20261127
+      - v9060-reliability-recovery-20261127
   pull_request:
     branches:
       - main
@@ -133,9 +133,9 @@ jobs:
           assert "Alpha-only" in repository or '"ALPHA"' in repository
           beta=(root/"data/network/BetaReadOnlyInterceptor.kt").read_text()
           assert "BETA_READ_ONLY_DENIED" in beta and "method == \"GET\"" in beta
-          assert "versionCode = 9059" in build
-          assert 'applicationIdSuffix = ".v9059test"' in build
-          assert "9.0.59-portfolio-shadow" in build
+          assert "versionCode = 9060" in build
+          assert 'applicationIdSuffix = ".v9060test"' in build
+          assert "9.0.60-reliability-recovery" in build
 
           # NSE archive 403 recovery is per-host exponential backoff; local import is validated and broker-free.
           nse=(root/"engine/NseArchiveRecoveryPolicy.kt").read_text()
@@ -199,7 +199,7 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --disable-pip-version-check -r backend/requirements.txt
-          python -m pytest -q backend/tests | tee backend-tests-v9059.txt
+          python -m pytest -q backend/tests | tee backend-tests-v9060.txt
       - name: Android unit tests and assemble isolated TEST APK
         run: |
           set -euo pipefail
@@ -219,12 +219,12 @@ jobs:
             "AdaptiveLowCandleEvidenceTest","AmfiMarketCapClassificationParserTest",
             "InstitutionalIntelligencePolicyTest","InstitutionalHistoryPolicyTest",
             "InstitutionalDisclosureCoverageTest","NseArchiveRecoveryPolicyTest","DiagnosticZipIntegrityTest","HistoricalLowDiscoveryPolicyTest","DailyShadowTrialPolicyTest","OwnershipIntelligenceTest",
-            "FixedScanScheduleDiagnosticsTest","IdleBrokerPollingPolicyTest","NseBhavcopyFileImporterTest","PortfolioLadderPolicyTest","LiveNewsSentimentPolicyTest","PortfolioShadowPolicyTest"
+            "FixedScanScheduleDiagnosticsTest","IdleBrokerPollingPolicyTest","NseBhavcopyFileImporterTest","PortfolioLadderPolicyTest","LiveNewsSentimentPolicyTest","PortfolioShadowPolicyTest","FixedDegradedSweepAdmissionTest","NewsIndexedResolverParityTest","FixedPrimaryProgressionResearchTest"
           ]
           absent=[x for x in essential if not any(x in y for y in names)]
           assert not absent, absent
           assert n>=608 and errors==0,(n,errors)
-          pathlib.Path("android-tests-v9059.txt").write_text(f"{n} Android tests; {errors} failures; required suites present\n")
+          pathlib.Path("android-tests-v9060.txt").write_text(f"{n} Android tests; {errors} failures; required suites present\n")
           print(n,"Android unit tests passed")
           PY
       - name: Assemble production update APK with stable signing key
@@ -239,11 +239,11 @@ jobs:
         run: |
           set -euo pipefail
           apk="app/build/outputs/apk/debug/app-debug.apk"
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$apk" > signer-v9059.txt
-          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$apk" > package-v9059.txt
-          grep -F "name='com.multify.traderpro.vivoy73final.v9059test'" package-v9059.txt >/dev/null
-          grep -F "versionCode='9059'" package-v9059.txt >/dev/null
-          grep -F "versionName='9.0.59-portfolio-shadow-TEST-debug'" package-v9059.txt >/dev/null
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$apk" > signer-v9060.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$apk" > package-v9060.txt
+          grep -F "name='com.multify.traderpro.vivoy73final.v9060test'" package-v9060.txt >/dev/null
+          grep -F "versionCode='9060'" package-v9060.txt >/dev/null
+          grep -F "versionName='9.0.60-reliability-recovery-TEST-debug'" package-v9060.txt >/dev/null
           python - <<'PY'
           import csv,io,json,zipfile,collections,pathlib
           asset="assets/amfi_market_cap_categories.csv"
@@ -264,20 +264,20 @@ jobs:
           assert dict(counts)==meta["category_counts"]
           print("AMFI APK ASSET VERIFIED",meta["period"],dict(counts))
           PY
-          sha256sum "$apk" > SHA256-v9059.txt
-          stat -c "APK size (bytes): %s" "$apk" > size-v9059.txt
-          echo "TEST side-by-side package. Do not run two authenticated trading engines concurrently. Export research backup before uninstalling any package." > safety-v9059.txt
+          sha256sum "$apk" > SHA256-v9060.txt
+          stat -c "APK size (bytes): %s" "$apk" > size-v9060.txt
+          echo "TEST side-by-side package. Do not run two authenticated trading engines concurrently. Export research backup before uninstalling any package." > safety-v9060.txt
           mkdir -p build/delivery
-          cp "$apk" build/delivery/Phayra-v9.0.59-TEST.apk
+          cp "$apk" build/delivery/Phayra-v9.0.60-TEST.apk
           if [[ -f app/build/outputs/apk/release/app-release.apk ]]; then
             release_apk="app/build/outputs/apk/release/app-release.apk"
-            "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$release_apk" > signer-v9059-release.txt
-            "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$release_apk" > package-v9059-release.txt
-            grep -F "name='com.multify.traderpro.vivoy73final'" package-v9059-release.txt >/dev/null
-            grep -F "versionCode='9059'" package-v9059-release.txt >/dev/null
+            "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$release_apk" > signer-v9060-release.txt
+            "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$release_apk" > package-v9060-release.txt
+            grep -F "name='com.multify.traderpro.vivoy73final'" package-v9060-release.txt >/dev/null
+            grep -F "versionCode='9060'" package-v9060-release.txt >/dev/null
             python - <<'PY'
           import re,pathlib
-          text=pathlib.Path("signer-v9059-release.txt").read_text().lower()
+          text=pathlib.Path("signer-v9060-release.txt").read_text().lower()
           match=re.search(r"certificate sha-256 digest:\s*([0-9a-f:]+)",text)
           assert match, "Release APK signer fingerprint missing"
           actual=match.group(1).replace(":","")
@@ -285,27 +285,27 @@ jobs:
           assert actual==expected, (actual,expected)
           print("PRODUCTION UPDATE SIGNER VERIFIED")
           PY
-            cp "$release_apk" build/delivery/Phayra-v9.0.59-UPDATE.apk
-            echo "PRODUCTION_UPDATE_APK_SIGNED=true" > release-signing-status-v9059.txt
+            cp "$release_apk" build/delivery/Phayra-v9.0.60-UPDATE.apk
+            echo "PRODUCTION_UPDATE_APK_SIGNED=true" > release-signing-status-v9060.txt
           else
-            echo "PRODUCTION_UPDATE_APK_SIGNED=false; stable signing secrets were not available." > release-signing-status-v9059.txt
+            echo "PRODUCTION_UPDATE_APK_SIGNED=false; stable signing secrets were not available." > release-signing-status-v9060.txt
           fi
-          cp SHA256-v9059.txt signer-v9059.txt package-v9059.txt size-v9059.txt safety-v9059.txt android-tests-v9059.txt backend-tests-v9059.txt build/delivery/
-          cp release-signing-status-v9059.txt build/delivery/
+          cp SHA256-v9060.txt signer-v9060.txt package-v9060.txt size-v9060.txt safety-v9060.txt android-tests-v9060.txt backend-tests-v9060.txt build/delivery/
+          cp release-signing-status-v9060.txt build/delivery/
       - name: Upload TEST APK and validation evidence
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: Phayra-v9.0.59-Portfolio-Shadow
+          name: Phayra-v9.0.60-Reliability-Recovery
           path: |
             build/delivery/*
-            SHA256-v9059.txt
-            signer-v9059.txt
-            package-v9059.txt
-            size-v9059.txt
-            safety-v9059.txt
-            android-tests-v9059.txt
-            backend-tests-v9059.txt
+            SHA256-v9060.txt
+            signer-v9060.txt
+            package-v9060.txt
+            size-v9060.txt
+            safety-v9060.txt
+            android-tests-v9060.txt
+            backend-tests-v9060.txt
             app/src/main/assets/amfi_market_cap_categories.csv
             build/amfi-market-cap-source.txt
           if-no-files-found: error

@@ -15,13 +15,32 @@ internal object ForecastNewsSymbolResolutionPolicy {
         .replace(Regex("\\b(LIMITED|LTD|PRIVATE|PVT|INCORPORATED|INC|THE)\\b"), " ")
         .replace(Regex("\\s+"), " ").trim()
 
-    fun resolve(title: String, catalog: Map<String, String>): String {
+    /** Build once per catalog, not for every headline. Same anchored ambiguity rule. */
+    class Index(catalog:Map<String,String>) {
+        private val byStem=catalog.entries.groupBy{stem(it.key)}
+            .filterKeys{it.length>=6}.mapValues{(_,v)->v.map{it.value}.toSet()}
+        fun resolve(title:String):String {
+            val cleaned=cleanHeader(title)
+            if(cleaned.length<6)return ""
+            val matches=linkedSetOf<String>()
+            for(i in cleaned.indices)if(cleaned[i]==' ') {
+                byStem[cleaned.substring(0,i)]?.let{matches.addAll(it)}
+                if(matches.size>1)return ""
+            }
+            byStem[cleaned]?.let{matches.addAll(it)}
+            return matches.singleOrNull().orEmpty()
+        }
+    }
+    private fun cleanHeader(title:String):String {
         val normalizedTitle = normalized(title)
         if (normalizedTitle.isEmpty()) return ""
         val header = normalizedTitle.substringBefore(" HAS INFORMED")
             .substringBefore(" INTIMATES ").substringBefore(" INFORMS ")
             .substringBefore(" ANNOUNCES ").substringBefore(" DISCLOSES ").trim()
-        val cleaned = stem(header)
+        return stem(header)
+    }
+    fun resolve(title: String, catalog: Map<String, String>): String {
+        val cleaned=cleanHeader(title)
         if (cleaned.length < 6) return ""
         val matches = catalog.entries.asSequence().filter { (name, _) ->
             val key = stem(name)
